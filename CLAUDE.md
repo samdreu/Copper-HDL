@@ -285,5 +285,21 @@ receive/clone one.
 - Generated Verilator artifacts (`tb_*.cpp`, `obj_dir_*`) land under
   `target/verilator/` (per-invocation names, reclaimed by `cargo clean`);
   `waveforms/*.vcd` is gitignored.
+- **Built Verilator models are cached, content-keyed** (2026-10-20):
+  `target/verilator/cache/<sha256>/` holds the `V<module>` executable, where the key
+  is a SHA-256 over the full emitted SV (plus any `` `include ``d file), the full
+  generated testbench (stimulus and expected outputs are compiled in), the module
+  name, the sorted `-G` parameters, the tracing flag, every Verilator argument, and
+  `verilator --version`. A repeat regression with unchanged SV runs Verilator zero
+  times; a changed module cannot hit, and a hit also compares the stored key material
+  byte-for-byte. A miss builds in the per-invocation directory exactly as before and
+  then publishes by atomic `rename` of a private staging dir — an entry is never
+  built in place, never overwritten, and never written into at run time (the VCD
+  path is `argv[1]`, not baked into the testbench). The log says
+  `Verilator model: cache hit <key>` / `cache miss <key>`. Off with
+  `COPPER_VERILATOR_CACHE=0`; `cargo clean` reclaims it. Hand-rolled callers that
+  spawn Verilator through `tests/common::verilator_command` are outside it.
+  Pinned by `tests/verilator_model_cache.rs` (hit / one-character miss with a
+  different verdict / four parallel invocations of one model / traced runs / off).
 - Do research on prior HDLs and hardware DSLs to get knowledge on what correct semantics
   should be and to get advice on design decisions.

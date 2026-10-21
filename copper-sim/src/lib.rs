@@ -9,8 +9,9 @@ use std::task::{Context, Poll};
 
 pub mod verification;
 pub use verification::{
-    is_missing_verilator, verify_with_verilator, verilator_status, CycleData, SimulationTrace,
-    VERILATOR_NOT_INSTALLED,
+    is_missing_verilator, sha256_hex, verify_with_verilator, verify_with_verilator_report,
+    verilator_cache_root, verilator_status, verilator_version, CacheOutcome, CycleData,
+    SimulationTrace, VerilatorCachePolicy, VerilatorRun, VERILATOR_NOT_INSTALLED,
 };
 
 pub mod testing;
