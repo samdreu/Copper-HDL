@@ -362,6 +362,24 @@ const EXPECTED_WRITE_BEFORE_UPDATE: &[&str] = &[
     // minimal stage shape.
     "tests/fixtures/out_phase_dut.rs::out_from_reg_before_commit",
     "tests/sequential_forwarding_divergence.rs::v8t_stage_publish_then_load",
+    // Seen THROUGH a `let` temporary (2026-10-20): a Mealy `ready = !full ||
+    // drain` computed into `can_take` and written, with `full` updated later in
+    // the same segment. V8a with one rename — the rule's syntactic `uses ∩
+    // registers` saw only the temporary's name and let it through while
+    // refusing the inline spelling. Both were MEASURED in the corpus sweep
+    // before the rule learned the dataflow: `ready`/`in_ready` the only
+    // diverging port, every mismatch the simulator at 1 against the SV at 0
+    // (the SV drops `ready` the cycle `full` commits; the simulator a cycle
+    // later — hardware leads by one), on 15 of 200 cycles for `vr_sink_mealy`
+    // and 20 of 200 for `vr_skid` under the seeded stimulus (the lead is only
+    // visible on cycles where `full` changes). They keep
+    // `allow_pretick_alignment` as demonstrations; the
+    // refused spellings are the `write_before_update_via_temp` /
+    // `write_before_update_via_bool_temp` ui/fail cases. No pre-existing
+    // corpus module was newly flagged — the extension's catch is exactly the
+    // two probes that motivated it.
+    "tests/fixtures/valid_ready_dut.rs::vr_sink_mealy",
+    "tests/fixtures/valid_ready_dut.rs::vr_skid",
 ];
 
 #[test]

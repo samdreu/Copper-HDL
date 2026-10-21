@@ -855,6 +855,30 @@ impl Cfg {
     /// modules with sim-only tests (`module_composition_hybrid`'s stages),
     /// since migrated to the canonical write/read/tick/update spelling.
     ///
+    /// # Through `let` temporaries (added 2026-10-20)
+    ///
+    /// Clause 2 asks what the write's value *reads*, and a value routed through a
+    /// same-segment temporary reads whatever the temporary's definition reads:
+    ///
+    /// ```text
+    /// let can_take: Logic = if full == Logic::Zero || drain.read() == Logic::One { One } else { Zero };
+    /// ready.write(can_take);            // reads `full` — through `can_take`
+    /// … full = Logic::One; …            // updated later in the segment
+    /// clk.tick().await;
+    /// ```
+    ///
+    /// is V8a with one rename, and it diverges exactly like V8a (measured in the
+    /// corpus sweep as `vr_sink_mealy` / `vr_skid` in
+    /// `tests/fixtures/valid_ready_dut.rs`: one cycle, hardware leading — the
+    /// emitted RTL is `assign ready = can_take` with `can_take` a wire of `full`'s
+    /// Q). The syntactic `uses ∩ registers` saw only `can_take` and passed it. The
+    /// clause now follows **reaching definitions** within the segment
+    /// ([`value_registers`](Self::value_registers)): every non-register local the
+    /// write uses is replaced by the uses of the definitions that reach it, to a
+    /// fixpoint. The walk stops at registers (their own generation is the thing
+    /// being tested) and at inputs (which have no definition), so the rule's
+    /// meaning is unchanged — only the spelling it sees through is.
+    ///
     /// # Honest scope (R6)
     ///
     /// Pre-tick and trailing regions — a middle segment of a multi-tick loop is
@@ -873,8 +897,8 @@ impl Cfg {
             }
             // (2) the write reads a register — otherwise its value is
             // generation-free and the phase it executes in is unobservable.
-            let read_regs: BTreeSet<String> =
-                wn.uses.intersection(&regs).cloned().collect();
+            // Seen through same-segment temporaries (reaching definitions).
+            let read_regs = self.value_registers(w, &region, &regs);
             if read_regs.is_empty() {
                 continue;
             }
@@ -914,8 +938,7 @@ impl Cfg {
             if wn.folded || wn.writes.is_empty() {
                 continue;
             }
-            let read_regs: BTreeSet<String> =
-                wn.uses.intersection(&regs).cloned().collect();
+            let read_regs = self.value_registers(w, &trailing, &regs);
             if read_regs.is_empty() {
                 continue;
             }
@@ -930,6 +953,84 @@ impl Cfg {
         }
 
         flagged.into_iter().collect()
+    }
+
+    /// The registers the **value** written at node `w` depends on, seen through
+    /// the same-segment temporaries it is routed through.
+    ///
+    /// `w.uses ∩ registers` is the direct answer; a name in `w.uses` that is
+    /// neither a register nor an input is a local temporary, and its value is
+    /// whatever the definitions that *reach* `w` computed — so those definitions'
+    /// uses are folded in, to a fixpoint. A definition reaches `w` iff it sits in
+    /// `region` and a comb-only path leads from it to `w` with no intervening
+    /// re-definition of the same name (classic reaching definitions, so
+    /// `let a = r; let a = i.read(); o.write(a);` attributes `a` to the second
+    /// `let` only).
+    ///
+    /// The walk stops at a register on purpose: a register the write reads is the
+    /// generation the rule tests, and following *its* definition would conflate a
+    /// committed value with the expression that produced it (not measured; see the
+    /// family's standing rule). It also stops at inputs, which have no definition.
+    fn value_registers(
+        &self,
+        w: usize,
+        region: &[usize],
+        regs: &BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        let mut found: BTreeSet<String> = BTreeSet::new();
+        let mut visited: BTreeSet<String> = BTreeSet::new();
+        let mut pending: Vec<String> = self.nodes[w].uses.iter().cloned().collect();
+        while let Some(name) = pending.pop() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            if regs.contains(&name) {
+                found.insert(name);
+                continue;
+            }
+            if self.inputs.contains(&name) {
+                continue;
+            }
+            for &d in region {
+                if d == w || self.nodes[d].folded || !self.nodes[d].defs.contains(&name) {
+                    continue;
+                }
+                if self.comb_reaches_without_redef(d, w, &name) {
+                    pending.extend(self.nodes[d].uses.iter().cloned());
+                }
+            }
+        }
+        found
+    }
+
+    /// [`comb_reaches`](Self::comb_reaches) from `a` to `b`, except that a path
+    /// through a node (other than `a` itself) that re-defines `name` does not
+    /// count: the definition at `a` is killed there.
+    fn comb_reaches_without_redef(&self, a: usize, b: usize, name: &str) -> bool {
+        let mut stack: Vec<usize> = self.nodes[a]
+            .succs
+            .iter()
+            .filter(|(_, k)| *k == EdgeKind::Comb)
+            .map(|&(s, _)| s)
+            .collect();
+        let mut seen = vec![false; self.nodes.len()];
+        while let Some(n) = stack.pop() {
+            if n == b {
+                return true;
+            }
+            if n == self.head
+                || std::mem::replace(&mut seen[n], true)
+                || self.nodes[n].defs.contains(name)
+            {
+                continue;
+            }
+            for &(s, k) in &self.nodes[n].succs {
+                if k == EdgeKind::Comb {
+                    stack.push(s);
+                }
+            }
+        }
+        false
     }
 
     /// Does one iteration of the loop cross **more than one clock edge**?
@@ -3284,6 +3385,144 @@ mod tests {
             }
         "#;
         assert!(v8(src).is_empty());
+    }
+
+    // ── through `let` temporaries (2026-10-20) ──────────────────────────────
+
+    /// V8a with the value routed through a same-segment `Logic` temporary — the
+    /// Mealy-ready spelling that evaded the rule (`vr_sink_mealy`, measured: one
+    /// cycle, hardware leading). The temporary's definition reads `full` and the
+    /// input `drain`; `full` is updated after the write.
+    #[test]
+    fn v8e_logic_temp_sees_through_to_register() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, drain: In<Logic, C>, ready: Out<Logic, C>) {
+                let mut full: Logic = Logic::Zero;
+                loop {
+                    let can_take: Logic = if full == Logic::Zero || drain.read() == Logic::One { Logic::One } else { Logic::Zero };
+                    ready.write(can_take);
+                    if can_take == Logic::One { full = Logic::One; } else { full = Logic::Zero; }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert_eq!(v8(src), ["ready"]);
+    }
+
+    /// The same shape through a `bool` temporary (`let ok: bool = …; ready.write(if ok …)`).
+    #[test]
+    fn v8e_bool_temp_sees_through_to_register() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, drain: In<Logic, C>, ready: Out<Logic, C>) {
+                let mut full: Logic = Logic::Zero;
+                loop {
+                    let ok: bool = full == Logic::Zero || drain.read() == Logic::One;
+                    ready.write(if ok { Logic::One } else { Logic::Zero });
+                    if ok { full = Logic::One; } else { full = Logic::Zero; }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert_eq!(v8(src), ["ready"]);
+    }
+
+    /// Two temporaries deep: `let a = full …; let b = a; ready.write(b)`. The
+    /// walk is transitive within the segment.
+    #[test]
+    fn v8e_temp_chain_is_transitive() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, drain: In<Logic, C>, ready: Out<Logic, C>) {
+                let mut full: Logic = Logic::Zero;
+                loop {
+                    let a: Logic = if full == Logic::Zero || drain.read() == Logic::One { Logic::One } else { Logic::Zero };
+                    let b: Logic = a;
+                    ready.write(b);
+                    full = a;
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert_eq!(v8(src), ["ready"]);
+    }
+
+    /// The V8b flip survives the temporary: the register is updated BEFORE the
+    /// temporary is computed, so the write captures the committing value.
+    #[test]
+    fn v8e_temp_after_update_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, drain: In<Logic, C>, ready: Out<Logic, C>) {
+                let mut full: Logic = Logic::Zero;
+                loop {
+                    if drain.read() == Logic::One { full = Logic::One; }
+                    let can_take: Logic = if full == Logic::Zero { Logic::One } else { Logic::Zero };
+                    ready.write(can_take);
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(v8(src).is_empty());
+    }
+
+    /// Reaching definitions, not "any definition in the segment": the temporary
+    /// is re-bound from an input before the write, so the register it first held
+    /// is not what the write reads.
+    #[test]
+    fn v8e_redefined_temp_uses_the_reaching_definition() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut r: Bits<8> = Bits::zero();
+                loop {
+                    let a = r;
+                    let a = step.read();
+                    o.write(a);
+                    r = r + a;
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(v8(src).is_empty());
+    }
+
+    /// A temporary that reads only inputs and constants is generation-free, so
+    /// the register updated after the write is irrelevant (clause 2 still holds).
+    #[test]
+    fn v8e_input_only_temp_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut r: Bits<8> = Bits::zero();
+                loop {
+                    let s = step.read() + Bits::from_lit::<1>();
+                    o.write(s);
+                    r = r + s;
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(v8(src).is_empty());
+    }
+
+    /// The trailing clause sees through a temporary too.
+    #[test]
+    fn v8e_trailing_temp_sees_through_to_register() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut r: Bits<8> = Bits::zero();
+                loop {
+                    clk.tick().await;
+                    let v = r;
+                    o.write(v);
+                    r = i.read();
+                }
+            }
+        "#;
+        assert_eq!(v8(src), ["o"]);
     }
 
     /// V1 — no `In` read anywhere; register assigned pre-tick; plain `Out`.
