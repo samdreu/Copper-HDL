@@ -99,6 +99,12 @@ entries in `Cargo.toml`.
   `tools/regression.sh` unsets it too), so `cargo test`, `cargo run --example …`, and
   the driver all work with it set. When invoking `verilator` **directly** in a shell
   that exports one, prefix `env -u VERILATOR_ROOT`.
+- **ccache is optional but worth having** (`brew install ccache`): a full run builds a
+  few hundred Verilator models and each recompiles the Verilator runtime. When
+  `ccache` is on the PATH, `tools/regression.sh` and `verify_with_verilator` hand it to
+  Verilator's makefiles (`OBJCACHE`), and the equivalence harness compiles its C++ at
+  `-O0` (a few hundred cycles per model; compile time dominates). Neither changes what
+  is checked. Set `OBJCACHE=` to opt out.
 - **Icarus Verilog is optional** (`brew install icarus-verilog`): only
   `tests/sim_throughput.rs` (the simulator-throughput benchmark, three-way sim vs
   Verilator vs Icarus) and `tools/stats/simperf.py` use it. Absent, the test skips

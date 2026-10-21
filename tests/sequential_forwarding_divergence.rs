@@ -1333,7 +1333,7 @@ async fn v7_escape_across_tick(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>,
 "#;
 
 #[hardware(sequential)]
-async fn v7_escape_across_tick(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+async fn v7_escape_across_tick(clk: Clock<C>, _i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut r: Bits<8> = Bits::zero();
     let mut s: Bits<8> = Bits::zero();
     loop {

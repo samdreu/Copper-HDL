@@ -44,7 +44,7 @@ fn slow_counter_sim_matches_transpiled_verilog() {
     // transpiler (see `tests/common/mod.rs`).
     for i in 0..10u8 {
         exec.tick_clock(&mut clk);
-        let expected = (i + 1) / 2;
+        let expected = i.div_ceil(2);
         eq.record(
             &[],
             &[("out", out_obs.read().as_array())],

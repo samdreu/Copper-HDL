@@ -61,10 +61,9 @@ fn traffic_light_sim_matches_transpiled_verilog() {
     exec.spawn_wired(traffic_light(clk.clone(), req_in, red_o, yel_o, grn_o), dhs, reads);
 
     // Hold with no request, then request and ride the full cycle back to Green.
-    let requests: Vec<bool> = std::iter::repeat(false)
-        .take(2)
+    let requests: Vec<bool> = std::iter::repeat_n(false, 2)
         .chain(std::iter::once(true))
-        .chain(std::iter::repeat(false).take(12))
+        .chain(std::iter::repeat_n(false, 12))
         .collect();
 
     // On each tick the DUT advances state, then drives the outputs from the

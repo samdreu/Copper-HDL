@@ -276,6 +276,20 @@ pub fn is_missing_verilator(err: &str) -> bool {
 ///
 /// `VERILATOR_ROOT` is cleared for the probe exactly as it is for the build below,
 /// so the probe and the thing it is probing for see the same environment.
+/// Whether `ccache` can be spawned, probed once per process. Used only to decide
+/// whether to hand Verilator's makefiles an object cache; a missing ccache changes
+/// nothing but build time.
+fn ccache_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("ccache")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
 pub fn verilator_status() -> Result<(), String> {
     match Command::new("verilator")
         .arg("--version")
@@ -404,13 +418,22 @@ pub(crate) fn verify_with_verilator_traced(
     // equally produce a false PASS — which is why the directory is now unique per
     // (module, parameters) rather than per module.
 
-    // Build compile arguments
+    // Build compile arguments.
+    //
+    // The C++ is compiled at `-O0`: this harness exists to compare a few hundred
+    // cycles against the simulator, so the model's run time is noise next to its
+    // compile time, and Verilator's default `-Os` roughly doubles the latter. The
+    // throughput benchmark (`tests/sim_throughput.rs`) builds its own models and is
+    // unaffected. `OPT_FAST`/`OPT_GLOBAL` are the make variables `verilated.mk`
+    // applies to the model and runtime objects respectively.
     let mut verilator_args: Vec<&str> = vec![
         "--cc", "--exe", "--build",
         "--top-module", module_name,
         "--Mdir", &obj_dir,
         "-Wall", "-Wno-DECLFILENAME",
         "-CFLAGS", "-std=c++14",
+        "-MAKEFLAGS", "OPT_FAST=-O0",
+        "-MAKEFLAGS", "OPT_GLOBAL=-O0",
     ];
     for p in &param_args {
         verilator_args.push(p);
@@ -422,9 +445,20 @@ pub(crate) fn verify_with_verilator_traced(
     verilator_args.push(&tb_file);
 
     println!("Running Verilator{}...", if tracing { " (with trace)" } else { "" });
-    let verilator_output = Command::new("verilator")
+    let mut verilator_cmd = Command::new("verilator");
+    verilator_cmd
         .args(&verilator_args)
-        .env_remove("VERILATOR_ROOT")
+        .env_remove("VERILATOR_ROOT");
+    // Every model recompiles the Verilator runtime from scratch. `verilated.mk`
+    // prefixes each compile with `$(OBJCACHE)`, so when ccache is on the PATH and
+    // the caller has not chosen otherwise, hand it over: the runtime objects then
+    // compile once per machine, and a module whose emitted SystemVerilog did not
+    // change is a cache hit. `tools/regression.sh` exports the same variable; this
+    // covers a bare `cargo test`. A build-speed knob only — the model is identical.
+    if std::env::var_os("OBJCACHE").is_none() && ccache_available() {
+        verilator_cmd.env("OBJCACHE", "ccache");
+    }
+    let verilator_output = verilator_cmd
         .output()
         .map_err(|e| format!("Failed to run Verilator: {}", e))?;
 

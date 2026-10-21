@@ -196,8 +196,7 @@ mod out_of_range {
         let payload = std::panic::catch_unwind(f).expect_err("expected an out-of-range panic");
         std::panic::set_hook(prev);
         payload
-            .downcast_ref::<String>()
-            .map(|s| s.clone())
+            .downcast_ref::<String>().cloned()
             .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
             .unwrap_or_default()
     }

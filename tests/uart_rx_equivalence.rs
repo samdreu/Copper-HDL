@@ -27,12 +27,12 @@ const SRC: &str = include_str!("fixtures/uart_rx_dut.rs");
 /// stop bit. Written from the protocol, not from the DUT.
 fn frame(byte: u8) -> Vec<Logic> {
     let mut v = Vec::with_capacity(CLKS_PER_BIT * 10);
-    v.extend(std::iter::repeat(Logic::Zero).take(CLKS_PER_BIT));
+    v.extend(std::iter::repeat_n(Logic::Zero, CLKS_PER_BIT));
     for i in 0..8 {
         let lvl = if (byte >> i) & 1 == 1 { Logic::One } else { Logic::Zero };
-        v.extend(std::iter::repeat(lvl).take(CLKS_PER_BIT));
+        v.extend(std::iter::repeat_n(lvl, CLKS_PER_BIT));
     }
-    v.extend(std::iter::repeat(Logic::One).take(CLKS_PER_BIT));
+    v.extend(std::iter::repeat_n(Logic::One, CLKS_PER_BIT));
     v
 }
 
@@ -52,10 +52,10 @@ fn the_uart_receiver_matches_its_transpiled_verilog() {
     // Idle, then three frames back to back, then idle. 0x55/0xAA catch a
     // bit-order error; 0x01 catches an off-by-one in the sampling phase.
     let sent: [u8; 3] = [0x55, 0xAA, 0x01];
-    let mut wave: Vec<Logic> = std::iter::repeat(Logic::One).take(CLKS_PER_BIT).collect();
+    let mut wave: Vec<Logic> = std::iter::repeat_n(Logic::One, CLKS_PER_BIT).collect();
     for b in sent {
         wave.extend(frame(b));
-        wave.extend(std::iter::repeat(Logic::One).take(CLKS_PER_BIT));
+        wave.extend(std::iter::repeat_n(Logic::One, CLKS_PER_BIT));
     }
 
     let mut received: Vec<u8> = Vec::new();

@@ -17,7 +17,7 @@
 // load issued with the freshly-latched EX/MEM address lands in the MEM cycle.
 
 use copper_core::{Bits, Clock, ClockDomain, Logic, Memory};
-use copper_core::port::{registered_wire, wire, Out, RegOut};
+use copper_core::port::{registered_wire, RegOut};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 

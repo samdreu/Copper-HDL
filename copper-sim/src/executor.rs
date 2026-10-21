@@ -377,7 +377,7 @@ impl HardwareExecutor {
     /// Spawn a module, registering its output [`DirtyHandle`]s so the executor
     /// knows when to re-settle.
     ///
-    /// `dirties` is the list obtained by calling [`Out::dirty_handle`] on each
+    /// `dirties` is the list obtained by calling `Out::dirty_handle` on each
     /// output port before handing the `Out` to the module. After each task poll
     /// the executor checks these flags to decide whether another delta cycle is
     /// needed.

@@ -9,9 +9,10 @@
 //! example is `include!`d at the crate root and the pipelined one inside `mod pl`,
 //! so their identically-named harnesses (`run_program`, `test_*`, `MainClk`, the
 //! assemblers) don't collide. Each example's `fn main` is `#[cfg(not(test))]`, so
-//! it is excluded here. The CPUs do not transpile (a `Vec` program port + `Memory`
-//! + submodules), so this is a simulation self-check against known architectural
-//! results — not a Verilator equivalence.
+//! it is excluded here. This file is a simulation self-check against known
+//! architectural results — not a Verilator equivalence. The CPUs do transpile; the
+//! sim-vs-Verilator check for the pipelined core lives in
+//! `tests/rv32i_pipelined_verilator.rs`.
 //!
 //! `run_program(prog, max) -> (a0, cycles)` runs the CPU until it halts and returns
 //! the final `a0` register. A wrong result is a real CPU/simulator bug.

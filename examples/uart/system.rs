@@ -226,7 +226,7 @@ fn main() {
     // Both channels transmit different bytes at the same time on the same clock.
     // Bytes must arrive on the correct channel — no cross-contamination.
     println!("\n=== Dual-channel simultaneous transmission ===");
-    println!("{:<12}  {:<12}  {}", "uart0", "uart1", "");
+    println!("{:<12}  {:<12}  ", "uart0", "uart1");
 
     for &(b0, b1) in &[(0xAB_u8, 0xCD_u8), (0x12, 0x34), (0xFF, 0x00)] {
         // Pulse both tx_starts in the same clock cycle

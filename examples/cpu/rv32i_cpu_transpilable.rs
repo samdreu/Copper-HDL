@@ -172,7 +172,7 @@ fn branch_taken(rv1: Bits<32>, rv2: Bits<32>, f3: usize) -> bool {
     else if f3 == 4 { slt(rv1, rv2) }
     else if f3 == 5 { !slt(rv1, rv2) }
     else if f3 == 6 { rv1.as_u32() < rv2.as_u32() }
-    else if f3 == 7 { !(rv1.as_u32() < rv2.as_u32()) }
+    else if f3 == 7 { rv1.as_u32() >= rv2.as_u32() }
     else { false }
 }
 

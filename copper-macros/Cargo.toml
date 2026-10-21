@@ -3,6 +3,9 @@ name = "copper-macros"
 version = "0.1.0"
 edition = "2024"
 description = "The #[hardware] proc macro: signature validation, CDC enforcement, simulation wiring"
+license = "MIT"
+repository = "https://github.com/samdreu/Copper-HDL"
+rust-version = "1.85"
 
 [lib]
 proc-macro = true

@@ -8,7 +8,7 @@
 // The test harness runs both with identical inputs and asserts identical outputs.
 
 use copper_core::types::{Bits, Clock, ClockDomain};
-use copper_core::port::{In, Out, RegOut, registered_wire, wire};
+use copper_core::port::{In, RegOut, registered_wire, wire};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -50,11 +50,11 @@ async fn mac_fsm(
                 stage   = Stage::Mul;
             }
             Stage::Mul => {
-                result = product.clone() + c_latch.clone();
+                result = product + c_latch;
                 stage  = Stage::Out;
             }
             Stage::Out => {
-                out.write(result.clone());
+                out.write(result);
                 stage = Stage::Load;
             }
         }
@@ -171,8 +171,8 @@ fn main() {
         105, // cycle 9: Group C (10*10)+5 = 105
     ];
 
-    println!("{:>5}  {:>10}  {:>8}  {:>8}  {:>8}  {}",
-             "cycle", "inputs", "fsm_out", "pip_out", "expected", "ok");
+    println!("{:>5}  {:>10}  {:>8}  {:>8}  {:>8}  ok",
+             "cycle", "inputs", "fsm_out", "pip_out", "expected");
 
     let mut all_pass = true;
     for (&(av, bv, cv), &exp) in inputs.iter().zip(expected.iter()) {

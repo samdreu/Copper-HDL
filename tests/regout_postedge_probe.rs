@@ -3,7 +3,7 @@
 //! same body driving a `RegOut` output is registered — its value is deferred one
 //! cycle to [0,1,2,…]. This pins the two output-timing behaviors the
 //! register/combinational distinction selects between (`design_docs/OUTDATED/EXECUTOR_CONVENTION_EXPERIMENT.md`).
-use copper_core::port::{registered_wire, wire, Out};
+use copper_core::port::{registered_wire, wire};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain};
 use copper_sim::{HardwareExecutor, HardwareModule};
@@ -22,7 +22,7 @@ fn regout_defers_one_cycle_under_postedge() {
         HardwareModule::__new(async move {
             let mut v: Bits<8> = Bits::zero();
             loop {
-                o_drv.write(v.clone());
+                o_drv.write(v);
                 clk_c.tick().await;
                 v = v + Bits::from_u8(1);
             }
@@ -46,7 +46,7 @@ fn regout_defers_one_cycle_under_postedge() {
         HardwareModule::__new(async move {
             let mut v: Bits<8> = Bits::zero();
             loop {
-                r_drv.write(v.clone());
+                r_drv.write(v);
                 clk2_c.tick().await;
                 v = v + Bits::from_u8(1);
             }

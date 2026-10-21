@@ -17,7 +17,7 @@
 mod common;
 
 use common::{EquivalenceTest, Rng};
-use copper_core::port::{wire, In, Out};
+use copper_core::port::wire;
 use copper_core::types::Bits;
 use copper_core::Logic;
 use copper_sim::HardwareExecutor;
@@ -40,14 +40,14 @@ mod cmp {
 mod gray {
     use copper_core::port::{In, Out};
     use copper_core::types::Bits;
-    use copper_core::Logic;
+    
     use copper_macros::hardware;
     include!("fixtures/gray_to_binary_dut.rs");
 }
 mod rot {
     use copper_core::port::{In, Out};
     use copper_core::types::Bits;
-    use copper_core::Logic;
+    
     use copper_macros::hardware;
     include!("fixtures/rotate_right_dut.rs");
 }

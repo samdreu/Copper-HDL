@@ -132,8 +132,8 @@ because it is assigned in the loop and read after the tick.
 
 | | |
 |---|---|
-| **Rust** | every crate is `edition = "2024"`, which needs rustc ≥ 1.85 (no `rust-version` field pins it; developed on 1.92) |
-| **Verilator** | required for examples and equivalence tests — `brew install verilator` (developed on 5.044) |
+| **Rust** | every crate is `edition = "2024"`, which needs rustc ≥ 1.85 (pinned as `rust-version = "1.85"` in every `Cargo.toml`; developed on 1.92) |
+| **Verilator** | required for examples and equivalence tests — `brew install verilator` (developed on 5.044; the numbers in the paper were generated with 5.051) |
 | **Icarus Verilog** | *optional* — `brew install icarus-verilog` (developed on 12.0). Used only by the simulator-throughput benchmark `tests/sim_throughput.rs` and by `tools/stats/simperf.py`; when `iverilog` is absent that test skips its Icarus leg (`iverilog_available`) and the stats script refuses to write a CSV |
 
 Verilator is not optional for a full regression run. A genuinely *absent*
@@ -350,17 +350,14 @@ Register inference is additionally checked *structurally*: the registers the
 analysis infers are matched reg-for-reg against the independent reference
 Verilog, not merely against matching behavior.
 
-Current state, as of the last full regression run:
-
-- **1010 tests pass, 0 fail, 21 ignored** across 123 test binaries
-- **26 of 26 examples pass**, Verilator equivalence included
-- **133 corpus differential cases pass**, 10 ignored with a recorded reason
-- the pipelined RV32I CPU matches its Verilated self **cycle-for-cycle on all
-  13 architectural programs** (`tests/rv32i_pipelined_verilator.rs`)
-- all five wiring guards (G-A / G-B / G-C / G-D / G-E) clean; G-E reports 2
-  swept modules anchored to an independent hand-written reference on top of the
-  sim-vs-emitted-SV check (`ram_read_first`, `bit_not_bits` — the `REFERENCE`
-  table in `build.rs`)
+Current state: the counts (tests, examples, sweep cases, ignored cases, anchored
+modules) are not copied here, because a hand-copied number goes stale. A full
+`tools/regression.sh` run prints them and ends in `REGRESSION OK`, and the
+numbers used in the paper are generated into `paper/stats/SUMMARY.md` by
+`tools/stats/collect.sh`. The guards G-A through G-E (above) report the example,
+sweep and anchoring counts on every run. The pipelined RV32I CPU matches its
+Verilated self cycle-for-cycle on all 13 architectural programs
+(`tests/rv32i_pipelined_verilator.rs`).
 
 Every ignored test prints its reason on each run. They are pinned one-cycle
 divergence witnesses that keep `allow_pretick_alignment` on purpose, shapes
@@ -491,7 +488,10 @@ still open.
 
 ## License
 
-The Copper source does not yet carry a license declaration.
+The Copper source is licensed under the MIT License (see `LICENSE`; the
+copyright holder and year there are placeholders to be confirmed by the author).
+The BaseJump STL-derived reference Verilog listed below is under the Solderpad
+Hardware License v0.51 and keeps that license: see `LICENSE-Solderpad`.
 
 The Verilog vendored as **independent references** under `examples/*/sv/` and
 `tests/fixtures/reference_sv/` comes from three sources, and each file's header

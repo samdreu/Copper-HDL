@@ -12,7 +12,6 @@ mod common;
 use common::EquivalenceTest;
 use copper_core::port::{wire, In, Out};
 use copper_core::types::Bits;
-use copper_core::Logic;
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 

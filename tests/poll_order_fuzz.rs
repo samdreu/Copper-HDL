@@ -57,7 +57,7 @@ fn assert_order_independent(name: &str, run: impl Fn(PollOrder) -> Vec<u128>) {
 async fn counter_a(clk: Clock<ClkA>, out: Out<Bits<8>, ClkA>) {
     let mut v = Bits::<8>::from_lit::<0>();
     loop {
-        out.write(v.clone());
+        out.write(v);
         clk.tick().await;
         v = v + Bits::<8>::from_u8(1);
     }
@@ -67,7 +67,7 @@ async fn counter_a(clk: Clock<ClkA>, out: Out<Bits<8>, ClkA>) {
 async fn counter_b(clk: Clock<ClkB>, out: Out<Bits<8>, ClkB>) {
     let mut v = Bits::<8>::from_lit::<0>();
     loop {
-        out.write(v.clone());
+        out.write(v);
         clk.tick().await;
         v = v + Bits::<8>::from_u8(1);
     }

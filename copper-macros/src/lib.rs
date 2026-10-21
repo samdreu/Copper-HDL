@@ -891,8 +891,8 @@ fn wrap_in_module(f: &mut ItemFn) {
 /// #[hardware] macro for defining hardware modules
 ///
 /// Marks a function as a hardware module.
-/// - `#[hardware(sequential)]` — async fn, must have Clock<D>, In<T>, Out<T> params, no return value
-/// - `#[hardware(combinational)]` — non-async fn, must have In<T> and Out<T> params, no Clock, no return value.
+/// - `#[hardware(sequential)]` — async fn, must have `Clock<D>`, `In<T>`, `Out<T>` params, no return value
+/// - `#[hardware(combinational)]` — non-async fn, must have `In<T>` and `Out<T>` params, no Clock, no return value.
 ///   The macro wraps the body in `loop { <body>; delta_yield().await; }` automatically for combinational modules.
 #[proc_macro_attribute]
 pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {

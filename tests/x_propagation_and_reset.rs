@@ -106,7 +106,7 @@ async fn resettable(
 }
 
 fn has_x(v: &Bits<8>) -> bool {
-    v.as_array().iter().any(|l| *l == Logic::X)
+    v.as_array().contains(&Logic::X)
 }
 
 // ── 1. an unknown register reads X, and X reaches the output ─────────────────

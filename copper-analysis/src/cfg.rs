@@ -1674,7 +1674,7 @@ impl Cfg {
     ///   comb-reaches a register assignment), not value dependence — an
     ///   over-approximation of the model's "some commit *depends on* a same-cycle
     ///   input read" closing-anchor condition.
-    /// * reach queries are iteration-local ([`comb_reaches`](Self::comb_reaches)
+    /// * reach queries are iteration-local (`comb_reaches`
     ///   stops at the head), so a trailing→head ordering within the merged phase is
     ///   not followed.
     /// * **`RegOut` writes are commits the CFG does not carry** (`Node::writes`

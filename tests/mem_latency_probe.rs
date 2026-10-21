@@ -34,7 +34,7 @@ async fn ram_straddle(
         if memory.read_port::<0>().is_ready() {
             data = memory.read_port::<0>().data();
         }
-        dob.write(data.clone());
+        dob.write(data);
     }
 }
 
@@ -54,7 +54,7 @@ async fn ram_prewrite(
         if memory.read_port::<0>().is_ready() {
             data = memory.read_port::<0>().data();
         }
-        dob.write(data.clone());
+        dob.write(data);
         if enb.read() == Logic::One {
             memory.read_port::<0>().read(addrb.read().as_usize());
         }

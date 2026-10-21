@@ -23,4 +23,10 @@ waveforms/
 .claude/
 smoke-failure.log
 regression-failure.log
+# The paper itself (drafts, templates, third-party PDFs, build logs) stays out of
+# the repository. `paper/stats/` is the exception: it is the generated evaluation
+# record (`tools/stats/collect.sh`) that the README and the stats scripts point at.
+paper/*
+!paper/stats/
 paper/stats-quick/
+.claude/worktrees/

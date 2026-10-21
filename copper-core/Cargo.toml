@@ -3,6 +3,9 @@ name = "copper-core"
 version = "0.1.0"
 edition = "2024"
 description = "Copper hardware types (Logic, Bits, Clock, ports, Memory), clock-domain machinery, and every IR in the pipeline"
+license = "MIT"
+repository = "https://github.com/samdreu/Copper-HDL"
+rust-version = "1.85"
 
 [dependencies]
 

@@ -7,11 +7,11 @@
 //! silently-detected module.
 //!
 //! Usage:
-//!   copper-transpile <input.rs> [-o <out.sv>] [--module <name>] [--profile <p>]
+//!   copper-transpile `<input.rs>` [-o `<out.sv>`] [--module `<name>`] [--profile `<p>`]
 //!
-//!   -o <path>         write output to a file (default: stdout)
-//!   --module <name>   which module to emit (required if the file has >1)
-//!   --profile <p>     verilator (default) | generic | yosys
+//!   -o `<path>`        write output to a file (default: stdout)
+//!   --module `<name>` which module to emit (required if the file has >1)
+//!   --profile `<p>`   verilator (default) | generic | yosys
 //!   --hierarchy       also emit every submodule the target transitively
 //!                     instantiates (deepest-first) — a self-contained design
 //!   --list            list the hardware modules found, then exit

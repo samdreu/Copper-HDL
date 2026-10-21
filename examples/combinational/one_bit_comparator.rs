@@ -39,7 +39,7 @@ fn main() {
     (Logic::One, Logic::One, Logic::One),
     ];
 
-    for (i, &(i0, i1, expected_eq)) in cases.iter().enumerate() {
+    for (i, &(i0, i1, _expected_eq)) in cases.iter().enumerate() {
         i0_drv.write(i0);
         i1_drv.write(i1);
         executor.poll_tasks();

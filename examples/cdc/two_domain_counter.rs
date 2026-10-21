@@ -140,8 +140,8 @@ fn main() {
 
     println!("=== CDC Two-Domain Counter (2:1 fast:slow) ===");
     println!(
-        "{:>5}  {:>10}  {:>8}  {:>7}  {:>9}  {}",
-        "slow", "fast_count", "flag_raw", "sync_q", "flag_sync", ""
+        "{:>5}  {:>10}  {:>8}  {:>7}  {:>9}  ",
+        "slow", "fast_count", "flag_raw", "sync_q", "flag_sync"
     );
 
     let mut all_pass = true;

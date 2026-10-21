@@ -39,16 +39,16 @@ async fn sipo_block(
 ) {
     loop {
         let w0 = data_i.read();
-        w0_dbg.write(w0.clone());
+        w0_dbg.write(w0);
         clk.tick().await;
         let w1 = data_i.read(); // mid-phase
-        w1_dbg.write(w1.clone());
+        w1_dbg.write(w1);
         clk.tick().await;
         let w2 = data_i.read(); // mid-phase
-        w2_dbg.write(w2.clone());
+        w2_dbg.write(w2);
         clk.tick().await;
         let w3 = data_i.read(); // mid-phase
-        w3_dbg.write(w3.clone());
+        w3_dbg.write(w3);
         let mut bits = [Logic::Zero; 16];
         for k in 0..4 {
             bits[k] = w0[k];

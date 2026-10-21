@@ -6,7 +6,7 @@ use copper_core::port::{registered_wire, wire, In, Out, RegOut};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain};
 use copper_macros::hardware;
-use copper_sim::{HardwareExecutor, HardwareTest, SimulationTrace, make_cycle};
+use copper_sim::{HardwareExecutor, HardwareTest};
 struct MainClk;
 impl ClockDomain for MainClk {}
 
@@ -64,8 +64,8 @@ async fn mac_fsm(
     loop {
         match stage {
             Stage::Load => { product = a.read() * b.read(); c_latch = c.read(); stage = Stage::Mul; }
-            Stage::Mul  => { result = product.clone() + c_latch.clone(); stage = Stage::Out; }
-            Stage::Out  => { out.write(result.clone()); stage = Stage::Load; }
+            Stage::Mul  => { result = product + c_latch; stage = Stage::Out; }
+            Stage::Out  => { out.write(result); stage = Stage::Load; }
         }
         clk.tick().await;
     }
@@ -77,7 +77,7 @@ async fn mac_fsm(
 async fn counter(clk: Clock<MainClk>, q: Out<Bits<8>, MainClk>) {
     let mut v: Bits<8> = Bits::zero();
     loop {
-        q.write(v.clone());
+        q.write(v);
         clk.tick().await;
         v = v + Bits::from_u8(1);
     }

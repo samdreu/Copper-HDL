@@ -1,4 +1,4 @@
-use copper_core::{Bits, Clock, ClockDomain, Logic, Memory};
+use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -40,7 +40,7 @@ const CLKS_PER_BIT: usize = 434; // 50 MHz / 115200
 const CLKS_PER_HALF_BIT: usize = CLKS_PER_BIT / 2;
 
 
-struct packet {
+struct Packet {
     start: Logic,
     data: Bits<8>,
     stop: Logic,
@@ -140,12 +140,12 @@ fn main() {
     // One complete 8N1 UART frame as a clock-by-clock waveform (start + 8 data + stop).
     fn uart_frame(byte: u8, cpb: usize) -> Vec<Logic> {
         let mut v = Vec::with_capacity(cpb * 10);
-        v.extend(std::iter::repeat(Logic::Zero).take(cpb));
+        v.extend(std::iter::repeat_n(Logic::Zero, cpb));
         for i in 0..8 {
             let lvl = if (byte >> i) & 1 == 1 { Logic::One } else { Logic::Zero };
-            v.extend(std::iter::repeat(lvl).take(cpb));
+            v.extend(std::iter::repeat_n(lvl, cpb));
         }
-        v.extend(std::iter::repeat(Logic::One).take(cpb));
+        v.extend(std::iter::repeat_n(Logic::One, cpb));
         v
     }
 
@@ -197,7 +197,7 @@ fn main() {
 
     // ── 1. Normal byte reception (exercises IDLE→START→DATA→STOP path) ────────
     println!("=== Normal byte reception ===");
-    println!("{:<32}  {:>8}  {:>8}  {}", "case", "expected", "received", "");
+    println!("{:<32}  {:>8}  {:>8}  ", "case", "expected", "received");
 
     let normal_cases: &[(&str, u8)] = &[
         ("0x37 (Nandland reference)",  0x37),

@@ -7,6 +7,9 @@ name = "copper"
 version = "0.1.0"
 edition = "2024"
 description = "Copper: a Rust-embedded HDL — hardware as #[hardware] async fns, simulated and transpiled to SystemVerilog"
+license = "MIT"
+repository = "https://github.com/samdreu/Copper-HDL"
+rust-version = "1.85"
 
 [dependencies]
 copper-core = { path = "copper-core" }
@@ -39,6 +42,10 @@ path = "examples/combinational/one_bit_comparator.rs"
 [[example]]
 name = "mux"
 path = "examples/combinational/mux.rs"
+
+[[example]]
+name = "full_adder"
+path = "examples/combinational/full_adder.rs"
 
 [[example]]
 name = "ripple_carry_adder"
@@ -78,6 +85,14 @@ test = true
 [[example]]
 name = "handshake"
 path = "examples/sequential/handshake.rs"
+
+[[example]]
+name = "simple_handshake"
+path = "examples/sequential/simple_handshake.rs"
+
+[[example]]
+name = "serializer"
+path = "examples/sequential/serializer.rs"
 # `main()` is a self-check (simulator vs the hand model, `exit(1)` on mismatch); the
 # `#[cfg(test)]` checks pin the `done` step cycles and the never-acknowledged case.
 test = true
@@ -93,6 +108,10 @@ path = "examples/sequential/pipeline_mac.rs"
 [[example]]
 name = "lfsr"
 path = "examples/sequential/lfsr.rs"
+
+[[example]]
+name = "simple_counter"
+path = "examples/sequential/simple_counter.rs"
 
 [[example]]
 name = "dual_port_ram"

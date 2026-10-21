@@ -3367,10 +3367,14 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
             let left = lower_expr(&bin.left, ctx)?;
             let right = lower_expr(&bin.right, ctx)?;
             let op = lower_binop(&bin.op, bin.span)?;
-            // An untyped integer literal takes the width of the other operand,
-            // so `timer < 1` compares at the register's width rather than the
-            // default literal width (which would widen the whole expression).
-            let (left, right) = balance_binop_literals(left, right, ctx);
+            // An integer literal takes the width of the other operand, so
+            // `timer < 1` compares at the register's width rather than the
+            // default literal width (which would widen the whole expression)
+            // and `count + Bits::from_usize(1)` adds at `count`'s width rather
+            // than `usize`'s. A shift amount adopts only when it is bare: its
+            // Rust type is independent of the shifted value's.
+            let is_shift = matches!(op, CHIRBinOp::Shl | CHIRBinOp::Shr);
+            let (left, right) = balance_binop_literals(left, right, bin.span, is_shift, ctx)?;
             Ok(signed_binop(op, left, right))
         }
 
@@ -3426,7 +3430,8 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
             // operand does (`lit_width_in_ternary`'s `Bits::zero()` else-arm:
             // the `from_lit` arm carries a declared 32, the bare zero must not
             // stay 64 and WIDTHTRUNC into the port).
-            let (then_val, else_val) = balance_binop_literals(then_val, else_val, ctx);
+            let (then_val, else_val) =
+                balance_binop_literals(then_val, else_val, if_expr.span, false, ctx)?;
             Ok(CHIRExpr::Mux {
                 cond: Box::new(cond),
                 then_val: Box::new(then_val),
@@ -3946,10 +3951,48 @@ fn lower_repeat(rep: &ExprRepeat, ctx: &mut LowerCtx) -> Result<CHIRExpr, CHIRLo
 
 const DEFAULT_LIT_WIDTH: usize = 64;
 
-/// Give a bare (default-width) integer literal operand the width of the other
-/// side of a binary operation. Without this, `timer < 1` on an 8-bit register
-/// compares at 64 bits and Verilator reports a width-expansion warning.
-fn balance_binop_literals(left: CHIRExpr, right: CHIRExpr, ctx: &LowerCtx) -> (CHIRExpr, CHIRExpr) {
+/// Give an integer literal operand the width of the other side of a binary
+/// operation (or of the other arm of an `if`-expression mux).
+///
+/// Two literal shapes arrive here:
+///
+/// * a **bare** literal (`timer < 1`), still at `DEFAULT_LIT_WIDTH` because
+///   nothing in its own spelling fixed a width — without this, the compare
+///   happens at 64 bits and Verilator reports a width-expansion warning;
+/// * a literal whose width was **guessed from its constructor name or suffix**
+///   (`count + Bits::from_usize(1)` lowers the `1` as 32 bits because `usize`
+///   is 32 bits here, see `infer_type_from_suffix`). In the Rust source that
+///   literal has the SAME type as `count` — `Bits<N>`'s `+ - * / % & | ^` and
+///   comparisons are all same-type (`copper-core/src/types.rs`), and rustc
+///   inferred the constructor's `N` from the other operand — so the 32 is a
+///   transpiler artefact, not the author's width. Before this clause it
+///   survived into the emitted text (`count + 32'd1`) and the corpus sweep's
+///   `-Wall` build of `simple_counter` failed on WIDTHEXPAND/WIDTHTRUNC.
+///
+/// Shifts take `is_shift`: Rust lets a shift amount have any integer type, so
+/// there the two sides are NOT the same type and a width-carrying literal keeps
+/// its own width (`1u32 << k` with an 8-bit `k` must not become an 8-bit `1`).
+/// A bare literal amount still adopts the other side's width, as it always did.
+///
+/// A literal that does not fit the adopted width is a **spanned error**, never
+/// a silent truncation: the simulator's `Bits::from_usize` asserts the same
+/// bound at run time, so the two front-ends refuse the same programs.
+fn balance_binop_literals(
+    left: CHIRExpr,
+    right: CHIRExpr,
+    span: SourceSpan,
+    is_shift: bool,
+    ctx: &LowerCtx,
+) -> Result<(CHIRExpr, CHIRExpr), CHIRLowerError> {
+    /// A literal of integer kind (not `Bool`) whose width may be rewritten.
+    fn int_lit(e: &CHIRExpr) -> Option<&CHIRLit> {
+        match e {
+            CHIRExpr::Lit(l) if matches!(l.ty, CHIRType::UInt { .. } | CHIRType::SInt { .. }) => {
+                Some(l)
+            }
+            _ => None,
+        }
+    }
     let is_default_lit = |e: &CHIRExpr| {
         matches!(e, CHIRExpr::Lit(l)
             if l.ty == CHIRType::UInt { width: Width::Concrete(DEFAULT_LIT_WIDTH) })
@@ -3958,17 +4001,76 @@ fn balance_binop_literals(left: CHIRExpr, right: CHIRExpr, ctx: &LowerCtx) -> (C
         width_of_chir_expr(e, ctx).filter(|w| *w != DEFAULT_LIT_WIDTH)
     };
 
+    // Case A — a bare literal against anything with a known width (the other
+    // side may itself be a width-carrying literal: `Bits::<32>::from_lit::<1>()`
+    // vs `Bits::zero()`, the `lit_width_in_ternary` ledger entry).
     if is_default_lit(&right) && !is_default_lit(&left) {
         if let Some(w) = other_width(&left) {
-            return (left, retype_literals(right, w));
+            let right = retype_lit_checked(right, w, span)?;
+            return Ok((left, right));
         }
     }
     if is_default_lit(&left) && !is_default_lit(&right) {
         if let Some(w) = other_width(&right) {
-            return (retype_literals(left, w), right);
+            let left = retype_lit_checked(left, w, span)?;
+            return Ok((left, right));
         }
     }
-    (left, right)
+
+    // Case B — a width-guessed literal against a NON-literal operand of a
+    // different known width. Two literals of different fixed widths are left
+    // alone: neither side has a better claim, and the sweep's lint will say so.
+    if is_shift {
+        return Ok((left, right));
+    }
+    let lit_width = |e: &CHIRExpr| int_lit(e).and_then(|l| width_of_type_concrete(&l.ty));
+    if let (Some(lw), None) = (lit_width(&right), int_lit(&left)) {
+        if let Some(w) = other_width(&left) {
+            if w != lw {
+                let right = retype_lit_checked(right, w, span)?;
+                return Ok((left, right));
+            }
+        }
+    }
+    if let (Some(lw), None) = (lit_width(&left), int_lit(&right)) {
+        if let Some(w) = other_width(&right) {
+            if w != lw {
+                let left = retype_lit_checked(left, w, span)?;
+                return Ok((left, right));
+            }
+        }
+    }
+    Ok((left, right))
+}
+
+/// Retype the integer literal `e` to `width` bits, keeping its signedness kind,
+/// or refuse with a spanned error when its value needs more bits than that.
+/// `e` is a literal here (the callers checked); anything else passes through.
+fn retype_lit_checked(
+    e: CHIRExpr,
+    width: usize,
+    span: SourceSpan,
+) -> Result<CHIRExpr, CHIRLowerError> {
+    let CHIRExpr::Lit(l) = e else { return Ok(e) };
+    let fits = width >= 128 || l.value < (1u128 << width);
+    if !fits {
+        return Err(CHIRLowerError::UnsupportedConstruct {
+            description: format!(
+                "integer literal {} does not fit in the {}-bit operand it combines with \
+                 (the simulator's `Bits::from_usize` would panic on the same value)",
+                l.value, width
+            ),
+            span,
+            suggested_rewrite: Some(
+                "widen the other operand, or use a value that fits its width".to_string(),
+            ),
+        });
+    }
+    let ty = match l.ty {
+        CHIRType::SInt { .. } => CHIRType::SInt { width: Width::Concrete(width) },
+        _ => CHIRType::UInt { width: Width::Concrete(width) },
+    };
+    Ok(CHIRExpr::Lit(CHIRLit { ty, value: l.value }))
 }
 
 /// Retype untyped (default-width) literals sitting in *value* positions to
@@ -6270,6 +6372,123 @@ mod tests {
             CHIRExpr::Lit(lit) => assert_eq!(lit.value, 42),
             _ => panic!("expected lit"),
         }
+    }
+
+    // ── Literal operand widths (`balance_binop_literals`) ────────────────────
+
+    /// `CHIRExpr` has no `PartialEq`; compare two expressions by their Debug form.
+    macro_rules! assert_same {
+        ($a:expr, $b:expr $(, $($msg:tt)+)?) => {
+            assert_eq!(format!("{:?}", $a), format!("{:?}", $b) $(, $($msg)+)?)
+        };
+    }
+
+    fn lit(width: usize, value: u128) -> CHIRExpr {
+        CHIRExpr::Lit(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(width) }, value })
+    }
+
+    /// A context holding one 8-bit signal `count`.
+    fn ctx_with_count8<'a>(
+        hw: &'a std::collections::HashSet<String>,
+        reg: &'a ModuleRegistry,
+    ) -> LowerCtx<'a> {
+        let mut ctx = LowerCtx::new(hw, reg);
+        ctx.symbols.insert("count".into(), CHIRType::UInt { width: Width::Concrete(8) });
+        ctx
+    }
+
+    /// `count + Bits::from_usize(1)`: the `1` arrives as a 32-bit literal (the
+    /// `usize` guess) and must take `count`'s 8 bits — the `simple_counter`
+    /// sweep failure (`count + 32'd1` under `-Wall`).
+    #[test]
+    fn fixed_width_literal_adopts_the_other_operands_width() {
+        let (hw, reg) = (no_hw(), empty_registry());
+        let ctx = ctx_with_count8(&hw, &reg);
+        let (l, r) =
+            balance_binop_literals(CHIRExpr::Var("count".into()), lit(32, 1), span(), false, &ctx)
+                .unwrap();
+        assert_same!(l, CHIRExpr::Var("count".into()));
+        assert_same!(r, lit(8, 1));
+        // Symmetric.
+        let (l, r) =
+            balance_binop_literals(lit(32, 1), CHIRExpr::Var("count".into()), span(), false, &ctx)
+                .unwrap();
+        assert_same!(l, lit(8, 1));
+        assert_same!(r, CHIRExpr::Var("count".into()));
+    }
+
+    /// The bare-literal case (`timer < 1`, still at `DEFAULT_LIT_WIDTH`) keeps
+    /// working exactly as before.
+    #[test]
+    fn bare_literal_still_adopts_the_other_operands_width() {
+        let (hw, reg) = (no_hw(), empty_registry());
+        let ctx = ctx_with_count8(&hw, &reg);
+        let (_, r) = balance_binop_literals(
+            CHIRExpr::Var("count".into()),
+            lit(DEFAULT_LIT_WIDTH, 1),
+            span(),
+            false,
+            &ctx,
+        )
+        .unwrap();
+        assert_same!(r, lit(8, 1));
+    }
+
+    /// A literal that needs more bits than the operand it combines with is a
+    /// spanned error, never a silent truncation — for both literal shapes.
+    #[test]
+    fn literal_that_does_not_fit_the_adopted_width_is_rejected() {
+        let (hw, reg) = (no_hw(), empty_registry());
+        let ctx = ctx_with_count8(&hw, &reg);
+        for width in [32usize, DEFAULT_LIT_WIDTH] {
+            let err =
+                balance_binop_literals(CHIRExpr::Var("count".into()), lit(width, 300), span(), false, &ctx)
+                    .expect_err("300 does not fit in 8 bits");
+            let msg = err.to_string();
+            assert!(msg.contains("300") && msg.contains("8-bit"), "got: {msg}");
+        }
+        // 255 does.
+        let (_, r) =
+            balance_binop_literals(CHIRExpr::Var("count".into()), lit(32, 255), span(), false, &ctx)
+                .unwrap();
+        assert_same!(r, lit(8, 255));
+    }
+
+    /// A shift amount has its own Rust type (`1u32 << k` is legal with an 8-bit
+    /// `k`), so a width-carrying literal on either side of a shift keeps its
+    /// width; only a bare amount adopts, as it always did.
+    #[test]
+    fn shift_keeps_a_fixed_width_literal_but_sizes_a_bare_one() {
+        let (hw, reg) = (no_hw(), empty_registry());
+        let ctx = ctx_with_count8(&hw, &reg);
+        let (l, r) =
+            balance_binop_literals(lit(32, 1), CHIRExpr::Var("count".into()), span(), true, &ctx)
+                .unwrap();
+        assert_same!(l, lit(32, 1), "`1u32 << count` must stay 32 bits wide");
+        assert_same!(r, CHIRExpr::Var("count".into()));
+        let (_, r) = balance_binop_literals(
+            CHIRExpr::Var("count".into()),
+            lit(DEFAULT_LIT_WIDTH, 1),
+            span(),
+            true,
+            &ctx,
+        )
+        .unwrap();
+        assert_same!(r, lit(8, 1), "a bare shift amount still adopts (unchanged behaviour)");
+    }
+
+    /// Two literals of different fixed widths, or a literal against an operand
+    /// of unknown width, are left alone: there is no better claim to adopt.
+    #[test]
+    fn literal_without_a_width_to_adopt_is_left_alone() {
+        let (hw, reg) = (no_hw(), empty_registry());
+        let ctx = LowerCtx::new(&hw, &reg);
+        let (l, r) = balance_binop_literals(lit(8, 0), lit(32, 1), span(), false, &ctx).unwrap();
+        assert_same!((l, r), (lit(8, 0), lit(32, 1)));
+        let (l, r) =
+            balance_binop_literals(CHIRExpr::Var("unknown".into()), lit(32, 1), span(), false, &ctx)
+                .unwrap();
+        assert_same!((l, r), (CHIRExpr::Var("unknown".into()), lit(32, 1)));
     }
 
     #[test]

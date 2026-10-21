@@ -3,6 +3,9 @@ name = "copper-codegen"
 version = "0.1.0"
 edition = "2024"
 description = "Copper transpiler (FIR -> CHIR -> SHIR -> VLIR -> SystemVerilog) and the copper-transpile CLI"
+license = "MIT"
+repository = "https://github.com/samdreu/Copper-HDL"
+rust-version = "1.85"
 
 [[bin]]
 name = "copper-transpile"

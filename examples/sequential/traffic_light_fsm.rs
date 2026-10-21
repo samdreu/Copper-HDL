@@ -141,7 +141,7 @@ fn main() {
         "GREEN",
     ];
 
-    println!("{:>5}  {:>7}  {:<12}  {}", "cycle", "request", "phase", "pass");
+    println!("{:>5}  {:>7}  {:<12}  pass", "cycle", "request", "phase");
 
     let mut all_pass = true;
     for (&req, &expected) in inputs.iter().zip(expected_phases.iter()) {

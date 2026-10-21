@@ -9,7 +9,8 @@ declared inline in test files are outside it (a `sync_2ff_concrete` twin is swep
 The counts move as the corpus does, so trust the tool over any number written here:
 `build.rs` prints `corpus sweep: N generated, M ignored-with-reason` on every build,
 and G-D prints `corpus sweep ran N differential cases (M ignored-with-reason)` on
-every full run. Verified 2026-09-01: **133 running, 10 ignored-with-reason**, out of
+every full run. The current counts are in the build and regression printouts above (and in
+`paper/stats/SUMMARY.md`); on 2026-09-01 it was 133 running, 10 ignored-with-reason, out of
 143 modules. Every one of the ten is a row in `build.rs`'s `SKIP` table — a recorded
 transpiler refusal, a structural module with no simulatable body, a deliberate
 divergence witness, a documented startup transient, or the pipelined CPU, whose

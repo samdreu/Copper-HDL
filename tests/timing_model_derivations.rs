@@ -37,6 +37,13 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     // pass hiding phases from a module that used to be visible; a new module of the
     // shape this set exists to name. tests/det_for_probe.rs pins its timing.
     "det_for",
+    // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
+    // counted `for` over the data bits, each with its tick inside) and the one-tick
+    // handshake (two `while` waits). Every tick sits inside a loop, so both extract
+    // into one `match pc` — new modules of the shape this set names, not a pass
+    // that started hiding phases.
+    "serializer",
+    "simple_handshake",
     "capture_after_wait",
     "det_010_awaits",
     "handshake",

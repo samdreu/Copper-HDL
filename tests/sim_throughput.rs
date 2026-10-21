@@ -23,7 +23,7 @@
 //! binary ran. Real measurements come from `tools/stats/simperf.py`, which sets:
 //!
 //! ```text
-//! COPPER_BENCH_CYCLES=100000 COPPER_BENCH_RUNS=5 COPPER_BENCH_CSV=paper/stats/simperf.csv \
+//! COPPER_BENCH_CYCLES=1000000 COPPER_BENCH_RUNS=5 COPPER_BENCH_CSV=paper/stats/simperf.csv \
 //!     cargo test --release --test sim_throughput -- --nocapture
 //! ```
 //!
@@ -389,9 +389,10 @@ mod cpu_ex {
         rstn_drv.write(Logic::One);
 
         // 16 post-reset warm cycles before folding starts, on EVERY side. The
-        // emitted SV leaves registers uninitialized (reset or write-before-read
-        // covers correctness), which 2-state Verilator zero-fills — matching the
-        // simulator's zero inits by accident — but 4-state Icarus keeps as X.
+        // emitted SV carries register initializers only where the design gives one
+        // (reset or write-before-read covers correctness elsewhere), so a register
+        // without one is zero-filled by 2-state Verilator — matching the
+        // simulator's zero inits — but kept as X by 4-state Icarus.
         // The pipeline-fill window is where an X could slip through a path the
         // reset does not drive; by cycle 16 every architectural register the
         // workload reads has been written, so all three simulators fold only

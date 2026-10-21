@@ -23,8 +23,9 @@ runs its reference leg, so the row is inert and is not counted (`bit_not_bits` w
 exactly that from 2026-08-26 until its stale `SKIP` row was deleted on 2026-09-01,
 and G-E over-reported by one the whole time). The result is written as the
 `ANCHORED` / `UNANCHORED` constants in the generated file and as a
-`cargo:warning=anchoring: …` line in the build log, which G-E greps. Verified
-2026-09-01: **2 anchored** (`ram_read_first`, `bit_not_bits`), both live.
+`cargo:warning=anchoring: …` line in the build log, which G-E greps. The current
+count is the G-E line of a `tools/regression.sh` run (first verified 2026-09-01 at 2:
+`ram_read_first`, `bit_not_bits`).
 
 What the count does **not** include is every module anchored *outside* the sweep:
 the examples checked against `examples/**/sv/*.sv` through
@@ -32,7 +33,7 @@ the examples checked against `examples/**/sv/*.sv` through
 that `include!` them), `tests/verilog_hybrid_pipeline.rs` and
 `tests/verilog_fifo_memory_new.rs` (`tests/fixtures/reference_sv/`),
 `tests/det_010_independent_golden.rs`, and `tests/cdc_synchronizer_anchor.rs`.
-G-E is the sweep's ledger, not the repo's; "141 cross-checked against the
+G-E is the sweep's ledger, not the repo's; "N cross-checked against the
 transpiler only" means *within the generated cases*.
 
 ## Adding one

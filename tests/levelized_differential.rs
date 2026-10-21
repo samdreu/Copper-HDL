@@ -41,7 +41,7 @@ impl ClockDomain for Slow {}
 async fn counter(clk: Clock<Dm>, out: Out<Bits<8>, Dm>) {
     let mut v = Bits::<8>::from_lit::<0>();
     loop {
-        out.write(v.clone());
+        out.write(v);
         clk.tick().await;
         v = v + Bits::<8>::from_u8(1);
     }
@@ -75,7 +75,7 @@ async fn accum(clk: Clock<Dm>, a: In<Bits<8>, Dm>, out: RegOut<Bits<8>, Dm>) {
     let mut acc = Bits::<8>::from_lit::<0>();
     loop {
         acc = acc + a.read();
-        out.write(acc.clone());
+        out.write(acc);
         clk.tick().await;
     }
 }
@@ -99,7 +99,7 @@ fn buf(in_i: In<Bits<8>, Dm>, out: Out<Bits<8>, Dm>) {
 async fn counter_fast(clk: Clock<Fast>, out: Out<Bits<8>, Fast>) {
     let mut v = Bits::<8>::from_lit::<0>();
     loop {
-        out.write(v.clone());
+        out.write(v);
         clk.tick().await;
         v = v + Bits::<8>::from_u8(1);
     }
@@ -114,7 +114,7 @@ fn add_one_fast(in_i: In<Bits<8>, Fast>, out: Out<Bits<8>, Fast>) {
 async fn counter_slow(clk: Clock<Slow>, out: Out<Bits<8>, Slow>) {
     let mut v = Bits::<8>::from_lit::<0>();
     loop {
-        out.write(v.clone());
+        out.write(v);
         clk.tick().await;
         v = v + Bits::<8>::from_u8(1);
     }

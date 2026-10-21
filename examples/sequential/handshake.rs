@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn a_request_never_acknowledged_never_counts() {
-        let stream: Vec<(bool, bool)> = std::iter::repeat((true, false)).take(40).collect();
+        let stream: Vec<(bool, bool)> = std::iter::repeat_n((true, false), 40).collect();
         assert_eq!(simulate(&stream).last(), Some(&0));
     }
 }

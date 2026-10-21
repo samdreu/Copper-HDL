@@ -50,6 +50,15 @@ set -uo pipefail
 # binary directly, so clear it here too.
 unset VERILATOR_ROOT
 
+# Every Verilator model recompiles the Verilator runtime C++ from scratch, and a full
+# run builds a few hundred models. Verilator's generated makefiles honour OBJCACHE
+# (`verilated.mk`), so when ccache is installed hand it over: the runtime objects
+# then compile once, and a module whose emitted SystemVerilog did not change is a
+# cache hit end to end. Purely a build-speed knob — the models are identical.
+if [ -z "${OBJCACHE:-}" ] && command -v ccache >/dev/null 2>&1; then
+  export OBJCACHE=ccache
+fi
+
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)" || exit 2
 
 # Representative fast set for --quick: combinational, generic monomorphization,

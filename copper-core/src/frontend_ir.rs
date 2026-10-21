@@ -229,7 +229,7 @@ pub struct ClockParamMeta {
     /// name of parameter
     pub param_name: String,
 
-    /// Raw type text, usually "Clock<Domain>"
+    /// Raw type text, usually "`Clock<Domain>`"
     pub clock_ty: String,
 
     /// domain text if present, e.g. "MainClk"
@@ -496,7 +496,7 @@ pub struct ExprBinary {
 pub struct ExprCall {
     pub func: Box<ExprType>,
     pub args: Vec<ExprType>,
-    /// True if the callee was annotated with #[hardware] — this call site
+    /// True if the callee was annotated with `#[hardware]` — this call site
     /// will be lowered to a CHIRSubmoduleInst rather than an inlined call.
     pub is_hardware_module: bool,
     pub span: SourceSpan,
