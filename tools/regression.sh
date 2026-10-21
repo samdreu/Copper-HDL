@@ -9,7 +9,7 @@
 #   1. cargo build --workspace     the crates compile
 #   2. copper-transpile <file>     the standalone SV emitter / CLI
 #   3. cargo test --workspace      every test target
-#   4. cargo run --example <name>  Copper-sim vs Verilator equivalence
+#   4. the example binaries, in parallel   Copper-sim vs Verilator equivalence
 #
 # THE DEFAULT IS THE FULL REGRESSION — bare, it runs everything. That is deliberate:
 # an example's `main()` is a real self-check (several assert against independent
@@ -244,15 +244,28 @@ else
 
   command -v verilator >/dev/null || fail "verilator not on PATH (brew install verilator)"
 
+  # Build every example once, then run the binaries in parallel. A `cargo run` per
+  # example serialises on cargo's lock and pays cargo's start-up each time, and the
+  # examples are independent of each other: each writes its own
+  # `waveforms/<name>.vcd` and its own per-invocation Verilator work directory, and
+  # none reads the environment at run time. The results are printed in registration
+  # order afterwards, so the output reads the same as the sequential loop did.
+  cargo build -q --examples || fail "building the examples"
+  EXDIR="${CARGO_TARGET_DIR:-target}/debug/examples"
+  JOBS="${COPPER_REGRESSION_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
+  mkdir -p "$TMP/ex"
+  printf '%s\n' "${EXAMPLES[@]}" | xargs -P "$JOBS" -I{} sh -c \
+    'if "$3/$1" >"$2/ex/$1.log" 2>&1; then echo PASS >"$2/ex/$1.status"; else echo FAIL >"$2/ex/$1.status"; fi' \
+    _ {} "$TMP" "$EXDIR"
   PASS=0; TOTAL=0
   for ex in "${EXAMPLES[@]}"; do
     TOTAL=$((TOTAL + 1))
     printf '  %-22s ' "$ex"
-    if cargo run -q --example "$ex" >"$TMP/ex.log" 2>&1; then
+    if [ "$(cat "$TMP/ex/$ex.status" 2>/dev/null)" = PASS ]; then
       echo "PASS"; PASS=$((PASS + 1))
     else
       echo "FAIL"
-      sed 's/^/      /' "$TMP/ex.log" | tail -8
+      sed 's/^/      /' "$TMP/ex/$ex.log" 2>/dev/null | tail -8
       echo "      (rerun: cargo run --example $ex)"
     fi
   done
