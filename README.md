@@ -391,11 +391,18 @@ What remains unsupported falls into two kinds.
 simulation and in silicon are refused with a spanned error and a recorded
 counterexample rather than lowered to something plausible:
 
-- **The mid-phase read seam**: an `In` read placed *after* a delay
-  (`for _ in 0..N { clk.tick().await; } let x = input.read();`) samples
-  post-edge in the simulator but pre-edge in a flip-flop, a cycle apart under
-  any testbench that moves inputs between edges. Write the read first and the
-  delay last — `examples/uart/rx.rs` shows the anchored spelling.
+- **An `In` read placed after a delay is not refused.** A consumer that waits
+  for `valid`, ticks twice, and only then reads `data`
+  (`while valid.read() == Logic::Zero { clk.tick().await; } clk.tick().await;
+  clk.tick().await; acc = acc + data.read();`) is accepted by the macro and by
+  the transpiler, and the differential sweep finds the simulator and the
+  emitted SystemVerilog agree on every cycle
+  (`tests/fixtures/valid_ready_dut.rs::vr_read_after_delay`, measured
+  2026-10-20). The read opens its own segment, so it samples at that cycle's
+  opening on both sides. Earlier editions of this list said the shape was
+  refused by design; it is not, and no rule targets it. The read-first,
+  delay-last spelling in `examples/uart/rx.rs` is the one anchored against an
+  independent reference, not the only one that works.
 - **The pre-tick alignment family**: five compile-time rules refuse plain-`Out`
   drive shapes whose phase would silently differ between the simulator and the
   synthesized FSM (a path-dependent read boundary, a port written in more than

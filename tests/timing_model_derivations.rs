@@ -50,6 +50,15 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     "if_tick",
     "rom_gated",
     "rom_paced",
+    // The valid/ready probes (tests/fixtures/valid_ready_dut.rs, 2026-10-20) with
+    // a `while … { clk.tick().await; }` wait — desugared and extracted the same
+    // way `waiter` / `while_waiter` are, so each lowers to one phase. The two
+    // Mealy spellings in that file (`vr_sink_mealy`, `vr_skid`) are single-tick
+    // and agree.
+    "vr_read_after_delay",
+    "vr_sink_moore",
+    "vr_src_regout",
+    "vr_src_same_cycle",
     "waiter",
     "while_waiter",
 ];

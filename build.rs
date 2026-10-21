@@ -108,6 +108,30 @@ const SKIP: &[(&str, &str)] = &[
          agreeing flip and sweeps",
     ),
     (
+        "vr_sink_mealy",
+        "ONE-CYCLE DIVERGENCE, GUARDED as of 2026-10-20: a Mealy `ready = !full || drain` \
+         computed into a `let can_take: Logic` temporary, written, and only then `full` \
+         updated in the same segment — V8a with one rename, which \
+         `pretick_out_write_before_update` did not see through until it learned to follow \
+         same-segment temporaries (reaching definitions). MEASURED before the fix: `ready` \
+         the only diverging port, the simulator at 1 against the SV at 0 on 15 of 200 \
+         cycles (hardware leads by one — the emitted `assign ready = can_take` is a wire of \
+         `full`'s Q, the simulator reads `full` pre-update). The macro now refuses the shape \
+         (ui/fail/write_before_update_via_temp.rs); this fixture keeps \
+         `allow_pretick_alignment` as the demonstration. `vr_sink_moore` is the registered \
+         spelling and sweeps",
+    ),
+    (
+        "vr_skid",
+        "ONE-CYCLE DIVERGENCE, GUARDED as of 2026-10-20: the same temporary-routed Mealy \
+         ready as `vr_sink_mealy` (`let ir: Logic = …; in_ready.write(ir); … full = …`) in a \
+         one-entry skid buffer whose `out_valid`/`out_data` are written before any input \
+         read (the agreeing V8c position) and sweep clean. MEASURED before the fix: \
+         `in_ready` the only diverging port, simulator 1 against SV 0 on 20 of 200 cycles. \
+         Kept with `allow_pretick_alignment` as the demonstration; the guard refuses it \
+         without the opt-out",
+    ),
+    (
         "regout_trailing_single_tick",
         "ONE-CYCLE DIVERGENCE, and the half worth knowing: reaching for `RegOut` does NOT fix \
          the entry above. In a SINGLE-TICK loop the trailing statements share the head's \
