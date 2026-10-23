@@ -1067,6 +1067,40 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
+            // A `RegOut` written in the TRAILING region (after the last top-level
+            // tick) from an input read directly. A `RegOut` write takes effect at the
+            // first clock edge after it executes — for a trailing write, the next
+            // edge — and the emitted non-blocking assign at that edge samples the
+            // input one drive later than the simulator's immediate read did. Through
+            // a register the value is held and the two agree; read directly it is
+            // not, and realizing it would need a staging flop.
+            let trailing_input = if allow_pretick_alignment {
+                Vec::new()
+            } else {
+                cfg.as_ref().map(|c| c.trailing_regout_reads_input()).unwrap_or_default()
+            };
+            if let Some(port) = trailing_input.first() {
+                let span = port_param_span(&input_fn.sig, port)
+                    .unwrap_or_else(|| input_fn.sig.ident.span());
+                return Error::new(
+                    span,
+                    format!(
+                        "registered output `{port}` is written after the last `clk.tick().await` \
+                         from an input read in that same region. A `RegOut` write takes effect \
+                         at the first clock edge after it executes, so this write commits at \
+                         the NEXT edge — where the synthesized flip-flop samples the input one \
+                         drive later than the simulator's immediate read did, and the two \
+                         silently disagree by one cycle. Read the input before the \
+                         `clk.tick().await` (the write then commits at that edge, with the \
+                         read), or latch it into a register and write `{port}` from the \
+                         register (a held value is the same on both sides). If this module \
+                         exists to DEMONSTRATE the divergence, opt out explicitly with \
+                         `#[hardware(sequential, {ALLOW_PRETICK})]`."
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
             // A plain `Out` driven in more than one clock phase. The multi-tick
             // lowering already refuses this; control extraction hides the phases by
             // rewriting the body into a single-tick `match pc` FSM, so it has to be

@@ -48,6 +48,16 @@ the order things were learned:
   `d1_in_the_trailing_segment_is_an_unguarded_gap`) stays refused, exact set
   `EXPECTED_TRAILING` in `copper-analysis/tests/pretick_alignment_corpus.rs`.
   Retirement remains gated on phase C proper.
+  **LANDED 2026-10-23 (branch `feat/unify-tick-dialects`).** Phase C turned out
+  to be an *emission form*, not the "deep surgery" in `control_extract` this
+  note feared: the new-state placement after the last top-level tick was
+  right all along (it is the only place a memory result is available), and
+  what lagged was the plain-`Out` drive in that state becoming an edge-sampled
+  register. `vlir_lower::opening_hold_outputs` now emits an opening drive in a
+  conditional arm as a forwarded combinational mux with a hold register (the
+  m2 hand model); `trailing_update`, `branch_trailing` and `pulse_plain` agree;
+  `unprotected_trailing_out_write`, `EXPECTED_TRAILING` and `has_nested_tick`
+  are deleted. Measured sv-baseline delta: exactly those three witnesses.
 * **D — DONE, evidence-first.** The V-battery was re-measured under B before the
   rule moved (`d_narrowing_battery_verdicts`): V5 **and V7** dissolved (V7's
   2026-08-21 verdict was stale even before B — the 2026-08-25 trailing
@@ -124,7 +134,7 @@ decision".
 | closing suffix (a commit depends on a same-cycle `In` read; statements after the barrier) | **unforwarded** commit-frontier expression | unforwarded | none |
 | opening region (pre-tick with no input-dependent commit — e.g. no `In` reads at all) | **forwarded** expression (`assign o = r + 1` for V1) | unforwarded | **phase B** |
 | opening prefix (statements before the first leading read) | committed-state expression | unforwarded (≡ committed here) | none |
-| trailing region (multi-tick) | commit trailing updates at the edge **opening** the trailing cycle; assign the committed register | extraction route commits one edge late; linear route measured correct (2026-08-27) | **phase C** |
+| trailing region (multi-tick) | commit trailing updates at the edge **opening** the trailing cycle; assign the committed register | extraction route commits one edge late; linear route measured correct (2026-08-27) | **phase C — LANDED 2026-10-23** as an emission form (see the execution note under C above) |
 
 The phase-B target is §5.3's Prost-style measurement (matches V1's sim exactly);
 the phase-C target is m2's hand-lowered module (matches the sim cycle-for-cycle,
@@ -205,7 +215,9 @@ pinned).
 
 * `unprotected_trailing_out_write`: **retire** (its shape now agrees; the m2
   pin becomes the regression test). *(SUPERSEDED — phase C deferred; the rule
-  was kept and narrowed 2026-08-27, execution note C.)*
+  was kept and narrowed 2026-08-27, execution note C.)* **DONE 2026-10-23**
+  with phase C: rule, wrapper, macro call, pin and unit tests deleted; the m2
+  test and `trailing_segment_register_update_agrees` are the regression tests.
 * `unprotected_pretick_out_write` (D1): **narrow to the derived
   path-dependent-boundary rule** — flag only a region whose first leading read
   is not on every path to a commit it protects (`probe_fsm`, W4). V1-shapes are

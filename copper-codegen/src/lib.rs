@@ -335,6 +335,22 @@ fn transpile_target(
         }
     }
 
+    // A `RegOut` written in the trailing region from an immediate input read: the
+    // emitted next-edge non-blocking assign samples the input one drive later than
+    // the simulator's read (`Cfg::trailing_regout_reads_input`). Same opt-out as
+    // above, for the same reason.
+    if !opts_out_of_pretick_alignment(target) {
+        if let Some(port) = copper_analysis::trailing_regout_reads_input(target).first() {
+            return Err(format!(
+                "registered output '{port}' is written after the last clk.tick().await from \
+                 an input read in that same region — the write commits at the next edge, \
+                 where the flip-flop samples the input one drive later than the simulator's \
+                 immediate read. Read the input before the tick, or latch it into a register \
+                 and write the port from the register"
+            ));
+        }
+    }
+
     // The memory-port staging rules, for the same reason and from the same place:
     // they are questions about clock EDGES, and control extraction rewrites the
     // ticks that delimit them into `pc` states. `chir_lower` used to ask them of

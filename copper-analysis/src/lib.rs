@@ -107,6 +107,16 @@ pub fn unprotected_pretick_out_write(f: &ItemFn) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `RegOut` ports written in the trailing region from an *immediate* `In` read
+/// (directly, not through a register). A `RegOut` write takes effect at the first
+/// clock edge after it executes; for a trailing write that is the next edge, where
+/// a non-blocking assign samples the input one drive later than the simulator's
+/// immediate read did. See [`Cfg::trailing_regout_reads_input`]. Returns the
+/// offending ports, sorted.
+pub fn trailing_regout_reads_input(f: &ItemFn) -> Vec<String> {
+    Cfg::build(f).map(|c| c.trailing_regout_reads_input()).unwrap_or_default()
+}
+
 /// Plain combinational `Out` ports driven in **more than one clock phase** — a
 /// shape the multi-tick lowering already refuses, but which control extraction
 /// hides by rewriting the body into a single-tick `match pc` FSM whose states are

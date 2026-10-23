@@ -110,6 +110,12 @@ struct Node {
     /// Combinational output ports (`Out<…>`, not `RegOut`) driven here via
     /// `port.write(…)` — the def/use of *ports* the definite-assignment check keys on.
     writes: BTreeSet<String>,
+    /// `RegOut` ports written here via `port.write(…)`. Kept apart from `writes`
+    /// because every pre-tick alignment rule is about plain `Out` and relies on
+    /// `writes` excluding registered ports; only
+    /// [`Cfg::trailing_regout_reads_input`] reads this. A folded nested loop
+    /// records none (its interior is the sub-CFG's business).
+    regout_writes: BTreeSet<String>,
     /// Memory-port access sites appearing in this node's own expression —
     /// `mem.read_port::<K>().read(a)` / `.data()` / `.is_ready()` and
     /// `mem.write_port::<K>().write(a, v)`. A *folded* nested loop node carries
@@ -147,6 +153,7 @@ impl Node {
             tick_clock: None,
             succs: Vec::new(),
             writes: BTreeSet::new(),
+            regout_writes: BTreeSet::new(),
             mem: Vec::new(),
             folded: false,
             may_exit_without_tick: false,
@@ -264,7 +271,7 @@ impl Cfg {
 
         let comb_outputs = combinational_outputs(f);
 
-        let mut b = Builder::new(comb_outputs.clone(), in_param_names(f), memory_locals(f));
+        let mut b = Builder::new(comb_outputs.clone(), registered_outputs(f), in_param_names(f), memory_locals(f));
         // The head is node 0: an empty node whose successor is the first body node.
         // Every back-edge (trailing tick, fall-through) targets it.
         let head = b.new_node(Node::empty(loop_span));
@@ -293,7 +300,7 @@ impl Cfg {
     /// rejects. Structure: `head → body → exit` sink, no back-edge.
     pub fn build_combinational(f: &ItemFn) -> Cfg {
         let comb_outputs = combinational_outputs(f);
-        let mut b = Builder::new(comb_outputs.clone(), in_param_names(f), memory_locals(f));
+        let mut b = Builder::new(comb_outputs.clone(), registered_outputs(f), in_param_names(f), memory_locals(f));
         let span = f.sig.ident.span();
         let exit = b.new_node(Node::empty(span));
         let head = b.build_block(&f.block.stmts, exit);
@@ -882,10 +889,27 @@ impl Cfg {
         region: &[usize],
         regs: &BTreeSet<String>,
     ) -> BTreeSet<String> {
+        self.value_sources(w, region, regs).0
+    }
+
+    /// The registers a write's value reads (as [`Self::value_registers`]) together
+    /// with the `In` ports it reads *directly* — not through a register — each
+    /// paired with the node the read happens in (the write itself, or the
+    /// definition of the temporary that carried it). The node matters because a
+    /// read is deferred to the closing edge iff a tick is comb-reachable from it.
+    fn value_sources(
+        &self,
+        w: usize,
+        region: &[usize],
+        regs: &BTreeSet<String>,
+    ) -> (BTreeSet<String>, Vec<(String, usize)>) {
         let mut found: BTreeSet<String> = BTreeSet::new();
+        let mut input_sites: Vec<(String, usize)> = Vec::new();
         let mut visited: BTreeSet<String> = BTreeSet::new();
-        let mut pending: Vec<String> = self.nodes[w].uses.iter().cloned().collect();
-        while let Some(name) = pending.pop() {
+        // (name, the node whose expression mentions it)
+        let mut pending: Vec<(String, usize)> =
+            self.nodes[w].uses.iter().map(|u| (u.clone(), w)).collect();
+        while let Some((name, at)) = pending.pop() {
             if !visited.insert(name.clone()) {
                 continue;
             }
@@ -894,6 +918,7 @@ impl Cfg {
                 continue;
             }
             if self.inputs.contains(&name) {
+                input_sites.push((name, at));
                 continue;
             }
             for &d in region {
@@ -901,11 +926,81 @@ impl Cfg {
                     continue;
                 }
                 if self.comb_reaches_without_redef(d, w, &name) {
-                    pending.extend(self.nodes[d].uses.iter().cloned());
+                    pending.extend(self.nodes[d].uses.iter().map(|u| (u.clone(), d)));
                 }
             }
         }
-        found
+        (found, input_sites)
+    }
+
+    /// True iff a tick node is comb-reachable from `n` (not through the loop head):
+    /// an `In` read at `n` is then *deferred* — the macro parks it at the pre-edge
+    /// settle of that tick — rather than *immediate*.
+    fn comb_reaches_tick(&self, n: usize) -> bool {
+        let mut stack: Vec<usize> = self.nodes[n]
+            .succs
+            .iter()
+            .filter(|(_, k)| *k == EdgeKind::Comb)
+            .map(|&(s, _)| s)
+            .collect();
+        let mut seen = vec![false; self.nodes.len()];
+        while let Some(m) = stack.pop() {
+            if m == self.head || std::mem::replace(&mut seen[m], true) {
+                continue;
+            }
+            if self.nodes[m].is_tick {
+                return true;
+            }
+            for &(s, k) in &self.nodes[m].succs {
+                if k == EdgeKind::Comb {
+                    stack.push(s);
+                }
+            }
+        }
+        false
+    }
+
+    /// `RegOut` ports written in the **trailing region** (after the last top-level
+    /// tick: a tick-free path leads back to the loop head) whose value reads an
+    /// `In` port **directly** — not through a register — at an *immediate* read
+    /// site (no tick is comb-reachable from it). Returns the ports, sorted.
+    ///
+    /// A `RegOut` write takes effect at the first clock edge after it executes. A
+    /// trailing write executes after the edge that opened its cycle and commits at
+    /// the next one, so the transpiler emits it as a non-blocking assignment at
+    /// that next edge from the **committed** registers (`q <= acc`, see
+    /// `shir_lower`'s `trailing_reg_outs`). Anything that write reads through a
+    /// register is therefore the value the simulator saw: the register committed at
+    /// the opening edge and holds through the cycle. An `In` port is not held: the
+    /// simulator's immediate read sampled the value present after the opening edge,
+    /// while a non-blocking assign at the next edge samples the value present
+    /// before *that* edge — one drive later under the harness convention. Realizing
+    /// the simulator's reading would need a staging flop (the simulator's `pending`
+    /// made real); the shape is refused instead, with the remedies: read the input
+    /// before the tick, or latch it into a register the write reads.
+    ///
+    /// A read with a tick comb-reachable from it is *deferred* (the macro parks it
+    /// at that tick's pre-edge settle), so both sides sample the same edge and the
+    /// write is fine — `ex_regfile`'s trailing reads before its halt loop are that
+    /// shape and agree. The check is per read site for exactly that reason.
+    pub fn trailing_regout_reads_input(&self) -> Vec<String> {
+        let trailing: Vec<usize> = (0..self.nodes.len())
+            .filter(|&n| {
+                n != self.head && !self.nodes[n].folded && self.tick_free_reaches(n, self.head)
+            })
+            .collect();
+        let regs: BTreeSet<String> = self.registers().into_iter().collect();
+        let mut flagged: BTreeSet<String> = BTreeSet::new();
+        for &w in &trailing {
+            if self.nodes[w].regout_writes.is_empty() {
+                continue;
+            }
+            let (_, input_sites) = self.value_sources(w, &trailing, &regs);
+            if input_sites.iter().any(|(_, at)| !self.comb_reaches_tick(*at)) {
+                flagged.extend(self.nodes[w].regout_writes.iter().cloned());
+            }
+        }
+        flagged.into_iter().collect()
     }
 
     /// [`comb_reaches`](Self::comb_reaches) from `a` to `b`, except that a path
@@ -1842,6 +1937,8 @@ struct Builder {
     /// The module's combinational output ports, so terminal `port.write(…)` nodes
     /// can be tagged with the port they drive (definite-assignment).
     outputs: BTreeSet<String>,
+    /// The module's `RegOut` ports, for [`Node::regout_writes`].
+    reg_outputs: BTreeSet<String>,
     /// The module's `In` ports — propagated into nested-loop sub-CFGs so the
     /// multi-write-collapse detector can spot a leading read inside a nested loop.
     inputs: BTreeSet<String>,
@@ -1874,10 +1971,16 @@ struct Builder {
 }
 
 impl Builder {
-    fn new(outputs: BTreeSet<String>, inputs: BTreeSet<String>, mems: BTreeSet<String>) -> Builder {
+    fn new(
+        outputs: BTreeSet<String>,
+        reg_outputs: BTreeSet<String>,
+        inputs: BTreeSet<String>,
+        mems: BTreeSet<String>,
+    ) -> Builder {
         Builder {
             nodes: Vec::new(),
             outputs,
+            reg_outputs,
             inputs,
             mems,
             nested: Vec::new(),
@@ -1899,7 +2002,7 @@ impl Builder {
     /// loop (no register/output analysis), so `defined_in_loop`/`comb_outputs`/
     /// `exit` are empty/`None`.
     fn nested_loop_cfg(&self, body: &[Stmt], span: Span) -> Cfg {
-        let mut b = Builder::new(self.outputs.clone(), self.inputs.clone(), self.mems.clone());
+        let mut b = Builder::new(self.outputs.clone(), self.reg_outputs.clone(), self.inputs.clone(), self.mems.clone());
         let head = b.new_node(Node::empty(span));
         let brk = b.new_node(Node::empty(span)); // exit sink for `break`
         b.loop_ctx.push((head, brk));
@@ -2112,12 +2215,16 @@ impl Builder {
                 let writes = output_write_target(expr, &self.outputs)
                     .into_iter()
                     .collect();
+                let regout_writes = output_write_target(expr, &self.reg_outputs)
+                    .into_iter()
+                    .collect();
                 self.new_node(Node {
                     defs,
                     uses,
                     mem: mem_accesses(expr, &self.mems),
                     succs: vec![(next, EdgeKind::Comb)],
                     writes,
+                    regout_writes,
                     ..Node::empty(expr.span())
                 })
             }
@@ -2448,6 +2555,21 @@ fn combinational_outputs(f: &ItemFn) -> BTreeSet<String> {
         if let syn::FnArg::Typed(pt) = arg {
             if matches!(&*pt.ty, syn::Type::Path(tp)
                 if tp.path.segments.last().is_some_and(|s| s.ident == "Out"))
+            {
+                pat_bindings(&pt.pat, &mut outs);
+            }
+        }
+    }
+    outs
+}
+
+/// The module's `RegOut<…>` parameter names.
+fn registered_outputs(f: &ItemFn) -> BTreeSet<String> {
+    let mut outs = BTreeSet::new();
+    for arg in &f.sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            if matches!(&*pt.ty, syn::Type::Path(tp)
+                if tp.path.segments.last().is_some_and(|s| s.ident == "RegOut"))
             {
                 pat_bindings(&pt.pat, &mut outs);
             }
@@ -3383,6 +3505,86 @@ mod tests {
             }
         "#;
         assert_eq!(v8(src), ["o"]);
+    }
+
+    // ── trailing `RegOut` written from an immediate input read ────────────────
+
+    fn trailing_regout(src: &str) -> Vec<String> {
+        Cfg::build(&parse(src)).map(|c| c.trailing_regout_reads_input()).unwrap_or_default()
+    }
+
+    /// The refused shape: the trailing `RegOut` write reads the input through a
+    /// same-segment temporary. The simulator parks `x_k`; the next-edge
+    /// non-blocking assign samples `x_{k+1}`.
+    #[test]
+    fn trailing_regout_from_immediate_input_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) {
+                loop {
+                    clk.tick().await;
+                    let d = step.read();
+                    q.write(d);
+                }
+            }
+        "#;
+        assert_eq!(trailing_regout(src), ["q"]);
+    }
+
+    /// Through a register the input is held: `acc` committed at the opening edge,
+    /// `q <= acc` at the next edge reads exactly it (`regout_trailing_single_tick`).
+    #[test]
+    fn trailing_regout_from_register_fed_by_input_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) {
+                let mut acc: Bits<8> = Bits::zero();
+                loop {
+                    clk.tick().await;
+                    let d = step.read();
+                    acc = acc + d;
+                    q.write(acc);
+                }
+            }
+        "#;
+        assert!(trailing_regout(src).is_empty());
+    }
+
+    /// A pre-tick write is not trailing: it commits at the closing edge, where
+    /// the deferred read and the non-blocking assign sample the same edge.
+    #[test]
+    fn pretick_regout_from_input_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) {
+                loop {
+                    let d = step.read();
+                    q.write(d);
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(trailing_regout(src).is_empty());
+    }
+
+    /// A trailing read with a tick comb-reachable from it is DEFERRED (the halt
+    /// loop makes `ex_regfile`'s reads this shape), so both sides sample the
+    /// closing edge and the write agrees.
+    #[test]
+    fn trailing_regout_from_deferred_input_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, halt: In<Logic, C>, step: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) {
+                loop {
+                    clk.tick().await;
+                    let h = halt.read();
+                    let d = step.read();
+                    if h == Logic::One { loop { clk.tick().await; } }
+                    q.write(d);
+                }
+            }
+        "#;
+        assert!(trailing_regout(src).is_empty());
     }
 
     /// V1 — no `In` read anywhere; register assigned pre-tick; plain `Out`.

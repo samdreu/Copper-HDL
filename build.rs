@@ -132,14 +132,6 @@ const SKIP: &[(&str, &str)] = &[
          without the opt-out",
     ),
     (
-        "regout_trailing_single_tick",
-        "ONE-CYCLE DIVERGENCE, and the half worth knowing: reaching for `RegOut` does NOT fix \
-         the entry above. In a SINGLE-TICK loop the trailing statements share the head's \
-         phase, so the transpiler folds a trailing `RegOut` write into this edge while the \
-         simulator commits it on the next. Same lead, opposite cause. Every other member of \
-         the pre-tick alignment family is about a body crossing two or more edges",
-    ),
-    (
         "trailing_constant",
         "STARTUP TRANSIENT, not a divergence in steady state: `dv` is written only in \
          the trailing segment, so the simulator first drives it at cycle 1 (it holds \

@@ -32,10 +32,14 @@ pub async fn out_from_reg_before_commit(
     }
 }
 
-/// **BROKEN, and not fixed by `RegOut`** — the half worth knowing. In a
-/// single-tick loop the trailing statements share the head's phase, so the
-/// transpiler folds a trailing `RegOut` write into THIS edge while the simulator
-/// commits it on the NEXT one. Same one-cycle lead, opposite cause.
+/// The `RegOut` spelling of the trailing write, and it AGREES (since 2026-10-23;
+/// it was the pinned `regout_trailing_single_tick` divergence before). A `RegOut`
+/// write takes effect at the first clock edge after it executes: this one runs
+/// after the opening edge and commits at the next, so the transpiler emits it from
+/// the COMMITTED register at that next edge (`q <= acc`, not the forwarded
+/// `acc + d` it used to fold into the opening edge). The input feeds `q` only
+/// through `acc`, which is what makes it realizable; a trailing `RegOut` written
+/// from an input directly is refused (`trailing_regout_reads_input`).
 #[hardware(sequential)]
 pub async fn regout_trailing_single_tick(
     clk: Clock<MainClk>,

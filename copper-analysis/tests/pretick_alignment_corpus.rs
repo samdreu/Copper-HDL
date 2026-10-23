@@ -255,6 +255,63 @@ fn multi_phase_out_write_flags_exactly_the_demonstration_modules() {
     );
 }
 
+// ── The trailing-`RegOut`-from-an-input rule (2026-10-23) ──────────────────────
+
+/// `RegOut` ports written after the last top-level tick from an `In` port read
+/// directly, at an immediate read site (`copper_analysis::trailing_regout_reads_input`).
+///
+/// Born with the tick-dialect unification: a `RegOut` write takes effect at the
+/// first clock edge after it executes, so the linear single-tick lowering now emits
+/// a trailing `RegOut` from the committed register at the next edge (which made
+/// `regout_trailing_single_tick` agree and sweep), and the one shape that emission
+/// cannot realize is a value read straight from an input — the flip-flop samples it
+/// one drive later than the simulator's immediate read. No corpus module has the
+/// shape; the ui/fail case `trailing_regout_reads_input.rs` is the witness, and a
+/// module joining this set is either a real divergence to measure or a rule
+/// regression to fix.
+const EXPECTED_TRAILING_REGOUT_INPUT: &[&str] = &[];
+
+#[test]
+fn trailing_regout_reads_input_flags_exactly_the_demonstration_modules() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    for dir in ["examples", "src", "tests"] {
+        rs_files(&root.join(dir), &mut files);
+    }
+    files.sort();
+
+    let mut scanned = 0usize;
+    let mut flagged: BTreeSet<String> = BTreeSet::new();
+    for path in &files {
+        let Ok(src) = fs::read_to_string(path) else { continue };
+        let Ok(file) = syn::parse_file(&src) else { continue };
+        let mut fns = Vec::new();
+        clocked_hardware_fns(&file.items, &mut fns);
+        for f in &fns {
+            scanned += 1;
+            if !copper_analysis::trailing_regout_reads_input(f).is_empty() {
+                let rel = path.strip_prefix(&root).unwrap_or(path).display();
+                flagged.insert(format!("{rel}::{}", f.sig.ident));
+            }
+        }
+    }
+
+    assert!(scanned >= 40, "expected to scan the corpus, only saw {scanned} clocked modules");
+
+    let expected: BTreeSet<String> =
+        EXPECTED_TRAILING_REGOUT_INPUT.iter().map(|s| s.to_string()).collect();
+    let unexpected: Vec<_> = flagged.difference(&expected).cloned().collect();
+    let missing: Vec<_> = expected.difference(&flagged).cloned().collect();
+    assert!(
+        unexpected.is_empty(),
+        "newly flagged by the trailing-RegOut-from-input rule. Either the module HAS \
+         the divergence — check it against its transpiled SV; the remedy is to read \
+         the input before the tick or through a register — or the rule has regressed \
+         into a false positive: {unexpected:?}"
+    );
+    assert!(missing.is_empty(), "no longer flagged — the module changed: {missing:?}");
+}
+
 // ── The write-between-read-and-update rule (V8, m1) ──────────────────────────
 
 /// Plain `Out` ports written between a leading `In` read and the update of a

@@ -411,6 +411,11 @@ counterexample rather than lowered to something plausible:
   evidence in
   [`design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md`](design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md)
   so they are not re-tried.
+- **A `RegOut` written after the last tick from an input read directly**: a
+  `RegOut` write takes effect at the first clock edge after it executes, so such
+  a write commits at the next edge, where the flip-flop samples the input one
+  drive later than the simulator's read. Read the input before the tick, or
+  through a register (`trailing_regout_reads_input`).
 - A **wait loop that ticks before testing** its condition (a repeating wait must
   be `loop { <test>; clk.tick().await; }`), and `continue` inside a nested loop
   — refused orderings, each with its own diagnostic
@@ -444,10 +449,6 @@ counterexample rather than lowered to something plausible:
 on by one cycle, kept as `#[ignore]`d sweep cases with the reason attached
 rather than papered over (`SKIP` in `build.rs`):
 
-- a `RegOut` written *after* the tick in a **single-tick** loop: the transpiler
-  folds the write into this edge, the simulator commits it on the next
-  (`regout_trailing_single_tick`) — reaching for `RegOut` does not fix the
-  trailing plain-`Out` shape the pre-tick rules refuse;
 - a phase-gated cross-tick read (`probe_fsm`, the W4 path-dependent boundary
   from the guardrail doc);
 - an `Out` first written in the trailing segment drives from cycle 1 in the

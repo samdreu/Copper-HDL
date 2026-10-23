@@ -138,7 +138,7 @@ cycle**. Three consequences, all now implemented on every lowering path:
   of the tick that closes it. Unobservable through ports — `multi_write_collapse`
   rejects a port written on both sides of a tick — but observable for a plain local
   flowing from `C` into `A`.
-* **`C`'s register updates commit at the last tick's edge**, which is the edge that
+* **`C`'s register-local updates commit at the last tick's edge**, which is the edge that
   *opens* `C`'s cycle. That is the post-edge continuation convention above ("a register
   clocked at edge N is observable in cycle N"), and it is why moving a register update
   after the tick is D1's sanctioned remedy. Because those updates and the preceding
@@ -156,19 +156,43 @@ against `examples/cdc/sv/sync_2ff_ref.sv`). Same cycle, but the
 trailing statements execute at an instant just after the edge, and a wire would keep
 tracking its inputs for the rest of that cycle.
 
-**One lowering path realizes this and one does not — a known, guarded
-limitation.** The **linear** multi-tick path commits trailing updates at the
-opening edge exactly as stated (measured agreeing,
-`tests/sequential_forwarding_divergence.rs::linear_trailing_probe`).
-**Control extraction** places trailing effects one edge late wherever the last
-tick sits — measured divergent for both the folded-loop and branch-nested
-spellings (the `trailing_update` and `branch_trailing` modules in the same file;
-tests `d1_in_the_trailing_segment_is_an_unguarded_gap` and `branch_trailing_probe`) — so
-`Cfg::unprotected_trailing_out_write` refuses the observable class on precisely the
-extraction-shaped modules (the `Cfg::has_nested_tick` gate) and exempts the linear
-class. `RegOut` absorbs the placement difference, which is why uart's trailing write
-agrees. The extraction-path fix is the migration's deferred phase C; landing it
-retires the rule. Phase C has not landed as of 2026-09-01.
+* **A `RegOut` written in `C` commits at the *next* edge**, not the opening one: a
+  `RegOut` write takes effect at the first clock edge after it executes, and `C`
+  executes after the edge that opened its cycle (the rule is stated once under
+  *Output timing* below; this is its trailing instance). The simulator parks the
+  write in `pending` until the next `Clock::advance`; the linear lowering emits
+  it from the **committed** register at that edge (`q <= acc`, not the forwarded
+  `acc + d` — `shir_lower`'s `trailing_reg_outs`; landed 2026-10-23, which is
+  what made `regout_trailing_single_tick` agree and sweep); control extraction's
+  trailing state already committed there. The one value that emission cannot
+  realize is an `In` port read *directly* in `C` at an immediate read site — the
+  flip-flop would sample it one drive later than the simulator did — so that
+  shape is refused by `Cfg::trailing_regout_reads_input` (both front-ends; remedy:
+  read before the tick, or through a register). Reads with a tick comb-reachable
+  from them are deferred and agree (`ex_regfile`'s reads before its halt loop).
+
+**Both lowering routes realize this (phase C, landed 2026-10-23).** The **linear**
+multi-tick path commits trailing updates at the opening edge exactly as stated
+(measured agreeing, `tests/sequential_forwarding_divergence.rs::linear_trailing_probe`).
+**Control extraction** places the statements after the last top-level tick in a
+state that runs in the window after that edge and commits at the next one — the
+right place for register updates, memory stagings, memory results (which exist only
+after the opening edge) and `RegOut` writes. Its one defect was the emitted form of
+a plain `Out` driven in that state: a conditionally-driven output became an
+edge-sampled register (`o <= edge_value` under the arm's guard), visible one cycle
+after the simulator shows it — the measured lag of `trailing_update` (folded loop)
+and `branch_trailing` (branch-nested ticks). The fix is an emission form, not a
+state placement: `vlir_lower::opening_hold_outputs` emits a conditionally-driven
+plain `Out` whose every drive is an **opening** drive (no `In` read precedes it in
+its arm — `SHIRStmt::PortDrive::opening`, the same predicate that selects the
+forwarded continuous-assign form) as a forwarded combinational mux with a
+`<port>_hold` register loaded in `always_ff` under the same guards: the m2 hand
+model, which `m2_model_forwarded_lowering_matches_the_simulator_for_trailing_update`
+had pinned as matching the simulator cycle-for-cycle. Measured on landing: both
+witnesses agree (`trailing_segment_register_update_agrees`, `branch_trailing_probe`),
+and so does `pulse_plain`, the `multi_phase_out_write` witness (that rule stands
+pending phase E's derivation, §8-5 of `CYCLE_DATAFLOW_SEMANTICS.md`). The rule that
+refused the class, `unprotected_trailing_out_write`, is retired.
 
 **Startup.** An `Out` written *only* in `C` reads as its initial value until the
 statement first runs, while the emitted continuous `assign` drives it from time 0 — so
@@ -184,10 +208,28 @@ Two output-port kinds capture the Mealy/Moore distinction explicitly:
   reflects the current cycle's logic, with no added latency; an `Out` left unwritten on a path
   *holds* its value (a conditional write is an **enabled register** — `vlir_lower::conditional_output_ports`
   routes it into `always_ff` — verified `sim ≡ BaseJump` on `examples/basejump/bsg_dff_en.rs`).
-- **`RegOut<T,D>`** — a registered (Moore) output driven from `always_ff`; its value commits at the
-  clock edge, so it appears one cycle later. Use it for write-before-tick Moore outputs (verified on
-  `examples/basejump/sipo_block.rs`, `tests/sipo_block_equivalence.rs`). The two axes — input read
-  timing and output register timing — are orthogonal.
+- **`RegOut<T,D>`** — a registered (Moore) output driven from `always_ff`. **A `RegOut` write takes
+  effect at the first clock edge after it executes** — one clause, no regions: for a write before a
+  tick that is the tick's edge (so a write-before-tick Moore output appears one cycle later; verified
+  on `examples/basejump/sipo_block.rs`, `tests/sipo_block_equivalence.rs`), for a write after the
+  last tick it is the next edge (see *Trailing statements*). The two axes — input read timing and
+  output register timing — are orthogonal.
+
+**Tick position is not a dialect.** A tick-first body (`loop { tick; work }`) and a tick-last body
+(`loop { work; tick }`) are the same four clauses applied at two execution instants: a local
+assignment is visible to the following statements at once and is realized as a commit at its
+region's edge; a plain `Out` write is a continuous drive from the write instant; a `RegOut` write
+takes effect at the first clock edge after it executes; an `In` read yields the value present at the
+instant it executes (deferred to the closing settle when a tick follows it, immediate otherwise —
+*Input read timing* below). What tick position chooses is the instant: a tick-last body's work runs
+toward the closing edge and samples the inputs present at it; a tick-first body's work runs just
+after the opening edge on the registers that edge committed. The practical consequence for `RegOut`
+is that `q.write(acc)` after `acc`'s update is a registered copy of `acc` in a tick-last body and a
+copy one edge later in a tick-first one, because the write executes on opposite sides of the edge;
+in a tick-first body the registered copy is the plain `Out` written from the committed register
+(`out_from_reg_after_commit`, `assign q = acc`). No rule is keyed on tick position; the census of
+2026-10-23 (187 sequential modules: 47 tick-last, 34 tick-first, 52 middle, 17 linear multi-tick,
+37 extracted) all lower through the same three implementations.
 
 **Multi-write-around-a-tick guardrail.** A combinational `Out` written on *both sides of one bare
 `clk.tick().await`* within an iteration, after a *leading (deferred) input read*
@@ -319,9 +361,9 @@ and `the_state_arm_lead_is_systematic_not_a_first_cycle_artifact`).
 
 Enforcement is asymmetric, and deliberately so. The macro's sequential arm (`copper-macros/src/lib.rs`)
 runs `check_reachability`, `multi_write_collapse`, `unprotected_pretick_out_write`,
-`unprotected_trailing_out_write`, `pretick_out_write_before_update` and `multi_phase_out_write`;
-the transpiler's `transpile_fir` (`copper-codegen/src/lib.rs`) runs `check_reachability`,
-`multi_phase_out_write`, and the two memory rules below. So `multi_phase_out_write` runs in **both**
+`pretick_out_write_before_update`, `trailing_regout_reads_input` and `multi_phase_out_write`;
+the transpiler's `transpile_target` (`copper-codegen/src/lib.rs`) runs `check_reachability`,
+`multi_phase_out_write`, `trailing_regout_reads_input`, and the two memory rules below. So `multi_phase_out_write` runs in **both**
 front-ends (the transpiler honours the opt-out too, or a module that exists to demonstrate the
 hazard could not be measured against anything), the rest of the pre-tick family runs in the
 **macro** only, and the memory rules run in the **transpiler** only (see *Memory*).
