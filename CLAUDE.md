@@ -257,10 +257,15 @@ receive/clone one.
 - **`PRETICK_ALIGNMENT_GUARDRAIL.md`** — the pre-tick alignment family: four rules
   (`Cfg::unprotected_pretick_out_write`, `multi_phase_out_write`,
   `pretick_out_write_before_update`, plus the constant-write clause inside the
-  first) with three exact-set corpus pins in
-  `copper-analysis/tests/pretick_alignment_corpus.rs`. A fifth,
-  `unprotected_trailing_out_write`, was retired 2026-10-23 when phase C landed (see
-  below). **D1** is **guarded** (rule
+  first), joined 2026-10-23 by two more of the same discipline —
+  `trailing_regout_reads_input` (a `RegOut` written after the last tick from an input
+  read directly; a `RegOut` write takes effect at the first clock edge after it
+  executes, so the flip-flop would sample the input one drive late) and
+  `out_first_driven_late` (a constant-only plain `Out` first written after the second
+  edge: a startup transient the `assign` cannot show) — every one with an exact-set
+  corpus pin in `copper-analysis/tests/pretick_alignment_corpus.rs` and enforced in
+  both front-ends. A former fifth, `unprotected_trailing_out_write`, was retired
+  2026-10-23 when phase C landed (see below). **D1** is **guarded** (rule
   2026-08-21, narrowed 2026-08-26): in the pre-tick segment, a plain `Out` write is a
   compile error when the segment also assigns a register that no leading `In` read
   reaches AND the write is observable across the phase shift — either it reads a

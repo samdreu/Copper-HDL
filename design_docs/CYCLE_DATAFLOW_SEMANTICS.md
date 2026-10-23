@@ -362,7 +362,13 @@ and the per-module table (§7) existed. Each bullet carries what actually happen
    of control extraction (§5 trailing row).
 3. Startup: an `Out` first written in a late segment vs the continuous assign's
    time-0 value (the documented startup discrepancy). Under a normative model this
-   needs an initial-value rule, not a caveat. — **Open.**
+   needs an initial-value rule, not a caveat. — **Answered 2026-10-23 by refusal**
+   (`Cfg::out_first_driven_late`): a constant-only plain `Out` whose first write
+   falls after the *second* edge is refused in both front-ends; the same constant
+   one edge earlier is visible at the first observation and agrees
+   (`late_constant_one_edge`, measured), and register-valued late writes agree
+   because the flop's zero initial equals the wire's. No initial-value rule was
+   added; the shape the simulator cannot show is unwritable instead.
 4. Memory read results interact with anchoring (`is_ready`/`data` are
    edge-produced): restate the four staging rules in window terms. — **Done**
    (m3, `tests/cycle_dataflow_memory_derivation.rs`).

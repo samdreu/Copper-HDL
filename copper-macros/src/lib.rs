@@ -1130,6 +1130,43 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
+            // A plain `Out` FIRST DRIVEN LATE: every write of it a constant, none of
+            // them before the second clock edge of a multi-tick body. The simulator
+            // shows the port's initial value at the first observation (the writing
+            // segment has not run yet) while the emitted `assign` drives the constant
+            // from time 0 — a one-cycle startup transient no continuous assign can
+            // reproduce. Refused on the source (restrict-don't-grow, 2026-10-23);
+            // the boundary is measured, see `Cfg::out_first_driven_late`.
+            let late = if allow_pretick_alignment {
+                Vec::new()
+            } else {
+                // On the one shared graph, like every other rule here (the macro
+                // builds exactly one `Cfg` per module — M8 attribute cost).
+                cfg.as_ref().map(|c| c.out_first_driven_late()).unwrap_or_default()
+            };
+            if let Some(port) = late.first() {
+                let span = port_param_span(&input_fn.sig, port)
+                    .unwrap_or_else(|| input_fn.sig.ident.span());
+                return Error::new(
+                    span,
+                    format!(
+                        "output port `{port}` is first driven LATE: every write of it is a \
+                         constant, and none of them executes before the second clock edge of \
+                         a loop that crosses more than one `clk.tick().await` per iteration. \
+                         The simulator shows the port's initial value at the first observation \
+                         (the segment that writes it has not run yet) while the synthesized \
+                         `assign` drives the constant from time 0 — a one-cycle startup \
+                         transient that no continuous assign can reproduce. Write `{port}` in \
+                         the head segment too (before the first tick, so it is driven from \
+                         the first cycle), or declare it as `RegOut<…>` (registered: its first \
+                         drive is a clock edge the hardware has as well). If this module \
+                         exists to DEMONSTRATE the transient, opt out explicitly with \
+                         `#[hardware(sequential, {ALLOW_PRETICK})]`."
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
             // c2 (gate G6): the sim macro consumes the SHARED analysis crate — the
             // same one the transpiler consumes — proving a proc-macro can depend on
             // it with no dependency cycle. The inferred register set is logged for

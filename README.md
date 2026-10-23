@@ -416,6 +416,11 @@ counterexample rather than lowered to something plausible:
   a write commits at the next edge, where the flip-flop samples the input one
   drive later than the simulator's read. Read the input before the tick, or
   through a register (`trailing_regout_reads_input`).
+- **A constant-only `Out` first written after the second clock edge** of a
+  multi-tick body: the simulator shows the initial value at the first
+  observation, the emitted `assign` drives the constant from time 0. Write it in
+  the head segment too, or declare it `RegOut` (`out_first_driven_late`; the same
+  constant one edge earlier agrees and is kept as the positive witness).
 - A **wait loop that ticks before testing** its condition (a repeating wait must
   be `loop { <test>; clk.tick().await; }`), and `continue` inside a nested loop
   — refused orderings, each with its own diagnostic
@@ -450,10 +455,7 @@ on by one cycle, kept as `#[ignore]`d sweep cases with the reason attached
 rather than papered over (`SKIP` in `build.rs`):
 
 - a phase-gated cross-tick read (`probe_fsm`, the W4 path-dependent boundary
-  from the guardrail doc);
-- an `Out` first written in the trailing segment drives from cycle 1 in the
-  simulator but from time 0 as a continuous `assign` — a **startup transient**,
-  identical from cycle 1 on (`trailing_constant`).
+  from the guardrail doc).
 
 One correctness rule is worth knowing when reading the generated Verilog: an
 output drive that is *sampled at the clock edge* is emitted from the values the

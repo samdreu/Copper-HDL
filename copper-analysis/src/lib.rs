@@ -130,6 +130,22 @@ pub fn multi_phase_out_write(f: &ItemFn) -> Vec<String> {
     Cfg::build(f).map(|c| c.multi_phase_out_write()).unwrap_or_default()
 }
 
+/// Plain combinational `Out` ports **first driven late**: every write of the port
+/// is a constant and none of them executes before the second clock edge of a loop
+/// that crosses more than one edge per iteration. The simulator shows the port's
+/// initial value at the first observation while the emitted `assign` drives the
+/// constant from time 0 — a one-cycle startup transient no continuous assign can
+/// reproduce. Returns the offending ports, sorted; empty for a combinational module,
+/// one with no top-level loop, a single-tick loop, or all-`RegOut` outputs.
+///
+/// The remedies are to write the port in the head segment too, or to declare it
+/// `RegOut`. See [`Cfg::out_first_driven_late`] for the measurement, the flipping
+/// witness that fixes the boundary at the second edge, and why register-valued late
+/// writes are deliberately outside it.
+pub fn out_first_driven_late(f: &ItemFn) -> Vec<String> {
+    Cfg::build(f).map(|c| c.out_first_driven_late()).unwrap_or_default()
+}
+
 /// How many **clock phases** `f`'s top-level loop occupies — the number of distinct
 /// cycles one iteration runs in. `None` for a module with no loop.
 ///

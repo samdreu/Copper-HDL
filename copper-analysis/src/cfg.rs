@@ -139,6 +139,12 @@ struct Node {
     /// simulator exhibits (measured) while the transpiled FSM would happily run one
     /// cycle per iteration.
     may_exit_without_tick: bool,
+    /// True iff this node is a `port.write(<constant>)` of a combinational `Out` —
+    /// the operand is a literal, an enum unit variant / associated-const / `const`
+    /// path, or a constructor call over such operands (`Logic::One`, `Bits::zero()`,
+    /// `Bits::<8>::from_u8(9)`); see [`is_constant_expr`]. Read by
+    /// [`Cfg::out_first_driven_late`], whose boundary is exactly "constant-valued".
+    const_write: bool,
     /// Source span, for spanned diagnostics.
     span: Span,
 }
@@ -157,6 +163,7 @@ impl Node {
             mem: Vec::new(),
             folded: false,
             may_exit_without_tick: false,
+            const_write: false,
             span,
         }
     }
@@ -1132,6 +1139,142 @@ impl Cfg {
             }
         }
         phases.into_iter().filter(|(_, p)| p.len() > 1).map(|(port, _)| port).collect()
+    }
+
+    /// Plain combinational `Out` ports that are **first driven late**: the loop
+    /// crosses more than one clock edge per iteration, **every** write of the port
+    /// is a constant, and **no** write of it lies in the first two segments — the
+    /// head segment (head → first tick) or the segment entered by the first tick —
+    /// so its first write executes only after the **second** clock edge. Returns
+    /// the offending ports, sorted; empty for a combinational module, one with no
+    /// top-level loop, a single-tick loop, or a module whose outputs are all
+    /// `RegOut`.
+    ///
+    /// # The transient
+    ///
+    /// The simulator drives a port at the instant its `write` *executes*, and
+    /// observes after each edge's post-edge settle. The head segment runs before
+    /// edge 0; the segment after the first tick runs in edge 0's post-edge settle,
+    /// so both are visible at the first observation. A write that sits only past
+    /// the **second** tick first executes after edge 1, so the first observation
+    /// shows the port's **initial** value. The transpiler has no such instant for a
+    /// constant: every write of the port carries the same value, so the emission is
+    /// an unconditional `assign dv = 1'b1`, which drives from time 0. Measured on
+    /// `trailing_constant`
+    /// (`loop { r = a.read(); tick; o.write(r); tick; dv.write(Logic::One); }`): the
+    /// two disagree at the first observation and agree from the next one on — a
+    /// one-cycle **startup transient**, not a steady-state divergence, which is why
+    /// it lived as a `SKIP` row ("STARTUP TRANSIENT") in `build.rs` rather than as a
+    /// pinned divergence. A continuous assign has no notion of "not yet written", so
+    /// there is no emitted form that shows the transient; the shape is refused
+    /// instead (restrict-don't-grow, decided 2026-10-23). The fixture is now
+    /// `copper-macros/tests/ui/fail/out_first_driven_late.rs`.
+    ///
+    /// # The flipping witness for "second edge"
+    ///
+    /// The plan's first cut keyed clause (b) on the head segment alone. Measured
+    /// before landing (2026-10-23, `late_constant_one_edge` in
+    /// `tests/fixtures/trailing_statements_dut.rs`, the same differential harness):
+    /// the identical body with `dv.write(Logic::One)` moved to the segment after the
+    /// FIRST tick **agrees** — that segment runs in edge 0's post-edge settle and is
+    /// visible at the first observation, exactly when the `assign` is. One statement
+    /// moved across one tick flips the verdict, so the boundary is the second edge,
+    /// and the witness sweeps as a positive case to keep it measured.
+    ///
+    /// A folded tick-bearing nested loop (`for _ in 0..3 { tick }`, a wait loop)
+    /// crosses an unknown number of edges, so a write past it is treated as past
+    /// the second edge — the refusing direction. `pulse_plain` is the instance, and
+    /// it is a measured transient.
+    ///
+    /// # The boundary: constant-valued writes only
+    ///
+    /// A late write **from a register** has the same first-execution instant, but
+    /// its emitted drive is `assign o = r` over a flop, and the flop's zero initial
+    /// equals the wire's initial under the differential sweep — so the two traces
+    /// agree today: `mac_pipeline`'s `out.write(sum)` and `trailing_out`'s `mid`
+    /// (`tests/fixtures/trailing_statements_dut.rs`) both sweep green. That agreement
+    /// rests on the initial values coinciding, not on the instants coinciding; the
+    /// rule records the boundary rather than widening past it, and a
+    /// register-valued (or input-valued) late write is **not** flagged. "Constant"
+    /// is decided syntactically by [`is_constant_expr`], on the write's operand.
+    ///
+    /// # Why a head-segment write clears it
+    ///
+    /// A write in the head segment executes in the first cycle, before any edge, so
+    /// the port is driven from the first observation — the same instant the `assign`
+    /// starts — and every later write of the same constant is idempotent. The
+    /// opted-out corpus witness is `pulse_plain`
+    /// (`tests/sequential_forwarding_divergence.rs`): both its writes are constants
+    /// and both are late (after a folded tick-bearing `for`, and trailing).
+    ///
+    /// A single-tick loop is exempt by the same discriminator as
+    /// [`unprotected_trailing_out_write`](Self::unprotected_trailing_out_write): its
+    /// trailing statements share the head's phase. `RegOut` is excluded for free
+    /// (`Node::writes` holds only combinational outputs), and it is the remedy — a
+    /// registered port's first drive is an edge the hardware has as well
+    /// (`pulse_registered`, sweeping green). A `folded` node's `writes` is the
+    /// all-outputs over-approximation, not a real write, so it is not evidence
+    /// either way — exactly as in every other rule of the family.
+    pub fn out_first_driven_late(&self) -> Vec<String> {
+        if !self.crosses_more_than_one_tick() {
+            return Vec::new();
+        }
+        let early: BTreeSet<usize> = self.early_region();
+        let mut written_early: BTreeSet<String> = BTreeSet::new();
+        // port -> every late write of it is a constant
+        let mut late: BTreeMap<String, bool> = BTreeMap::new();
+        for (n, node) in self.nodes.iter().enumerate() {
+            if node.folded || node.writes.is_empty() {
+                continue;
+            }
+            for w in &node.writes {
+                if early.contains(&n) {
+                    written_early.insert(w.clone());
+                } else {
+                    late.entry(w.clone())
+                        .and_modify(|all_const| *all_const &= node.const_write)
+                        .or_insert(node.const_write);
+                }
+            }
+        }
+        late.into_iter()
+            .filter(|(port, all_const)| *all_const && !written_early.contains(port))
+            .map(|(port, _)| port)
+            .collect()
+    }
+
+    /// Nodes that execute **before the first observation** of an iteration started
+    /// at the loop head: reachable from the head over `Comb` edges and at most one
+    /// `Tick` edge out of a *bare* tick. The head segment runs before edge 0 and the
+    /// segment the first tick enters runs in edge 0's post-edge settle; both are
+    /// visible at the first observation (measured, see
+    /// [`out_first_driven_late`](Self::out_first_driven_late)). A folded
+    /// tick-bearing nested loop crosses an unknown number of edges, so traversal
+    /// stops at it: what follows it counts as late.
+    fn early_region(&self) -> BTreeSet<usize> {
+        let mut out = BTreeSet::new();
+        // (node, ticks crossed so far)
+        let mut seen = vec![[false; 2]; self.nodes.len()];
+        let mut stack: Vec<(usize, usize)> = vec![(self.head, 0)];
+        while let Some((n, crossed)) = stack.pop() {
+            if std::mem::replace(&mut seen[n][crossed], true) {
+                continue;
+            }
+            if n != self.head {
+                out.insert(n);
+            }
+            let node = &self.nodes[n];
+            for &(s, k) in &node.succs {
+                match k {
+                    EdgeKind::Comb if s != self.head => stack.push((s, crossed)),
+                    EdgeKind::Tick if crossed == 0 && !node.folded && s != self.head => {
+                        stack.push((s, 1))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
     }
 
     /// Enforce the memory-port rules **on the source**, where the clock edges are
@@ -2212,12 +2355,13 @@ impl Builder {
             // terminal expression: one node, combinational edge to the continuation.
             _ => {
                 let (defs, uses) = terminal_defs_uses(expr);
-                let writes = output_write_target(expr, &self.outputs)
+                let writes: BTreeSet<String> = output_write_target(expr, &self.outputs)
                     .into_iter()
                     .collect();
                 let regout_writes = output_write_target(expr, &self.reg_outputs)
                     .into_iter()
                     .collect();
+                let const_write = !writes.is_empty() && write_operand_is_constant(expr);
                 self.new_node(Node {
                     defs,
                     uses,
@@ -2225,6 +2369,7 @@ impl Builder {
                     succs: vec![(next, EdgeKind::Comb)],
                     writes,
                     regout_writes,
+                    const_write,
                     ..Node::empty(expr.span())
                 })
             }
@@ -2585,6 +2730,48 @@ fn output_write_target(expr: &Expr, outputs: &BTreeSet<String>) -> Option<String
         return None;
     }
     simple_ident(&mc.receiver).filter(|r| outputs.contains(r))
+}
+
+/// Is the operand of this `port.write(v)` a constant ([`is_constant_expr`])?
+fn write_operand_is_constant(expr: &Expr) -> bool {
+    let Expr::MethodCall(mc) = expr else { return false };
+    mc.args.len() == 1 && is_constant_expr(&mc.args[0])
+}
+
+/// A **syntactic** constant: a value that cannot differ between two executions of
+/// the expression. Literals; a multi-segment path (an enum unit variant such as
+/// `Logic::One`, an associated const); a single-segment `SCREAMING_CASE` path (a
+/// `const` item or const generic); a call through a multi-segment path whose
+/// arguments are all constant (`Bits::zero()`, `Bits::from_lit::<1>()`,
+/// `Bits::<8>::from_u8(9)`); and parentheses, casts, unary and binary operators
+/// over constants. A method call (`a.read()`), a local, or a macro is not — the test
+/// is conservative in the direction of **not** calling something constant, which
+/// for [`Cfg::out_first_driven_late`] is the direction of not refusing.
+fn is_constant_expr(e: &Expr) -> bool {
+    match e {
+        Expr::Lit(_) => true,
+        Expr::Path(p) => {
+            if p.qself.is_some() {
+                return false;
+            }
+            if p.path.segments.len() > 1 {
+                return true;
+            }
+            let name = p.path.segments[0].ident.to_string();
+            name.starts_with(|c: char| c.is_ascii_uppercase())
+                && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        }
+        Expr::Call(c) => {
+            matches!(&*c.func, Expr::Path(p) if p.qself.is_none() && p.path.segments.len() > 1)
+                && c.args.iter().all(is_constant_expr)
+        }
+        Expr::Paren(p) => is_constant_expr(&p.expr),
+        Expr::Group(g) => is_constant_expr(&g.expr),
+        Expr::Cast(c) => is_constant_expr(&c.expr),
+        Expr::Unary(u) => is_constant_expr(&u.expr),
+        Expr::Binary(b) => is_constant_expr(&b.left) && is_constant_expr(&b.right),
+        _ => false,
+    }
 }
 
 /// The statement list and span of the module's top-level `loop { … }`, if any.
@@ -3823,6 +4010,139 @@ mod tests {
             "an unconditional constant write is idempotent across the phase shift — \
              flagging it would reject a correct design"
         );
+    }
+
+    // ── the late-constant startup rule (`out_first_driven_late`, 2026-10-23) ──
+
+    fn late(src: &str) -> Vec<String> {
+        Cfg::build(&parse(src)).map(|c| c.out_first_driven_late()).unwrap_or_default()
+    }
+
+    /// `trailing_constant`'s shape (now `ui/fail/out_first_driven_late.rs`): `dv` is
+    /// written only with a constant, and only past the second edge. The simulator
+    /// shows its initial value at the first observation; `assign dv = 1'b1` never
+    /// does. Flagged — and `o`, register-valued, is not.
+    #[test]
+    fn late_constant_write_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, dv: Out<Logic, C>, o: Out<Bits<8>, C>) {
+                let mut r: Bits<8> = Bits::zero();
+                loop { r = a.read(); clk.tick().await; o.write(r); clk.tick().await; dv.write(Logic::One); }
+            }
+        "#;
+        assert_eq!(late(src), vec!["dv".to_string()]);
+    }
+
+    /// `pulse_plain`'s shape: both writes constant, both past a folded tick-bearing
+    /// `for`. Flagged (it is the opted-out corpus witness).
+    #[test]
+    fn late_constant_after_folded_loop_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, dv: Out<Logic, C>) {
+                loop { for _ in 0..3 { clk.tick().await; } dv.write(Logic::One); clk.tick().await; dv.write(Logic::Zero); }
+            }
+        "#;
+        assert_eq!(late(src), vec!["dv".to_string()]);
+    }
+
+    /// The flipping witness (`late_constant_one_edge`, measured AGREEING): the same
+    /// constant moved to the segment after the FIRST tick runs in edge 0's post-edge
+    /// settle and is visible at the first observation. Not flagged.
+    #[test]
+    fn constant_one_edge_late_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, dv: Out<Logic, C>, o: Out<Bits<8>, C>) {
+                let mut r: Bits<8> = Bits::zero();
+                loop { r = a.read(); clk.tick().await; dv.write(Logic::One); o.write(r); clk.tick().await; }
+            }
+        "#;
+        assert!(late(src).is_empty());
+    }
+
+    /// Three bare ticks, the constant after the third: past the second edge on the
+    /// linear path too, not only past a folded loop. Flagged.
+    #[test]
+    fn constant_two_edges_late_linear_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, dv: Out<Logic, C>) {
+                loop { clk.tick().await; clk.tick().await; dv.write(Logic::One); clk.tick().await; }
+            }
+        "#;
+        assert_eq!(late(src), vec!["dv".to_string()]);
+    }
+
+    /// The same body with `dv` also written in the head segment: it is driven from
+    /// the first cycle, so there is nothing for the first observation to miss. Not
+    /// flagged.
+    #[test]
+    fn late_constant_also_written_in_head_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, dv: Out<Logic, C>, o: Out<Bits<8>, C>) {
+                let mut r: Bits<8> = Bits::zero();
+                loop { dv.write(Logic::Zero); r = a.read(); clk.tick().await; o.write(r); clk.tick().await; dv.write(Logic::One); }
+            }
+        "#;
+        assert!(late(src).is_empty());
+    }
+
+    /// A register-valued late write (`trailing_out`'s `mid`, `mac_pipeline`'s
+    /// `out`): outside the rule by its recorded boundary — the flop's zero initial
+    /// equals the wire's, so the traces agree today. Not flagged.
+    #[test]
+    fn late_register_write_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, mid: Out<Bits<8>, C>) {
+                let mut r: Bits<8> = Bits::zero();
+                loop { r = a.read(); clk.tick().await; mid.write(r); clk.tick().await; }
+            }
+        "#;
+        assert!(late(src).is_empty());
+    }
+
+    /// A single-tick loop: the trailing statements share the head's phase, so the
+    /// write executes before the first observation. Not flagged.
+    #[test]
+    fn single_tick_late_constant_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, dv: Out<Logic, C>) {
+                loop { clk.tick().await; dv.write(Logic::One); }
+            }
+        "#;
+        assert!(late(src).is_empty());
+    }
+
+    /// A constant that is written late on one path and from a register on another
+    /// is not "every write constant". Not flagged (the boundary is per port, over
+    /// all of its writes).
+    #[test]
+    fn late_mixed_constant_and_register_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut r: Bits<8> = Bits::zero();
+                loop { r = a.read(); clk.tick().await; if r == Bits::zero() { o.write(Bits::zero()); } else { o.write(r); } clk.tick().await; }
+            }
+        "#;
+        assert!(late(src).is_empty());
+    }
+
+    /// `RegOut` is excluded for free: `Node::writes` holds only combinational outputs.
+    #[test]
+    fn late_constant_regout_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, dv: RegOut<Logic, C>) {
+                loop { clk.tick().await; clk.tick().await; dv.write(Logic::One); }
+            }
+        "#;
+        assert!(late(src).is_empty());
     }
 
     /// A module with no `Out` at all cannot expose the hazard.

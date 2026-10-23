@@ -255,6 +255,78 @@ fn multi_phase_out_write_flags_exactly_the_demonstration_modules() {
     );
 }
 
+// ── The late-constant startup rule ────────────────────────────────────────────
+
+/// Plain `Out` ports whose every write is a constant and whose first write executes
+/// only after the second clock edge of a multi-tick loop
+/// (`copper_analysis::out_first_driven_late`, 2026-10-23).
+///
+/// Not a steady-state divergence but a **startup transient**: the simulator shows
+/// the port's initial value at the first observation (the writing segment has not
+/// run yet) while the emitted `assign` drives the constant from time 0. Its
+/// instance, `trailing_constant`, lived as a `SKIP` row ("STARTUP TRANSIENT") in
+/// `build.rs` until the shape was refused; it is now
+/// `copper-macros/tests/ui/fail/out_first_driven_late.rs`, and the agreeing half of
+/// its flipping pair — the same constant one edge earlier,
+/// `late_constant_one_edge` — sweeps as a positive case. Register-valued late writes
+/// are deliberately outside the rule (`mac_pipeline`'s `out`, `trailing_out`'s `mid`
+/// agree today because the flop's zero initial equals the wire's).
+///
+/// Same exact-set discipline as every rule above: an entry must be a module that
+/// exists to DEMONSTRATE the hazard and carries `allow_pretick_alignment` (the
+/// opt-out silences the error, not the detection). A real design appearing here is
+/// a false positive to measure, not a line to add.
+const EXPECTED_LATE_CONSTANT: &[&str] = &[
+    // Both writes constant, both past a folded tick-bearing `for` — a measured
+    // divergence already opted out for `multi_phase_out_write`.
+    "tests/sequential_forwarding_divergence.rs::pulse_plain",
+];
+
+#[test]
+fn out_first_driven_late_flags_exactly_the_demonstration_modules() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    for dir in ["examples", "src", "tests"] {
+        rs_files(&root.join(dir), &mut files);
+    }
+    files.sort();
+
+    let mut scanned = 0usize;
+    let mut flagged: BTreeSet<String> = BTreeSet::new();
+    for path in &files {
+        let Ok(src) = fs::read_to_string(path) else { continue };
+        let Ok(file) = syn::parse_file(&src) else { continue };
+        let mut fns = Vec::new();
+        clocked_hardware_fns(&file.items, &mut fns);
+        for f in &fns {
+            scanned += 1;
+            if !copper_analysis::out_first_driven_late(f).is_empty() {
+                let rel = path.strip_prefix(&root).unwrap_or(path).display();
+                flagged.insert(format!("{rel}::{}", f.sig.ident));
+            }
+        }
+    }
+
+    assert!(scanned >= 40, "expected to scan the corpus, only saw {scanned} clocked modules");
+
+    let expected: BTreeSet<String> = EXPECTED_LATE_CONSTANT.iter().map(|s| s.to_string()).collect();
+    let unexpected: Vec<_> = flagged.difference(&expected).cloned().collect();
+    let missing: Vec<_> = expected.difference(&flagged).cloned().collect();
+    assert!(
+        unexpected.is_empty(),
+        "newly flagged by the late-constant startup rule (a plain `Out` whose every write \
+         is a constant and whose first write comes after the second clock edge). Either \
+         the module HAS the transient — sweep it: the signature is a mismatch at cycle 0 \
+         only, and the remedy is a head-segment write or `RegOut` — or the rule has \
+         regressed into a false positive, which is the failure mode this pin exists to \
+         catch: {unexpected:?}"
+    );
+    assert!(
+        missing.is_empty(),
+        "no longer flagged — the transient may be fixed, or the module changed: {missing:?}"
+    );
+}
+
 // ── The trailing-`RegOut`-from-an-input rule (2026-10-23) ──────────────────────
 
 /// `RegOut` ports written after the last top-level tick from an `In` port read

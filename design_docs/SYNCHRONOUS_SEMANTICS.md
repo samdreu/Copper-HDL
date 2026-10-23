@@ -194,11 +194,21 @@ and so does `pulse_plain`, the `multi_phase_out_write` witness (that rule stands
 pending phase E's derivation, §8-5 of `CYCLE_DATAFLOW_SEMANTICS.md`). The rule that
 refused the class, `unprotected_trailing_out_write`, is retired.
 
-**Startup.** An `Out` written *only* in `C` reads as its initial value until the
-statement first runs, while the emitted continuous `assign` drives it from time 0 — so
-the two differ for the first cycle or two and agree thereafter. A continuous assign has
-no notion of "not yet written"; this is a property of an output first driven late, not
-of the rule above.
+**Startup — refused where it is observable (2026-10-23).** An `Out` whose every
+write is a constant and whose first write executes only *after the second clock
+edge* of a multi-tick body shows its initial value at the first observation in the
+simulator (the writing segment has not run yet) while the emitted continuous
+`assign` drives the constant from time 0: a one-cycle startup transient that no
+continuous assign can reproduce. `Cfg::out_first_driven_late` refuses the shape in
+both front-ends (opt-out honoured; remedies: write the port in the head segment too,
+or declare it `RegOut`). The boundary is measured, not guessed: the same constant one
+edge earlier (`late_constant_one_edge`, `tests/fixtures/trailing_statements_dut.rs`)
+agrees on every cycle, because the segment the first tick enters runs in edge 0's
+post-edge settle and is visible at the first observation exactly when the `assign`
+is; and register-valued late writes (`mac_pipeline`'s `out`, `trailing_out`'s `mid`)
+agree because the flop's zero initial equals the wire's. The refused witness is the
+former `trailing_constant` SKIP row, now `copper-macros/tests/ui/fail/out_first_driven_late.rs`;
+exact-set pin `EXPECTED_LATE_CONSTANT` = {`pulse_plain`}.
 
 ## Output timing — `Out` vs `RegOut`
 
@@ -361,9 +371,10 @@ and `the_state_arm_lead_is_systematic_not_a_first_cycle_artifact`).
 
 Enforcement is asymmetric, and deliberately so. The macro's sequential arm (`copper-macros/src/lib.rs`)
 runs `check_reachability`, `multi_write_collapse`, `unprotected_pretick_out_write`,
-`pretick_out_write_before_update`, `trailing_regout_reads_input` and `multi_phase_out_write`;
-the transpiler's `transpile_target` (`copper-codegen/src/lib.rs`) runs `check_reachability`,
-`multi_phase_out_write`, `trailing_regout_reads_input`, and the two memory rules below. So `multi_phase_out_write` runs in **both**
+`pretick_out_write_before_update`, `trailing_regout_reads_input`, `multi_phase_out_write` and
+`out_first_driven_late`; the transpiler's `transpile_target` (`copper-codegen/src/lib.rs`) runs
+`check_reachability`, `multi_phase_out_write`, `out_first_driven_late`,
+`trailing_regout_reads_input`, and the two memory rules below. So `multi_phase_out_write` runs in **both**
 front-ends (the transpiler honours the opt-out too, or a module that exists to demonstrate the
 hazard could not be measured against anything), the rest of the pre-tick family runs in the
 **macro** only, and the memory rules run in the **transpiler** only (see *Memory*).

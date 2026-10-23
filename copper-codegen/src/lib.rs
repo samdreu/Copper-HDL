@@ -333,6 +333,21 @@ fn transpile_target(
                  RegOut<…>, or drive it in exactly one phase"
             ));
         }
+        // A plain `Out` FIRST DRIVEN LATE — every write a constant, none before the
+        // second clock edge of a multi-tick body. The emitted `assign` drives the
+        // constant from time 0 while the simulator shows the initial value at the
+        // first observation: a one-cycle startup transient with no emitted form.
+        // Same rule, same opt-out, as the macro (`Cfg::out_first_driven_late`).
+        if let Some(port) = copper_analysis::out_first_driven_late(target).first() {
+            return Err(format!(
+                "output port '{port}' is first driven late: every write of it is a constant \
+                 and none executes before the second clock edge of a loop that crosses more \
+                 than one clk.tick().await per iteration, so the simulator shows its initial \
+                 value at the first observation while the emitted assign drives the constant \
+                 from time 0 (a one-cycle startup transient). Write it in the head segment \
+                 too, or declare it as RegOut<…>"
+            ));
+        }
     }
 
     // A `RegOut` written in the trailing region from an immediate input read: the

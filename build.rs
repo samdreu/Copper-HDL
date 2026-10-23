@@ -132,16 +132,6 @@ const SKIP: &[(&str, &str)] = &[
          without the opt-out",
     ),
     (
-        "trailing_constant",
-        "STARTUP TRANSIENT, not a divergence in steady state: `dv` is written only in \
-         the trailing segment, so the simulator first drives it at cycle 1 (it holds \
-         its initial value until the statement runs) while the emitted `assign dv = \
-         1'b1` drives it from time 0. They agree from cycle 1 on. A continuous assign \
-         has no notion of \"not yet written\", so this is a property of an `Out` first \
-         driven late, not of the trailing-statement semantics — see \
-         design_docs/SYNCHRONOUS_SEMANTICS.md",
-    ),
-    (
         "two_domain_top",
         "a `#[hardware(structural)]` parent: transpile-only by design, with no simulatable body \
          to drive (item 4 — the sim wires the hierarchy by hand)",

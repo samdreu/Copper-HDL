@@ -1,0 +1,5 @@
+error: output port `dv` is first driven LATE: every write of it is a constant, and none of them executes before the second clock edge of a loop that crosses more than one `clk.tick().await` per iteration. The simulator shows the port's initial value at the first observation (the segment that writes it has not run yet) while the synthesized `assign` drives the constant from time 0 — a one-cycle startup transient that no continuous assign can reproduce. Write `dv` in the head segment too (before the first tick, so it is driven from the first cycle), or declare it as `RegOut<…>` (registered: its first drive is a clock edge the hardware has as well). If this module exists to DEMONSTRATE the transient, opt out explicitly with `#[hardware(sequential, allow_pretick_alignment)]`.
+  --> tests/ui/fail/out_first_driven_late.rs:23:5
+   |
+23 |     dv: Out<Logic, MainClk>,
+   |     ^^
