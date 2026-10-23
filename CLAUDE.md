@@ -65,6 +65,21 @@ tools/regression.sh --no-test        # skip cargo test
 tools/regression.sh --example lfsr   # one named example
 ```
 
+**For a number you will quote, run it remotely.** On macOS every freshly built
+executable is assessed by Gatekeeper at launch (an online check), a full run
+launches a few hundred of them, and a laptop sleeps — measured 2026-10-21, the same
+tree took 304 s or 2598 s for the test phase depending on nothing in the tree.
+`tools/regression-remote.sh` runs the bare regression on the `recycle` machine (96
+cores, Linux, the paper-numbers toolchain) against an exact pushed commit, with
+`target/` on local scratch disk, refuses to start on a loaded box, and copies the
+log back under `target/remote-regression/`:
+
+```bash
+tools/regression-remote.sh --setup          # once per clone: scratch target/, tool check
+tools/regression-remote.sh                  # HEAD, which must already be on origin
+tools/regression-remote.sh --sync           # this working tree instead (not for numbers)
+```
+
 Note an example's `main()` is a real self-check — several assert against
 independent BaseJump Verilog and `exit(1)` on mismatch — and `cargo test` only
 *builds* examples, never runs them. That is why examples are in the default path.
