@@ -337,6 +337,9 @@ fn lower_stmt_list(
                     port_name: port_name.clone(),
                     value: assign_form,
                     edge_value,
+                    // Same predicate as `assign_form`: an opening-prefix drive is
+                    // one the simulator runs at the cycle's opening instant.
+                    opening: fwd.forward_opening_drives && !fwd.seen_in_read,
                 });
             }
             CHIRStmt::If { condition, then_body, else_body, .. } => {

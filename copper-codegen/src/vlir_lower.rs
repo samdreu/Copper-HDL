@@ -144,7 +144,20 @@ pub fn lower_to_vlir(shir: &SHIRModule) -> LowerResult<VLIRModule> {
 
     let body = match &shir.body {
         SHIRBody::Combinational(c) => VLIRBody::Combinational(lower_comb(c, &leg)?),
-        SHIRBody::Sequential(s) => VLIRBody::Sequential(lower_seq(s, &leg, &registered_outs)?),
+        SHIRBody::Sequential(s) => {
+            // Widths of the data outputs, for the hold registers phase-C emission
+            // declares (`opening_hold_outputs`).
+            let out_widths: HashMap<String, Width> = shir
+                .ports
+                .iter()
+                .filter(|p| matches!(p.direction, SHIRPortDir::Output))
+                .filter_map(|p| match &p.kind {
+                    SHIRPortKind::Data { ty } => Some((leg.get(&p.name), width_of(ty))),
+                    SHIRPortKind::Clock => None,
+                })
+                .collect();
+            VLIRBody::Sequential(lower_seq(s, &leg, &registered_outs, &out_widths)?)
+        }
         SHIRBody::Structural(st) => VLIRBody::Structural(lower_structural(st, &leg)?),
     };
 
@@ -260,7 +273,12 @@ fn lower_structural(st: &SHIRStructuralBody, leg: &Legalizer) -> LowerResult<VLI
 
 // ── Sequential body ─────────────────────────────────────────────────────────
 
-fn lower_seq(s: &SHIRSeqBody, leg: &Legalizer, registered_outs: &HashSet<String>) -> LowerResult<VLIRSeqBody> {
+fn lower_seq(
+    s: &SHIRSeqBody,
+    leg: &Legalizer,
+    registered_outs: &HashSet<String>,
+    out_widths: &HashMap<String, Width>,
+) -> LowerResult<VLIRSeqBody> {
     let clock = leg.get(&s.clock);
 
     let mut reg_decls: Vec<VLIRRegDecl> = s
@@ -354,6 +372,53 @@ fn lower_seq(s: &SHIRSeqBody, leg: &Legalizer, registered_outs: &HashSet<String>
         // paths — an unconditional `RegOut` is a plain D flip-flop).
         let mut cond_outs = conditional_output_ports(&stmts);
         cond_outs.extend(hold_outs.iter().cloned());
+
+        // Phase C (cycle-dataflow, `design_docs/PAIRED_IMPLEMENTATION_SCOPE.md`):
+        // a conditionally-driven plain `Out` whose every drive in this phase is an
+        // OPENING drive (`PortAssign::opening` — no `In` read precedes it, so the
+        // simulator runs it at the cycle's opening instant) is visible from the
+        // observation right after the edge that opened the cycle. Registering it
+        // at the edge, as the split below does, publishes it one cycle late — the
+        // measured lag of the control-extracted trailing state (`trailing_update`,
+        // `branch_trailing`, the m2 hand model in
+        // tests/sequential_forwarding_divergence.rs). Such a port keeps its drives
+        // combinational under their guards, defaults to a hold register at the
+        // top of the block (so it holds between writes and infers no latch), and
+        // the hold register is loaded in `always_ff` under the same guards. A
+        // closing drive (behind a read's barrier) keeps the edge-sampled form.
+        let opening_outs = opening_hold_outputs(&stmts, &cond_outs, &hold_outs);
+        if !opening_outs.is_empty() {
+            let mut hold_ff = Vec::new();
+            for port in &opening_outs {
+                cond_outs.remove(port);
+                let hold = hold_register_name(port, &reg_decls, out_widths);
+                hold_ff.extend(shadow_hold_ff(&stmts, port, &hold));
+                let width = out_widths.get(port).cloned().unwrap_or(Width::Concrete(1));
+                reg_decls.push(VLIRRegDecl {
+                    name: hold.clone(),
+                    width: width.clone(),
+                    // The port's power-on value is the wire's: zero, which is also
+                    // what the harness and Verilator start a plain output at.
+                    init: Some(VLIRExpr::Lit { width, value: 0 }),
+                });
+                stmts.insert(0, VLIRStmt::PortAssign {
+                    port_name: port.clone(),
+                    value: VLIRExpr::Var(hold.clone()),
+                    edge_value: VLIRExpr::Var(hold),
+                    opening: false,
+                });
+            }
+            if multi_phase {
+                ff_stmts.push(VLIRFFStmt::If {
+                    condition: phase_eq(phase.phase_idx, &phase_r_width),
+                    then_stmts: hold_ff,
+                    else_stmts: None,
+                });
+            } else {
+                ff_stmts.extend(hold_ff);
+            }
+        }
+
         if !cond_outs.is_empty() {
             let (cleaned, out_ff) = split_output_regs(&stmts, &cond_outs);
             stmts = cleaned;
@@ -546,13 +611,14 @@ fn lower_flat_stmts(
             // phase-gated combinational value instead of holding. Keep it as a
             // `PortAssign` in the phase's statements and let the split move it
             // to `always_ff`.
-            SHIRStmt::PortDrive { port_name, value, edge_value }
+            SHIRStmt::PortDrive { port_name, value, edge_value, opening }
                 if hold_outs.contains(&leg.get(port_name)) =>
             {
                 comb.push(VLIRStmt::PortAssign {
                     port_name: leg.get(port_name),
                     value: lower_expr(value, leg, mb)?,
                     edge_value: lower_expr(edge_value, leg, mb)?,
+                    opening: *opening,
                 })
             }
             // Read as a continuous `assign`, i.e. AFTER the edge — so the plain,
@@ -682,10 +748,11 @@ fn lower_comb_stmt(
         }),
         // A port driven inside a conditional becomes a blocking assign in
         // `always_comb` (the port is a `logic` output, assigned on every path).
-        SHIRStmt::PortDrive { port_name, value, edge_value } => Ok(VLIRStmt::PortAssign {
+        SHIRStmt::PortDrive { port_name, value, edge_value, opening } => Ok(VLIRStmt::PortAssign {
             port_name: leg.get(port_name),
             value: lower_expr(value, leg, mb)?,
             edge_value: lower_expr(edge_value, leg, mb)?,
+            opening: *opening,
         }),
         SHIRStmt::If { condition, edge_condition, then_stmts, else_stmts } => Ok(VLIRStmt::If {
             condition: lower_expr(condition, leg, mb)?,
@@ -749,10 +816,11 @@ fn clone_comb_stmt(s: &VLIRStmt) -> VLIRStmt {
             outer_dim: outer_dim.clone(),
             value: value.clone(),
         },
-        VLIRStmt::PortAssign { port_name, value, edge_value } => VLIRStmt::PortAssign {
+        VLIRStmt::PortAssign { port_name, value, edge_value, opening } => VLIRStmt::PortAssign {
             port_name: port_name.clone(),
             value: value.clone(),
             edge_value: edge_value.clone(),
+            opening: *opening,
         },
         VLIRStmt::If { condition, edge_condition, then_stmts, else_stmts } => VLIRStmt::If {
             condition: condition.clone(),
@@ -1374,6 +1442,121 @@ fn phase_scoped_output_ports(phases: &[SHIRPhase]) -> HashSet<String> {
     hold
 }
 
+/// The conditionally-driven plain `Out` ports of one phase whose drives are ALL
+/// opening drives (see `VLIRStmt::PortAssign::opening`), in a deterministic
+/// order. `RegOut` and phase-scoped hold ports are excluded: a `RegOut` write
+/// takes effect at the first edge after it executes, and a port written in only
+/// some phases needs the phase-guarded register. A port with any drive inside a
+/// `for` loop is excluded too — `shadow_hold_ff` does not descend into loops, so
+/// such a port keeps the edge-sampled form rather than silently losing a drive.
+fn opening_hold_outputs(
+    stmts: &[VLIRStmt],
+    cond_outs: &HashSet<String>,
+    hold_outs: &HashSet<String>,
+) -> Vec<String> {
+    let mut ports: Vec<String> = cond_outs
+        .iter()
+        .filter(|p| !hold_outs.contains(*p))
+        .filter(|p| {
+            let mut all_opening = true;
+            let mut any = false;
+            port_drive_flags(stmts, p, false, &mut any, &mut all_opening);
+            any && all_opening
+        })
+        .cloned()
+        .collect();
+    ports.sort();
+    ports
+}
+
+/// Visit every drive of `port` under `stmts`: records that one exists and
+/// whether every one is an opening drive outside a `for` loop.
+fn port_drive_flags(stmts: &[VLIRStmt], port: &str, in_loop: bool, any: &mut bool, all_opening: &mut bool) {
+    for s in stmts {
+        match s {
+            VLIRStmt::PortAssign { port_name, opening, .. } if port_name == port => {
+                *any = true;
+                if !*opening || in_loop {
+                    *all_opening = false;
+                }
+            }
+            VLIRStmt::If { then_stmts, else_stmts, .. } => {
+                port_drive_flags(then_stmts, port, in_loop, any, all_opening);
+                if let Some(e) = else_stmts {
+                    port_drive_flags(e, port, in_loop, any, all_opening);
+                }
+            }
+            VLIRStmt::Case { arms, default, .. } => {
+                for a in arms {
+                    port_drive_flags(&a.stmts, port, in_loop, any, all_opening);
+                }
+                if let Some(d) = default {
+                    port_drive_flags(d, port, in_loop, any, all_opening);
+                }
+            }
+            VLIRStmt::ForLoop { body, .. } => port_drive_flags(body, port, true, any, all_opening),
+            _ => {}
+        }
+    }
+}
+
+/// A fresh register name for the hold register behind an opening-driven
+/// conditional output: `<port>_hold`, extended until it collides with nothing
+/// declared so far.
+fn hold_register_name(port: &str, reg_decls: &[VLIRRegDecl], out_widths: &HashMap<String, Width>) -> String {
+    let mut name = format!("{port}_hold");
+    while reg_decls.iter().any(|r| r.name == name) || out_widths.contains_key(&name) {
+        name.push('_');
+    }
+    name
+}
+
+/// The `always_ff` half of phase-C emission: every drive of `port` under `stmts`
+/// becomes `<hold> <= <edge_value>` under the same guard structure, with the
+/// tests in their pre-edge form exactly as `split_output_reg` chooses them. The
+/// combinational copy is left untouched by the caller.
+fn shadow_hold_ff(stmts: &[VLIRStmt], port: &str, hold: &str) -> Vec<VLIRFFStmt> {
+    let mut ff = Vec::new();
+    for s in stmts {
+        match s {
+            VLIRStmt::PortAssign { port_name, edge_value, .. } if port_name == port => {
+                ff.push(VLIRFFStmt::NonBlockingAssign { target: hold.to_string(), value: edge_value.clone() });
+            }
+            VLIRStmt::If { edge_condition, then_stmts, else_stmts, .. } => {
+                let tf = shadow_hold_ff(then_stmts, port, hold);
+                let ef = else_stmts.as_ref().map(|e| shadow_hold_ff(e, port, hold)).unwrap_or_default();
+                if !tf.is_empty() || !ef.is_empty() {
+                    ff.push(VLIRFFStmt::If {
+                        condition: edge_condition.clone(),
+                        then_stmts: tf,
+                        else_stmts: if ef.is_empty() { None } else { Some(ef) },
+                    });
+                }
+            }
+            VLIRStmt::Case { edge_selector, arms, default, .. } => {
+                let mut ff_arms = Vec::new();
+                for a in arms {
+                    let af = shadow_hold_ff(&a.stmts, port, hold);
+                    if !af.is_empty() {
+                        ff_arms.push(VLIRFFCaseArm { selector_value: a.selector_value.clone(), stmts: af });
+                    }
+                }
+                let ff_default = default.as_ref().map(|d| shadow_hold_ff(d, port, hold)).filter(|f| !f.is_empty());
+                if !ff_arms.is_empty() || ff_default.is_some() {
+                    // A complete case: the empty default means "hold".
+                    ff.push(VLIRFFStmt::Case {
+                        selector: edge_selector.clone(),
+                        arms: ff_arms,
+                        default: ff_default.or_else(|| Some(Vec::new())),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    ff
+}
+
 /// Output ports driven on some-but-not-all paths — a conditional output./// Output ports driven on some-but-not-all paths — a conditional output. In a
 /// sequential module these become **implicit-hold registers**: the `.write()`
 /// holds its value between writes, so the drive belongs in `always_ff`
@@ -1482,7 +1665,7 @@ fn hoist_moore_output_defaults(stmts: &mut Vec<VLIRStmt>) {
         // A hoisted default exists to make the port driven on all paths so it stays
         // COMBINATIONAL; it is never split into `always_ff`, so both forms are the
         // same expression.
-        stmts.insert(0, VLIRStmt::PortAssign { port_name, value: value.clone(), edge_value: value });
+        stmts.insert(0, VLIRStmt::PortAssign { port_name, value: value.clone(), edge_value: value, opening: false });
     }
 }
 

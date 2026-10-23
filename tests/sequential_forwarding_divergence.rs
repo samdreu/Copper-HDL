@@ -644,10 +644,18 @@ fn sim_pulse_registered() -> Vec<u8> {
         .collect()
 }
 
-/// The measurement the rule rests on: a plain `Out` pulse driven in two phases
-/// diverges from its own transpiled SystemVerilog by exactly one cycle.
+/// The measurement the rule rested on: a plain `Out` pulse driven in two phases
+/// diverged from its own transpiled SystemVerilog by exactly one cycle — until
+/// phase C's emission form (2026-10-23, `vlir_lower::opening_hold_outputs`): an
+/// opening drive in a conditional arm is now a forwarded combinational mux with
+/// a hold register instead of an edge-sampled register, and this witness AGREES.
+/// `multi_phase_out_write` is deliberately NOT retired on the strength of one
+/// witness: `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §8-5 asks for the phase-E
+/// derivation (which multi-phase shapes are a legal state-mux and which are mixed)
+/// plus an m2-style hand-lowered measurement first. Until then the rule stands and
+/// this test pins that the witness it names agrees under the new emission.
 #[test]
-fn a_plain_out_driven_in_two_phases_diverges() {
+fn a_plain_out_driven_in_two_phases_agrees_under_phase_c_emission() {
     let sim = sim_pulse_plain();
     // Period 4 (three delay ticks plus the pulse tick); the simulator observes the
     // write in the post-edge settle of the cycle it was issued in.
@@ -661,15 +669,13 @@ fn a_plain_out_driven_in_two_phases_diverges() {
         return;
     }
     let sv = transpile_and_run(PULSE_PLAIN_SRC, "pulse_plain", "clk", "dv", "");
-    assert_ne!(
+    assert_eq!(
         sim, sv,
-        "sim and SV now AGREE for a plain `Out` driven in two phases — the hazard is \
-         FIXED. Remove `multi_phase_out_write`'s error, promote this to a real \
-         equivalence test, and revert the `RegOut` migrations in examples/uart/system.rs \
-         and examples/cpu/rv32i_cpu.rs."
+        "sim and SV DIVERGE again for a plain `Out` driven in two phases — phase C's \
+         emission form (an opening drive stays combinational with a hold register) \
+         regressed. Before 2026-10-23 the SV trace was the sim trace shifted one \
+         cycle: [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0]."
     );
-    // The same period, one cycle later — not a different design, a shifted one.
-    assert_eq!(sv, vec![0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0], "transpiled SV behaviour changed");
 }
 
 /// The discriminator, isolated: identical design, `RegOut` instead of `Out`, and
@@ -748,8 +754,13 @@ async fn trailing_update(clk: Clock<C>, o: Out<Bits<8>, C>) {
     }
 }
 
+/// Phase C landed 2026-10-23: the trailing register update's plain-`Out` drive
+/// is an opening drive in the extracted trailing state, and `vlir_lower` now
+/// emits it as a forwarded combinational mux with a hold register (the m2 hand
+/// model below), so sim ≡ SV. The rule assertions stay until
+/// `unprotected_trailing_out_write` is retired in the following commit.
 #[test]
-fn d1_in_the_trailing_segment_is_an_unguarded_gap() {
+fn trailing_segment_register_update_agrees() {
     let mut clk = Clock::<C>::new();
     let mut exec = HardwareExecutor::new();
     let (o, obs) = wire::<Bits<8>, C>(Bits::zero());
@@ -789,10 +800,10 @@ fn d1_in_the_trailing_segment_is_an_unguarded_gap() {
         return;
     }
     let sv = transpile_and_run(TRAILING_D1_SRC, "trailing_update", "clk", "o", "");
-    assert_ne!(
+    assert_eq!(
         sim, sv,
-        "sim and SV now AGREE for a trailing-segment register update — the gap is \
-         FIXED. Promote this to a real equivalence test."
+        "sim and SV diverge again for a trailing-segment register update — phase C's \
+         emission form regressed (before 2026-10-23 the SV lagged by one cycle)"
     );
 }
 
@@ -1272,16 +1283,15 @@ fn m2_model_forwarded_lowering_matches_the_simulator_for_trailing_update() {
          executor's trailing-segment behaviour changed"
     );
 
-    // And today's codegen still disagrees with both — the divergence the paired
-    // fix will close from the codegen side. (The sim≠SV half is also asserted by
-    // d1_in_the_trailing_segment_is_an_unguarded_gap; repeated here so this test
-    // reads as the complete m2 statement: sim ≡ model ≠ today's SV.)
+    // And since phase C (2026-10-23) codegen agrees with both: the complete m2
+    // statement is sim ≡ model ≡ SV. (The sim ≡ SV half is also asserted by
+    // trailing_segment_register_update_agrees.)
     let sv = transpile_and_run(TRAILING_D1_SRC, "trailing_update", "clk", "o", "");
-    assert_ne!(
+    assert_eq!(
         model, sv,
-        "today's transpiled SV now matches the model lowering — the trailing gap is \
-         FIXED in codegen. Promote trailing_update to a real equivalence test and \
-         update DERIVATION_TABLE.md's trailing_update row from 'predict' to done."
+        "today's transpiled SV no longer matches the hand-lowered model — phase C's \
+         emission form (`vlir_lower::opening_hold_outputs`) regressed; before it \
+         landed the SV lagged the model by one cycle"
     );
 }
 
@@ -1585,19 +1595,15 @@ fn branch_trailing_probe() {
     }
     let sv = transpile_and_run(BRANCH_TRAILING_SRC, "branch_trailing", "clk", "o", "");
     eprintln!("branch_trailing: sim = {sim:?}\n                 sv  = {sv:?}  -> {}", if sim == sv { "AGREE" } else { "DIVERGE" });
-    let one_cycle_late: Vec<u8> = (0..CYCLES).map(|k| (k / 2) as u8).collect();
+    //   VERDICT (2026-10-23, phase C): AGREE. The trailing state's plain-`Out`
+    //   drive is emitted as a forwarded combinational mux with a hold register,
+    //   so it is visible from the opening observation exactly as the simulator
+    //   shows it. The one-cycle-late trace `(0..CYCLES).map(|k| k / 2)` is what
+    //   the extracted route produced before.
     assert_eq!(
-        sv, one_cycle_late,
-        "the extracted-route divergence is no longer the one-edge-late trace — \
-         if sim == sv the trailing lowering is fixed for the top-level-last-tick \
-         class: re-bless this probe, EXPECTED_TRAILING, and the phase-C scope \
-         notes in design_docs/PAIRED_IMPLEMENTATION_SCOPE.md together"
-    );
-    assert_ne!(
         sim, sv,
-        "sim and SV now AGREE for extracted trailing after a TOP-LEVEL last \
-         tick — phase C landed for this class; re-bless this probe, \
-         EXPECTED_TRAILING, and the phase-C scope notes together"
+        "sim and SV diverge again for extracted trailing after a TOP-LEVEL last \
+         tick — phase C's emission form regressed"
     );
 }
 
