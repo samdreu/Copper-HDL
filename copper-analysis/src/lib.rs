@@ -107,25 +107,6 @@ pub fn unprotected_pretick_out_write(f: &ItemFn) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Enforce the reachability well-formedness invariant: **every path through the
-/// module's top-level loop must reach a `clk.tick().await`**. Deleting all tick
-/// edges from the CFG must leave the reachable subgraph acyclic; a remaining cycle
-/// is a path that returns to the loop head without ticking — a zero-time
-/// combinational loop — and is rejected with a spanned [`syn::Error`].
-///
-/// A module with no top-level loop has nothing to check and is `Ok`.
-/// Plain combinational `Out` ports driven from a register in the **trailing** segment
-/// of a **multi-tick** loop — D1's hazard past the last tick, which the head-segment
-/// rule cannot see. Returns the offending ports, sorted.
-///
-/// The gate is the phase count: in a single-tick loop the trailing statements share
-/// the head's phase and there is nothing to misalign, which is what distinguishes the
-/// measured divergence from `rom_from_fn`. See [`Cfg::unprotected_trailing_out_write`]
-/// for the flipping witness and the two widenings this replaces.
-pub fn unprotected_trailing_out_write(f: &ItemFn) -> Vec<String> {
-    Cfg::build(f).map(|c| c.unprotected_trailing_out_write()).unwrap_or_default()
-}
-
 /// Plain combinational `Out` ports driven in **more than one clock phase** — a
 /// shape the multi-tick lowering already refuses, but which control extraction
 /// hides by rewriting the body into a single-tick `match pc` FSM whose states are

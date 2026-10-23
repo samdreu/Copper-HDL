@@ -998,20 +998,16 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             // early — silently disagreeing with the synthesized `always_ff`. Reject
             // it, pointing at `RegOut` (immune: it commits at the edge). See
             // `design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md` for the measurements.
-            // The same hazard past the LAST tick: a plain `Out` driven from a
-            // register in the loop's trailing segment, in a body that crosses more
-            // than one clock edge per iteration. Measured identical — one cycle
-            // early, uniformly — and gated on the tick count because in a
-            // single-tick loop the trailing statements share the head's phase and
-            // there is nothing to misalign (guardrail 5.4).
+            // (The trailing-segment companion rule, `unprotected_trailing_out_write`,
+            // was retired 2026-10-23 when phase C landed: the extraction route's
+            // trailing plain-`Out` drive is now emitted as a forwarded combinational
+            // mux with a hold register and agrees with the simulator —
+            // `tests/sequential_forwarding_divergence.rs::trailing_segment_register_update_agrees`,
+            // `branch_trailing_probe`.)
             let misaligned = if allow_pretick_alignment {
                 Vec::new()
             } else {
-                let mut m = cfg.as_ref().map(|c| c.unprotected_pretick_out_write()).unwrap_or_default();
-                m.extend(cfg.as_ref().map(|c| c.unprotected_trailing_out_write()).unwrap_or_default());
-                m.sort();
-                m.dedup();
-                m
+                cfg.as_ref().map(|c| c.unprotected_pretick_out_write()).unwrap_or_default()
             };
             if let Some(port) = misaligned.first() {
                 let span = port_param_span(&input_fn.sig, port)

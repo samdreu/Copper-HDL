@@ -242,17 +242,6 @@ pub struct Cfg {
     /// 0-iteration exit never false-rejects the outer loop); its own body's
     /// tickless-cycle well-formedness is enforced here instead.
     nested_ticking_loops: Vec<Cfg>,
-    /// True iff some `clk.tick().await` in the top-level loop body is NOT a bare
-    /// top-level statement — it sits inside an `if`/`match` arm or a nested loop.
-    /// This is the source-level mirror of **control extraction's trigger** (the
-    /// transpiler flattens exactly the bodies whose ticks live inside control),
-    /// and it is the measured discriminator for the trailing-segment rule: the
-    /// LINEAR lowering path commits trailing updates at the correct edge
-    /// (`linear_trailing`, sim ≡ SV), while the extraction path commits them one
-    /// edge late wherever the last tick sits (`trailing_update` — folded loop —
-    /// and `branch_trailing` — branch-nested ticks — both measured divergent,
-    /// 2026-08-27). Conservative direction: any nesting keeps the flag.
-    has_nested_tick: bool,
     /// The register set, computed once. The backward-liveness fixed point behind
     /// [`Cfg::registers`] is the expensive part of every analysis on this graph
     /// (≈375 ms on the transpilable CPU, measured 2026-09-03 against 0.8 ms to
@@ -284,11 +273,6 @@ impl Cfg {
         let body_entry = b.build_block(&loop_body, head);
         b.nodes[head].succs.push((body_entry, EdgeKind::Comb));
 
-        let has_nested_tick = loop_body.iter().any(|stmt| {
-            let bare = matches!(stmt, Stmt::Expr(e, _) if tick_clock(e).is_some());
-            !bare && stmt_contains_tick(stmt)
-        });
-
         Some(Cfg {
             nodes: b.nodes,
             head,
@@ -297,7 +281,6 @@ impl Cfg {
             inputs: in_param_names(f),
             exit: None,
             nested_ticking_loops: b.nested,
-            has_nested_tick,
             registers_cache: std::cell::OnceCell::new(),
         })
     }
@@ -322,7 +305,6 @@ impl Cfg {
             inputs: in_param_names(f),
             exit: Some(exit),
             nested_ticking_loops: b.nested,
-            has_nested_tick: false,
             registers_cache: std::cell::OnceCell::new(),
         }
     }
@@ -717,104 +699,6 @@ impl Cfg {
 
         let mut memo = std::collections::HashMap::new();
         !entries.is_empty() && entries.iter().all(|&e| go(self, e, port, &mut memo))
-    }
-
-    /// Plain combinational `Out` ports driven from a register in the **trailing**
-    /// segment of a **multi-tick** loop — D1's hazard, past the last tick.
-    ///
-    /// # The gap this closes, and the discriminator that took three attempts
-    ///
-    /// `unprotected_pretick_out_write` examines head → first tick only, so D1's shape
-    /// moved past the last tick was unguarded and measurably divergent
-    /// (`trailing_update`, one cycle, uniformly). §5.4 of the guardrail records two
-    /// widenings measured and rejected: merging the trailing segment into the head
-    /// region flags **25** modules — including `fast_counter_corrected`, the module
-    /// D1's OWN remedy produces — and treating every trailing segment as a separate
-    /// region flags **10**, all of them single-tick memory modules like `rom_from_fn`,
-    /// which structurally matches the divergent DUT and AGREES.
-    ///
-    /// The discriminator is **how many clock phases the loop has**, and it was found
-    /// by flipping exactly one thing (2026-08-25). With the identical trailing body
-    /// `n = n + 1; o.write(n);`:
-    ///
-    /// | loop | result |
-    /// |---|---|
-    /// | `loop { tick; … }` — single-tick | **agrees** (this is `rom_from_fn`'s shape) |
-    /// | `loop { for _ in 0..2 { tick } … }` — multi-tick | **diverges** by one cycle |
-    ///
-    /// In a single-tick loop the trailing segment **shares the head's phase** — falling
-    /// off the end and re-entering costs no cycle, the CFG puts them in one
-    /// Comb-component, and `shir_lower`'s single-tick path hoists them into one phase.
-    /// There is no separate trailing region to be misaligned. Only from two phases on
-    /// does the trailing segment become a region of its own, and only then does the
-    /// hazard exist. That is why a rule that ignored the phase count cost ten false
-    /// positives.
-    ///
-    /// # What it does not use
-    ///
-    /// **Clause (i) — a leading `In` read — does not apply here.** Measured: the same
-    /// DUT with a read still diverges (V2/V3/V4 of the probe), which also refutes the
-    /// natural hypothesis that the loop-top barrier pins the whole iteration.
-    ///
-    /// A constant write stays exempt on the same terms as the head rule: `uart/rx`'s
-    /// trailing `rx_dv.write(Zero)` is verified correct, and an unconditional constant
-    /// is idempotent across the shift.
-    pub fn unprotected_trailing_out_write(&self) -> Vec<String> {
-        // One tick per iteration: the trailing statements ARE the head's phase — the
-        // body occupies a single cycle, so there is nothing for the trailing region to
-        // be misaligned against. This gate is the whole discriminator, and it is
-        // deliberately NOT the Comb-component count: the divergent DUT's extra ticks
-        // live inside a folded nested loop, so it has one component too, and gating on
-        // components suppressed exactly the case this rule exists for (measured).
-        if !self.crosses_more_than_one_tick() {
-            return Vec::new();
-        }
-        // NARROWED 2026-08-27: the LINEAR class is exempt. The phase-C decision
-        // probes measured the discriminator with a witness on each side: the
-        // linear multi-tick spelling (all ticks bare top-level statements —
-        // `linear_trailing`) AGREES, because the linear lowering path commits
-        // trailing updates at the last phase's edge (the 2026-08-25 shared-map
-        // work); both extraction-shaped spellings (`trailing_update`,
-        // `branch_trailing`) DIVERGE one cycle, because the extraction path
-        // places trailing effects one state late regardless of where the last
-        // tick sits. So the rule's remaining refusal is precisely a lowering
-        // limitation of control extraction, flagged where extraction fires —
-        // mirrored by `has_nested_tick` — and phase C retiring it is the
-        // recorded follow-up (PAIRED_IMPLEMENTATION_SCOPE.md).
-        if !self.has_nested_tick {
-            return Vec::new();
-        }
-
-        // The trailing region's entries: what a clock edge hands control to, when that
-        // lands in the region running back to the head.
-        let trailing_entries: Vec<usize> = self
-            .nodes
-            .iter()
-            .flat_map(|n| n.succs.iter())
-            .filter(|(s, k)| *k == EdgeKind::Tick && *s != self.head && self.tick_free_reaches(*s, self.head))
-            .map(|&(s, _)| s)
-            .collect();
-
-        let regs: BTreeSet<String> = self.registers().into_iter().collect();
-        let mut driven: BTreeSet<String> = BTreeSet::new();
-        for (n, node) in self.nodes.iter().enumerate() {
-            // The trailing region: a tick-free path back to the loop head. The
-            // pre-tick region cannot qualify — reaching the head from there means
-            // crossing the loop's own ticks.
-            if n == self.head || !self.tick_free_reaches(n, self.head) {
-                continue;
-            }
-            if node.folded || node.writes.is_empty() {
-                continue;
-            }
-            for w in &node.writes {
-                if !node.uses.is_disjoint(&regs) || !self.written_on_all_paths(w, &trailing_entries)
-                {
-                    driven.insert(w.clone());
-                }
-            }
-        }
-        driven.into_iter().collect()
     }
 
     /// Plain combinational `Out` ports written **between a leading `In` read and
@@ -2032,9 +1916,6 @@ impl Builder {
             inputs: self.inputs.clone(),
             exit: None,
             nested_ticking_loops: b.nested,
-            // Sub-CFG of a nested loop: its interior IS extraction territory, so
-            // the conservative value keeps any rule that consults it flagging.
-            has_nested_tick: true,
             registers_cache: std::cell::OnceCell::new(),
         }
     }
@@ -3238,65 +3119,6 @@ mod tests {
         Cfg::build(&parse(src)).map(|c| c.unprotected_pretick_out_write()).unwrap_or_default()
     }
 
-    // ── the trailing rule's linear exemption (phase-C probes, 2026-08-27) ───
-
-    fn trailing(src: &str) -> Vec<String> {
-        Cfg::build(&parse(src)).map(|c| c.unprotected_trailing_out_write()).unwrap_or_default()
-    }
-
-    /// The linear multi-tick spelling — all ticks bare top-level statements —
-    /// takes the LINEAR lowering path, which commits trailing updates at the
-    /// correct edge. Measured AGREEING (`linear_trailing_probe`), so flagging it
-    /// was a false positive; exempt.
-    #[test]
-    fn trailing_linear_class_exempt() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
-                let mut n: Bits<8> = Bits::zero();
-                loop { clk.tick().await; clk.tick().await; n = n + Bits::from_lit::<1>(); o.write(n); }
-            }
-        "#;
-        assert!(trailing(src).is_empty());
-    }
-
-    /// A folded tick-bearing nested loop — extraction territory. Measured
-    /// DIVERGENT (`trailing_update`); flagged.
-    #[test]
-    fn trailing_folded_loop_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
-                let mut n: Bits<8> = Bits::zero();
-                loop { for _ in 0..2 { clk.tick().await; } n = n + Bits::from_lit::<1>(); o.write(n); }
-            }
-        "#;
-        assert_eq!(trailing(src), ["o"]);
-    }
-
-    /// Branch-nested ticks with a top-level last tick — extraction still fires,
-    /// and the placement is still one edge late. Measured DIVERGENT
-    /// (`branch_trailing_probe`, unblocked by the select-legal emission fix);
-    /// flagged — this is the witness that the exemption is the LINEAR class, not
-    /// "top-level last tick".
-    #[test]
-    fn trailing_branch_nested_tick_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
-                let mut n: Bits<8> = Bits::zero();
-                loop {
-                    if n[0] == Logic::One { clk.tick().await; } else { clk.tick().await; }
-                    clk.tick().await;
-                    n = n + Bits::from_lit::<1>();
-                    o.write(n);
-                }
-            }
-        "#;
-        assert_eq!(trailing(src), ["o"]);
-    }
-
-    // ── the V8 rule's TRAILING clause (v8t / out_phase pair, 2026-08-27) ────
 
     /// Trailing publish-then-load: the write precedes the update of the register
     /// it reads, in the trailing segment. Measured DIVERGING

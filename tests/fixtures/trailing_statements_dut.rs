@@ -17,12 +17,13 @@
 /// An output driven in the trailing segment, alongside one driven mid-loop. This is
 /// the shape the multi-tick path refused.
 ///
-/// `tail` is a `RegOut` because a plain `Out` driven from a REGISTER here is the
-/// pre-tick hazard past the last tick, which `unprotected_trailing_out_write` rejects
-/// — the two things are separate: the lowering can now express trailing statements,
-/// and the rule still refuses the subset that diverges. What stays legal in the
-/// trailing segment with a plain `Out` is a constant write (`uart/rx`'s
-/// `rx_dv.write(Zero)`, verified) — see `trailing_constant` below.
+/// `tail` is a `RegOut`: a `RegOut` write takes effect at the first clock edge
+/// after it executes, so a trailing write publishes at the next edge on both
+/// sides. (A plain `Out` driven from a register here was refused by
+/// `unprotected_trailing_out_write` until phase C landed on 2026-10-23; the
+/// extraction route now emits such a drive as a forwarded combinational mux with
+/// a hold register, and the linear route already committed it at the right edge,
+/// so the rule is retired.) A constant trailing write is `trailing_constant` below.
 #[hardware(sequential)]
 async fn trailing_out(
     clk: Clock<MainClk>,

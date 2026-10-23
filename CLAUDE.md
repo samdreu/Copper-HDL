@@ -254,11 +254,13 @@ receive/clone one.
   **historical plan** — `SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md` (its status notes are
   dated; do not take "not started" there at face value).
   `design_docs/OUTDATED/` is historical, not authoritative.
-- **`PRETICK_ALIGNMENT_GUARDRAIL.md`** — the pre-tick alignment family: five rules
+- **`PRETICK_ALIGNMENT_GUARDRAIL.md`** — the pre-tick alignment family: four rules
   (`Cfg::unprotected_pretick_out_write`, `multi_phase_out_write`,
-  `unprotected_trailing_out_write`, `pretick_out_write_before_update`, plus the
-  constant-write clause inside the first) with four exact-set corpus pins in
-  `copper-analysis/tests/pretick_alignment_corpus.rs`. **D1** is **guarded** (rule
+  `pretick_out_write_before_update`, plus the constant-write clause inside the
+  first) with three exact-set corpus pins in
+  `copper-analysis/tests/pretick_alignment_corpus.rs`. A fifth,
+  `unprotected_trailing_out_write`, was retired 2026-10-23 when phase C landed (see
+  below). **D1** is **guarded** (rule
   2026-08-21, narrowed 2026-08-26): in the pre-tick segment, a plain `Out` write is a
   compile error when the segment also assigns a register that no leading `In` read
   reaches AND the write is observable across the phase shift — either it reads a
@@ -274,12 +276,15 @@ receive/clone one.
   register-free segment is now `Immediate`, so a passthrough tracks its producer
   instead of lagging it.
   The other rules: **`multi_phase_out_write`** (a plain `Out` driven in more than one
-  clock phase; enforced in both front-ends); **`unprotected_trailing_out_write`** (the
-  same hazard past the *last* tick, gated on the body crossing more than one clock
-  edge per iteration *and* containing a nested tick — a linear multi-tick body is
-  exempt); **`pretick_out_write_before_update`** (a plain `Out` written from a register
-  before that register's update in the same segment publishes the previous
-  generation; 2026-08-26/27). The doc also records **five** rejected fixes with
+  clock phase; enforced in both front-ends); **`pretick_out_write_before_update`** (a
+  plain `Out` written from a register before that register's update in the same
+  segment publishes the previous generation; 2026-08-26/27). **Phase C landed
+  2026-10-23** (`vlir_lower::opening_hold_outputs`): a conditionally-driven plain
+  `Out` whose drives are all *opening* drives (no `In` read precedes them in the
+  arm) is emitted as a forwarded combinational mux with a `<port>_hold` register
+  instead of an edge-sampled register, which is what made the control-extraction
+  route's trailing drives one cycle late; `trailing_update`, `branch_trailing` and
+  `pulse_plain` now agree, and `unprotected_trailing_out_write` is gone. The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in

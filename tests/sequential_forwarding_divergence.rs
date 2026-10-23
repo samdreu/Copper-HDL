@@ -734,7 +734,7 @@ fn the_rule_flags_the_plain_form_and_not_the_registered_one() {
 // correct designs, which is requirement R1.
 
 const TRAILING_D1_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn trailing_update(clk: Clock<C>, o: Out<Bits<8>, C>) {
     let mut n: Bits<8> = Bits::zero();
     loop {
@@ -744,7 +744,7 @@ async fn trailing_update(clk: Clock<C>, o: Out<Bits<8>, C>) {
     }
 }
 "#;
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn trailing_update(clk: Clock<C>, o: Out<Bits<8>, C>) {
     let mut n: Bits<8> = Bits::zero();
     loop {
@@ -757,8 +757,7 @@ async fn trailing_update(clk: Clock<C>, o: Out<Bits<8>, C>) {
 /// Phase C landed 2026-10-23: the trailing register update's plain-`Out` drive
 /// is an opening drive in the extracted trailing state, and `vlir_lower` now
 /// emits it as a forwarded combinational mux with a hold register (the m2 hand
-/// model below), so sim ≡ SV. The rule assertions stay until
-/// `unprotected_trailing_out_write` is retired in the following commit.
+/// model below), so sim ≡ SV, and `unprotected_trailing_out_write` is retired.
 #[test]
 fn trailing_segment_register_update_agrees() {
     let mut clk = Clock::<C>::new();
@@ -773,27 +772,15 @@ fn trailing_segment_register_update_agrees() {
         })
         .collect();
 
-    // GUARDED since 2026-08-25 by `unprotected_trailing_out_write`. The head-segment
-    // rule still does not see it — it examines head → first tick — which is why the
-    // trailing region needed a rule of its own rather than a wider one.
-    //
-    // The discriminator that made it separable from `rom_from_fn` (§5.4's open
-    // question) is the number of clock edges the body crosses per iteration, found by
-    // flipping exactly that: with the identical trailing body, a SINGLE-tick loop
-    // agrees and a multi-tick one diverges. In a single-tick loop the trailing
-    // statements share the head's phase, so there is nothing to be misaligned against.
+    // Guarded from 2026-08-25 to 2026-10-23 by `unprotected_trailing_out_write`,
+    // retired when phase C landed. The head-segment rule must still not reach into
+    // the trailing region: widening it was measured at 25 false positives (§5.4).
     let f: syn::ItemFn = syn::parse_str(TRAILING_D1_SRC).expect("parses");
     assert!(
         copper_analysis::unprotected_pretick_out_write(&f).is_empty(),
         "the HEAD rule now covers the trailing segment too — check that is deliberate; \
          the two were kept separate because widening the head region cost 25 false \
          positives (§5.4)"
-    );
-    assert_eq!(
-        copper_analysis::unprotected_trailing_out_write(&f),
-        vec!["o".to_string()],
-        "the trailing rule stopped flagging the shape it exists for — the traces below \
-         still diverge, so accepting it again would ship the divergence"
     );
 
     if !verilator_available() {
@@ -1435,15 +1422,12 @@ fn d_narrowing_battery_verdicts() {
 
 // ── The linear-trailing probe (phase-C decision evidence, 2026-08-27) ─────────
 //
-// `unprotected_trailing_out_write` keys on "crosses more than one clock edge per
-// iteration", which covers BOTH lowering paths — but §5.4's divergence was only
-// ever measured on the EXTRACTED path (the folded counted `for`). The linear
-// multi-tick path commits trailing register updates at the last phase's edge
-// (the 2026-08-25 shared-map work), so the model predicts the linear spelling
-// of the identical shape AGREES — measured so (2026-08-27). The rule therefore
-// over-flags the linear class: its refusal there is a lowering limitation, not
-// a semantics rule. The EXTRACTED-with-top-level-last-tick class is NOT
-// over-flagged — measured DIVERGING (2026-08-27), see `branch_trailing`.
+// §5.4's divergence was only ever measured on the EXTRACTED path (the folded
+// counted `for`). The linear multi-tick path commits trailing register updates
+// at the last phase's edge (the 2026-08-25 shared-map work), so the model
+// predicted the linear spelling of the identical shape AGREES — measured so
+// (2026-08-27). The extracted class diverged until phase C (2026-10-23), see
+// `branch_trailing`; both routes now agree and no rule refuses the shape.
 
 const LINEAR_TRAILING_SRC: &str = r#"
 #[hardware(sequential)]
@@ -1471,17 +1455,10 @@ async fn linear_trailing(clk: Clock<C>, o: Out<Bits<8>, C>) {
 
 #[test]
 fn linear_trailing_probe() {
-    // NARROWED 2026-08-27: the rule now exempts the linear class (its gate is
-    // `has_nested_tick`, the source-level mirror of extraction's trigger), so
-    // this spelling compiles WITHOUT an opt-out and the rule must return
-    // nothing for it — this probe is the exemption's standing witness.
-    let f: syn::ItemFn = syn::parse_str(LINEAR_TRAILING_SRC).expect("parses");
-    assert!(
-        copper_analysis::unprotected_trailing_out_write(&f).is_empty(),
-        "the trailing rule flags the LINEAR spelling again — it was measured \
-         AGREEING (the linear path commits trailing updates at the right edge), \
-         so that is a false positive unless the linear lowering itself changed"
-    );
+    // The linear multi-tick spelling was measured AGREEING on 2026-08-27 (the
+    // linear path commits trailing updates at the right edge); since phase C
+    // (2026-10-23) the extracted spelling agrees too and the trailing rule is
+    // retired, so this probe is the linear route's standing equivalence witness.
 
     let mut clk = Clock::<C>::new();
     let mut exec = HardwareExecutor::new();
@@ -1528,7 +1505,7 @@ fn linear_trailing_probe() {
 //   linear lowering route alone.
 
 const BRANCH_TRAILING_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn branch_trailing(clk: Clock<C>, o: Out<Bits<8>, C>) {
     let mut n: Bits<8> = Bits::zero();
     loop {
@@ -1544,7 +1521,7 @@ async fn branch_trailing(clk: Clock<C>, o: Out<Bits<8>, C>) {
 }
 "#;
 
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn branch_trailing(clk: Clock<C>, o: Out<Bits<8>, C>) {
     let mut n: Bits<8> = Bits::zero();
     loop {

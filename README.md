@@ -403,10 +403,10 @@ counterexample rather than lowered to something plausible:
   refused by design; it is not, and no rule targets it. The read-first,
   delay-last spelling in `examples/uart/rx.rs` is the one anchored against an
   independent reference, not the only one that works.
-- **The pre-tick alignment family**: five compile-time rules refuse plain-`Out`
+- **The pre-tick alignment family**: four compile-time rules refuse plain-`Out`
   drive shapes whose phase would silently differ between the simulator and the
   synthesized FSM (a path-dependent read boundary, a port written in more than
-  one clock phase, and their trailing-segment variants). The remedy each error
+  one clock phase, and a write that precedes its register's update). The remedy each error
   names is usually `RegOut`. Five *rejected* fixes are recorded with measured
   evidence in
   [`design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md`](design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md)
@@ -478,7 +478,7 @@ still open.
 | | |
 |---|---|
 | [`design_docs/SYNCHRONOUS_SEMANTICS.md`](design_docs/SYNCHRONOUS_SEMANTICS.md) | the timing model — start here |
-| [`design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md`](design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md) | the pre-tick alignment family — its five compile-time rules, and the rejected fixes with measured evidence |
+| [`design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md`](design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md) | the pre-tick alignment family — its compile-time rules, and the rejected fixes with measured evidence |
 | [`design_docs/CORPUS_DIFFERENTIAL_SWEEP.md`](design_docs/CORPUS_DIFFERENTIAL_SWEEP.md) | why every module gets a generated sim-vs-emitted-SV case, and how |
 | [`design_docs/ANCHORING_A_MODULE.md`](design_docs/ANCHORING_A_MODULE.md) | how to add an independent Verilog reference to a swept module (the `REFERENCE` table) |
 | [`design_docs/LEVELIZED_SCHEDULING_SCOPE.md`](design_docs/LEVELIZED_SCHEDULING_SCOPE.md) | the levelized scheduler |
