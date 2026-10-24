@@ -302,6 +302,17 @@ receive/clone one.
   on `(top, pid)` and two tests transpiling `trailing_update` raced on a 96-core host
   (2026-09-03), one deleting the file the other's Verilator was about to read. Every
   test temp dir now carries a `TMP_NONCE`.
+- **Both front-ends enforce the same rules (front-end parity, 2026-10-23).** The
+  macro's sequential arm and `transpile_target` run the same list from
+  `copper-analysis`: the two source-shape rules (`check_nested_loop_shape` — a nested
+  loop must end at a clock boundary; `check_awaits` — only `clk.tick().await` may be
+  awaited), reachability, the pre-tick alignment family (opt-out honoured in both),
+  the memory rules and `multi_write_collapse` (no opt-out in either). A module that
+  compiles therefore transpiles, or is refused by both. The standing audit is
+  `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
+  `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
+  fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one
+  front-end, add it to the other and to the audit in the same change.
 - **When adding a `#[hardware]` mode or flag, fix every attribute parser.**
   `parse_args::<syn::Ident>()` fails outright once a flag is present, which silently
   drops those modules from corpus scans (`copper-analysis/tests/pretick_alignment_corpus.rs`

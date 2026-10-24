@@ -16,7 +16,7 @@ include!("fixtures/handshake_dut.rs");
 const DUT_SRC: &str = include_str!("fixtures/handshake_dut.rs");
 
 /// The `loop`/`break` spelling, in its own namespace (the fixture also defines
-/// `waiter` and `tick_first_waiter`, which this test does not use).
+/// `waiter`, which this test does not use).
 #[allow(dead_code)]
 mod loop_spelling {
     use super::*;

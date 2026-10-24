@@ -3788,6 +3788,13 @@ endmodule
         // combinational latch: it lowers to a guarded `always_ff` update
         // (`case (stage) ... out <= acc; default: ; endcase`) that holds
         // otherwise — not the old hard latch error.
+        //
+        // The input is read at the loop top, on every path: with it read inside
+        // the `Load` arm only, the write's region boundary is path-dependent and
+        // `unprotected_pretick_out_write` refuses the module in both front-ends
+        // (front-end parity, 2026-10-23) — which is right, and not what this test
+        // is about. Read on every path, the write sits behind the read's barrier
+        // and is the closing-anchored drive this test wants to see registered.
         let src = r#"
             enum Stage { Load = 0, Mul = 1, Out = 2 }
 
@@ -3796,8 +3803,9 @@ endmodule
                 let mut stage = Stage::Load;
                 let mut acc: Bits<8> = Bits::from_lit::<0>();
                 loop {
+                    let v = a.read();
                     match stage {
-                        Stage::Load => { acc = a.read(); stage = Stage::Mul; }
+                        Stage::Load => { acc = v; stage = Stage::Mul; }
                         Stage::Mul => { stage = Stage::Out; }
                         _ => { out.write(acc); stage = Stage::Load; }
                     }

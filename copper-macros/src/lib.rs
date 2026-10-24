@@ -938,6 +938,7 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
         return err.to_compile_error().into();
     }
 
+
     match hardware_mode {
         HardwareMode::Sequential | HardwareMode::Synchronizer => {
             // Regular sequential modules must be single-domain; synchronizers are
@@ -965,6 +966,45 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 .map_or(Ok(()), |c| c.check_reachability().map_err(|(s, m)| Error::new(s, m)))
             {
                 return err.to_compile_error().into();
+            }
+            // Front-end parity (2026-10-23): the shapes the transpiler refuses are
+            // refused here too, so a module that simulates also transpiles. A nested
+            // loop must end at a clock boundary (the repeating wait is
+            // `loop { <test>; tick }`, never `loop { tick; <test> }`), and the only
+            // `await` a body may write is `<clock>.tick().await`. Both on the pristine
+            // fn, before any rewrite, and after reachability so a module that never
+            // ticks gets that message rather than one about a nested loop.
+            if let Err(err) = copper_analysis::check_nested_loop_shape(&input_fn) {
+                return err.to_compile_error().into();
+            }
+            if let Err(err) = copper_analysis::check_awaits(&input_fn) {
+                return err.to_compile_error().into();
+            }
+            // The memory-port staging rules and the plain-`Out`-from-a-read-result
+            // rule — transpiler-only until 2026-10-23, now enforced here too (front-end
+            // parity): one access per bus per cycle, a read result observed only after
+            // the edge that produces it and only on a staged port, and no plain `Out`
+            // driven from a read result across clock phases.
+            if let Err((span, msg)) = cfg.as_ref().map_or(Ok(()), |c| c.check_memory_staging()) {
+                return Error::new(span, msg).to_compile_error().into();
+            }
+            let mem_outs = cfg.as_ref().map(|c| c.memory_result_drives_plain_out()).unwrap_or_default();
+            if let Some(port) = mem_outs.first() {
+                let span = port_param_span(&input_fn.sig, port)
+                    .unwrap_or_else(|| input_fn.sig.ident.span());
+                return Error::new(
+                    span,
+                    format!(
+                        "output port `{port}` is driven from a memory read result in a \
+                         multi-phase module. The read pipeline re-captures on every clock edge, \
+                         so a plain `Out` either tracks it into the phases that do not observe \
+                         it, or holds one edge late — neither matches the simulator. Declare the \
+                         port `RegOut<T, D>`, or latch the result into a register and drive the \
+                         output from that."
+                    ),
+                )
+                .to_compile_error()
+                .into();
             }
             // A combinational `Out` written on both sides of one bare `clk.tick().await`
             // within an iteration, after a leading (deferred) input read, collapses in

@@ -253,8 +253,8 @@ each state drives the output once. This is Copper's analogue of Verilog's blocki
 (`=`/`<=`) choice, and follows MyHDL's discipline of restricting the synthesizable subset — so every
 *accepted* program preserves sim ≡ synth. Detection is `Cfg::multi_write_collapse`
 (`copper-analysis/src/cfg.rs`, over the shared CFG, top-level loop **and** nested ticking loops),
-enforced as a compile error by the `#[hardware]` macro only (`copper-macros/src/lib.rs`; the
-transpiler does not run it); it is precise (three necessary conditions — bare tick, both-sides
+enforced as a compile error by the `#[hardware]` macro and, since 2026-10-23, by
+`transpile_target` as well (neither honours an opt-out for it); it is precise (three necessary conditions — bare tick, both-sides
 write, leading read comb-reaching the pre-tick write) and corpus-clean, which the build itself
 enforces since every corpus module compiles through the macro. Pinned by
 `copper-macros/tests/ui/fail/multi_write_collapse.rs`, `ui/pass/multi_write_regout_ok.rs`, and the
@@ -369,15 +369,21 @@ and `the_state_arm_lead_is_systematic_not_a_first_cycle_artifact`).
   `out_from_reg_before_commit`, `v8t_stage_publish_then_load`), the `v8*` verdict tests in
   `tests/sequential_forwarding_divergence.rs`, and `copper-macros/tests/ui/fail/write_before_update.rs`.
 
-Enforcement is asymmetric, and deliberately so. The macro's sequential arm (`copper-macros/src/lib.rs`)
-runs `check_reachability`, `multi_write_collapse`, `unprotected_pretick_out_write`,
-`pretick_out_write_before_update`, `trailing_regout_reads_input`, `multi_phase_out_write` and
-`out_first_driven_late`; the transpiler's `transpile_target` (`copper-codegen/src/lib.rs`) runs
-`check_reachability`, `multi_phase_out_write`, `out_first_driven_late`,
-`trailing_regout_reads_input`, and the two memory rules below. So `multi_phase_out_write` runs in **both**
-front-ends (the transpiler honours the opt-out too, or a module that exists to demonstrate the
-hazard could not be measured against anything), the rest of the pre-tick family runs in the
-**macro** only, and the memory rules run in the **transpiler** only (see *Memory*).
+**Enforcement is symmetric (front-end parity, 2026-10-23).** The macro's sequential arm
+(`copper-macros/src/lib.rs`) and the transpiler's `transpile_target` (`copper-codegen/src/lib.rs`)
+run the same rules from the shared crate: `check_nested_loop_shape`, `check_awaits`,
+`check_reachability`, `multi_write_collapse`, `unprotected_pretick_out_write`,
+`pretick_out_write_before_update`, `trailing_regout_reads_input`, `multi_phase_out_write`,
+`out_first_driven_late`, `check_memory_staging` and `memory_result_drives_plain_out`. The five
+pre-tick alignment rules honour `allow_pretick_alignment` in both (a module that exists to
+demonstrate a divergence must still transpile, or there is nothing to measure it against);
+`multi_write_collapse`, the memory rules and the two shape rules have no opt-out in either. A
+module that compiles therefore transpiles, or is refused by both — the standing audit is
+`copper-analysis/tests/front_end_parity.rs`, which runs the former transpiler-only rules over
+every clocked module in the tree (expected failures: none) and checks that every module a
+pre-tick rule flags carries the opt-out. The transpiler keeps its own copies of the shape
+refusals (`chir_lower`, `control_extract`) as defence in depth, the way it keeps
+`check_reachability`.
 
 **The family's root cause, and what changed about its disposition.** These rules share one origin
 worth stating plainly: **Copper infers the register/combinational boundary where every other HDL
@@ -458,10 +464,13 @@ than the divergence adjudicated. The cost is low because the supported ordering 
 designs, and because the divergence needs an input that changes *mid-cycle* — an `In` driven by a
 clocked module in the same domain is stable across the window and both models agree. It is a
 testbench-observable difference, which is exactly why it could not be left in: sim ≡ SV *under a
-testbench* is this project's bar. Enforced by the **transpiler only**: `control_extract` declines
-to flatten the shape and `chir_lower` reports it ("a repeating wait must be written as
-`loop { <test>; clk.tick().await; }`"); the `#[hardware]` macro does not check it, so a sim-only
-design can still be written in the rejected order. Pinned by
+testbench* is this project's bar. Enforced in **both front-ends** since 2026-10-23:
+`copper_analysis::check_nested_loop_shape` (the source-level mirror of
+`control_extract::body_ends_at_a_clock_boundary`) runs in the `#[hardware]` macro and in
+`transpile_target`, and `chir_lower` keeps its own copy as defence in depth, so the rejected
+order fails at `cargo build` at its own declaration — it can no longer be written as a sim-only
+design (the former `tick_first_waiter` fixture is now
+`copper-macros/tests/ui/fail/tick_first_wait.rs`). Pinned by
 `copper-codegen/tests/unsupported_constructs.rs::ticking_before_the_test_in_a_wait_is_unsupported`
 and `tests/wait_loop_equivalence.rs::ticking_before_the_test_is_refused`. The measurement and the
 lowering alternatives tried are recorded in the repo `TODO` (the entry *Control extraction
@@ -485,11 +494,11 @@ Four rules make the divergent shapes unwritable. All four live in `copper-analys
 moved there 2026-08-25, commit `8c876fd`), on the **source**, for the reason given under *One
 analysis, both front-ends*: control extraction rewrites branch- and loop-nested ticks into a
 single-tick `match pc` FSM, so a check downstream of it counts one phase where the `pc` states *are*
-the phases it meant to count. **They are enforced by the transpiler only** — `transpile_fir`
-(`copper-codegen/src/lib.rs`) calls both; the `#[hardware]` macro calls neither, so a sim-only
-design that breaks one of them compiles and simulates, and is caught only when it is transpiled
-(which every corpus module is, by the sweep). "Spanned compile error" below therefore means a
-transpile-time error carrying the source span.
+the phases it meant to count. **They are enforced in both front-ends** since 2026-10-23:
+`transpile_target` (`copper-codegen/src/lib.rs`) and the `#[hardware]` macro's sequential arm
+both call `Cfg::check_memory_staging` and `Cfg::memory_result_drives_plain_out`, so a design
+that breaks one of them fails at `cargo build` rather than only when transpiled (the former
+sim-only `mp_rom` fixture is now `copper-macros/tests/ui/fail/memory_result_drives_plain_out.rs`).
 
 - **One access per bus per cycle** (`check_memory_staging`) — a physical port has a single address
   bus. Two accesses conflict iff one can reach the other **without crossing a clock edge**, not
@@ -560,13 +569,13 @@ call-site CDC check for the text-based path (`chir_lower::lower_structural_inst`
 
 In `#[hardware]` code the only `await` a design may write is a direct `clk.tick().await`; the one
 other await that appears in a hardware body, `pre_edge_barrier::<D>().await`, is injected by the
-macro itself (*Input read timing* above), never written by hand. Enforcement is one-sided as of
-2026-09-01: the **transpiler** rejects any other await (`chir_lower`, `UnsupportedConstruct`
-"await on non-clock value"), while the **macro** only *records* tick awaits (`TickAwaitVisitor`,
-`copper-macros/src/lib.rs`) and does not reject a foreign one — so a sim-only module can await
-something else, and its behavior under the executor is unspecified. The transpiler's refusal is
-not pinned by a test as of 2026-09-01. Every loop path must reach a tick — the reachability
-well-formedness condition below, a hard compile error in both front-ends.
+macro itself (*Input read timing* above), never written by hand. Enforced in **both front-ends**
+since 2026-10-23: `copper_analysis::check_awaits` runs in the macro (on the pristine function,
+before the barrier is injected) and in `transpile_target`, and `chir_lower` keeps its
+`UnsupportedConstruct` "await on non-clock value" as defence in depth; pinned by
+`copper-macros/tests/ui/fail/foreign_await.rs` and the shape module's unit tests. Every loop
+path must reach a tick — the reachability well-formedness condition below, a hard compile error
+in both front-ends.
 
 ## The control-flow-graph (CFG) model
 

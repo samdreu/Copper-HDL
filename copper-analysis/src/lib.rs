@@ -31,8 +31,10 @@ use std::collections::BTreeSet;
 use syn::ItemFn;
 
 mod cfg;
+mod shape;
 
 pub use cfg::{classify_reads, classify_reads_with, Cfg, DerivationFacts, EdgeKind, PhaseFacts, ReadTiming};
+pub use shape::{check_awaits, check_nested_loop_shape};
 
 /// Plain combinational `Out` ports written **between a leading `In` read and the
 /// update of a register the write reads** — the read's pre-edge barrier drags the

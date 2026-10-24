@@ -422,8 +422,9 @@ counterexample rather than lowered to something plausible:
   the head segment too, or declare it `RegOut` (`out_first_driven_late`; the same
   constant one edge earlier agrees and is kept as the positive witness).
 - A **wait loop that ticks before testing** its condition (a repeating wait must
-  be `loop { <test>; clk.tick().await; }`), and `continue` inside a nested loop
-  — refused orderings, each with its own diagnostic
+  be `loop { <test>; clk.tick().await; }`) — refused by both front-ends
+  (`copper_analysis::check_nested_loop_shape`), and `continue` inside a nested
+  loop — refused by the transpiler with its own diagnostic
   (`copper-codegen/src/control_extract.rs`).
 - **Zero-latency memories** (`READ_LAT` and `WRITE_LAT` must both be at least
   1), a memory port accessed more than once in one cycle

@@ -2889,7 +2889,7 @@ fn stmt_breaks_enclosing_loop(s: &Stmt) -> bool {
 /// `Some(clock_name)` iff `expr` is `<clock>.tick().await`. The clock receiver
 /// identity is preserved (item 4's per-domain tick tag); a non-simple receiver
 /// yields the placeholder `"<clock>"`.
-fn tick_clock(expr: &Expr) -> Option<String> {
+pub(crate) fn tick_clock(expr: &Expr) -> Option<String> {
     let Expr::Await(a) = expr else { return None };
     let Expr::MethodCall(mc) = a.base.as_ref() else {
         return None;
@@ -2903,7 +2903,7 @@ fn tick_clock(expr: &Expr) -> Option<String> {
 /// Does this statement issue a `<clock>.tick().await` at any depth? Shares
 /// [`first_tick_clock`]'s walk so the two cannot disagree about where a tick can
 /// live — a drift that has caused real bugs in the transpiler's own gate.
-fn stmt_contains_tick(s: &syn::Stmt) -> bool {
+pub(crate) fn stmt_contains_tick(s: &syn::Stmt) -> bool {
     struct FindTick(bool);
     impl<'ast> Visit<'ast> for FindTick {
         fn visit_expr(&mut self, e: &'ast Expr) {

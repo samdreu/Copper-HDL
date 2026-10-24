@@ -1,0 +1,5 @@
+error: a repeating wait must be written as `loop { <test>; clk.tick().await; }` — the tick has to be the LAST statement of the loop body. Testing AFTER the tick reads an input in the window where a simulator samples the value the just-past edge produced and a flip-flop samples the value present before its own edge; the two are a cycle apart under any testbench that changes inputs between edges. Copper does not choose between them — the ordering is outside the language, the same way a pre-tick alignment hazard is. Move the test before the tick: `loop { if ready { break; } clk.tick().await; }`
+  --> tests/ui/fail/tick_first_wait.rs:20:9
+   |
+20 |         loop {
+   |         ^^^^

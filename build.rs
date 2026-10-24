@@ -51,17 +51,6 @@ use quote::ToTokens;
 /// fail" is a claim that should have an author and a sentence.
 const SKIP: &[(&str, &str)] = &[
     (
-        "mp_rom",
-        "refused by design: a plain `Out` driven from a memory read result across phases has no \
-         correct emitted form (measured a full cycle late). multiphase_memory_equivalence.rs pins \
-         the diagnostic",
-    ),
-    (
-        "tick_first_waiter",
-        "refused by design: a repeating wait must be written test-first; pinned as an unsupported \
-         construct in unsupported_constructs.rs",
-    ),
-    (
         "probe",
         "an `allow_pretick_alignment` witness: the module exists to DEMONSTRATE the pre-tick \
          divergence, so sim ≠ SV is its purpose. probe_timing_investigation.rs measures it",

@@ -1,0 +1,5 @@
+error: output port `data` is driven from a memory read result in a multi-phase module. The read pipeline re-captures on every clock edge, so a plain `Out` either tracks it into the phases that do not observe it, or holds one edge late — neither matches the simulator. Declare the port `RegOut<T, D>`, or latch the result into a register and drive the output from that.
+  --> tests/ui/fail/memory_result_drives_plain_out.rs:17:66
+   |
+17 | async fn mp_rom(clk: Clock<MainClk>, addr: In<Bits<4>, MainClk>, data: Out<Bits<16>, MainClk>) {
+   |                                                                  ^^^^
