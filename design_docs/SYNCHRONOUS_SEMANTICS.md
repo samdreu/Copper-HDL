@@ -190,9 +190,16 @@ forwarded continuous-assign form) as a forwarded combinational mux with a
 model, which `m2_model_forwarded_lowering_matches_the_simulator_for_trailing_update`
 had pinned as matching the simulator cycle-for-cycle. Measured on landing: both
 witnesses agree (`trailing_segment_register_update_agrees`, `branch_trailing_probe`),
-and so does `pulse_plain`, the `multi_phase_out_write` witness (that rule stands
-pending phase E's derivation, §8-5 of `CYCLE_DATAFLOW_SEMANTICS.md`). The rule that
-refused the class, `unprotected_trailing_out_write`, is retired.
+and so does `pulse_plain`, the `multi_phase_out_write` witness (phase E then
+derived and measured the multi-phase class and narrowed that rule, §9 of
+`CYCLE_DATAFLOW_SEMANTICS.md`; the input-free pulse is accepted). The rule that
+refused the class, `unprotected_trailing_out_write`, is retired. **Reach of the
+form, measured 2026-10-23:** the opening-prefix predicate is statement-granular,
+and an extracted body is one `match pc` statement, so the mux + hold form is
+emitted only for modules that read **no** input; an extracted module with an
+input read anywhere edge-samples every conditionally driven plain `Out` and shows
+an opening write one cycle late (`e9_read_in_another_state_opening_write`,
+unguarded — `CYCLE_DATAFLOW_SEMANTICS.md` §9.4).
 
 **Startup — refused where it is observable (2026-10-23).** An `Out` whose every
 write is a constant and whose first write executes only *after the second clock
@@ -316,23 +323,28 @@ about its region is what separates them.
   (listed set as of 2026-09-01: `trailing_update`, `branch_trailing`); the 25/10 false-positive
   counts were measured once (`PRETICK_ALIGNMENT_GUARDRAIL.md` §5.4) and are not a regression gate.
 - **`multi_phase_out_write`** — a plain `Out` driven in **more than one clock phase** (a phase being
-  a Comb-connected component of the CFG). This rule was already in the language: the multi-tick
-  lowering refuses the shape — *"driven in more than one phase … hold it in a register"* — but only
-  when it can **see** the phases, and control extraction hides them by rewriting a branch- or
-  loop-nested body into a single-tick `match pc` FSM whose `pc` states *are* the phases it meant to
-  count. Restating it on the source closes that blind spot (landed 2026-08-25, commit `99290da`).
-  The instance that forced it: a one-cycle pulse,
-  `loop { for _ in 0..3 { tick } dv.write(One); tick; dv.write(Zero); }`, found while writing the
-  UART receiver's first sim-vs-Verilator test — one cycle late, uniformly, `RegOut` immune,
-  measured both ways (`tests/sequential_forwarding_divergence.rs::a_plain_out_driven_in_two_phases_diverges`
-  / `the_registered_output_form_agrees`). The corpus costs quoted when it landed — widening D1
-  instead would have flagged 36 of 120 corpus modules, ~30 with passing equivalence tests
-  (`det_010`, `mac_pipeline`, `dual_port_ram`, `bsg_dff_en`, every memory fixture), while this rule
-  flagged 9, six of them its own synthetic witnesses — were measured once at that commit and are
-  not reproducible from the tree (recorded in `PRETICK_ALIGNMENT_GUARDRAIL.md` §5.4). What the tree
-  pins today is the exact set: as of 2026-09-01
-  `pretick_alignment_corpus.rs::multi_phase_out_write_flags_exactly_the_demonstration_modules`
-  lists exactly one module, `pulse_plain` (`tests/sequential_forwarding_divergence.rs`).
+  a Comb-connected component of the CFG), **narrowed 2026-10-23 (cycle-dataflow phase E,
+  `CYCLE_DATAFLOW_SEMANTICS.md` §9) to the measured divergent class.** Such a port is a mux over FSM
+  state, and it agrees iff every write has the same anchor on both sides. The simulator anchors a
+  write by whether a *deferred* `In` read parks the task before it; the transpiler anchors it by
+  whether any read appears earlier in its statement walk — and under control extraction that walk
+  is the whole `match pc`, so one input read anywhere edge-samples every drive. Accepted and
+  measured agreeing: an **input-free** extracted body (every drive opening on both sides, phase C's
+  mux — `pulse_plain`, `e2_two_registers`, `e3_forwarded_then_committed`) and a body where **every
+  write of the port follows a deferred read** in a module with registers (every drive closing on
+  both sides — `e5d_two_closing_deferred`). Refused, each with a flipping witness one edit away:
+  the **linear** route (no mux form; `vlir_lower` refuses it as multiply driven or edge-samples the
+  hold path — `e7`, `e7w`), an **input read anywhere** with an opening write (`e2x`), a
+  **register-free** body with reads (immediate passthroughs — `e4i`, `e5f`), and **mixed anchors**
+  (`e4`, `e5`, `e6`). History: the rule landed 2026-08-25 (commit `99290da`) as "any port in two
+  phases", forced by the one-cycle pulse `loop { for _ in 0..3 { tick } dv.write(One); tick;
+  dv.write(Zero); }` found while writing the UART receiver's first sim-vs-Verilator test, which
+  diverged by one cycle until phase C's emission form; the three real modules it flagged then
+  (`uart_tx`, `uart_rx`, the CPU's program counter) were migrated to `RegOut`, which remains the
+  universal remedy. Pins: `pretick_alignment_corpus.rs::multi_phase_out_write_flags_exactly_the_demonstration_modules`
+  (`EXPECTED_MULTI_PHASE`: the eight refused probes in `tests/sequential_forwarding_divergence.rs`),
+  the `mphase_*` unit tests in `cfg.rs`, `ui/fail/multi_phase_out_write.rs`, and the two accepted
+  shapes in `ui/pass/pretick_alignment_ok.rs`.
 
 **The constant-write exemption is narrower than it looks.** The misalignment changes *when* a write
 happens, so it is observable only if the value written differs between the phases — which is why a

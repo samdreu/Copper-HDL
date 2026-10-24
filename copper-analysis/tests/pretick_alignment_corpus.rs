@@ -191,17 +191,21 @@ fn pretick_alignment_hazard_flags_exactly_the_known_divergent_modules() {
 
 // ── The multi-phase output rule ───────────────────────────────────────────────
 
-/// Plain combinational `Out` ports driven in **more than one clock phase**
-/// (`copper_analysis::multi_phase_out_write`).
+/// Plain combinational `Out` ports driven in **more than one clock phase** whose
+/// emitted form cannot show the simulator's trace
+/// (`copper_analysis::multi_phase_out_write`, narrowed 2026-10-23, phase E).
 ///
-/// The sibling of the rule above, and the one that covers the case it cannot see.
-/// `unprotected_pretick_out_write` examines only head → first tick (plan Q5, which
-/// recorded the middle-segment gap as theoretical). An instance turned up on
-/// 2026-08-25 — a one-cycle output pulse in the UART receiver — and widening the
-/// D1 rule to every post-tick segment was measured and REJECTED: it flags 36 of
-/// 120 corpus modules, ~30 with passing equivalence tests. Writing a plain `Out`
-/// after a tick is the ordinary multi-phase pattern; writing it in *two* phases is
-/// not, and that is what this rule keys on.
+/// The sibling of the rule above, and the one that covers the case it cannot see:
+/// `unprotected_pretick_out_write` examines only head → first tick, and widening
+/// it to every post-tick segment was measured and REJECTED (36 of 120 corpus
+/// modules, ~30 with passing equivalence tests). Writing a plain `Out` after a
+/// tick is the ordinary multi-phase pattern; writing it in *two* phases is what
+/// this rule keys on — and since phase E it refuses only the measured divergent
+/// classes (mixed anchors, register-free passthrough reads, the linear route),
+/// admitting the input-free extracted class (`pulse_plain`, `e2`, `e3`) and the
+/// all-closing class (`e5d`) that phase C's emission shows exactly. Each listed
+/// module is one row of the verdict table in
+/// `tests/sequential_forwarding_divergence.rs` (the `e*` tests pin its traces).
 ///
 /// Like the rule above, the expectation is an **exact set** so it fails in both
 /// directions. Every entry here must be a module that exists to DEMONSTRATE the
@@ -210,7 +214,19 @@ fn pretick_alignment_hazard_flags_exactly_the_known_divergent_modules() {
 /// quietly disappear from this view. A real design appearing here is a bug in that
 /// design, and the fix is `RegOut`.
 const EXPECTED_MULTI_PHASE: &[&str] = &[
-    "tests/sequential_forwarding_divergence.rs::pulse_plain",
+    // the linear route: refused by `vlir_lower` as multiply driven (e7) or
+    // edge-sampled through the phase-guarded hold path (e7w)
+    "tests/sequential_forwarding_divergence.rs::e7_linear_two_registers",
+    "tests/sequential_forwarding_divergence.rs::e7w_linear_phase_local_wires",
+    // an input read anywhere demotes every drive to edge-sampled (clause i)
+    "tests/sequential_forwarding_divergence.rs::e2x_two_registers_plus_unrelated_read",
+    // mixed anchors: one closing drive, one opening (clause ii)
+    "tests/sequential_forwarding_divergence.rs::e4_closing_then_opening",
+    "tests/sequential_forwarding_divergence.rs::e5_two_closing",
+    "tests/sequential_forwarding_divergence.rs::e6_closing_via_wire_then_opening",
+    // register-free: the reads feeding the writes are immediate passthroughs
+    "tests/sequential_forwarding_divergence.rs::e4i_register_free_passthrough_then_opening",
+    "tests/sequential_forwarding_divergence.rs::e5f_two_closing_register_free",
 ];
 
 #[test]
@@ -245,9 +261,10 @@ fn multi_phase_out_write_flags_exactly_the_demonstration_modules() {
     let missing: Vec<_> = expected.difference(&flagged).cloned().collect();
     assert!(
         unexpected.is_empty(),
-        "newly flagged (a plain `Out` driven in two clock phases — declare it `RegOut`, \
-         or if the module exists to demonstrate the hazard add `allow_pretick_alignment` \
-         and list it here): {unexpected:?}"
+        "newly flagged (a plain `Out` driven in two clock phases in the mixed, \
+         register-free or linear class — declare it `RegOut`, make every write of it \
+         closing, or if the module exists to demonstrate the hazard add \
+         `allow_pretick_alignment` and list it here): {unexpected:?}"
     );
     assert!(
         missing.is_empty(),
@@ -277,8 +294,10 @@ fn multi_phase_out_write_flags_exactly_the_demonstration_modules() {
 /// opt-out silences the error, not the detection). A real design appearing here is
 /// a false positive to measure, not a line to add.
 const EXPECTED_LATE_CONSTANT: &[&str] = &[
-    // Both writes constant, both past a folded tick-bearing `for` — a measured
-    // divergence already opted out for `multi_phase_out_write`.
+    // Both writes constant, both past a folded tick-bearing `for`. Since phase E
+    // (2026-10-23) this is the ONLY rule that flags it — `multi_phase_out_write`
+    // admits the input-free class — and the module agrees with its SV under
+    // phase C's emission (the folded loop is this rule's conservative direction).
     "tests/sequential_forwarding_divergence.rs::pulse_plain",
 ];
 

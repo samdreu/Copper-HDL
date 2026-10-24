@@ -1,0 +1,5 @@
+error: output port `o` is driven in more than one clock phase (on both sides of a `clk.tick().await`) in a shape whose synthesized form shows one of the writes a cycle after the simulator does. A write with no input read before it runs at its cycle's opening; once the body reads any input, or on the linear multi-tick path, the port is emitted as an edge-sampled register and that write lands one observation late (measured, phase E). Accepted shapes: a body that reads no input at all, or one where every write of `o` follows an input read with a `clk.tick().await` after it (all writes then land at the edge on both sides). Otherwise declare `o` as `RegOut<…>` (a registered output, immune because it commits at the clock edge), or drive it in exactly one phase. If this module exists to DEMONSTRATE the divergence, opt out explicitly with `#[hardware(sequential, allow_pretick_alignment)]`.
+  --> tests/ui/fail/multi_phase_out_write.rs:20:70
+   |
+20 | async fn mixed_anchors(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+   |                                                                      ^

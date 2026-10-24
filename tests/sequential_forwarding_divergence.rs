@@ -649,11 +649,11 @@ fn sim_pulse_registered() -> Vec<u8> {
 /// phase C's emission form (2026-10-23, `vlir_lower::opening_hold_outputs`): an
 /// opening drive in a conditional arm is now a forwarded combinational mux with
 /// a hold register instead of an edge-sampled register, and this witness AGREES.
-/// `multi_phase_out_write` is deliberately NOT retired on the strength of one
-/// witness: `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §8-5 asks for the phase-E
-/// derivation (which multi-phase shapes are a legal state-mux and which are mixed)
-/// plus an m2-style hand-lowered measurement first. Until then the rule stands and
-/// this test pins that the witness it names agrees under the new emission.
+/// Phase E (2026-10-23) then derived and measured the whole class (the `e*`
+/// battery at the end of this file): `multi_phase_out_write` was NARROWED, not
+/// retired — an input-free extracted module like this one is accepted, the mixed,
+/// register-free and linear classes stay refused. This test pins the admitted
+/// witness.
 #[test]
 fn a_plain_out_driven_in_two_phases_agrees_under_phase_c_emission() {
     let sim = sim_pulse_plain();
@@ -693,15 +693,28 @@ fn the_registered_output_form_agrees() {
     );
 }
 
-/// …and the rule itself flags exactly the plain form.
+/// …and the rule no longer flags EITHER form (phase E, 2026-10-23): with no input
+/// read in the module every drive is opening on both sides, phase C's mux shows
+/// it, and the measured agreement above is what admitted the class. The module
+/// keeps `allow_pretick_alignment` for `out_first_driven_late` (both writes are
+/// constants past a folded tick-bearing loop), which is a startup rule and not
+/// this one. The rule's own positive witnesses are the `e*` probes below.
 #[test]
-fn the_rule_flags_the_plain_form_and_not_the_registered_one() {
+fn the_rule_no_longer_flags_the_input_free_pulse() {
     let plain: syn::ItemFn = syn::parse_str(PULSE_PLAIN_SRC).expect("parses");
     let reg: syn::ItemFn = syn::parse_str(PULSE_REG_SRC).expect("parses");
-    assert_eq!(copper_analysis::multi_phase_out_write(&plain), vec!["dv".to_string()]);
+    assert!(
+        copper_analysis::multi_phase_out_write(&plain).is_empty(),
+        "pulse_plain is flagged again — clause (i) of the narrowed rule (no input read ⇒ accepted) regressed"
+    );
     assert!(
         copper_analysis::multi_phase_out_write(&reg).is_empty(),
         "`RegOut` must be exempt — it is excluded by construction, like multi_write_collapse"
+    );
+    assert_eq!(
+        copper_analysis::out_first_driven_late(&plain),
+        vec!["dv".to_string()],
+        "pulse_plain's remaining flag is out_first_driven_late; if that changed, its opt-out can go"
     );
 }
 
@@ -1692,4 +1705,739 @@ fn v8t_trailing_stage_shape_verdict() {
          divergence; re-bless the rule, EXPECTED_WRITE_BEFORE_UPDATE, and the \
          out_phase ledger entries together"
     );
+}
+
+// ── Phase E — a plain `Out` driven in two or more clock phases ────────────────
+//
+// `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` "Phase E". The derivation classifies
+// each writing segment by ANCHOR (opening: no `In` read reaches the write, so the
+// simulator runs it at the cycle's opening instant; closing: a read's barrier
+// parks it at the pre-edge settle) and predicts, from the write-window invariant
+// and the phase-C emission form, which combinations agree. Every probe below is
+// an inline module (not swept), so these tests ARE the measurement. Verdicts are
+// recorded on each test; the exact traces are pinned so a change on either side
+// is loud.
+
+const E2_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e2_two_registers(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut a: Bits<8> = Bits::zero();
+    let mut b: Bits<8> = Bits::zero();
+    loop {
+        a = a + Bits::from_lit::<1>();
+        b = b + Bits::from_lit::<3>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(a);
+        clk.tick().await;
+        o.write(b);
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e2_two_registers(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut a: Bits<8> = Bits::zero();
+    let mut b: Bits<8> = Bits::zero();
+    loop {
+        a = a + Bits::from_lit::<1>();
+        b = b + Bits::from_lit::<3>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(a);
+        clk.tick().await;
+        o.write(b);
+    }
+}
+
+const E3_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e3_forwarded_then_committed(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        r = r + Bits::from_lit::<1>();
+        o.write(r);
+        clk.tick().await;
+        o.write(r);
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e3_forwarded_then_committed(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        r = r + Bits::from_lit::<1>();
+        o.write(r);
+        clk.tick().await;
+        o.write(r);
+    }
+}
+
+const E4_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e4_closing_then_opening(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(Bits::zero());
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e4_closing_then_opening(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(Bits::zero());
+    }
+}
+
+const E5_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e5_two_closing(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read() + cnt);
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e5_two_closing(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read() + cnt);
+    }
+}
+
+const E6_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e6_closing_via_wire_then_opening(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        let r = x.read();
+        o.write(r);
+        for _ in 0..2 { clk.tick().await; }
+        o.write(Bits::zero());
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e6_closing_via_wire_then_opening(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        let r = x.read();
+        o.write(r);
+        for _ in 0..2 { clk.tick().await; }
+        o.write(Bits::zero());
+    }
+}
+
+const E4I_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e4i_register_free_passthrough_then_opening(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(Bits::zero());
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e4i_register_free_passthrough_then_opening(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(Bits::zero());
+    }
+}
+
+const E7_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e7_linear_two_registers(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut a: Bits<8> = Bits::zero();
+    let mut b: Bits<8> = Bits::zero();
+    loop {
+        a = a + Bits::from_lit::<1>();
+        b = b + Bits::from_lit::<3>();
+        clk.tick().await;
+        o.write(a);
+        clk.tick().await;
+        o.write(b);
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e7_linear_two_registers(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut a: Bits<8> = Bits::zero();
+    let mut b: Bits<8> = Bits::zero();
+    loop {
+        a = a + Bits::from_lit::<1>();
+        b = b + Bits::from_lit::<3>();
+        clk.tick().await;
+        o.write(a);
+        clk.tick().await;
+        o.write(b);
+        clk.tick().await;
+    }
+}
+
+const E7W_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e7w_linear_phase_local_wires(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut a: Bits<8> = Bits::zero();
+    loop {
+        a = a + Bits::from_lit::<1>();
+        clk.tick().await;
+        let v: Bits<8> = a + Bits::from_lit::<2>();
+        o.write(v);
+        clk.tick().await;
+        let w: Bits<8> = a + Bits::from_lit::<5>();
+        o.write(w);
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e7w_linear_phase_local_wires(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut a: Bits<8> = Bits::zero();
+    loop {
+        a = a + Bits::from_lit::<1>();
+        clk.tick().await;
+        let v: Bits<8> = a + Bits::from_lit::<2>();
+        o.write(v);
+        clk.tick().await;
+        let w: Bits<8> = a + Bits::from_lit::<5>();
+        o.write(w);
+        clk.tick().await;
+    }
+}
+
+
+const E5D_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e5d_two_closing_deferred(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read() + cnt);
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e5d_two_closing_deferred(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read() + cnt);
+        clk.tick().await;
+    }
+}
+
+const E8_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e8_single_phase_trailing_immediate_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read() + cnt);
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e8_single_phase_trailing_immediate_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read() + cnt);
+    }
+}
+
+const E9_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e9_read_in_another_state_opening_write(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        r = x.read();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(r);
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e9_read_in_another_state_opening_write(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        r = x.read();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(r);
+    }
+}
+
+
+const E2X_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e2x_two_registers_plus_unrelated_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut a: Bits<8> = Bits::zero();
+    let mut b: Bits<8> = Bits::zero();
+    loop {
+        a = x.read();
+        b = b + Bits::from_lit::<3>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(a);
+        clk.tick().await;
+        o.write(b);
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e2x_two_registers_plus_unrelated_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut a: Bits<8> = Bits::zero();
+    let mut b: Bits<8> = Bits::zero();
+    loop {
+        a = x.read();
+        b = b + Bits::from_lit::<3>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(a);
+        clk.tick().await;
+        o.write(b);
+    }
+}
+
+const E5F_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e5f_two_closing_register_free(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read() + Bits::from_lit::<1>());
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e5f_two_closing_register_free(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read() + Bits::from_lit::<1>());
+        clk.tick().await;
+    }
+}
+
+const E10_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e10_middle_phase_write_before_update(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        let s = x.read();
+        o.write(r);
+        r = r + s;
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e10_middle_phase_write_before_update(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        let s = x.read();
+        o.write(r);
+        r = r + s;
+        clk.tick().await;
+    }
+}
+
+/// Simulate a free-running probe (no inputs), one `Bits<8>` output.
+fn sim_e_free<F>(build: impl FnOnce(Clock<C>, Out<Bits<8>, C>) -> copper_sim::HardwareModule<F>) -> Vec<u8>
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    let mut clk = Clock::<C>::new();
+    let mut exec = HardwareExecutor::new();
+    let (p, obs) = wire::<Bits<8>, C>(Bits::zero());
+    let dh = p.dirty_handle();
+    exec.spawn_wired(build(clk.clone(), p), vec![dh], vec![]);
+    (0..CYCLES)
+        .map(|_| {
+            exec.tick_clock(&mut clk);
+            obs.read().as_u128() as u8
+        })
+        .collect()
+}
+
+/// The stimulus the input-driven probes share: cycle k drives `x = 10 + k`
+/// before its edge (the harness convention), so every edge carries a value the
+/// others do not and an off-by-one sample is loud.
+fn e_stimulus(k: usize) -> u8 {
+    (10 + k) as u8
+}
+
+/// Simulate an input-driven probe, one `Bits<8>` input, one `Bits<8>` output.
+fn sim_e_in<F>(build: impl FnOnce(Clock<C>, In<Bits<8>, C>, Out<Bits<8>, C>) -> copper_sim::HardwareModule<F>) -> Vec<u8>
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    let mut clk = Clock::<C>::new();
+    let mut exec = HardwareExecutor::new();
+    let (x_drv, x_in) = wire::<Bits<8>, C>(Bits::zero());
+    let (p, obs) = wire::<Bits<8>, C>(Bits::zero());
+    let dh = p.dirty_handle();
+    let reads = vec![x_in.wire_id()];
+    exec.spawn_wired(build(clk.clone(), x_in, p), vec![dh], reads);
+    (0..CYCLES)
+        .map(|k| {
+            x_drv.write(Bits::from_usize(e_stimulus(k) as usize));
+            exec.tick_clock(&mut clk);
+            obs.read().as_u128() as u8
+        })
+        .collect()
+}
+
+/// `transpile_and_run` with the per-cycle `x` stimulus of [`e_stimulus`].
+fn transpile_and_run_driven(src: &str, top: &str) -> Vec<u8> {
+    let sv = copper_codegen::transpile_source(src, Some(top), &copper_codegen::EmitConfig::default())
+        .expect("transpile");
+    let dir = std::env::temp_dir().join(format!(
+        "copper_fwd_e_{top}_{}_{}",
+        std::process::id(),
+        TMP_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join(format!("{top}.sv"));
+    std::fs::write(&p, &sv).unwrap();
+    let mut tb = format!(
+        "#include \"V{top}.h\"\n#include \"verilated.h\"\n#include <iostream>\n\
+         int main(int c, char** v) {{ Verilated::commandArgs(c, v);\n\
+         V{top}* t = new V{top}(); t->clk = 0; t->eval();\n"
+    );
+    for k in 0..CYCLES {
+        tb.push_str(&format!(
+            "t->x = {}; t->clk=0; t->eval(); t->clk=1; t->eval(); std::cout << (int)t->o << std::endl;\n",
+            e_stimulus(k)
+        ));
+    }
+    tb.push_str("return 0; }\n");
+    let tbp = dir.join("tb.cpp");
+    std::fs::write(&tbp, tb).unwrap();
+    let out = verilator_command()
+        .current_dir(&dir)
+        .args(["--cc", "--exe", "--build", "--top-module", top,
+               "-Wno-DECLFILENAME", "-Wno-WIDTHEXPAND", "-CFLAGS", "-std=c++14"])
+        .arg(std::fs::canonicalize(&p).unwrap())
+        .arg(&tbp)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "verilator build failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let run = std::process::Command::new(dir.join(format!("obj_dir/V{top}"))).output().unwrap();
+    let s = String::from_utf8_lossy(&run.stdout).into_owned();
+    let _ = std::fs::remove_dir_all(&dir);
+    s.lines().filter_map(|l| l.trim().parse::<u8>().ok()).collect()
+}
+
+/// The verdict table, as a test: which probe sources the narrowed rule flags.
+/// Every DIVERGE row below is flagged and every AGREE row is clean, and the
+/// single-phase probes (`e8`, `e9`, `e10`) are outside the rule whatever their
+/// verdict. `pulse_plain`, the rule's original witness, is clean now — it is
+/// still opted out because `out_first_driven_late` flags it (its writes are
+/// constants past a folded tick-bearing loop), not because of this rule.
+#[test]
+fn phase_e_the_narrowed_rule_flags_exactly_the_diverging_probes() {
+    let flagged = |src: &str| {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        copper_analysis::multi_phase_out_write(&f)
+    };
+    let o = vec!["o".to_string()];
+    // AGREE — accepted
+    assert!(flagged(PULSE_PLAIN_SRC).is_empty(), "pulse_plain: two constants, no input");
+    assert!(flagged(E2_SRC).is_empty(), "e2: two committed registers, no input");
+    assert!(flagged(E3_SRC).is_empty(), "e3: forwarded then committed, no input");
+    assert!(flagged(E5D_SRC).is_empty(), "e5d: both writes behind a deferred read");
+    // DIVERGE or REFUSED one IR late — flagged
+    assert_eq!(flagged(E2X_SRC), o, "e2x: an unrelated read demotes every drive");
+    assert_eq!(flagged(E4_SRC), o, "e4: deferred read then a constant (mixed)");
+    assert_eq!(flagged(E5_SRC), o, "e5: trailing immediate read (mixed)");
+    assert_eq!(flagged(E6_SRC), o, "e6: deferred read via a wire then a constant (mixed)");
+    assert_eq!(flagged(E4I_SRC), o, "e4i: register-free passthrough then a constant");
+    assert_eq!(flagged(E5F_SRC), o, "e5f: register-free, both reads passthrough");
+    assert_eq!(flagged(E7_SRC), o, "e7: linear route (refused by vlir_lower)");
+    assert_eq!(flagged(E7W_SRC), o, "e7w: linear route, phase-local wires");
+    // Single-phase: not this rule's business
+    assert!(flagged(E8_SRC).is_empty());
+    assert!(flagged(E9_SRC).is_empty());
+    assert!(flagged(E10_SRC).is_empty());
+}
+
+/// AGREE. Two committed registers written in two phases, no input anywhere:
+/// both drives are opening on both sides, and phase C emits `o = a` / `o = b`
+/// under `pc` guards with a hold register. The derivation's clause (i).
+#[test]
+fn e2_two_registers_in_two_phases_agrees() {
+    let sim = sim_e_free(e2_two_registers);
+    assert_eq!(sim, vec![0, 1, 3, 3, 2, 6, 6, 3, 9, 9, 4, 12, 12], "simulator behaviour changed");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run(E2_SRC, "e2_two_registers", "clk", "o", "");
+    assert_eq!(sim, sv, "sim and SV diverge for register-valued opening drives in two phases — phase C's mux + hold emission regressed");
+}
+
+/// AGREE. A forwarded next-state write (`r = r + 1; o.write(r)`) in one phase and
+/// the committed register in the next: the mux arm carries `r + 1` for the first
+/// and `r` for the second, which is what the simulator shows.
+#[test]
+fn e3_forwarded_then_committed_write_agrees() {
+    let sim = sim_e_free(e3_forwarded_then_committed);
+    assert_eq!(sim, vec![0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4], "simulator behaviour changed");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run(E3_SRC, "e3_forwarded_then_committed", "clk", "o", "");
+    assert_eq!(sim, sv, "sim and SV diverge for a forwarded-then-committed two-phase write — the forwarded form of the mux arm regressed");
+}
+
+/// AGREE. Both writes sit behind a deferred `In` read (a tick follows each) in a
+/// module with a register: both closing on both sides, and the edge-sampled
+/// `o <= x` / `o <= x + cnt` under `pc` guards shows each at the closing
+/// observation exactly as the barrier-parked write does. Clause (ii).
+#[test]
+fn e5d_two_closing_writes_in_two_phases_agree() {
+    let sim = sim_e_in(e5d_two_closing_deferred);
+    assert_eq!(sim, vec![0, 0, 12, 12, 15, 15, 15, 17, 17, 21, 21, 21, 22], "simulator behaviour changed");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E5D_SRC, "e5d_two_closing_deferred");
+    assert_eq!(sim, sv, "sim and SV diverge for two closing drives in two phases — the edge-sampled form regressed");
+}
+
+/// DIVERGE — flagged. `e2` plus one unrelated input read in the head. Codegen's
+/// opening-prefix scan covers the whole extracted `match pc`, so one read
+/// anywhere demotes every drive to an edge-sampled register, and the opening
+/// drives show one cycle after the simulator. The flipping pair for clause (i):
+/// the only difference from `e2` is `a = x.read()` for `a = a + 1`.
+#[test]
+fn e2x_an_unrelated_read_elsewhere_makes_the_opening_drives_lag_known_gap() {
+    let sim = sim_e_in(e2x_two_registers_plus_unrelated_read);
+    assert_eq!(sim, vec![0, 10, 3, 3, 13, 6, 6, 16, 9, 9, 19, 12, 12], "simulator behaviour changed");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E2X_SRC, "e2x_two_registers_plus_unrelated_read");
+    assert_eq!(sv, vec![0, 0, 10, 3, 3, 13, 6, 6, 16, 9, 9, 19, 12], "transpiled SV behaviour changed");
+    assert_eq!(sim[..CYCLES - 1], sv[1..], "the lag is no longer a clean one-cycle shift");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e2x — codegen's opening predicate became arm-granular; re-derive clause (i) of multi_phase_out_write and re-bless EXPECTED_MULTI_PHASE");
+}
+
+/// DIVERGE — flagged. A deferred read feeds the first write (closing, agrees at
+/// its own observation) and a constant the second (opening): the closing drive
+/// drags the whole port into the edge-sampled form and the constant shows one
+/// cycle late. The mixed class.
+#[test]
+fn e4_closing_then_opening_write_diverges_known_gap() {
+    let sim = sim_e_in(e4_closing_then_opening);
+    assert_eq!(sim, vec![0, 0, 12, 0, 0, 0, 16, 0, 0, 0, 20, 0, 0], "simulator behaviour changed");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E4_SRC, "e4_closing_then_opening");
+    assert_eq!(sv, vec![0, 0, 12, 12, 0, 0, 16, 16, 0, 0, 20, 20, 0], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for the mixed class — re-derive multi_phase_out_write and re-bless EXPECTED_MULTI_PHASE");
+}
+
+/// DIVERGE — flagged. `e4` with the read routed through a same-segment wire
+/// (`let r = x.read(); o.write(r)`): the wire changes nothing, as in V8d.
+#[test]
+fn e6_closing_via_wire_then_opening_write_diverges_known_gap() {
+    let sim = sim_e_in(e6_closing_via_wire_then_opening);
+    assert_eq!(sim, vec![0, 0, 12, 0, 0, 0, 16, 0, 0, 0, 20, 0, 0], "simulator behaviour changed");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E6_SRC, "e6_closing_via_wire_then_opening");
+    assert_eq!(sv, vec![0, 0, 12, 12, 0, 0, 16, 16, 0, 0, 20, 20, 0], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e6 — see e4");
+}
+
+/// DIVERGE — flagged. `e5d` without its trailing tick: the second read has no
+/// tick after it in the iteration, so `classify_reads` makes it IMMEDIATE and the
+/// simulator runs the write at the opening instant with `x_N`, while codegen
+/// (which sees a read before the write) edge-samples `x_{N+1}`. One tick moved
+/// flips `e5d`'s verdict — the flipping pair for clause (ii).
+#[test]
+fn e5_trailing_immediate_read_makes_the_second_write_opening_diverges_known_gap() {
+    let sim = sim_e_in(e5_two_closing);
+    assert_eq!(sim, vec![0, 0, 12, 14, 14, 14, 16, 19, 19, 19, 20, 24, 24], "simulator behaviour changed");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E5_SRC, "e5_two_closing");
+    assert_eq!(sv, vec![0, 0, 12, 12, 15, 15, 16, 16, 20, 20, 20, 20, 25], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e5 — a trailing immediate read feeding a plain Out is realized; re-derive clause (ii)");
+}
+
+/// DIVERGE — flagged. A register-free module: a read feeding a plain `Out` is a
+/// passthrough-immediate read (the D2 rule in `classify_reads`), so the simulator
+/// writes `x_N` at the opening while codegen edge-samples `x_{N+1}`. The
+/// register-free clause's witness alongside `e5f`.
+#[test]
+fn e4i_register_free_passthrough_then_opening_write_diverges_known_gap() {
+    let sim = sim_e_in(e4i_register_free_passthrough_then_opening);
+    assert_eq!(sim, vec![0, 11, 11, 0, 0, 15, 15, 0, 0, 19, 19, 0, 0], "simulator behaviour changed");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E4I_SRC, "e4i_register_free_passthrough_then_opening");
+    assert_eq!(sv, vec![0, 0, 12, 12, 0, 0, 16, 16, 0, 0, 20, 20, 0], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e4i — the passthrough-immediate class is realized; re-derive the register-free clause");
+}
+
+/// DIVERGE — flagged. `e5d` with its register removed: the same two writes, now
+/// both passthrough-immediate in the simulator. One `let mut` flips `e5d`'s
+/// verdict — the flipping pair for the register-free clause.
+#[test]
+fn e5f_register_free_two_closing_writes_diverge_known_gap() {
+    let sim = sim_e_in(e5f_two_closing_register_free);
+    assert_eq!(sim, vec![0, 11, 11, 14, 14, 14, 16, 16, 19, 19, 19, 21, 21], "simulator behaviour changed");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E5F_SRC, "e5f_two_closing_register_free");
+    assert_eq!(sv, vec![0, 0, 12, 12, 15, 15, 15, 17, 17, 20, 20, 20, 22], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e5f — see e4i");
+}
+
+/// REFUSED one IR late — flagged. The linear route (every tick a bare top-level
+/// statement) has no mux form: `vlir_lower` refuses two continuous assigns to one
+/// port as multiply driven. The source rule keeps refusing it so the macro and the
+/// transpiler agree (front-end parity); the simulator trace is pinned so the
+/// shape's meaning is on record for when the linear path learns the mux.
+#[test]
+fn e7_linear_route_two_phase_write_is_refused_by_the_lowering() {
+    let sim = sim_e_free(e7_linear_two_registers);
+    assert_eq!(sim, vec![1, 3, 3, 2, 6, 6, 3, 9, 9, 4, 12, 12, 5], "simulator behaviour changed");
+    let err = copper_codegen::transpile_source(E7_SRC, Some("e7_linear_two_registers"), &copper_codegen::EmitConfig::default())
+        .err()
+        .expect("the linear path refuses a port driven in two phases");
+    assert!(err.contains("driven in more than one phase"), "unexpected refusal: {err}");
+}
+
+/// DIVERGE — flagged. The linear route with phase-local wire values: the hold
+/// path (`phase_scoped_output_ports`) registers the port under phase guards, and
+/// the opening drives show one cycle after the simulator.
+#[test]
+fn e7w_linear_route_phase_local_wires_diverge_known_gap() {
+    let sim = sim_e_free(e7w_linear_phase_local_wires);
+    assert_eq!(sim, vec![3, 6, 6, 4, 7, 7, 5, 8, 8, 6, 9, 9, 7], "simulator behaviour changed");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run(E7W_SRC, "e7w_linear_phase_local_wires", "clk", "o", "");
+    assert_eq!(sv, vec![0, 3, 6, 6, 4, 7, 7, 5, 8, 8, 6, 9, 9], "transpiled SV behaviour changed");
+    assert_eq!(sim[..CYCLES - 1], sv[1..], "the lag is no longer a clean one-cycle shift");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e7w — the linear hold path forwards; re-derive the linear clause");
+}
+
+// ── Found by the phase-E battery, OUTSIDE the multi-phase rule — UNGUARDED ────
+//
+// Two single-phase shapes diverge today and no rule flags them. Both are the
+// same mechanism the mixed class above exposes, in a port written in ONE phase:
+// under control extraction codegen's opening-prefix scan runs over the whole
+// `match pc` statement, so any `In` read anywhere in the body marks every
+// conditional plain-`Out` drive as closing and edge-samples it, one observation
+// after the simulator's opening-instant write. These pin the measured gap; the
+// remedy is a codegen change (arm-granular opening tracking in
+// `shir_lower::lower_stmt_list`, and a treatment of immediate reads), which is
+// outside phase E's scope and must be decided before anything is retired.
+
+/// DIVERGE — UNGUARDED. A trailing write `o.write(x.read() + cnt)` after a wait
+/// loop: the read has no tick after it, so it is immediate and the simulator
+/// shows `x_N + cnt` at the opening observation; codegen edge-samples
+/// `x_{N+1} + cnt` one observation later.
+#[test]
+fn e8_single_phase_trailing_immediate_read_diverges_unguarded_gap() {
+    let sim = sim_e_in(e8_single_phase_trailing_immediate_read);
+    assert_eq!(sim, vec![0, 12, 12, 15, 15, 18, 18, 21, 21, 24, 24, 27, 27], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E8_SRC).unwrap();
+    assert!(copper_analysis::multi_phase_out_write(&f).is_empty(), "single-phase: not the multi-phase rule's business");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E8_SRC, "e8_single_phase_trailing_immediate_read");
+    assert_eq!(sv, vec![0, 0, 13, 13, 16, 16, 19, 19, 22, 22, 25, 25, 28], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e8 — the immediate-read class is realized; record it in CYCLE_DATAFLOW_SEMANTICS.md Phase E");
+}
+
+/// DIVERGE — UNGUARDED. The read is in a DIFFERENT state (`r = x.read()` two
+/// ticks earlier) and the write reads only the committed register, yet the drive
+/// is edge-sampled: the whole-`match` scan saw a read. Without the read this is
+/// `trailing_update`'s agreeing shape. Phase C's mux + hold is therefore reached
+/// only by input-free extracted modules today.
+#[test]
+fn e9_a_read_in_another_state_demotes_an_opening_write_diverges_unguarded_gap() {
+    let sim = sim_e_in(e9_read_in_another_state_opening_write);
+    assert_eq!(sim, vec![0, 0, 0, 12, 12, 12, 12, 16, 16, 16, 16, 20, 20], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E9_SRC).unwrap();
+    assert!(copper_analysis::multi_phase_out_write(&f).is_empty(), "single-phase: not the multi-phase rule's business");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E9_SRC, "e9_read_in_another_state_opening_write");
+    assert_eq!(sv, vec![0, 0, 0, 0, 12, 12, 12, 12, 16, 16, 16, 16, 20], "transpiled SV behaviour changed");
+    assert_eq!(sim[..CYCLES - 1], sv[1..], "the lag is no longer a clean one-cycle shift");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e9 — codegen's opening predicate became arm-granular; re-derive clause (i) of multi_phase_out_write, which can then admit modules with reads");
+}
+
+/// AGREE. The V8a shape (read; publish; update) in a MIDDLE phase, which neither
+/// clause of `pretick_out_write_before_update` covers (head and trailing only).
+/// It agrees because in an extracted arm the drive is edge-sampled, and the flop
+/// samples the pre-update register exactly as the barrier-parked write reads it;
+/// the head-segment V8a diverges only because its drive is a continuous assign.
+/// Pinned so the V8 rule's head/trailing scope is on record as sufficient.
+#[test]
+fn e10_middle_phase_write_before_update_agrees() {
+    let sim = sim_e_in(e10_middle_phase_write_before_update);
+    assert_eq!(sim, vec![0, 0, 0, 0, 0, 12, 12, 12, 27, 27, 27, 45, 45], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E10_SRC).unwrap();
+    assert!(copper_analysis::pretick_out_write_before_update(&f).is_empty(), "the V8 rule's scope is head + trailing; this is a middle phase");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E10_SRC, "e10_middle_phase_write_before_update");
+    assert_eq!(sim, sv, "sim and SV diverge for a middle-phase write-before-update — the edge-sampled arm form regressed, and the V8 rule needs a middle clause");
 }

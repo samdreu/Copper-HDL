@@ -32,7 +32,7 @@
 > | `unprotected_pretick_out_write` (D1, narrowed §5.7) | a plain `Out` written where an `In` read reaches the write on some path while a register is assigned unprotected on another (path-dependent boundary), or a conditional/constant write in such a segment | — |
 > | …its **constant-write** clause (§5.5; `written_on_all_paths`) | the same, where the port is written on *some* paths only — a constant is idempotent across the phase shift only if it lands on every path | 3 modules, all measured divergences (commit `348ddd0`) |
 > | ~~`unprotected_trailing_out_write`~~ (§5.4; narrowed 2026-08-27; **RETIRED 2026-10-23**) | refused the same hazard past the *last* tick on the extraction route, which emitted a trailing plain-`Out` drive one cycle late. Phase C fixed the emission (`vlir_lower::opening_hold_outputs`), both witnesses agree, and the rule is deleted | 1 real module when it landed (`rv32i_cpu_pipelined`'s `program_counter`, → `RegOut`; commit `56233ce`) |
-> | `multi_phase_out_write` | a plain `Out` driven in more than one clock phase | 9 modules, six of them its own witnesses, three real (`rv32i_cpu` — since replaced by `rv32i_cpu_transpilable` — and `uart_tx`/`uart_rx`, → `RegOut`; commit `99290da`) |
+> | `multi_phase_out_write` (**narrowed 2026-10-23**, phase E — `CYCLE_DATAFLOW_SEMANTICS.md` §9) | a plain `Out` driven in more than one clock phase on the linear route, or with an input read anywhere while a write is opening, or in a register-free body with reads, or with mixed anchors; the input-free and all-closing extracted classes are accepted | 9 modules when it landed as "any two phases", six of them its own witnesses, three real (`rv32i_cpu` — since replaced by `rv32i_cpu_transpilable` — and `uart_tx`/`uart_rx`, → `RegOut`; commit `99290da`); 0 live modules at the narrowing |
 > | `pretick_out_write_before_update` (§5.6, 2026-08-26; trailing clause 2026-08-27) | a plain `Out` written before the update of a register it reads — behind a leading read in the pre-tick segment, or anywhere in the trailing segment (whose updates commit at the opening edge) | 0 real modules at landing (caught a compile-only UI fixture; commit `7abfd98`); the trailing clause then caught THREE real sim-only-tested modules (`tests/module_composition_hybrid.rs`'s stages, measured divergent as `v8t_stage_publish_then_load`, migrated to the canonical write/read/tick/update spelling; commit `b439894`) |
 >
 > **Where each is enforced, and the opt-out.** Every rule is a spanned compile
@@ -53,7 +53,7 @@
 > | `unprotected_pretick_out_write` | `hazard_w4_mixed_alignment_flagged`, `hazard_probe_fsm_flagged` / `hazard_v4_leading_read_not_flagged`, `hazard_v6_post_tick_assign_not_flagged`, `hazard_w8_regout_immunises_mixed_alignment`, `hazard_w9_regout_immunises_the_minimal_case`, `hazard_lfsr_shape_not_flagged`, `hazard_regout_only_module_not_flagged`, and the three DISSOLVED shapes `hazard_v1_assign_then_write_dissolved`, `hazard_v5_trailing_read_dissolved`, `hazard_v7_escape_across_tick_dissolved` | `fail/pretick_alignment.rs` (`mixed_alignment`), `pass/pretick_alignment_ok.rs` (`post_tick_update`, `registered_output`, `leading_read`, `constant_write`, `forwarded_opening_drive`) | `pretick_alignment_hazard_flags_exactly_the_known_divergent_modules`; `EXPECTED_FLAGGED` = {`tests/fixtures/probe_timing_dut.rs::probe_fsm`, `tests/sequential_forwarding_divergence.rs::w4_mixed_alignment`, `tests/fixtures/control_extraction_dut.rs::branch_merge_explicit`, `…::pc_arm_toggle`, `…::pc_arm_write`} |
 > | …constant-write clause | `a_conditional_constant_write_is_flagged` / `an_unconditional_constant_write_is_not_flagged` | `pass/pretick_alignment_ok.rs::constant_write` (no dedicated `fail/` case; the corpus pin carries the positives) | the last three entries of `EXPECTED_FLAGGED` above |
 > | ~~`unprotected_trailing_out_write`~~ | retired 2026-10-23 with phase C; its unit tests, pin and witnesses' opt-outs are gone. `trailing_segment_register_update_agrees` and `branch_trailing_probe` now pin the AGREEMENT | — | — |
-> | `multi_phase_out_write` | **none in `cfg.rs`**; the positive/negative pair is `tests/sequential_forwarding_divergence.rs::the_rule_flags_the_plain_form_and_not_the_registered_one` (`pulse_plain` flagged, `pulse_registered` clean) | **none** | `multi_phase_out_write_flags_exactly_the_demonstration_modules`; `EXPECTED_MULTI_PHASE` = {`tests/sequential_forwarding_divergence.rs::pulse_plain`} |
+> | `multi_phase_out_write` | `mphase_*` (one per clause: `mphase_constant_pulse_no_input_not_flagged`, `mphase_two_registers_no_input_not_flagged`, `mphase_two_closing_deferred_not_flagged`, `mphase_regout_not_flagged`, `mphase_single_phase_not_flagged` / `mphase_two_registers_plus_unrelated_read_flagged`, `mphase_trailing_immediate_read_flagged`, `mphase_register_free_passthrough_flagged`, `mphase_mixed_closing_and_opening_flagged`, `mphase_linear_route_flagged`) | `fail/multi_phase_out_write.rs` (`mixed_anchors`), `pass/pretick_alignment_ok.rs` (`two_phase_opening_mux`, `two_phase_closing_mux`) | `multi_phase_out_write_flags_exactly_the_demonstration_modules`; `EXPECTED_MULTI_PHASE` = the eight refused `e*` probes in `tests/sequential_forwarding_divergence.rs` (`e7`, `e7w`, `e2x`, `e4`, `e5`, `e6`, `e4i`, `e5f`); `pulse_plain` is clean under this rule |
 > | `pretick_out_write_before_update` | `v8a_write_between_read_and_update_flagged`, `v8t_trailing_write_before_update_flagged` / `v8b_write_after_update_not_flagged`, `v8c_write_before_read_not_flagged`, `v8_constant_write_not_flagged`, `v8_regout_not_flagged`, `v8_unrelated_update_after_write_not_flagged`, `v8t_trailing_write_after_update_not_flagged` | `fail/write_before_update.rs` (`stale_publish`), `pass/pretick_alignment_ok.rs` (`v8b_publish_after_update`, `v8c_publish_before_read`), `pass/single_loop_local_ok.rs::accum` (reordered to V8c) | `write_before_update_flags_exactly_the_demonstration_modules`; `EXPECTED_WRITE_BEFORE_UPDATE` = {`tests/sequential_forwarding_divergence.rs::v8a_read_write_update`, `…::v8d_temp_renamed_update`, `tests/fixtures/out_phase_dut.rs::out_from_reg_before_commit`, `…::v8t_stage_publish_then_load`} |
 >
 > The four corpus pins scan every clocked (`sequential` / `synchronizer`) module
@@ -63,7 +63,7 @@
 > pinned module carries `allow_pretick_alignment`, so the pins are also the proof
 > that the opt-out silences the error and not the detection.
 >
-> **Measured, not argued:** `tests/sequential_forwarding_divergence.rs` (19
+> **Measured, not argued:** `tests/sequential_forwarding_divergence.rs` (34
 > `#[test]`s, none ignored, all sim-vs-Verilator on the transpiled SV; each records
 > *today's* verdict and flips loudly when a divergence is fixed or a dissolution
 > regresses).
@@ -353,6 +353,15 @@ noted it could not explain V7. That line of reasoning was looking at the wrong a
   | clear moved out of the trailing segment | pulse | **DIVERGE** — not the trailing segment |
   | plain ticks, no trailing statements | pulse | **refused by the linear path** |
 
+  **Phase C (2026-10-23) made the first row AGREE** — the opening drives of the
+  extracted pulse are now a forwarded mux with a hold register — and **phase E
+  the same day derived and measured the whole class** (`CYCLE_DATAFLOW_SEMANTICS.md`
+  §9, the `e*` battery): the rule is narrowed to the shapes whose emitted form
+  still cannot show the simulator's trace (linear route, an input read anywhere
+  with an opening write, a register-free body with reads, mixed anchors), and
+  the input-free and all-closing classes are accepted. The paragraph below is
+  the 2026-08-25 landing record.
+
   So the fix is `Cfg::multi_phase_out_write`, enforced in both front-ends
   (`copper-macros/src/lib.rs` and `copper-codegen/src/lib.rs::transpile_target`)
   with the same `RegOut` remedy and the same `allow_pretick_alignment` opt-out. On
@@ -549,7 +558,9 @@ discards that port, so only the type and its wire changed. On landing the flagge
 demonstration witnesses were `trailing_update` and `pulse_plain`; `pulse_plain`
 left the set the same day when `written_on_all_paths` was scoped to the region
 being asked about (its trailing `dv.write(Zero)` is an unconditional constant — it
-stays guarded by `multi_phase_out_write`, which is what is actually wrong with it).
+stayed guarded by `multi_phase_out_write` until phase E narrowed that rule on
+2026-10-23; it agrees under phase C and is flagged today only by
+`out_first_driven_late`).
 
 #### NARROWED 2026-08-27 — the linear class is exempt (commit `8ffade7`)
 

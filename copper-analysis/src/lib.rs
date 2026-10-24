@@ -119,15 +119,20 @@ pub fn trailing_regout_reads_input(f: &ItemFn) -> Vec<String> {
     Cfg::build(f).map(|c| c.trailing_regout_reads_input()).unwrap_or_default()
 }
 
-/// Plain combinational `Out` ports driven in **more than one clock phase** — a
-/// shape the multi-tick lowering already refuses, but which control extraction
-/// hides by rewriting the body into a single-tick `match pc` FSM whose states are
-/// the phases. Returns the offending ports, sorted; empty for a combinational
-/// module, one with no top-level loop, or one whose outputs are all `RegOut`.
+/// Plain combinational `Out` ports driven in **more than one clock phase** whose
+/// emitted form cannot show the simulator's trace — narrowed 2026-10-23 (phase E)
+/// to the measured divergent classes: a write anchored differently on the two
+/// sides (an input read anywhere in an extracted body edge-samples every drive;
+/// a trailing or register-free read is immediate in the simulator), and the
+/// linear route, which has no mux form. An input-free extracted module, and one
+/// whose every write of the port sits behind a deferred read, are accepted and
+/// measured agreeing. Returns the offending ports, sorted; empty for a
+/// combinational module, one with no top-level loop, or one whose outputs are all
+/// `RegOut`.
 ///
 /// The remedy is `RegOut`, which is immune by construction. See
-/// [`Cfg::multi_phase_out_write`] for the mechanism, the measured witnesses, and
-/// why widening the D1 rule instead was rejected with corpus evidence.
+/// [`Cfg::multi_phase_out_write`] for the derivation, the verdict table, and why
+/// widening the D1 rule instead was rejected with corpus evidence.
 pub fn multi_phase_out_write(f: &ItemFn) -> Vec<String> {
     Cfg::build(f).map(|c| c.multi_phase_out_write()).unwrap_or_default()
 }

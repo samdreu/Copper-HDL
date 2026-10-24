@@ -281,7 +281,13 @@ receive/clone one.
   register-free segment is now `Immediate`, so a passthrough tracks its producer
   instead of lagging it.
   The other rules: **`multi_phase_out_write`** (a plain `Out` driven in more than one
-  clock phase; enforced in both front-ends); **`pretick_out_write_before_update`** (a
+  clock phase, **narrowed 2026-10-23 by cycle-dataflow phase E** to the measured
+  divergent class — the linear route, an input read anywhere while a write is
+  opening, a register-free body with reads, or mixed anchors; an input-free extracted
+  body and one whose every write follows a deferred read are accepted and measured
+  agreeing — `CYCLE_DATAFLOW_SEMANTICS.md` §9, the `e*` battery in
+  `tests/sequential_forwarding_divergence.rs`; enforced in both front-ends);
+  **`pretick_out_write_before_update`** (a
   plain `Out` written from a register before that register's update in the same
   segment publishes the previous generation; 2026-08-26/27). **Phase C landed
   2026-10-23** (`vlir_lower::opening_hold_outputs`): a conditionally-driven plain
@@ -289,7 +295,11 @@ receive/clone one.
   arm) is emitted as a forwarded combinational mux with a `<port>_hold` register
   instead of an edge-sampled register, which is what made the control-extraction
   route's trailing drives one cycle late; `trailing_update`, `branch_trailing` and
-  `pulse_plain` now agree, and `unprotected_trailing_out_write` is gone. The doc also records **five** rejected fixes with
+  `pulse_plain` now agree, and `unprotected_trailing_out_write` is gone. **Reach of
+  phase C (measured 2026-10-23):** the opening predicate is statement-granular over
+  the whole extracted `match pc`, so the mux form is emitted only for modules with
+  no input read; `e9`/`e8` in the same battery pin two resulting single-phase
+  divergences that no rule guards yet (`CYCLE_DATAFLOW_SEMANTICS.md` §9.4). The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in

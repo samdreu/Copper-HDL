@@ -235,11 +235,18 @@ pinned).
   remains current as the measured-evidence record and gained §5.7 for phases B
   and D instead)*.
 
-### Phase E — OPTIONAL, gated separately: multi-phase mux (`pulse_plain`)
+### Phase E — multi-phase mux (`pulse_plain`) — DERIVED AND MEASURED 2026-10-23
 
-The §8-5 open question. Requires its own paper derivation plus an m2-style
-hand-lowered measurement *before* any scoping — a state-mux with hold arms is
-plausible and unproven. Not part of this migration unless separately approved.
+The §8-5 open question, answered in `CYCLE_DATAFLOW_SEMANTICS.md` §9: a
+multi-phase plain `Out` agrees iff every write has the same anchor on both
+sides. Phase C's mux + hold *is* the state-mux with hold arms, and it realizes
+the input-free class (`pulse_plain`, `e2`, `e3`); the all-closing class agrees
+edge-sampled (`e5d`). `multi_phase_out_write` was **narrowed, not retired** —
+the linear route, an input read anywhere with an opening write, register-free
+bodies with reads, and mixed anchors stay refused, each with a flipping pair.
+No emission changed (sv-baseline delta: the new probes only). Two single-phase
+divergences the battery exposed (`e8`, `e9`) are recorded unguarded in §9.4 and
+are the next candidate codegen change (arm-granular opening tracking).
 
 ## 3. Gates (every phase)
 

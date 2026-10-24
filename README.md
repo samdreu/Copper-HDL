@@ -406,7 +406,9 @@ counterexample rather than lowered to something plausible:
 - **The pre-tick alignment family**: four compile-time rules refuse plain-`Out`
   drive shapes whose phase would silently differ between the simulator and the
   synthesized FSM (a path-dependent read boundary, a port written in more than
-  one clock phase, and a write that precedes its register's update). The remedy each error
+  one clock phase where the two sides anchor a write differently — an input-free
+  body, or one whose every write follows an input read a tick follows, is
+  accepted — and a write that precedes its register's update). The remedy each error
   names is usually `RegOut`. Five *rejected* fixes are recorded with measured
   evidence in
   [`design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md`](design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md)

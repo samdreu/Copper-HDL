@@ -256,6 +256,16 @@ pub struct Cfg {
     /// 0-iteration exit never false-rejects the outer loop); its own body's
     /// tickless-cycle well-formedness is enforced here instead.
     nested_ticking_loops: Vec<Cfg>,
+    /// Some `clk.tick().await` of the top-level loop body sits **inside** a
+    /// statement — a branch, a `match` arm, or a nested loop — rather than being a
+    /// bare top-level statement. This is the source-level mirror of control
+    /// extraction's trigger (`control_extract::loop_needs_extraction`): such a body
+    /// is lowered as a single-tick `match pc` FSM, a body whose ticks are all
+    /// top-level goes down the **linear** multi-phase path. Read by
+    /// [`multi_phase_out_write`](Self::multi_phase_out_write), whose accepted class
+    /// exists only on the extracted route (phase C's emission form lives there).
+    /// `false` for a combinational body.
+    has_nested_tick: bool,
     /// The register set, computed once. The backward-liveness fixed point behind
     /// [`Cfg::registers`] is the expensive part of every analysis on this graph
     /// (≈375 ms on the transpilable CPU, measured 2026-09-03 against 0.8 ms to
@@ -287,6 +297,12 @@ impl Cfg {
         let body_entry = b.build_block(&loop_body, head);
         b.nodes[head].succs.push((body_entry, EdgeKind::Comb));
 
+        // A tick that is not itself a bare top-level statement of the loop body.
+        let has_nested_tick = loop_body.iter().any(|stmt| {
+            let bare = matches!(stmt, Stmt::Expr(e, _) if tick_clock(e).is_some());
+            !bare && stmt_has_tick(stmt)
+        });
+
         Some(Cfg {
             nodes: b.nodes,
             head,
@@ -295,6 +311,7 @@ impl Cfg {
             inputs: in_param_names(f),
             exit: None,
             nested_ticking_loops: b.nested,
+            has_nested_tick,
             registers_cache: std::cell::OnceCell::new(),
         })
     }
@@ -319,6 +336,7 @@ impl Cfg {
             inputs: in_param_names(f),
             exit: Some(exit),
             nested_ticking_loops: b.nested,
+            has_nested_tick: false,
             registers_cache: std::cell::OnceCell::new(),
         }
     }
@@ -1053,54 +1071,85 @@ impl Cfg {
         ticks >= 2 || self.nodes.iter().any(|n| n.is_tick && n.folded)
     }
 
-    /// Plain combinational `Out` ports driven in **more than one clock phase**.
-    ///
-    /// The multi-tick lowering already refuses this — *"output port `p` is driven in
-    /// more than one phase (across `clk.tick().await` boundaries), which would emit
-    /// multiple conflicting drivers. Drive it in exactly one phase, or hold it in a
-    /// register"* — but only when it can see the phases. **Control extraction hides
-    /// them**: it rewrites a body whose ticks live inside branches or loops into a
-    /// single-tick `match pc { … }` FSM, so the check counts one tick and passes,
-    /// while the `pc` states are exactly the phases it was meant to count.
-    ///
-    /// The consequence is measured, not argued. A one-cycle pulse —
-    ///
-    /// ```text
-    /// loop { for _ in 0..3 { tick } dv.write(One); tick; dv.write(Zero); }
-    /// ```
-    ///
-    /// — diverges from its transpiled SystemVerilog by exactly one cycle, uniformly,
-    /// because with no barrier the simulator runs a segment during the PREVIOUS
-    /// cycle's post-edge settle while the FSM gives it its own state. That is the
-    /// pre-tick alignment family (D1), and `RegOut` is immune to it by construction:
-    /// the phase at which the write executes is unobservable through a port that
-    /// commits at the edge. Replacing the port type is the whole fix, which is why
-    /// the diagnostic points there — the same remedy `multi_write_collapse` and the
-    /// D1 guardrail already point at.
-    ///
-    /// # Why not widen the D1 rule instead
-    ///
-    /// Tried and measured. `unprotected_pretick_out_write` examines only head →
-    /// first tick (plan Q5). Widening it to every post-tick segment flags **36 of
-    /// 120** corpus modules, ~30 of which have passing equivalence tests —
-    /// `det_010`, `mac_pipeline`, `dual_port_ram`, `bsg_dff_en`, every memory
-    /// fixture. Writing a plain `Out` after a tick is the ORDINARY multi-phase
-    /// pattern and is correct; writing it in *two* phases is not. On landing
-    /// (commit `99290da`, 2026-08-25) this rule flagged its synthetic witnesses and
-    /// three real modules (`uart_tx`, `uart_rx`, the CPU's program counter), which
-    /// were migrated to `RegOut`; the exact-set corpus pin today is `pulse_plain`
-    /// alone (`EXPECTED_MULTI_PHASE` in
-    /// `copper-analysis/tests/pretick_alignment_corpus.rs`).
+    /// Plain combinational `Out` ports driven in **more than one clock phase**
+    /// whose emitted form cannot show the simulator's trace — **narrowed 2026-10-23
+    /// (cycle-dataflow phase E)** from "every port written in two phases" to the
+    /// measured divergent class. Returns the offending ports, sorted.
     ///
     /// # What a "phase" is here
     ///
     /// A Comb-connected component of the CFG. A tick is the only edge that separates
     /// two of them, and the trailing segment merges with the head — correctly, since
     /// falling off the end of the body and re-entering it costs no cycle, so they
-    /// run in the same one.
+    /// run in the same one. `RegOut` is excluded for free: `Node::writes` holds only
+    /// combinational outputs, the same way `multi_write_collapse` gets its exclusion.
     ///
-    /// `RegOut` is excluded for free: `Node::writes` holds only combinational
-    /// outputs, the same way `multi_write_collapse` gets its exclusion.
+    /// # The derivation (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md`, "Phase E")
+    ///
+    /// A plain `Out` written in several phases is a mux over FSM state, and the
+    /// question is whether the mux the transpiler emits shows each write at the
+    /// instant the simulator shows it. Each write has an **anchor**: *opening* when
+    /// the simulator executes it at the opening instant of its cycle (no deferred
+    /// `In` read parks the task before it), *closing* when a deferred read's barrier
+    /// moves it to the pre-edge settle of the closing edge. The emission has a
+    /// predicate of its own (`vlir_lower::opening_hold_outputs`): a conditionally
+    /// driven port whose every drive is an opening drive **as codegen sees it** —
+    /// no `In` read anywhere in the statement walk before the drive, and under
+    /// control extraction that walk is the whole `match pc`, so **any input read in
+    /// the module** demotes every drive — becomes a forwarded combinational mux with
+    /// a hold register (visible from the opening observation); any other port is an
+    /// edge-sampled register under `pc` guards (visible from the closing one).
+    ///
+    /// Predicted on paper, then measured on the probes in
+    /// `tests/sequential_forwarding_divergence.rs` (one `#[test]` per row, traces
+    /// pinned):
+    ///
+    /// | shape | sim anchors | emission | verdict |
+    /// |---|---|---|---|
+    /// | two constants, no input (`pulse_plain`) | opening, opening | mux + hold | **agree** |
+    /// | two committed registers, no input (`e2_two_registers`) | opening, opening | mux + hold | **agree** |
+    /// | forwarded next-state then committed (`e3_forwarded_then_committed`) | opening, opening | mux + hold | **agree** |
+    /// | both writes behind a deferred read, module has registers (`e5d_two_closing_deferred`) | closing, closing | edge-sampled | **agree** |
+    /// | register-valued writes plus an unrelated read elsewhere (`e2x_…`) | opening, opening | edge-sampled | DIVERGE, opening drives one late |
+    /// | deferred read then a constant (`e4_…`), via a wire (`e6_…`) | closing, opening | edge-sampled | DIVERGE, the opening drive one late |
+    /// | one deferred, one trailing *immediate* read (`e5_two_closing`) | closing, opening | edge-sampled | DIVERGE (one tick moved flips it to `e5d`) |
+    /// | register-free module, reads feeding the writes (`e4i_…`, `e5f_…`) | opening (passthrough-immediate) | edge-sampled | DIVERGE |
+    /// | linear route, register values (`e7_…`) | opening, opening | **refused** by `vlir_lower` (multiply driven) | refused one IR late |
+    /// | linear route, phase-local wires (`e7w_…`) | opening, opening | phase-guarded hold register | DIVERGE, one late |
+    ///
+    /// So the port agrees iff it is on the **extracted** route and either (i) the
+    /// module reads no `In` port at all — every drive is opening on both sides and
+    /// phase C's mux shows it — or (ii) every write of the port is reached by a
+    /// **deferred** read in its own phase and the module has registers — every drive
+    /// is closing on both sides and the edge-sampled form shows it. Everything else
+    /// is refused: the mixed class (some drive opening in the simulator while
+    /// codegen edge-samples the whole port), the register-free class (a read
+    /// feeding a plain `Out` in a register-free body is an *immediate* passthrough
+    /// read in the simulator, `classify_reads`, so the write is opening however it
+    /// is spelled), and the linear route, where no mux form exists and the lowering
+    /// refuses or edge-samples one IR later — the macro must refuse it too, or a
+    /// module compiles that does not transpile (front-end parity).
+    ///
+    /// Unmeasured shapes land on the refusing side by construction: a write after a
+    /// folded tick-bearing loop that reads an input (a wait loop) is not reached by
+    /// that read over Comb edges, so it counts as opening, and a body extraction
+    /// handles only because of a `continue` has no nested tick, so it counts as
+    /// linear. Both can be measured and admitted later; neither is admitted by
+    /// guess.
+    ///
+    /// # Why not widen the D1 rule instead
+    ///
+    /// Tried and measured in 2026-08-25. `unprotected_pretick_out_write` examines only head →
+    /// first tick (plan Q5). Widening it to every post-tick segment flags **36 of
+    /// 120** corpus modules, ~30 of which have passing equivalence tests
+    /// (`det_010`, `mac_pipeline`, `dual_port_ram`, `bsg_dff_en`, every memory
+    /// fixture). Writing a plain `Out` after a tick is the ORDINARY multi-phase
+    /// pattern and is correct. On landing (commit `99290da`) this rule flagged its
+    /// synthetic witnesses and three real modules (`uart_tx`, `uart_rx`, the CPU's
+    /// program counter), which were migrated to `RegOut`; `RegOut` remains the
+    /// universal remedy, since the phase at which a write executes is unobservable
+    /// through a port that commits at the edge. The exact-set corpus pin is
+    /// `EXPECTED_MULTI_PHASE` in `copper-analysis/tests/pretick_alignment_corpus.rs`.
     pub fn multi_phase_out_write(&self) -> Vec<String> {
         let n = self.nodes.len();
         let mut parent: Vec<usize> = (0..n).collect();
@@ -1125,7 +1174,8 @@ impl Cfg {
                 }
             }
         }
-        let mut phases: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+        // port -> (phases it is written in, the nodes that write it)
+        let mut phases: BTreeMap<String, (BTreeSet<usize>, Vec<usize>)> = BTreeMap::new();
         for i in 0..n {
             // A `folded` node carries the conservative all-outputs over-approximation
             // for a nested loop, not a real `port.write` — counting it as evidence
@@ -1135,10 +1185,57 @@ impl Cfg {
             }
             let r = find(&mut parent, i);
             for w in &self.nodes[i].writes {
-                phases.entry(w.clone()).or_default().insert(r);
+                let e = phases.entry(w.clone()).or_default();
+                e.0.insert(r);
+                e.1.push(i);
             }
         }
-        phases.into_iter().filter(|(_, p)| p.len() > 1).map(|(port, _)| port).collect()
+        let reads_input = self.reads_any_input();
+        let register_free = self.registers().is_empty();
+        phases
+            .into_iter()
+            .filter(|(_, (p, _))| p.len() > 1)
+            .filter(|(_, (_, writes))| {
+                // Linear route: no mux form; the lowering refuses or edge-samples.
+                if !self.has_nested_tick {
+                    return true;
+                }
+                // (i) No input anywhere: every drive opening on both sides.
+                if !reads_input {
+                    return false;
+                }
+                // Register-free: the reads feeding the writes are immediate
+                // passthroughs, so the writes are opening in the simulator.
+                if register_free {
+                    return true;
+                }
+                // (ii) Every write closing on both sides — else mixed.
+                !writes.iter().all(|&w| self.deferred_read_reaches(w))
+            })
+            .map(|(port, _)| port)
+            .collect()
+    }
+
+    /// Some node of the loop body — a folded nested loop included, since its
+    /// `uses` carry its interior — reads an `In` port.
+    fn reads_any_input(&self) -> bool {
+        self.nodes.iter().any(|n| !n.uses.is_disjoint(&self.inputs))
+    }
+
+    /// True iff a **deferred** `In` read comb-reaches `w`: some node reading an
+    /// input both reaches `w` over Comb edges (the write's own operand included) and
+    /// reaches a tick over Comb edges — the condition under which `classify_reads`
+    /// makes the read `Deferred`, parking the task at the read site until the
+    /// pre-edge settle. A read whose only continuation is the loop head (a trailing
+    /// read) is immediate and does not count; neither does a read inside a folded
+    /// tick-bearing loop, which reaches nothing past itself over Comb edges.
+    fn deferred_read_reaches(&self, w: usize) -> bool {
+        (0..self.nodes.len()).any(|r| {
+            !self.nodes[r].uses.is_disjoint(&self.inputs)
+                && !self.nodes[r].folded
+                && self.comb_reaches(r, w)
+                && (0..self.nodes.len()).any(|t| self.nodes[t].is_tick && self.comb_reaches(r, t))
+        })
     }
 
     /// Plain combinational `Out` ports that are **first driven late**: the loop
@@ -2162,6 +2259,8 @@ impl Builder {
             inputs: self.inputs.clone(),
             exit: None,
             nested_ticking_loops: b.nested,
+            // Not consulted on a sub-CFG (the multi-phase rule runs on the top level).
+            has_nested_tick: false,
             registers_cache: std::cell::OnceCell::new(),
         }
     }
@@ -4010,6 +4109,158 @@ mod tests {
             "an unconditional constant write is idempotent across the phase shift — \
              flagging it would reject a correct design"
         );
+    }
+
+    // ── the multi-phase rule, narrowed (phase E, 2026-10-23) ───────────────────
+    //
+    // One unit test per clause, each the source of a probe measured in
+    // tests/sequential_forwarding_divergence.rs (verdict named in the test name).
+
+    fn mphase(src: &str) -> Vec<String> {
+        Cfg::build(&parse(src)).map(|c| c.multi_phase_out_write()).unwrap_or_default()
+    }
+
+    /// `pulse_plain`: two constants, no input, extracted. AGREES under phase C's
+    /// mux + hold emission — no longer flagged.
+    #[test]
+    fn mphase_constant_pulse_no_input_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, dv: Out<Logic, C>) {
+                loop { for _ in 0..3 { clk.tick().await; } dv.write(Logic::One); clk.tick().await; dv.write(Logic::Zero); }
+            }
+        "#;
+        assert!(mphase(src).is_empty());
+    }
+
+    /// `e2_two_registers`: committed registers in two phases, no input. AGREES.
+    #[test]
+    fn mphase_two_registers_no_input_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
+                let mut a: Bits<8> = Bits::zero();
+                let mut b: Bits<8> = Bits::zero();
+                loop { a = a + Bits::from_lit::<1>(); b = b + Bits::from_lit::<3>(); for _ in 0..2 { clk.tick().await; } o.write(a); clk.tick().await; o.write(b); }
+            }
+        "#;
+        assert!(mphase(src).is_empty());
+    }
+
+    /// `e2x_two_registers_plus_unrelated_read`: the same, plus one input read in
+    /// the head. Codegen edge-samples every drive once the module reads an input;
+    /// the opening drives lag. DIVERGES — flagged. The flipping pair for clause (i).
+    #[test]
+    fn mphase_two_registers_plus_unrelated_read_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut a: Bits<8> = Bits::zero();
+                let mut b: Bits<8> = Bits::zero();
+                loop { a = x.read(); b = b + Bits::from_lit::<3>(); for _ in 0..2 { clk.tick().await; } o.write(a); clk.tick().await; o.write(b); }
+            }
+        "#;
+        assert_eq!(mphase(src), vec!["o".to_string()]);
+    }
+
+    /// `e5d_two_closing_deferred`: both writes behind a deferred read (a tick
+    /// follows each), module has a register. Both closing on both sides. AGREES.
+    #[test]
+    fn mphase_two_closing_deferred_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read()); for _ in 0..2 { clk.tick().await; } o.write(x.read() + cnt); clk.tick().await; }
+            }
+        "#;
+        assert!(mphase(src).is_empty());
+    }
+
+    /// `e5_two_closing`: the trailing tick removed, so the second read has no tick
+    /// after it — immediate in the simulator, the write opening. DIVERGES — flagged.
+    /// The flipping pair for clause (ii): one tick moved.
+    #[test]
+    fn mphase_trailing_immediate_read_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read()); for _ in 0..2 { clk.tick().await; } o.write(x.read() + cnt); }
+            }
+        "#;
+        assert_eq!(mphase(src), vec!["o".to_string()]);
+    }
+
+    /// `e5f_two_closing_register_free`: `e5d` without its register. The reads are
+    /// immediate passthroughs in a register-free body. DIVERGES — flagged. The
+    /// flipping pair for the register-free clause.
+    #[test]
+    fn mphase_register_free_passthrough_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { for _ in 0..2 { clk.tick().await; } o.write(x.read()); for _ in 0..2 { clk.tick().await; } o.write(x.read() + Bits::from_lit::<1>()); clk.tick().await; }
+            }
+        "#;
+        assert_eq!(mphase(src), vec!["o".to_string()]);
+    }
+
+    /// `e4_closing_then_opening`: a deferred read feeds one write, a constant the
+    /// other. Mixed. DIVERGES — flagged.
+    #[test]
+    fn mphase_mixed_closing_and_opening_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read()); for _ in 0..2 { clk.tick().await; } o.write(Bits::zero()); }
+            }
+        "#;
+        assert_eq!(mphase(src), vec!["o".to_string()]);
+    }
+
+    /// `e7_linear_two_registers`: the linear route (every tick a bare top-level
+    /// statement). No mux form exists; `vlir_lower` refuses it as multiply driven,
+    /// so the source rule must refuse it too. Flagged.
+    #[test]
+    fn mphase_linear_route_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
+                let mut a: Bits<8> = Bits::zero();
+                let mut b: Bits<8> = Bits::zero();
+                loop { a = a + Bits::from_lit::<1>(); b = b + Bits::from_lit::<3>(); clk.tick().await; o.write(a); clk.tick().await; o.write(b); clk.tick().await; }
+            }
+        "#;
+        assert_eq!(mphase(src), vec!["o".to_string()]);
+    }
+
+    /// `RegOut` is exempt by construction, whatever the shape.
+    #[test]
+    fn mphase_regout_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read()); for _ in 0..2 { clk.tick().await; } o.write(Bits::zero()); }
+            }
+        "#;
+        assert!(mphase(src).is_empty());
+    }
+
+    /// A port written in ONE phase is never this rule's business, whatever the
+    /// anchors (`e8`, `e9` in the battery are single-phase and measured elsewhere).
+    #[test]
+    fn mphase_single_phase_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read() + cnt); }
+            }
+        "#;
+        assert!(mphase(src).is_empty());
     }
 
     // ── the late-constant startup rule (`out_first_driven_late`, 2026-10-23) ──
