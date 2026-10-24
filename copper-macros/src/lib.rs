@@ -938,6 +938,7 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
         return err.to_compile_error().into();
     }
 
+
     match hardware_mode {
         HardwareMode::Sequential | HardwareMode::Synchronizer => {
             // Regular sequential modules must be single-domain; synchronizers are
@@ -965,6 +966,45 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 .map_or(Ok(()), |c| c.check_reachability().map_err(|(s, m)| Error::new(s, m)))
             {
                 return err.to_compile_error().into();
+            }
+            // Front-end parity (2026-10-23): the shapes the transpiler refuses are
+            // refused here too, so a module that simulates also transpiles. A nested
+            // loop must end at a clock boundary (the repeating wait is
+            // `loop { <test>; tick }`, never `loop { tick; <test> }`), and the only
+            // `await` a body may write is `<clock>.tick().await`. Both on the pristine
+            // fn, before any rewrite, and after reachability so a module that never
+            // ticks gets that message rather than one about a nested loop.
+            if let Err(err) = copper_analysis::check_nested_loop_shape(&input_fn) {
+                return err.to_compile_error().into();
+            }
+            if let Err(err) = copper_analysis::check_awaits(&input_fn) {
+                return err.to_compile_error().into();
+            }
+            // The memory-port staging rules and the plain-`Out`-from-a-read-result
+            // rule — transpiler-only until 2026-10-23, now enforced here too (front-end
+            // parity): one access per bus per cycle, a read result observed only after
+            // the edge that produces it and only on a staged port, and no plain `Out`
+            // driven from a read result across clock phases.
+            if let Err((span, msg)) = cfg.as_ref().map_or(Ok(()), |c| c.check_memory_staging()) {
+                return Error::new(span, msg).to_compile_error().into();
+            }
+            let mem_outs = cfg.as_ref().map(|c| c.memory_result_drives_plain_out()).unwrap_or_default();
+            if let Some(port) = mem_outs.first() {
+                let span = port_param_span(&input_fn.sig, port)
+                    .unwrap_or_else(|| input_fn.sig.ident.span());
+                return Error::new(
+                    span,
+                    format!(
+                        "output port `{port}` is driven from a memory read result in a \
+                         multi-phase module. The read pipeline re-captures on every clock edge, \
+                         so a plain `Out` either tracks it into the phases that do not observe \
+                         it, or holds one edge late — neither matches the simulator. Declare the \
+                         port `RegOut<T, D>`, or latch the result into a register and drive the \
+                         output from that."
+                    ),
+                )
+                .to_compile_error()
+                .into();
             }
             // A combinational `Out` written on both sides of one bare `clk.tick().await`
             // within an iteration, after a leading (deferred) input read, collapses in
@@ -998,20 +1038,16 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             // early — silently disagreeing with the synthesized `always_ff`. Reject
             // it, pointing at `RegOut` (immune: it commits at the edge). See
             // `design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md` for the measurements.
-            // The same hazard past the LAST tick: a plain `Out` driven from a
-            // register in the loop's trailing segment, in a body that crosses more
-            // than one clock edge per iteration. Measured identical — one cycle
-            // early, uniformly — and gated on the tick count because in a
-            // single-tick loop the trailing statements share the head's phase and
-            // there is nothing to misalign (guardrail 5.4).
+            // (The trailing-segment companion rule, `unprotected_trailing_out_write`,
+            // was retired 2026-10-23 when phase C landed: the extraction route's
+            // trailing plain-`Out` drive is now emitted as a forwarded combinational
+            // mux with a hold register and agrees with the simulator —
+            // `tests/sequential_forwarding_divergence.rs::trailing_segment_register_update_agrees`,
+            // `branch_trailing_probe`.)
             let misaligned = if allow_pretick_alignment {
                 Vec::new()
             } else {
-                let mut m = cfg.as_ref().map(|c| c.unprotected_pretick_out_write()).unwrap_or_default();
-                m.extend(cfg.as_ref().map(|c| c.unprotected_trailing_out_write()).unwrap_or_default());
-                m.sort();
-                m.dedup();
-                m
+                cfg.as_ref().map(|c| c.unprotected_pretick_out_write()).unwrap_or_default()
             };
             if let Some(port) = misaligned.first() {
                 let span = port_param_span(&input_fn.sig, port)
@@ -1071,6 +1107,40 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
+            // A `RegOut` written in the TRAILING region (after the last top-level
+            // tick) from an input read directly. A `RegOut` write takes effect at the
+            // first clock edge after it executes — for a trailing write, the next
+            // edge — and the emitted non-blocking assign at that edge samples the
+            // input one drive later than the simulator's immediate read did. Through
+            // a register the value is held and the two agree; read directly it is
+            // not, and realizing it would need a staging flop.
+            let trailing_input = if allow_pretick_alignment {
+                Vec::new()
+            } else {
+                cfg.as_ref().map(|c| c.trailing_regout_reads_input()).unwrap_or_default()
+            };
+            if let Some(port) = trailing_input.first() {
+                let span = port_param_span(&input_fn.sig, port)
+                    .unwrap_or_else(|| input_fn.sig.ident.span());
+                return Error::new(
+                    span,
+                    format!(
+                        "registered output `{port}` is written after the last `clk.tick().await` \
+                         from an input read in that same region. A `RegOut` write takes effect \
+                         at the first clock edge after it executes, so this write commits at \
+                         the NEXT edge — where the synthesized flip-flop samples the input one \
+                         drive later than the simulator's immediate read did, and the two \
+                         silently disagree by one cycle. Read the input before the \
+                         `clk.tick().await` (the write then commits at that edge, with the \
+                         read), or latch it into a register and write `{port}` from the \
+                         register (a held value is the same on both sides). If this module \
+                         exists to DEMONSTRATE the divergence, opt out explicitly with \
+                         `#[hardware(sequential, {ALLOW_PRETICK})]`."
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
             // A plain `Out` driven in more than one clock phase. The multi-tick
             // lowering already refuses this; control extraction hides the phases by
             // rewriting the body into a single-tick `match pc` FSM, so it has to be
@@ -1095,6 +1165,43 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                          it commits at the clock edge), or drive it in exactly one phase. If \
                          this module exists to DEMONSTRATE the divergence, opt out explicitly \
                          with `#[hardware(sequential, {ALLOW_PRETICK})]`."
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
+            // A plain `Out` FIRST DRIVEN LATE: every write of it a constant, none of
+            // them before the second clock edge of a multi-tick body. The simulator
+            // shows the port's initial value at the first observation (the writing
+            // segment has not run yet) while the emitted `assign` drives the constant
+            // from time 0 — a one-cycle startup transient no continuous assign can
+            // reproduce. Refused on the source (restrict-don't-grow, 2026-10-23);
+            // the boundary is measured, see `Cfg::out_first_driven_late`.
+            let late = if allow_pretick_alignment {
+                Vec::new()
+            } else {
+                // On the one shared graph, like every other rule here (the macro
+                // builds exactly one `Cfg` per module — M8 attribute cost).
+                cfg.as_ref().map(|c| c.out_first_driven_late()).unwrap_or_default()
+            };
+            if let Some(port) = late.first() {
+                let span = port_param_span(&input_fn.sig, port)
+                    .unwrap_or_else(|| input_fn.sig.ident.span());
+                return Error::new(
+                    span,
+                    format!(
+                        "output port `{port}` is first driven LATE: every write of it is a \
+                         constant, and none of them executes before the second clock edge of \
+                         a loop that crosses more than one `clk.tick().await` per iteration. \
+                         The simulator shows the port's initial value at the first observation \
+                         (the segment that writes it has not run yet) while the synthesized \
+                         `assign` drives the constant from time 0 — a one-cycle startup \
+                         transient that no continuous assign can reproduce. Write `{port}` in \
+                         the head segment too (before the first tick, so it is driven from \
+                         the first cycle), or declare it as `RegOut<…>` (registered: its first \
+                         drive is a clock edge the hardware has as well). If this module \
+                         exists to DEMONSTRATE the transient, opt out explicitly with \
+                         `#[hardware(sequential, {ALLOW_PRETICK})]`."
                     ),
                 )
                 .to_compile_error()

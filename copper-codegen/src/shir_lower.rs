@@ -31,7 +31,16 @@ pub fn lower_to_shir(chir: &CHIRModule) -> Result<SHIRModule, SHIRLowerError> {
                     .map(|p| p.name.clone())
                     .collect(),
             );
-            SHIRBody::Sequential(lower_seq_body(seq, in_ports, chir.span)?)
+            // `RegOut` ports: a trailing write to one is emitted from the committed
+            // register, not the forwarded next-state (see `Forwarding::trailing_reg_outs`).
+            let reg_out_ports: std::rc::Rc<HashSet<String>> = std::rc::Rc::new(
+                chir.ports
+                    .iter()
+                    .filter(|p| p.registered)
+                    .map(|p| p.name.clone())
+                    .collect(),
+            );
+            SHIRBody::Sequential(lower_seq_body(seq, in_ports, reg_out_ports, chir.span)?)
         }
         CHIRBody::Structural(st) => {
             SHIRBody::Structural(lower_structural_body(st)?)
@@ -191,6 +200,19 @@ struct Forwarding {
     /// unforwarded form is the model's emission — m2's measured target) and for
     /// the combinational path.
     forward_opening_drives: bool,
+    /// The module's `RegOut` ports, **only** when this is a TRAILING segment
+    /// (empty otherwise). A `RegOut` write takes effect at the first clock edge
+    /// after it executes. A trailing write executes after the edge that opened
+    /// its cycle, so it commits at the NEXT edge — by which time the trailing
+    /// segment's own register updates have already committed (the linear paths
+    /// fold them into the opening edge). Its non-blocking assign must therefore
+    /// read the COMMITTED register, not the forwarded next-state: `q <= acc` at
+    /// the next edge yields the value the simulator parked from `q.write(acc)`,
+    /// while the forwarded `q <= acc + d` would publish it one edge early
+    /// (`regout_trailing_single_tick`, measured). Pre-tick writes commit at the
+    /// closing edge together with the segment's updates, where the forwarded
+    /// form is the right one, which is why this is keyed on the segment.
+    trailing_reg_outs: std::rc::Rc<HashSet<String>>,
 }
 
 impl Forwarding {
@@ -203,6 +225,7 @@ impl Forwarding {
             in_ports: std::rc::Rc::new(HashSet::new()),
             seen_in_read: false,
             forward_opening_drives: false,
+            trailing_reg_outs: std::rc::Rc::new(HashSet::new()),
         }
     }
 
@@ -213,6 +236,7 @@ impl Forwarding {
         reg_names: HashSet<String>,
         in_ports: std::rc::Rc<HashSet<String>>,
         forward_opening_drives: bool,
+        trailing_reg_outs: std::rc::Rc<HashSet<String>>,
         span: SourceSpan,
     ) -> Self {
         Forwarding {
@@ -222,6 +246,7 @@ impl Forwarding {
             in_ports,
             seen_in_read: false,
             forward_opening_drives,
+            trailing_reg_outs,
         }
     }
 
@@ -321,7 +346,14 @@ fn lower_stmt_list(
             }
             CHIRStmt::PortWrite { port_name, value, .. } => {
                 let value = rename_vars(lower_expr(value)?, renames);
-                let edge_value = fwd.at_edge(&value);
+                // A trailing `RegOut` write commits at the NEXT edge, after this
+                // segment's updates have committed: its edge form is the committed
+                // register (see `Forwarding::trailing_reg_outs`).
+                let edge_value = if fwd.trailing_reg_outs.contains(port_name) {
+                    value.clone()
+                } else {
+                    fwd.at_edge(&value)
+                };
                 // Cycle-dataflow phase B: an OPENING-prefix drive (no In-port
                 // read precedes it in this segment) executes at the cycle's
                 // opening in the simulator, publishing the forwarded value — so
@@ -337,6 +369,9 @@ fn lower_stmt_list(
                     port_name: port_name.clone(),
                     value: assign_form,
                     edge_value,
+                    // Same predicate as `assign_form`: an opening-prefix drive is
+                    // one the simulator runs at the cycle's opening instant.
+                    opening: fwd.forward_opening_drives && !fwd.seen_in_read,
                 });
             }
             CHIRStmt::If { condition, then_body, else_body, .. } => {
@@ -489,8 +524,12 @@ fn lower_structural_body(st: &CHIRStructuralBody) -> Result<SHIRStructuralBody, 
 fn lower_seq_body(
     seq: &CHIRSeqBody,
     in_ports: std::rc::Rc<HashSet<String>>,
+    reg_out_ports: std::rc::Rc<HashSet<String>>,
     module_span: SourceSpan,
 ) -> Result<SHIRSeqBody, SHIRLowerError> {
+    // Handed to the two TRAILING-segment lowerings only; every other segment gets
+    // the empty set, so its `RegOut` drives keep the forwarded edge form.
+    let no_reg_outs: std::rc::Rc<HashSet<String>> = std::rc::Rc::new(HashSet::new());
     // Step 1: Validate CHIR preconditions
     validate_seq_chir(seq, module_span)?;
 
@@ -572,6 +611,7 @@ fn lower_seq_body(
             &seq.registers,
             &in_ports,
             false, // trailing segment: committed unforwarded emission (m2)
+            &reg_out_ports,
             module_span,
         )?;
         // …then the head segment's own combinational logic. Register reassignments
@@ -585,6 +625,7 @@ fn lower_seq_body(
             &seq.registers,
             &in_ports,
             true, // head segment: opening-prefix drives get forwarded emission
+            &no_reg_outs,
             module_span,
         )?;
         let pre_edge = merge_trailing_before_head(trailing_pre_edge, head_pre_edge);
@@ -647,6 +688,7 @@ fn lower_seq_body(
             &seq.registers,
             &in_ports,
             true, // pre-tick segment of its phase: opening-prefix selection on
+            &no_reg_outs,
             module_span,
         )?;
 
@@ -694,6 +736,7 @@ fn lower_seq_body(
                     &seq.registers,
                     &in_ports,
                     false, // trailing segment: committed unforwarded emission (m2)
+                    &reg_out_ports,
                     module_span,
                 )?;
                 // Trailing segment maps to the same phase — same renames apply
@@ -1080,6 +1123,9 @@ fn lower_pre_edge_stmts(
     // Pre-tick/head segments get the opening-drive selection; TRAILING segments
     // must not (their committed unforwarded form is the model's emission — m2).
     forward_opening_drives: bool,
+    // The module's `RegOut` ports for a TRAILING segment, empty for any other
+    // (see `Forwarding::trailing_reg_outs`).
+    trailing_reg_outs: &std::rc::Rc<HashSet<String>>,
     span: SourceSpan,
 ) -> Result<Vec<SHIRStmt>, SHIRLowerError> {
     // The wire types this segment declares. This USED to be empty, on the premise
@@ -1096,6 +1142,7 @@ fn lower_pre_edge_stmts(
         reg_name_set(registers, promoted_names),
         in_ports.clone(),
         forward_opening_drives,
+        trailing_reg_outs.clone(),
         span,
     );
     lower_stmt_list(stmts, promoted_names, renames, &wire_types, &mut fwd)

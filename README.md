@@ -403,17 +403,28 @@ counterexample rather than lowered to something plausible:
   refused by design; it is not, and no rule targets it. The read-first,
   delay-last spelling in `examples/uart/rx.rs` is the one anchored against an
   independent reference, not the only one that works.
-- **The pre-tick alignment family**: five compile-time rules refuse plain-`Out`
+- **The pre-tick alignment family**: four compile-time rules refuse plain-`Out`
   drive shapes whose phase would silently differ between the simulator and the
   synthesized FSM (a path-dependent read boundary, a port written in more than
-  one clock phase, and their trailing-segment variants). The remedy each error
+  one clock phase, and a write that precedes its register's update). The remedy each error
   names is usually `RegOut`. Five *rejected* fixes are recorded with measured
   evidence in
   [`design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md`](design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md)
   so they are not re-tried.
+- **A `RegOut` written after the last tick from an input read directly**: a
+  `RegOut` write takes effect at the first clock edge after it executes, so such
+  a write commits at the next edge, where the flip-flop samples the input one
+  drive later than the simulator's read. Read the input before the tick, or
+  through a register (`trailing_regout_reads_input`).
+- **A constant-only `Out` first written after the second clock edge** of a
+  multi-tick body: the simulator shows the initial value at the first
+  observation, the emitted `assign` drives the constant from time 0. Write it in
+  the head segment too, or declare it `RegOut` (`out_first_driven_late`; the same
+  constant one edge earlier agrees and is kept as the positive witness).
 - A **wait loop that ticks before testing** its condition (a repeating wait must
-  be `loop { <test>; clk.tick().await; }`), and `continue` inside a nested loop
-  — refused orderings, each with its own diagnostic
+  be `loop { <test>; clk.tick().await; }`) — refused by both front-ends
+  (`copper_analysis::check_nested_loop_shape`), and `continue` inside a nested
+  loop — refused by the transpiler with its own diagnostic
   (`copper-codegen/src/control_extract.rs`).
 - **Zero-latency memories** (`READ_LAT` and `WRITE_LAT` must both be at least
   1), a memory port accessed more than once in one cycle
@@ -444,15 +455,8 @@ counterexample rather than lowered to something plausible:
 on by one cycle, kept as `#[ignore]`d sweep cases with the reason attached
 rather than papered over (`SKIP` in `build.rs`):
 
-- a `RegOut` written *after* the tick in a **single-tick** loop: the transpiler
-  folds the write into this edge, the simulator commits it on the next
-  (`regout_trailing_single_tick`) — reaching for `RegOut` does not fix the
-  trailing plain-`Out` shape the pre-tick rules refuse;
 - a phase-gated cross-tick read (`probe_fsm`, the W4 path-dependent boundary
-  from the guardrail doc);
-- an `Out` first written in the trailing segment drives from cycle 1 in the
-  simulator but from time 0 as a continuous `assign` — a **startup transient**,
-  identical from cycle 1 on (`trailing_constant`).
+  from the guardrail doc).
 
 One correctness rule is worth knowing when reading the generated Verilog: an
 output drive that is *sampled at the clock edge* is emitted from the values the
@@ -478,7 +482,7 @@ still open.
 | | |
 |---|---|
 | [`design_docs/SYNCHRONOUS_SEMANTICS.md`](design_docs/SYNCHRONOUS_SEMANTICS.md) | the timing model — start here |
-| [`design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md`](design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md) | the pre-tick alignment family — its five compile-time rules, and the rejected fixes with measured evidence |
+| [`design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md`](design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md) | the pre-tick alignment family — its compile-time rules, and the rejected fixes with measured evidence |
 | [`design_docs/CORPUS_DIFFERENTIAL_SWEEP.md`](design_docs/CORPUS_DIFFERENTIAL_SWEEP.md) | why every module gets a generated sim-vs-emitted-SV case, and how |
 | [`design_docs/ANCHORING_A_MODULE.md`](design_docs/ANCHORING_A_MODULE.md) | how to add an independent Verilog reference to a swept module (the `REFERENCE` table) |
 | [`design_docs/LEVELIZED_SCHEDULING_SCOPE.md`](design_docs/LEVELIZED_SCHEDULING_SCOPE.md) | the levelized scheduler |

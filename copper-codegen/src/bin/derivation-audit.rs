@@ -168,9 +168,6 @@ fn main() {
             if !copper_analysis::unprotected_pretick_out_write(f).is_empty() {
                 guards.push("D1");
             }
-            if !copper_analysis::unprotected_trailing_out_write(f).is_empty() {
-                guards.push("trail");
-            }
             if !copper_analysis::multi_phase_out_write(f).is_empty() {
                 guards.push("mphase");
             }

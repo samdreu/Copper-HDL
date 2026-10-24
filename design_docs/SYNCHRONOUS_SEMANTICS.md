@@ -138,7 +138,7 @@ cycle**. Three consequences, all now implemented on every lowering path:
   of the tick that closes it. Unobservable through ports — `multi_write_collapse`
   rejects a port written on both sides of a tick — but observable for a plain local
   flowing from `C` into `A`.
-* **`C`'s register updates commit at the last tick's edge**, which is the edge that
+* **`C`'s register-local updates commit at the last tick's edge**, which is the edge that
   *opens* `C`'s cycle. That is the post-edge continuation convention above ("a register
   clocked at edge N is observable in cycle N"), and it is why moving a register update
   after the tick is D1's sanctioned remedy. Because those updates and the preceding
@@ -156,25 +156,59 @@ against `examples/cdc/sv/sync_2ff_ref.sv`). Same cycle, but the
 trailing statements execute at an instant just after the edge, and a wire would keep
 tracking its inputs for the rest of that cycle.
 
-**One lowering path realizes this and one does not — a known, guarded
-limitation.** The **linear** multi-tick path commits trailing updates at the
-opening edge exactly as stated (measured agreeing,
-`tests/sequential_forwarding_divergence.rs::linear_trailing_probe`).
-**Control extraction** places trailing effects one edge late wherever the last
-tick sits — measured divergent for both the folded-loop and branch-nested
-spellings (the `trailing_update` and `branch_trailing` modules in the same file;
-tests `d1_in_the_trailing_segment_is_an_unguarded_gap` and `branch_trailing_probe`) — so
-`Cfg::unprotected_trailing_out_write` refuses the observable class on precisely the
-extraction-shaped modules (the `Cfg::has_nested_tick` gate) and exempts the linear
-class. `RegOut` absorbs the placement difference, which is why uart's trailing write
-agrees. The extraction-path fix is the migration's deferred phase C; landing it
-retires the rule. Phase C has not landed as of 2026-09-01.
+* **A `RegOut` written in `C` commits at the *next* edge**, not the opening one: a
+  `RegOut` write takes effect at the first clock edge after it executes, and `C`
+  executes after the edge that opened its cycle (the rule is stated once under
+  *Output timing* below; this is its trailing instance). The simulator parks the
+  write in `pending` until the next `Clock::advance`; the linear lowering emits
+  it from the **committed** register at that edge (`q <= acc`, not the forwarded
+  `acc + d` — `shir_lower`'s `trailing_reg_outs`; landed 2026-10-23, which is
+  what made `regout_trailing_single_tick` agree and sweep); control extraction's
+  trailing state already committed there. The one value that emission cannot
+  realize is an `In` port read *directly* in `C` at an immediate read site — the
+  flip-flop would sample it one drive later than the simulator did — so that
+  shape is refused by `Cfg::trailing_regout_reads_input` (both front-ends; remedy:
+  read before the tick, or through a register). Reads with a tick comb-reachable
+  from them are deferred and agree (`ex_regfile`'s reads before its halt loop).
 
-**Startup.** An `Out` written *only* in `C` reads as its initial value until the
-statement first runs, while the emitted continuous `assign` drives it from time 0 — so
-the two differ for the first cycle or two and agree thereafter. A continuous assign has
-no notion of "not yet written"; this is a property of an output first driven late, not
-of the rule above.
+**Both lowering routes realize this (phase C, landed 2026-10-23).** The **linear**
+multi-tick path commits trailing updates at the opening edge exactly as stated
+(measured agreeing, `tests/sequential_forwarding_divergence.rs::linear_trailing_probe`).
+**Control extraction** places the statements after the last top-level tick in a
+state that runs in the window after that edge and commits at the next one — the
+right place for register updates, memory stagings, memory results (which exist only
+after the opening edge) and `RegOut` writes. Its one defect was the emitted form of
+a plain `Out` driven in that state: a conditionally-driven output became an
+edge-sampled register (`o <= edge_value` under the arm's guard), visible one cycle
+after the simulator shows it — the measured lag of `trailing_update` (folded loop)
+and `branch_trailing` (branch-nested ticks). The fix is an emission form, not a
+state placement: `vlir_lower::opening_hold_outputs` emits a conditionally-driven
+plain `Out` whose every drive is an **opening** drive (no `In` read precedes it in
+its arm — `SHIRStmt::PortDrive::opening`, the same predicate that selects the
+forwarded continuous-assign form) as a forwarded combinational mux with a
+`<port>_hold` register loaded in `always_ff` under the same guards: the m2 hand
+model, which `m2_model_forwarded_lowering_matches_the_simulator_for_trailing_update`
+had pinned as matching the simulator cycle-for-cycle. Measured on landing: both
+witnesses agree (`trailing_segment_register_update_agrees`, `branch_trailing_probe`),
+and so does `pulse_plain`, the `multi_phase_out_write` witness (that rule stands
+pending phase E's derivation, §8-5 of `CYCLE_DATAFLOW_SEMANTICS.md`). The rule that
+refused the class, `unprotected_trailing_out_write`, is retired.
+
+**Startup — refused where it is observable (2026-10-23).** An `Out` whose every
+write is a constant and whose first write executes only *after the second clock
+edge* of a multi-tick body shows its initial value at the first observation in the
+simulator (the writing segment has not run yet) while the emitted continuous
+`assign` drives the constant from time 0: a one-cycle startup transient that no
+continuous assign can reproduce. `Cfg::out_first_driven_late` refuses the shape in
+both front-ends (opt-out honoured; remedies: write the port in the head segment too,
+or declare it `RegOut`). The boundary is measured, not guessed: the same constant one
+edge earlier (`late_constant_one_edge`, `tests/fixtures/trailing_statements_dut.rs`)
+agrees on every cycle, because the segment the first tick enters runs in edge 0's
+post-edge settle and is visible at the first observation exactly when the `assign`
+is; and register-valued late writes (`mac_pipeline`'s `out`, `trailing_out`'s `mid`)
+agree because the flop's zero initial equals the wire's. The refused witness is the
+former `trailing_constant` SKIP row, now `copper-macros/tests/ui/fail/out_first_driven_late.rs`;
+exact-set pin `EXPECTED_LATE_CONSTANT` = {`pulse_plain`}.
 
 ## Output timing — `Out` vs `RegOut`
 
@@ -184,10 +218,28 @@ Two output-port kinds capture the Mealy/Moore distinction explicitly:
   reflects the current cycle's logic, with no added latency; an `Out` left unwritten on a path
   *holds* its value (a conditional write is an **enabled register** — `vlir_lower::conditional_output_ports`
   routes it into `always_ff` — verified `sim ≡ BaseJump` on `examples/basejump/bsg_dff_en.rs`).
-- **`RegOut<T,D>`** — a registered (Moore) output driven from `always_ff`; its value commits at the
-  clock edge, so it appears one cycle later. Use it for write-before-tick Moore outputs (verified on
-  `examples/basejump/sipo_block.rs`, `tests/sipo_block_equivalence.rs`). The two axes — input read
-  timing and output register timing — are orthogonal.
+- **`RegOut<T,D>`** — a registered (Moore) output driven from `always_ff`. **A `RegOut` write takes
+  effect at the first clock edge after it executes** — one clause, no regions: for a write before a
+  tick that is the tick's edge (so a write-before-tick Moore output appears one cycle later; verified
+  on `examples/basejump/sipo_block.rs`, `tests/sipo_block_equivalence.rs`), for a write after the
+  last tick it is the next edge (see *Trailing statements*). The two axes — input read timing and
+  output register timing — are orthogonal.
+
+**Tick position is not a dialect.** A tick-first body (`loop { tick; work }`) and a tick-last body
+(`loop { work; tick }`) are the same four clauses applied at two execution instants: a local
+assignment is visible to the following statements at once and is realized as a commit at its
+region's edge; a plain `Out` write is a continuous drive from the write instant; a `RegOut` write
+takes effect at the first clock edge after it executes; an `In` read yields the value present at the
+instant it executes (deferred to the closing settle when a tick follows it, immediate otherwise —
+*Input read timing* below). What tick position chooses is the instant: a tick-last body's work runs
+toward the closing edge and samples the inputs present at it; a tick-first body's work runs just
+after the opening edge on the registers that edge committed. The practical consequence for `RegOut`
+is that `q.write(acc)` after `acc`'s update is a registered copy of `acc` in a tick-last body and a
+copy one edge later in a tick-first one, because the write executes on opposite sides of the edge;
+in a tick-first body the registered copy is the plain `Out` written from the committed register
+(`out_from_reg_after_commit`, `assign q = acc`). No rule is keyed on tick position; the census of
+2026-10-23 (187 sequential modules: 47 tick-last, 34 tick-first, 52 middle, 17 linear multi-tick,
+37 extracted) all lower through the same three implementations.
 
 **Multi-write-around-a-tick guardrail.** A combinational `Out` written on *both sides of one bare
 `clk.tick().await`* within an iteration, after a *leading (deferred) input read*
@@ -201,8 +253,8 @@ each state drives the output once. This is Copper's analogue of Verilog's blocki
 (`=`/`<=`) choice, and follows MyHDL's discipline of restricting the synthesizable subset — so every
 *accepted* program preserves sim ≡ synth. Detection is `Cfg::multi_write_collapse`
 (`copper-analysis/src/cfg.rs`, over the shared CFG, top-level loop **and** nested ticking loops),
-enforced as a compile error by the `#[hardware]` macro only (`copper-macros/src/lib.rs`; the
-transpiler does not run it); it is precise (three necessary conditions — bare tick, both-sides
+enforced as a compile error by the `#[hardware]` macro and, since 2026-10-23, by
+`transpile_target` as well (neither honours an opt-out for it); it is precise (three necessary conditions — bare tick, both-sides
 write, leading read comb-reaching the pre-tick write) and corpus-clean, which the build itself
 enforces since every corpus module compiles through the macro. Pinned by
 `copper-macros/tests/ui/fail/multi_write_collapse.rs`, `ui/pass/multi_write_regout_ok.rs`, and the
@@ -317,14 +369,21 @@ and `the_state_arm_lead_is_systematic_not_a_first_cycle_artifact`).
   `out_from_reg_before_commit`, `v8t_stage_publish_then_load`), the `v8*` verdict tests in
   `tests/sequential_forwarding_divergence.rs`, and `copper-macros/tests/ui/fail/write_before_update.rs`.
 
-Enforcement is asymmetric, and deliberately so. The macro's sequential arm (`copper-macros/src/lib.rs`)
-runs `check_reachability`, `multi_write_collapse`, `unprotected_pretick_out_write`,
-`unprotected_trailing_out_write`, `pretick_out_write_before_update` and `multi_phase_out_write`;
-the transpiler's `transpile_fir` (`copper-codegen/src/lib.rs`) runs `check_reachability`,
-`multi_phase_out_write`, and the two memory rules below. So `multi_phase_out_write` runs in **both**
-front-ends (the transpiler honours the opt-out too, or a module that exists to demonstrate the
-hazard could not be measured against anything), the rest of the pre-tick family runs in the
-**macro** only, and the memory rules run in the **transpiler** only (see *Memory*).
+**Enforcement is symmetric (front-end parity, 2026-10-23).** The macro's sequential arm
+(`copper-macros/src/lib.rs`) and the transpiler's `transpile_target` (`copper-codegen/src/lib.rs`)
+run the same rules from the shared crate: `check_nested_loop_shape`, `check_awaits`,
+`check_reachability`, `multi_write_collapse`, `unprotected_pretick_out_write`,
+`pretick_out_write_before_update`, `trailing_regout_reads_input`, `multi_phase_out_write`,
+`out_first_driven_late`, `check_memory_staging` and `memory_result_drives_plain_out`. The five
+pre-tick alignment rules honour `allow_pretick_alignment` in both (a module that exists to
+demonstrate a divergence must still transpile, or there is nothing to measure it against);
+`multi_write_collapse`, the memory rules and the two shape rules have no opt-out in either. A
+module that compiles therefore transpiles, or is refused by both — the standing audit is
+`copper-analysis/tests/front_end_parity.rs`, which runs the former transpiler-only rules over
+every clocked module in the tree (expected failures: none) and checks that every module a
+pre-tick rule flags carries the opt-out. The transpiler keeps its own copies of the shape
+refusals (`chir_lower`, `control_extract`) as defence in depth, the way it keeps
+`check_reachability`.
 
 **The family's root cause, and what changed about its disposition.** These rules share one origin
 worth stating plainly: **Copper infers the register/combinational boundary where every other HDL
@@ -405,10 +464,13 @@ than the divergence adjudicated. The cost is low because the supported ordering 
 designs, and because the divergence needs an input that changes *mid-cycle* — an `In` driven by a
 clocked module in the same domain is stable across the window and both models agree. It is a
 testbench-observable difference, which is exactly why it could not be left in: sim ≡ SV *under a
-testbench* is this project's bar. Enforced by the **transpiler only**: `control_extract` declines
-to flatten the shape and `chir_lower` reports it ("a repeating wait must be written as
-`loop { <test>; clk.tick().await; }`"); the `#[hardware]` macro does not check it, so a sim-only
-design can still be written in the rejected order. Pinned by
+testbench* is this project's bar. Enforced in **both front-ends** since 2026-10-23:
+`copper_analysis::check_nested_loop_shape` (the source-level mirror of
+`control_extract::body_ends_at_a_clock_boundary`) runs in the `#[hardware]` macro and in
+`transpile_target`, and `chir_lower` keeps its own copy as defence in depth, so the rejected
+order fails at `cargo build` at its own declaration — it can no longer be written as a sim-only
+design (the former `tick_first_waiter` fixture is now
+`copper-macros/tests/ui/fail/tick_first_wait.rs`). Pinned by
 `copper-codegen/tests/unsupported_constructs.rs::ticking_before_the_test_in_a_wait_is_unsupported`
 and `tests/wait_loop_equivalence.rs::ticking_before_the_test_is_refused`. The measurement and the
 lowering alternatives tried are recorded in the repo `TODO` (the entry *Control extraction
@@ -432,11 +494,11 @@ Four rules make the divergent shapes unwritable. All four live in `copper-analys
 moved there 2026-08-25, commit `8c876fd`), on the **source**, for the reason given under *One
 analysis, both front-ends*: control extraction rewrites branch- and loop-nested ticks into a
 single-tick `match pc` FSM, so a check downstream of it counts one phase where the `pc` states *are*
-the phases it meant to count. **They are enforced by the transpiler only** — `transpile_fir`
-(`copper-codegen/src/lib.rs`) calls both; the `#[hardware]` macro calls neither, so a sim-only
-design that breaks one of them compiles and simulates, and is caught only when it is transpiled
-(which every corpus module is, by the sweep). "Spanned compile error" below therefore means a
-transpile-time error carrying the source span.
+the phases it meant to count. **They are enforced in both front-ends** since 2026-10-23:
+`transpile_target` (`copper-codegen/src/lib.rs`) and the `#[hardware]` macro's sequential arm
+both call `Cfg::check_memory_staging` and `Cfg::memory_result_drives_plain_out`, so a design
+that breaks one of them fails at `cargo build` rather than only when transpiled (the former
+sim-only `mp_rom` fixture is now `copper-macros/tests/ui/fail/memory_result_drives_plain_out.rs`).
 
 - **One access per bus per cycle** (`check_memory_staging`) — a physical port has a single address
   bus. Two accesses conflict iff one can reach the other **without crossing a clock edge**, not
@@ -507,13 +569,13 @@ call-site CDC check for the text-based path (`chir_lower::lower_structural_inst`
 
 In `#[hardware]` code the only `await` a design may write is a direct `clk.tick().await`; the one
 other await that appears in a hardware body, `pre_edge_barrier::<D>().await`, is injected by the
-macro itself (*Input read timing* above), never written by hand. Enforcement is one-sided as of
-2026-09-01: the **transpiler** rejects any other await (`chir_lower`, `UnsupportedConstruct`
-"await on non-clock value"), while the **macro** only *records* tick awaits (`TickAwaitVisitor`,
-`copper-macros/src/lib.rs`) and does not reject a foreign one — so a sim-only module can await
-something else, and its behavior under the executor is unspecified. The transpiler's refusal is
-not pinned by a test as of 2026-09-01. Every loop path must reach a tick — the reachability
-well-formedness condition below, a hard compile error in both front-ends.
+macro itself (*Input read timing* above), never written by hand. Enforced in **both front-ends**
+since 2026-10-23: `copper_analysis::check_awaits` runs in the macro (on the pristine function,
+before the barrier is injected) and in `transpile_target`, and `chir_lower` keeps its
+`UnsupportedConstruct` "await on non-clock value" as defence in depth; pinned by
+`copper-macros/tests/ui/fail/foreign_await.rs` and the shape module's unit tests. Every loop
+path must reach a tick — the reachability well-formedness condition below, a hard compile error
+in both front-ends.
 
 ## The control-flow-graph (CFG) model
 

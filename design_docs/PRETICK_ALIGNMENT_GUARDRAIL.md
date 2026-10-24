@@ -31,7 +31,7 @@
 > |---|---|---|
 > | `unprotected_pretick_out_write` (D1, narrowed §5.7) | a plain `Out` written where an `In` read reaches the write on some path while a register is assigned unprotected on another (path-dependent boundary), or a conditional/constant write in such a segment | — |
 > | …its **constant-write** clause (§5.5; `written_on_all_paths`) | the same, where the port is written on *some* paths only — a constant is idempotent across the phase shift only if it lands on every path | 3 modules, all measured divergences (commit `348ddd0`) |
-> | `unprotected_trailing_out_write` (§5.4; narrowed 2026-08-27) | the same hazard past the *last* tick, gated on `crosses_more_than_one_tick` **and** `has_nested_tick` (the source-level mirror of extraction's trigger) — the LINEAR class is exempt, measured agreeing; the extracted class is measured one-edge-late wherever the last tick sits | 1 real module (`rv32i_cpu_pipelined`'s `program_counter`, → `RegOut`; commit `56233ce`) |
+> | ~~`unprotected_trailing_out_write`~~ (§5.4; narrowed 2026-08-27; **RETIRED 2026-10-23**) | refused the same hazard past the *last* tick on the extraction route, which emitted a trailing plain-`Out` drive one cycle late. Phase C fixed the emission (`vlir_lower::opening_hold_outputs`), both witnesses agree, and the rule is deleted | 1 real module when it landed (`rv32i_cpu_pipelined`'s `program_counter`, → `RegOut`; commit `56233ce`) |
 > | `multi_phase_out_write` | a plain `Out` driven in more than one clock phase | 9 modules, six of them its own witnesses, three real (`rv32i_cpu` — since replaced by `rv32i_cpu_transpilable` — and `uart_tx`/`uart_rx`, → `RegOut`; commit `99290da`) |
 > | `pretick_out_write_before_update` (§5.6, 2026-08-26; trailing clause 2026-08-27) | a plain `Out` written before the update of a register it reads — behind a leading read in the pre-tick segment, or anywhere in the trailing segment (whose updates commit at the opening edge) | 0 real modules at landing (caught a compile-only UI fixture; commit `7abfd98`); the trailing clause then caught THREE real sim-only-tested modules (`tests/module_composition_hybrid.rs`'s stages, measured divergent as `v8t_stage_publish_then_load`, migrated to the canonical write/read/tick/update spelling; commit `b439894`) |
 >
@@ -52,7 +52,7 @@
 > |---|---|---|---|
 > | `unprotected_pretick_out_write` | `hazard_w4_mixed_alignment_flagged`, `hazard_probe_fsm_flagged` / `hazard_v4_leading_read_not_flagged`, `hazard_v6_post_tick_assign_not_flagged`, `hazard_w8_regout_immunises_mixed_alignment`, `hazard_w9_regout_immunises_the_minimal_case`, `hazard_lfsr_shape_not_flagged`, `hazard_regout_only_module_not_flagged`, and the three DISSOLVED shapes `hazard_v1_assign_then_write_dissolved`, `hazard_v5_trailing_read_dissolved`, `hazard_v7_escape_across_tick_dissolved` | `fail/pretick_alignment.rs` (`mixed_alignment`), `pass/pretick_alignment_ok.rs` (`post_tick_update`, `registered_output`, `leading_read`, `constant_write`, `forwarded_opening_drive`) | `pretick_alignment_hazard_flags_exactly_the_known_divergent_modules`; `EXPECTED_FLAGGED` = {`tests/fixtures/probe_timing_dut.rs::probe_fsm`, `tests/sequential_forwarding_divergence.rs::w4_mixed_alignment`, `tests/fixtures/control_extraction_dut.rs::branch_merge_explicit`, `…::pc_arm_toggle`, `…::pc_arm_write`} |
 > | …constant-write clause | `a_conditional_constant_write_is_flagged` / `an_unconditional_constant_write_is_not_flagged` | `pass/pretick_alignment_ok.rs::constant_write` (no dedicated `fail/` case; the corpus pin carries the positives) | the last three entries of `EXPECTED_FLAGGED` above |
-> | `unprotected_trailing_out_write` | `trailing_folded_loop_flagged`, `trailing_branch_nested_tick_flagged` / `trailing_linear_class_exempt` | **none** — no `ui/fail` or `ui/pass` case exercises this rule through the macro | `trailing_out_write_flags_exactly_the_demonstration_modules`; `EXPECTED_TRAILING` = {`tests/sequential_forwarding_divergence.rs::trailing_update`, `…::branch_trailing`} |
+> | ~~`unprotected_trailing_out_write`~~ | retired 2026-10-23 with phase C; its unit tests, pin and witnesses' opt-outs are gone. `trailing_segment_register_update_agrees` and `branch_trailing_probe` now pin the AGREEMENT | — | — |
 > | `multi_phase_out_write` | **none in `cfg.rs`**; the positive/negative pair is `tests/sequential_forwarding_divergence.rs::the_rule_flags_the_plain_form_and_not_the_registered_one` (`pulse_plain` flagged, `pulse_registered` clean) | **none** | `multi_phase_out_write_flags_exactly_the_demonstration_modules`; `EXPECTED_MULTI_PHASE` = {`tests/sequential_forwarding_divergence.rs::pulse_plain`} |
 > | `pretick_out_write_before_update` | `v8a_write_between_read_and_update_flagged`, `v8t_trailing_write_before_update_flagged` / `v8b_write_after_update_not_flagged`, `v8c_write_before_read_not_flagged`, `v8_constant_write_not_flagged`, `v8_regout_not_flagged`, `v8_unrelated_update_after_write_not_flagged`, `v8t_trailing_write_after_update_not_flagged` | `fail/write_before_update.rs` (`stale_publish`), `pass/pretick_alignment_ok.rs` (`v8b_publish_after_update`, `v8c_publish_before_read`), `pass/single_loop_local_ok.rs::accum` (reordered to V8c) | `write_before_update_flags_exactly_the_demonstration_modules`; `EXPECTED_WRITE_BEFORE_UPDATE` = {`tests/sequential_forwarding_divergence.rs::v8a_read_write_update`, `…::v8d_temp_renamed_update`, `tests/fixtures/out_phase_dut.rs::out_from_reg_before_commit`, `…::v8t_stage_publish_then_load`} |
 >
@@ -576,9 +576,13 @@ measured witness. Unit pins in `cfg.rs`: `trailing_linear_class_exempt`,
 `trailing_folded_loop_flagged`, `trailing_branch_nested_tick_flagged`. Exact-set
 pin: `pretick_alignment_corpus.rs::trailing_out_write_flags_exactly_the_demonstration_modules`,
 `EXPECTED_TRAILING` = {`trailing_update`, `branch_trailing`}, both carrying
-`allow_pretick_alignment`. The recorded follow-up is to retire the rule when phase
+`allow_pretick_alignment`. The recorded follow-up was to retire the rule when phase
 C lands the corrected extraction-path trailing lowering (`PAIRED_IMPLEMENTATION_SCOPE.md`,
-Phase C).
+Phase C). **Done 2026-10-23:** phase C landed as an emission form
+(`vlir_lower::opening_hold_outputs` — an opening drive in a conditional arm stays
+combinational with a hold register, the m2 hand model), both witnesses agree without
+an opt-out, and the rule, `EXPECTED_TRAILING`, the three unit pins and the
+`has_nested_tick` field are deleted.
 
 **The head rule is unchanged and still head-segment-only**, deliberately: widening #1
 proved the two regions cannot share a rule, and they are now complementary the way D1

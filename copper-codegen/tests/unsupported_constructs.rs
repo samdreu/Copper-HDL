@@ -572,9 +572,11 @@ async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<16>, MainCl
 /// unrelated part of the module triggered extraction.
 ///
 /// The behavioural half is `tests/fixtures/trailing_statements_dut.rs`, swept
-/// differentially. The rules that constrain WHAT may be written there are unchanged
-/// and separate: `unprotected_trailing_out_write` still refuses a plain `Out` driven
-/// from a register in this segment, which is the measured divergence.
+/// differentially. Since phase C (2026-10-23) a plain `Out` driven from a register
+/// in this segment agrees with its SystemVerilog on the extraction route too
+/// (`vlir_lower::opening_hold_outputs`), and the trailing rule that refused it is
+/// retired; `pretick_out_write_before_update`'s trailing clause still constrains
+/// the write-before-update ordering there.
 #[test]
 fn trailing_combinational_statements_in_a_multi_tick_loop_lower_into_phase_zero() {
     let src = r#"

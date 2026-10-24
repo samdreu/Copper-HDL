@@ -188,6 +188,19 @@ pub enum SHIRStmt {
         port_name: String,
         value: SHIRExpr,
         edge_value: SHIRExpr,
+        /// Cycle-dataflow anchor of the drive. `true` when no `In`-port read
+        /// precedes the write in its segment walk (an *opening-prefix* drive):
+        /// the simulator executes it at the cycle's opening instant, so it is
+        /// visible from the observation right after the edge that opened the
+        /// cycle. `false` when a read precedes it (it executes behind that
+        /// read's `pre_edge_barrier`, in the closing settle) and for the
+        /// combinational path and the linear trailing segment, where the
+        /// selection does not apply. `vlir_lower` uses it to pick the emitted
+        /// form of a *conditional* plain-`Out` drive: an opening drive becomes a
+        /// forwarded continuous mux with a hold register, a closing one an
+        /// edge-sampled `always_ff` assignment (phase C,
+        /// `design_docs/PAIRED_IMPLEMENTATION_SCOPE.md`).
+        opening: bool,
     },
     /// A branch carries its test in BOTH forms, for exactly the reason
     /// [`SHIRStmt::PortDrive`] carries its value in both: the drives inside it may

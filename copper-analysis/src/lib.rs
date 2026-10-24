@@ -31,8 +31,10 @@ use std::collections::BTreeSet;
 use syn::ItemFn;
 
 mod cfg;
+mod shape;
 
 pub use cfg::{classify_reads, classify_reads_with, Cfg, DerivationFacts, EdgeKind, PhaseFacts, ReadTiming};
+pub use shape::{check_awaits, check_nested_loop_shape};
 
 /// Plain combinational `Out` ports written **between a leading `In` read and the
 /// update of a register the write reads** — the read's pre-edge barrier drags the
@@ -107,23 +109,14 @@ pub fn unprotected_pretick_out_write(f: &ItemFn) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Enforce the reachability well-formedness invariant: **every path through the
-/// module's top-level loop must reach a `clk.tick().await`**. Deleting all tick
-/// edges from the CFG must leave the reachable subgraph acyclic; a remaining cycle
-/// is a path that returns to the loop head without ticking — a zero-time
-/// combinational loop — and is rejected with a spanned [`syn::Error`].
-///
-/// A module with no top-level loop has nothing to check and is `Ok`.
-/// Plain combinational `Out` ports driven from a register in the **trailing** segment
-/// of a **multi-tick** loop — D1's hazard past the last tick, which the head-segment
-/// rule cannot see. Returns the offending ports, sorted.
-///
-/// The gate is the phase count: in a single-tick loop the trailing statements share
-/// the head's phase and there is nothing to misalign, which is what distinguishes the
-/// measured divergence from `rom_from_fn`. See [`Cfg::unprotected_trailing_out_write`]
-/// for the flipping witness and the two widenings this replaces.
-pub fn unprotected_trailing_out_write(f: &ItemFn) -> Vec<String> {
-    Cfg::build(f).map(|c| c.unprotected_trailing_out_write()).unwrap_or_default()
+/// `RegOut` ports written in the trailing region from an *immediate* `In` read
+/// (directly, not through a register). A `RegOut` write takes effect at the first
+/// clock edge after it executes; for a trailing write that is the next edge, where
+/// a non-blocking assign samples the input one drive later than the simulator's
+/// immediate read did. See [`Cfg::trailing_regout_reads_input`]. Returns the
+/// offending ports, sorted.
+pub fn trailing_regout_reads_input(f: &ItemFn) -> Vec<String> {
+    Cfg::build(f).map(|c| c.trailing_regout_reads_input()).unwrap_or_default()
 }
 
 /// Plain combinational `Out` ports driven in **more than one clock phase** — a
@@ -137,6 +130,22 @@ pub fn unprotected_trailing_out_write(f: &ItemFn) -> Vec<String> {
 /// why widening the D1 rule instead was rejected with corpus evidence.
 pub fn multi_phase_out_write(f: &ItemFn) -> Vec<String> {
     Cfg::build(f).map(|c| c.multi_phase_out_write()).unwrap_or_default()
+}
+
+/// Plain combinational `Out` ports **first driven late**: every write of the port
+/// is a constant and none of them executes before the second clock edge of a loop
+/// that crosses more than one edge per iteration. The simulator shows the port's
+/// initial value at the first observation while the emitted `assign` drives the
+/// constant from time 0 — a one-cycle startup transient no continuous assign can
+/// reproduce. Returns the offending ports, sorted; empty for a combinational module,
+/// one with no top-level loop, a single-tick loop, or all-`RegOut` outputs.
+///
+/// The remedies are to write the port in the head segment too, or to declare it
+/// `RegOut`. See [`Cfg::out_first_driven_late`] for the measurement, the flipping
+/// witness that fixes the boundary at the second edge, and why register-valued late
+/// writes are deliberately outside it.
+pub fn out_first_driven_late(f: &ItemFn) -> Vec<String> {
+    Cfg::build(f).map(|c| c.out_first_driven_late()).unwrap_or_default()
 }
 
 /// How many **clock phases** `f`'s top-level loop occupies — the number of distinct

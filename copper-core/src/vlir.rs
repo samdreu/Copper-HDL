@@ -245,6 +245,11 @@ pub enum VLIRStmt {
         port_name: String,
         value: VLIRExpr,
         edge_value: VLIRExpr,
+        /// See `SHIRStmt::PortDrive::opening`. Decides, for a conditionally
+        /// driven plain `Out`, whether `vlir_lower` registers the drive at the
+        /// edge (closing) or keeps it combinational with a hold register
+        /// (opening). Hoisted defaults carry `false`; they are never split.
+        opening: bool,
     },
     /// `edge_condition` is `condition` in PRE-edge terms, carried for the same
     /// reason `PortAssign` carries `edge_value`: `split_output_reg` may move the

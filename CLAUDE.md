@@ -254,11 +254,18 @@ receive/clone one.
   **historical plan** — `SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md` (its status notes are
   dated; do not take "not started" there at face value).
   `design_docs/OUTDATED/` is historical, not authoritative.
-- **`PRETICK_ALIGNMENT_GUARDRAIL.md`** — the pre-tick alignment family: five rules
+- **`PRETICK_ALIGNMENT_GUARDRAIL.md`** — the pre-tick alignment family: four rules
   (`Cfg::unprotected_pretick_out_write`, `multi_phase_out_write`,
-  `unprotected_trailing_out_write`, `pretick_out_write_before_update`, plus the
-  constant-write clause inside the first) with four exact-set corpus pins in
-  `copper-analysis/tests/pretick_alignment_corpus.rs`. **D1** is **guarded** (rule
+  `pretick_out_write_before_update`, plus the constant-write clause inside the
+  first), joined 2026-10-23 by two more of the same discipline —
+  `trailing_regout_reads_input` (a `RegOut` written after the last tick from an input
+  read directly; a `RegOut` write takes effect at the first clock edge after it
+  executes, so the flip-flop would sample the input one drive late) and
+  `out_first_driven_late` (a constant-only plain `Out` first written after the second
+  edge: a startup transient the `assign` cannot show) — every one with an exact-set
+  corpus pin in `copper-analysis/tests/pretick_alignment_corpus.rs` and enforced in
+  both front-ends. A former fifth, `unprotected_trailing_out_write`, was retired
+  2026-10-23 when phase C landed (see below). **D1** is **guarded** (rule
   2026-08-21, narrowed 2026-08-26): in the pre-tick segment, a plain `Out` write is a
   compile error when the segment also assigns a register that no leading `In` read
   reaches AND the write is observable across the phase shift — either it reads a
@@ -274,12 +281,15 @@ receive/clone one.
   register-free segment is now `Immediate`, so a passthrough tracks its producer
   instead of lagging it.
   The other rules: **`multi_phase_out_write`** (a plain `Out` driven in more than one
-  clock phase; enforced in both front-ends); **`unprotected_trailing_out_write`** (the
-  same hazard past the *last* tick, gated on the body crossing more than one clock
-  edge per iteration *and* containing a nested tick — a linear multi-tick body is
-  exempt); **`pretick_out_write_before_update`** (a plain `Out` written from a register
-  before that register's update in the same segment publishes the previous
-  generation; 2026-08-26/27). The doc also records **five** rejected fixes with
+  clock phase; enforced in both front-ends); **`pretick_out_write_before_update`** (a
+  plain `Out` written from a register before that register's update in the same
+  segment publishes the previous generation; 2026-08-26/27). **Phase C landed
+  2026-10-23** (`vlir_lower::opening_hold_outputs`): a conditionally-driven plain
+  `Out` whose drives are all *opening* drives (no `In` read precedes them in the
+  arm) is emitted as a forwarded combinational mux with a `<port>_hold` register
+  instead of an edge-sampled register, which is what made the control-extraction
+  route's trailing drives one cycle late; `trailing_update`, `branch_trailing` and
+  `pulse_plain` now agree, and `unprotected_trailing_out_write` is gone. The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in
@@ -292,6 +302,17 @@ receive/clone one.
   on `(top, pid)` and two tests transpiling `trailing_update` raced on a 96-core host
   (2026-09-03), one deleting the file the other's Verilator was about to read. Every
   test temp dir now carries a `TMP_NONCE`.
+- **Both front-ends enforce the same rules (front-end parity, 2026-10-23).** The
+  macro's sequential arm and `transpile_target` run the same list from
+  `copper-analysis`: the two source-shape rules (`check_nested_loop_shape` — a nested
+  loop must end at a clock boundary; `check_awaits` — only `clk.tick().await` may be
+  awaited), reachability, the pre-tick alignment family (opt-out honoured in both),
+  the memory rules and `multi_write_collapse` (no opt-out in either). A module that
+  compiles therefore transpiles, or is refused by both. The standing audit is
+  `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
+  `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
+  fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one
+  front-end, add it to the other and to the audit in the same change.
 - **When adding a `#[hardware]` mode or flag, fix every attribute parser.**
   `parse_args::<syn::Ident>()` fails outright once a flag is present, which silently
   drops those modules from corpus scans (`copper-analysis/tests/pretick_alignment_corpus.rs`

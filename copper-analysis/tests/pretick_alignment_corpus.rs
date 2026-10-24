@@ -255,47 +255,35 @@ fn multi_phase_out_write_flags_exactly_the_demonstration_modules() {
     );
 }
 
-/// The **trailing-segment** rule's exact set — D1's hazard past the last tick
-/// (`unprotected_trailing_out_write`, 2026-08-25).
+// ── The late-constant startup rule ────────────────────────────────────────────
+
+/// Plain `Out` ports whose every write is a constant and whose first write executes
+/// only after the second clock edge of a multi-tick loop
+/// (`copper_analysis::out_first_driven_late`, 2026-10-23).
 ///
-/// A measured divergence carrying `allow_pretick_alignment`. The rule's total corpus
-/// cost was one real module: `rv32i_cpu_pipelined`'s `program_counter`, migrated to
-/// `RegOut` — the same remedy its scalar sibling had already been given for the
-/// multi-phase rule.
+/// Not a steady-state divergence but a **startup transient**: the simulator shows
+/// the port's initial value at the first observation (the writing segment has not
+/// run yet) while the emitted `assign` drives the constant from time 0. Its
+/// instance, `trailing_constant`, lived as a `SKIP` row ("STARTUP TRANSIENT") in
+/// `build.rs` until the shape was refused; it is now
+/// `copper-macros/tests/ui/fail/out_first_driven_late.rs`, and the agreeing half of
+/// its flipping pair — the same constant one edge earlier,
+/// `late_constant_one_edge` — sweeps as a positive case. Register-valued late writes
+/// are deliberately outside the rule (`mac_pipeline`'s `out`, `trailing_out`'s `mid`
+/// agree today because the flop's zero initial equals the wire's).
 ///
-/// `pulse_plain` was here until the all-paths query was scoped to the region being
-/// asked about (2026-08-25). Its trailing `dv.write(Zero)` is an UNCONDITIONAL
-/// constant, so it is exempt on the same terms as any other — the rule was reading it
-/// as conditional only because it asked whether the HEAD region wrote it. The module
-/// is a divergence and stays guarded, by `multi_phase_out_write`: it drives `dv` in
-/// two clock phases, which is what is actually wrong with it.
-const EXPECTED_TRAILING: &[&str] = &[
-    "tests/sequential_forwarding_divergence.rs::trailing_update",
-    // Added 2026-08-27 by the phase-C decision probes (the rule's gate is the
-    // tick count, which cannot see which lowering route the trailing statements
-    // take); both verdicts are now MEASURED:
-    //   * `linear_trailing` — the linear multi-tick spelling, MEASURED AGREEING
-    //     (the linear path commits trailing updates at the right edge), so the
-    //     rule's refusal there is a lowering limitation of the extraction
-    //     route, not a semantics rule: a documented false positive held
-    //     deliberately.
-    //   * `branch_trailing` — extracted with a top-level last tick, MEASURED
-    //     DIVERGING (SV is the sim trace delayed one cycle; unblocked by the
-    //     2026-08-27 parenthesized-bit-select emission fix). A TRUE positive:
-    //     the extraction route commits trailing updates one edge late
-    //     regardless of where the last tick sits.
-    // NARROWED 2026-08-27 (user-approved): the rule now gates on
-    // `has_nested_tick` — the source-level mirror of extraction's trigger — so
-    // the linear class is EXEMPT and `linear_trailing` left this set (it keeps
-    // living in the divergence file as the exemption's measured witness, now
-    // without an opt-out). `branch_trailing` stays: a measured TRUE positive.
-    // Remaining follow-up: retire the rule wholesale when phase C lands the
-    // corrected extraction-path trailing lowering.
-    "tests/sequential_forwarding_divergence.rs::branch_trailing",
+/// Same exact-set discipline as every rule above: an entry must be a module that
+/// exists to DEMONSTRATE the hazard and carries `allow_pretick_alignment` (the
+/// opt-out silences the error, not the detection). A real design appearing here is
+/// a false positive to measure, not a line to add.
+const EXPECTED_LATE_CONSTANT: &[&str] = &[
+    // Both writes constant, both past a folded tick-bearing `for` — a measured
+    // divergence already opted out for `multi_phase_out_write`.
+    "tests/sequential_forwarding_divergence.rs::pulse_plain",
 ];
 
 #[test]
-fn trailing_out_write_flags_exactly_the_demonstration_modules() {
+fn out_first_driven_late_flags_exactly_the_demonstration_modules() {
     let root = repo_root();
     let mut files = Vec::new();
     for dir in ["examples", "src", "tests"] {
@@ -312,7 +300,7 @@ fn trailing_out_write_flags_exactly_the_demonstration_modules() {
         clocked_hardware_fns(&file.items, &mut fns);
         for f in &fns {
             scanned += 1;
-            if !copper_analysis::unprotected_trailing_out_write(f).is_empty() {
+            if !copper_analysis::out_first_driven_late(f).is_empty() {
                 let rel = path.strip_prefix(&root).unwrap_or(path).display();
                 flagged.insert(format!("{rel}::{}", f.sig.ident));
             }
@@ -321,20 +309,79 @@ fn trailing_out_write_flags_exactly_the_demonstration_modules() {
 
     assert!(scanned >= 40, "expected to scan the corpus, only saw {scanned} clocked modules");
 
-    let expected: BTreeSet<String> = EXPECTED_TRAILING.iter().map(|s| s.to_string()).collect();
+    let expected: BTreeSet<String> = EXPECTED_LATE_CONSTANT.iter().map(|s| s.to_string()).collect();
     let unexpected: Vec<_> = flagged.difference(&expected).cloned().collect();
     let missing: Vec<_> = expected.difference(&flagged).cloned().collect();
     assert!(
         unexpected.is_empty(),
-        "newly flagged by the trailing-segment rule. Either the module HAS the \
-         divergence — check it against its transpiled SV, and the remedy is `RegOut` — \
-         or the rule has regressed into a false positive, which is what cost the two \
-         widenings in guardrail 5.4 their place: {unexpected:?}"
+        "newly flagged by the late-constant startup rule (a plain `Out` whose every write \
+         is a constant and whose first write comes after the second clock edge). Either \
+         the module HAS the transient — sweep it: the signature is a mismatch at cycle 0 \
+         only, and the remedy is a head-segment write or `RegOut` — or the rule has \
+         regressed into a false positive, which is the failure mode this pin exists to \
+         catch: {unexpected:?}"
     );
     assert!(
         missing.is_empty(),
-        "no longer flagged — the hazard may be fixed, or the module changed: {missing:?}"
+        "no longer flagged — the transient may be fixed, or the module changed: {missing:?}"
     );
+}
+
+// ── The trailing-`RegOut`-from-an-input rule (2026-10-23) ──────────────────────
+
+/// `RegOut` ports written after the last top-level tick from an `In` port read
+/// directly, at an immediate read site (`copper_analysis::trailing_regout_reads_input`).
+///
+/// Born with the tick-dialect unification: a `RegOut` write takes effect at the
+/// first clock edge after it executes, so the linear single-tick lowering now emits
+/// a trailing `RegOut` from the committed register at the next edge (which made
+/// `regout_trailing_single_tick` agree and sweep), and the one shape that emission
+/// cannot realize is a value read straight from an input — the flip-flop samples it
+/// one drive later than the simulator's immediate read. No corpus module has the
+/// shape; the ui/fail case `trailing_regout_reads_input.rs` is the witness, and a
+/// module joining this set is either a real divergence to measure or a rule
+/// regression to fix.
+const EXPECTED_TRAILING_REGOUT_INPUT: &[&str] = &[];
+
+#[test]
+fn trailing_regout_reads_input_flags_exactly_the_demonstration_modules() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    for dir in ["examples", "src", "tests"] {
+        rs_files(&root.join(dir), &mut files);
+    }
+    files.sort();
+
+    let mut scanned = 0usize;
+    let mut flagged: BTreeSet<String> = BTreeSet::new();
+    for path in &files {
+        let Ok(src) = fs::read_to_string(path) else { continue };
+        let Ok(file) = syn::parse_file(&src) else { continue };
+        let mut fns = Vec::new();
+        clocked_hardware_fns(&file.items, &mut fns);
+        for f in &fns {
+            scanned += 1;
+            if !copper_analysis::trailing_regout_reads_input(f).is_empty() {
+                let rel = path.strip_prefix(&root).unwrap_or(path).display();
+                flagged.insert(format!("{rel}::{}", f.sig.ident));
+            }
+        }
+    }
+
+    assert!(scanned >= 40, "expected to scan the corpus, only saw {scanned} clocked modules");
+
+    let expected: BTreeSet<String> =
+        EXPECTED_TRAILING_REGOUT_INPUT.iter().map(|s| s.to_string()).collect();
+    let unexpected: Vec<_> = flagged.difference(&expected).cloned().collect();
+    let missing: Vec<_> = expected.difference(&flagged).cloned().collect();
+    assert!(
+        unexpected.is_empty(),
+        "newly flagged by the trailing-RegOut-from-input rule. Either the module HAS \
+         the divergence — check it against its transpiled SV; the remedy is to read \
+         the input before the tick or through a register — or the rule has regressed \
+         into a false positive: {unexpected:?}"
+    );
+    assert!(missing.is_empty(), "no longer flagged — the module changed: {missing:?}");
 }
 
 // ── The write-between-read-and-update rule (V8, m1) ──────────────────────────

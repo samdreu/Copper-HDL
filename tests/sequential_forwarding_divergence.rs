@@ -644,10 +644,18 @@ fn sim_pulse_registered() -> Vec<u8> {
         .collect()
 }
 
-/// The measurement the rule rests on: a plain `Out` pulse driven in two phases
-/// diverges from its own transpiled SystemVerilog by exactly one cycle.
+/// The measurement the rule rested on: a plain `Out` pulse driven in two phases
+/// diverged from its own transpiled SystemVerilog by exactly one cycle — until
+/// phase C's emission form (2026-10-23, `vlir_lower::opening_hold_outputs`): an
+/// opening drive in a conditional arm is now a forwarded combinational mux with
+/// a hold register instead of an edge-sampled register, and this witness AGREES.
+/// `multi_phase_out_write` is deliberately NOT retired on the strength of one
+/// witness: `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §8-5 asks for the phase-E
+/// derivation (which multi-phase shapes are a legal state-mux and which are mixed)
+/// plus an m2-style hand-lowered measurement first. Until then the rule stands and
+/// this test pins that the witness it names agrees under the new emission.
 #[test]
-fn a_plain_out_driven_in_two_phases_diverges() {
+fn a_plain_out_driven_in_two_phases_agrees_under_phase_c_emission() {
     let sim = sim_pulse_plain();
     // Period 4 (three delay ticks plus the pulse tick); the simulator observes the
     // write in the post-edge settle of the cycle it was issued in.
@@ -661,15 +669,13 @@ fn a_plain_out_driven_in_two_phases_diverges() {
         return;
     }
     let sv = transpile_and_run(PULSE_PLAIN_SRC, "pulse_plain", "clk", "dv", "");
-    assert_ne!(
+    assert_eq!(
         sim, sv,
-        "sim and SV now AGREE for a plain `Out` driven in two phases — the hazard is \
-         FIXED. Remove `multi_phase_out_write`'s error, promote this to a real \
-         equivalence test, and revert the `RegOut` migrations in examples/uart/system.rs \
-         and examples/cpu/rv32i_cpu.rs."
+        "sim and SV DIVERGE again for a plain `Out` driven in two phases — phase C's \
+         emission form (an opening drive stays combinational with a hold register) \
+         regressed. Before 2026-10-23 the SV trace was the sim trace shifted one \
+         cycle: [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0]."
     );
-    // The same period, one cycle later — not a different design, a shifted one.
-    assert_eq!(sv, vec![0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0], "transpiled SV behaviour changed");
 }
 
 /// The discriminator, isolated: identical design, `RegOut` instead of `Out`, and
@@ -728,7 +734,7 @@ fn the_rule_flags_the_plain_form_and_not_the_registered_one() {
 // correct designs, which is requirement R1.
 
 const TRAILING_D1_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn trailing_update(clk: Clock<C>, o: Out<Bits<8>, C>) {
     let mut n: Bits<8> = Bits::zero();
     loop {
@@ -738,7 +744,7 @@ async fn trailing_update(clk: Clock<C>, o: Out<Bits<8>, C>) {
     }
 }
 "#;
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn trailing_update(clk: Clock<C>, o: Out<Bits<8>, C>) {
     let mut n: Bits<8> = Bits::zero();
     loop {
@@ -748,8 +754,12 @@ async fn trailing_update(clk: Clock<C>, o: Out<Bits<8>, C>) {
     }
 }
 
+/// Phase C landed 2026-10-23: the trailing register update's plain-`Out` drive
+/// is an opening drive in the extracted trailing state, and `vlir_lower` now
+/// emits it as a forwarded combinational mux with a hold register (the m2 hand
+/// model below), so sim ≡ SV, and `unprotected_trailing_out_write` is retired.
 #[test]
-fn d1_in_the_trailing_segment_is_an_unguarded_gap() {
+fn trailing_segment_register_update_agrees() {
     let mut clk = Clock::<C>::new();
     let mut exec = HardwareExecutor::new();
     let (o, obs) = wire::<Bits<8>, C>(Bits::zero());
@@ -762,15 +772,9 @@ fn d1_in_the_trailing_segment_is_an_unguarded_gap() {
         })
         .collect();
 
-    // GUARDED since 2026-08-25 by `unprotected_trailing_out_write`. The head-segment
-    // rule still does not see it — it examines head → first tick — which is why the
-    // trailing region needed a rule of its own rather than a wider one.
-    //
-    // The discriminator that made it separable from `rom_from_fn` (§5.4's open
-    // question) is the number of clock edges the body crosses per iteration, found by
-    // flipping exactly that: with the identical trailing body, a SINGLE-tick loop
-    // agrees and a multi-tick one diverges. In a single-tick loop the trailing
-    // statements share the head's phase, so there is nothing to be misaligned against.
+    // Guarded from 2026-08-25 to 2026-10-23 by `unprotected_trailing_out_write`,
+    // retired when phase C landed. The head-segment rule must still not reach into
+    // the trailing region: widening it was measured at 25 false positives (§5.4).
     let f: syn::ItemFn = syn::parse_str(TRAILING_D1_SRC).expect("parses");
     assert!(
         copper_analysis::unprotected_pretick_out_write(&f).is_empty(),
@@ -778,21 +782,15 @@ fn d1_in_the_trailing_segment_is_an_unguarded_gap() {
          the two were kept separate because widening the head region cost 25 false \
          positives (§5.4)"
     );
-    assert_eq!(
-        copper_analysis::unprotected_trailing_out_write(&f),
-        vec!["o".to_string()],
-        "the trailing rule stopped flagging the shape it exists for — the traces below \
-         still diverge, so accepting it again would ship the divergence"
-    );
 
     if !verilator_available() {
         return;
     }
     let sv = transpile_and_run(TRAILING_D1_SRC, "trailing_update", "clk", "o", "");
-    assert_ne!(
+    assert_eq!(
         sim, sv,
-        "sim and SV now AGREE for a trailing-segment register update — the gap is \
-         FIXED. Promote this to a real equivalence test."
+        "sim and SV diverge again for a trailing-segment register update — phase C's \
+         emission form regressed (before 2026-10-23 the SV lagged by one cycle)"
     );
 }
 
@@ -1272,16 +1270,15 @@ fn m2_model_forwarded_lowering_matches_the_simulator_for_trailing_update() {
          executor's trailing-segment behaviour changed"
     );
 
-    // And today's codegen still disagrees with both — the divergence the paired
-    // fix will close from the codegen side. (The sim≠SV half is also asserted by
-    // d1_in_the_trailing_segment_is_an_unguarded_gap; repeated here so this test
-    // reads as the complete m2 statement: sim ≡ model ≠ today's SV.)
+    // And since phase C (2026-10-23) codegen agrees with both: the complete m2
+    // statement is sim ≡ model ≡ SV. (The sim ≡ SV half is also asserted by
+    // trailing_segment_register_update_agrees.)
     let sv = transpile_and_run(TRAILING_D1_SRC, "trailing_update", "clk", "o", "");
-    assert_ne!(
+    assert_eq!(
         model, sv,
-        "today's transpiled SV now matches the model lowering — the trailing gap is \
-         FIXED in codegen. Promote trailing_update to a real equivalence test and \
-         update DERIVATION_TABLE.md's trailing_update row from 'predict' to done."
+        "today's transpiled SV no longer matches the hand-lowered model — phase C's \
+         emission form (`vlir_lower::opening_hold_outputs`) regressed; before it \
+         landed the SV lagged the model by one cycle"
     );
 }
 
@@ -1425,15 +1422,12 @@ fn d_narrowing_battery_verdicts() {
 
 // ── The linear-trailing probe (phase-C decision evidence, 2026-08-27) ─────────
 //
-// `unprotected_trailing_out_write` keys on "crosses more than one clock edge per
-// iteration", which covers BOTH lowering paths — but §5.4's divergence was only
-// ever measured on the EXTRACTED path (the folded counted `for`). The linear
-// multi-tick path commits trailing register updates at the last phase's edge
-// (the 2026-08-25 shared-map work), so the model predicts the linear spelling
-// of the identical shape AGREES — measured so (2026-08-27). The rule therefore
-// over-flags the linear class: its refusal there is a lowering limitation, not
-// a semantics rule. The EXTRACTED-with-top-level-last-tick class is NOT
-// over-flagged — measured DIVERGING (2026-08-27), see `branch_trailing`.
+// §5.4's divergence was only ever measured on the EXTRACTED path (the folded
+// counted `for`). The linear multi-tick path commits trailing register updates
+// at the last phase's edge (the 2026-08-25 shared-map work), so the model
+// predicted the linear spelling of the identical shape AGREES — measured so
+// (2026-08-27). The extracted class diverged until phase C (2026-10-23), see
+// `branch_trailing`; both routes now agree and no rule refuses the shape.
 
 const LINEAR_TRAILING_SRC: &str = r#"
 #[hardware(sequential)]
@@ -1461,17 +1455,10 @@ async fn linear_trailing(clk: Clock<C>, o: Out<Bits<8>, C>) {
 
 #[test]
 fn linear_trailing_probe() {
-    // NARROWED 2026-08-27: the rule now exempts the linear class (its gate is
-    // `has_nested_tick`, the source-level mirror of extraction's trigger), so
-    // this spelling compiles WITHOUT an opt-out and the rule must return
-    // nothing for it — this probe is the exemption's standing witness.
-    let f: syn::ItemFn = syn::parse_str(LINEAR_TRAILING_SRC).expect("parses");
-    assert!(
-        copper_analysis::unprotected_trailing_out_write(&f).is_empty(),
-        "the trailing rule flags the LINEAR spelling again — it was measured \
-         AGREEING (the linear path commits trailing updates at the right edge), \
-         so that is a false positive unless the linear lowering itself changed"
-    );
+    // The linear multi-tick spelling was measured AGREEING on 2026-08-27 (the
+    // linear path commits trailing updates at the right edge); since phase C
+    // (2026-10-23) the extracted spelling agrees too and the trailing rule is
+    // retired, so this probe is the linear route's standing equivalence witness.
 
     let mut clk = Clock::<C>::new();
     let mut exec = HardwareExecutor::new();
@@ -1518,7 +1505,7 @@ fn linear_trailing_probe() {
 //   linear lowering route alone.
 
 const BRANCH_TRAILING_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn branch_trailing(clk: Clock<C>, o: Out<Bits<8>, C>) {
     let mut n: Bits<8> = Bits::zero();
     loop {
@@ -1534,7 +1521,7 @@ async fn branch_trailing(clk: Clock<C>, o: Out<Bits<8>, C>) {
 }
 "#;
 
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn branch_trailing(clk: Clock<C>, o: Out<Bits<8>, C>) {
     let mut n: Bits<8> = Bits::zero();
     loop {
@@ -1585,19 +1572,15 @@ fn branch_trailing_probe() {
     }
     let sv = transpile_and_run(BRANCH_TRAILING_SRC, "branch_trailing", "clk", "o", "");
     eprintln!("branch_trailing: sim = {sim:?}\n                 sv  = {sv:?}  -> {}", if sim == sv { "AGREE" } else { "DIVERGE" });
-    let one_cycle_late: Vec<u8> = (0..CYCLES).map(|k| (k / 2) as u8).collect();
+    //   VERDICT (2026-10-23, phase C): AGREE. The trailing state's plain-`Out`
+    //   drive is emitted as a forwarded combinational mux with a hold register,
+    //   so it is visible from the opening observation exactly as the simulator
+    //   shows it. The one-cycle-late trace `(0..CYCLES).map(|k| k / 2)` is what
+    //   the extracted route produced before.
     assert_eq!(
-        sv, one_cycle_late,
-        "the extracted-route divergence is no longer the one-edge-late trace — \
-         if sim == sv the trailing lowering is fixed for the top-level-last-tick \
-         class: re-bless this probe, EXPECTED_TRAILING, and the phase-C scope \
-         notes in design_docs/PAIRED_IMPLEMENTATION_SCOPE.md together"
-    );
-    assert_ne!(
         sim, sv,
-        "sim and SV now AGREE for extracted trailing after a TOP-LEVEL last \
-         tick — phase C landed for this class; re-bless this probe, \
-         EXPECTED_TRAILING, and the phase-C scope notes together"
+        "sim and SV diverge again for extracted trailing after a TOP-LEVEL last \
+         tick — phase C's emission form regressed"
     );
 }
 

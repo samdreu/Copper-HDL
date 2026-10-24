@@ -17,12 +17,18 @@
 /// An output driven in the trailing segment, alongside one driven mid-loop. This is
 /// the shape the multi-tick path refused.
 ///
-/// `tail` is a `RegOut` because a plain `Out` driven from a REGISTER here is the
-/// pre-tick hazard past the last tick, which `unprotected_trailing_out_write` rejects
-/// — the two things are separate: the lowering can now express trailing statements,
-/// and the rule still refuses the subset that diverges. What stays legal in the
-/// trailing segment with a plain `Out` is a constant write (`uart/rx`'s
-/// `rx_dv.write(Zero)`, verified) — see `trailing_constant` below.
+/// `tail` is a `RegOut`: a `RegOut` write takes effect at the first clock edge
+/// after it executes, so a trailing write publishes at the next edge on both
+/// sides. (A plain `Out` driven from a register here was refused by
+/// `unprotected_trailing_out_write` until phase C landed on 2026-10-23; the
+/// extraction route now emits such a drive as a forwarded combinational mux with
+/// a hold register, and the linear route already committed it at the right edge,
+/// so the rule is retired.) A plain `Out` written with a CONSTANT only past the
+/// second edge is refused by `out_first_driven_late` (a startup transient: the
+/// simulator shows the initial value at the first observation, the `assign`
+/// never does); that shape was `trailing_constant` here and is now
+/// `copper-macros/tests/ui/fail/out_first_driven_late.rs`. The agreeing half of
+/// its flipping pair is `late_constant_one_edge` below.
 #[hardware(sequential)]
 async fn trailing_out(
     clk: Clock<MainClk>,
@@ -61,11 +67,16 @@ async fn trailing_local_into_head(
     }
 }
 
-/// A plain `Out` written with a CONSTANT in the trailing segment — legal, and the
-/// real instance is `uart/rx`'s `rx_dv.write(Zero)`. The value is the same whichever
-/// phase the write runs in, so the alignment question cannot be observed through it.
+/// The flipping witness for `out_first_driven_late`'s boundary (measured 2026-10-23):
+/// a constant written ONE edge late — in the segment the first tick enters — AGREES
+/// with its SystemVerilog, while the same statement one tick later
+/// (`trailing_constant`, now `copper-macros/tests/ui/fail/out_first_driven_late.rs`)
+/// mismatches at cycle 0 only. That segment runs in edge 0's post-edge settle, so
+/// the write is visible at the first observation, exactly when `assign dv = 1'b1`
+/// is. The rule therefore keys on the SECOND edge, and this module sweeps as a
+/// positive case to keep that boundary measured rather than argued.
 #[hardware(sequential)]
-async fn trailing_constant(
+async fn late_constant_one_edge(
     clk: Clock<MainClk>,
     a: In<Bits<8>, MainClk>,
     dv: Out<Logic, MainClk>,
@@ -75,8 +86,8 @@ async fn trailing_constant(
     loop {
         r = a.read();
         clk.tick().await;
+        dv.write(Logic::One);
         o.write(r);
         clk.tick().await;
-        dv.write(Logic::One);
     }
 }

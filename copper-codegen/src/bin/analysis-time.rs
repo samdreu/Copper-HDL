@@ -75,7 +75,6 @@ fn one_run(tokens: &str, mode: &str) {
                 let _ = c.check_reachability();
                 let _ = c.multi_write_collapse();
                 let _ = c.unprotected_pretick_out_write();
-                let _ = c.unprotected_trailing_out_write();
                 let _ = c.pretick_out_write_before_update();
                 let _ = c.multi_phase_out_write();
                 let _ = c.registers();
@@ -106,7 +105,6 @@ fn breakdown(tokens: &str, mode: &str) {
     timed!("check_reachability", copper_analysis::check_reachability(&f));
     timed!("multi_write_collapse", copper_analysis::multi_write_collapse(&f));
     timed!("unprotected_pretick_out_write", copper_analysis::unprotected_pretick_out_write(&f));
-    timed!("unprotected_trailing_out_write", copper_analysis::unprotected_trailing_out_write(&f));
     timed!("pretick_out_write_before_update", copper_analysis::pretick_out_write_before_update(&f));
     timed!("multi_phase_out_write", copper_analysis::multi_phase_out_write(&f));
     timed!("infer_registers", copper_analysis::infer_registers(&f));

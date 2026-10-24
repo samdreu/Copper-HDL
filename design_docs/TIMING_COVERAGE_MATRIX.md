@@ -197,3 +197,20 @@ claims now rest on an outside referee rather than on self-assertion.
 
 That work also surfaced — and fixed — a real under-approximation in register
 inference on synchronizers; see under pattern 5 above.
+
+## Addendum (2026-10-23) — the trailing region
+
+A seventh pattern joined the anchored set with the tick-dialect unification: a
+**trailing region** (statements after the last top-level tick) driving a plain
+`Out` from a register it just updated. Its independent golden is the m2 hand-lowered
+module in `tests/sequential_forwarding_divergence.rs`
+(`m2_model_forwarded_lowering_matches_the_simulator_for_trailing_update`, derived on
+paper from the cycle-dataflow model and written by hand, not emitted), which the
+simulator matched cycle-for-cycle from the day it was written. Phase C made the
+transpiler match it too, on both lowering routes (`vlir_lower::opening_hold_outputs`),
+so `trailing_update`, `branch_trailing` and the `out_phase_dut` / `trailing_statements_dut`
+fixtures now sweep against the emitted SystemVerilog as well. The trailing `RegOut`
+write has the same status: `regout_trailing_single_tick` sweeps, and the rule it rests
+on — a `RegOut` write takes effect at the first clock edge after it executes — is the
+one the pre-tick `RegOut` anchors (`sipo_block`, BaseJump) already verified at the
+closing edge.

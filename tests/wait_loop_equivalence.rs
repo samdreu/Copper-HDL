@@ -196,8 +196,28 @@ fn a_wait_is_a_self_looping_state() {
 /// question is ever settled.
 #[test]
 fn ticking_before_the_test_is_refused() {
+    // The refused shape lives here (and as the macro's
+    // `copper-macros/tests/ui/fail/tick_first_wait.rs`), not in the fixture file:
+    // since 2026-10-23 both front-ends refuse it, so it cannot be a swept module.
+    const TICK_FIRST_SRC: &str = r#"
+#[hardware(sequential)]
+async fn tick_first_waiter(clk: Clock<MainClk>, go: In<Logic, MainClk>, count: RegOut<Bits<8>, MainClk>) {
+    let mut n: Bits<8> = Bits::zero();
+    loop {
+        count.write(n);
+        loop {
+            clk.tick().await;
+            if go.read() == Logic::One {
+                break;
+            }
+        }
+        n = n + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
     let err = copper_codegen::transpile_source(
-        SRC,
+        TICK_FIRST_SRC,
         Some("tick_first_waiter"),
         &copper_codegen::EmitConfig::default(),
     )

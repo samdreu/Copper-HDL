@@ -51,28 +51,3 @@ async fn handshake(
         clk.tick().await;
     }
 }
-
-/// The REFUSED ordering, kept as the counterexample: the body ticks BEFORE
-/// testing. The test then lands in the window where the simulator and a testbench
-/// disagree about which input value is current, and the transpiled module reacts a
-/// full cycle earlier than the simulator — measured, not argued.
-#[hardware(sequential)]
-async fn tick_first_waiter(
-    clk: Clock<MainClk>,
-    go: In<Logic, MainClk>,
-    count: RegOut<Bits<8>, MainClk>,
-) {
-    let mut n: Bits<8> = Bits::zero();
-
-    loop {
-        count.write(n);
-        loop {
-            clk.tick().await;
-            if go.read() == Logic::One {
-                break;
-            }
-        }
-        n = n + Bits::from_lit::<1>();
-        clk.tick().await;
-    }
-}

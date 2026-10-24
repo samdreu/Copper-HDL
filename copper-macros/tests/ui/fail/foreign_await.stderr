@@ -1,0 +1,5 @@
+error: await on a non-clock value: the only `await` a hardware module may write is `clk.tick().await`, which waits for a clock edge. Nothing else has a hardware meaning
+  --> tests/ui/fail/foreign_await.rs:17:9
+   |
+17 |         something_else().await;
+   |         ^^^^^^^^^^^^^^

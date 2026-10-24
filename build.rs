@@ -51,17 +51,6 @@ use quote::ToTokens;
 /// fail" is a claim that should have an author and a sentence.
 const SKIP: &[(&str, &str)] = &[
     (
-        "mp_rom",
-        "refused by design: a plain `Out` driven from a memory read result across phases has no \
-         correct emitted form (measured a full cycle late). multiphase_memory_equivalence.rs pins \
-         the diagnostic",
-    ),
-    (
-        "tick_first_waiter",
-        "refused by design: a repeating wait must be written test-first; pinned as an unsupported \
-         construct in unsupported_constructs.rs",
-    ),
-    (
         "probe",
         "an `allow_pretick_alignment` witness: the module exists to DEMONSTRATE the pre-tick \
          divergence, so sim ≠ SV is its purpose. probe_timing_investigation.rs measures it",
@@ -130,24 +119,6 @@ const SKIP: &[(&str, &str)] = &[
          `in_ready` the only diverging port, simulator 1 against SV 0 on 20 of 200 cycles. \
          Kept with `allow_pretick_alignment` as the demonstration; the guard refuses it \
          without the opt-out",
-    ),
-    (
-        "regout_trailing_single_tick",
-        "ONE-CYCLE DIVERGENCE, and the half worth knowing: reaching for `RegOut` does NOT fix \
-         the entry above. In a SINGLE-TICK loop the trailing statements share the head's \
-         phase, so the transpiler folds a trailing `RegOut` write into this edge while the \
-         simulator commits it on the next. Same lead, opposite cause. Every other member of \
-         the pre-tick alignment family is about a body crossing two or more edges",
-    ),
-    (
-        "trailing_constant",
-        "STARTUP TRANSIENT, not a divergence in steady state: `dv` is written only in \
-         the trailing segment, so the simulator first drives it at cycle 1 (it holds \
-         its initial value until the statement runs) while the emitted `assign dv = \
-         1'b1` drives it from time 0. They agree from cycle 1 on. A continuous assign \
-         has no notion of \"not yet written\", so this is a property of an `Out` first \
-         driven late, not of the trailing-statement semantics — see \
-         design_docs/SYNCHRONOUS_SEMANTICS.md",
     ),
     (
         "two_domain_top",

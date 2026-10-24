@@ -1,0 +1,5 @@
+error: registered output `q` is written after the last `clk.tick().await` from an input read in that same region. A `RegOut` write takes effect at the first clock edge after it executes, so this write commits at the NEXT edge — where the synthesized flip-flop samples the input one drive later than the simulator's immediate read did, and the two silently disagree by one cycle. Read the input before the `clk.tick().await` (the write then commits at that edge, with the read), or latch it into a register and write `q` from the register (a held value is the same on both sides). If this module exists to DEMONSTRATE the divergence, opt out explicitly with `#[hardware(sequential, allow_pretick_alignment)]`.
+  --> tests/ui/fail/trailing_regout_reads_input.rs:16:86
+   |
+16 | async fn trailing_regout_from_input(clk: Clock<MainClk>, step: In<Bits<8>, MainClk>, q: RegOut<Bits<8>, MainClk>) {
+   |                                                                                      ^
