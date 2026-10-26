@@ -108,3 +108,37 @@ async fn forwarded_opening_drive(clk: Clock<MainClk>, o: Out<Bits<8>, MainClk>) 
         clk.tick().await;
     }
 }
+
+// Phase E (2026-10-23): a plain `Out` driven in TWO clock phases is ACCEPTED when
+// the body reads no input — every drive runs at its cycle's opening on both sides,
+// and the extracted route emits a forwarded mux with a hold register. Measured
+// agreeing as `e2_two_registers` in tests/sequential_forwarding_divergence.rs.
+#[hardware(sequential)]
+async fn two_phase_opening_mux(clk: Clock<MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut a: Bits<8> = Bits::zero();
+    let mut b: Bits<8> = Bits::zero();
+    loop {
+        a = a + Bits::from_lit::<1>();
+        b = b + Bits::from_lit::<3>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(a);
+        clk.tick().await;
+        o.write(b);
+    }
+}
+
+// …and when every write of it sits behind an input read that a tick follows:
+// every drive then lands at the closing edge on both sides
+// (`e5d_two_closing_deferred`, measured agreeing).
+#[hardware(sequential)]
+async fn two_phase_closing_mux(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read() + cnt);
+        clk.tick().await;
+    }
+}
