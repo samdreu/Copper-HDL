@@ -32,7 +32,7 @@
 > | `unprotected_pretick_out_write` (D1, narrowed §5.7) | a plain `Out` written where an `In` read reaches the write on some path while a register is assigned unprotected on another (path-dependent boundary), or a conditional/constant write in such a segment | — |
 > | …its **constant-write** clause (§5.5; `written_on_all_paths`) | the same, where the port is written on *some* paths only — a constant is idempotent across the phase shift only if it lands on every path | 3 modules, all measured divergences (commit `348ddd0`) |
 > | ~~`unprotected_trailing_out_write`~~ (§5.4; narrowed 2026-08-27; **RETIRED 2026-10-23**) | refused the same hazard past the *last* tick on the extraction route, which emitted a trailing plain-`Out` drive one cycle late. Phase C fixed the emission (`vlir_lower::opening_hold_outputs`), both witnesses agree, and the rule is deleted | 1 real module when it landed (`rv32i_cpu_pipelined`'s `program_counter`, → `RegOut`; commit `56233ce`) |
-> | `multi_phase_out_write` (**narrowed 2026-10-23**, phase E — `CYCLE_DATAFLOW_SEMANTICS.md` §9) | a plain `Out` driven in more than one clock phase on the linear route, or with an input read anywhere while a write is opening, or in a register-free body with reads, or with mixed anchors; the input-free and all-closing extracted classes are accepted | 9 modules when it landed as "any two phases", six of them its own witnesses, three real (`rv32i_cpu` — since replaced by `rv32i_cpu_transpilable` — and `uart_tx`/`uart_rx`, → `RegOut`; commit `99290da`); 0 live modules at the narrowing |
+> | `multi_phase_out_write` (**narrowed 2026-10-23**, phase E — `CYCLE_DATAFLOW_SEMANTICS.md` §9) | a plain `Out` driven in more than one clock phase on the linear route, or in a register-free body with reads, or with mixed anchors (an input read reaching some write of the port while another is opening), or after a wait loop's read (unmeasured, by construction); accepted: an extracted port none of whose writes an input read reaches (whatever the body reads elsewhere — the "input read anywhere" clause was retired 2026-10-26 with the arm-granular opening walk), and the all-closing class | 9 modules when it landed as "any two phases", six of them its own witnesses, three real (`rv32i_cpu` — since replaced by `rv32i_cpu_transpilable` — and `uart_tx`/`uart_rx`, → `RegOut`; commit `99290da`); 0 live modules at the narrowing |
 > | `pretick_out_write_before_update` (§5.6, 2026-08-26; trailing clause 2026-08-27) | a plain `Out` written before the update of a register it reads — behind a leading read in the pre-tick segment, or anywhere in the trailing segment (whose updates commit at the opening edge) | 0 real modules at landing (caught a compile-only UI fixture; commit `7abfd98`); the trailing clause then caught THREE real sim-only-tested modules (`tests/module_composition_hybrid.rs`'s stages, measured divergent as `v8t_stage_publish_then_load`, migrated to the canonical write/read/tick/update spelling; commit `b439894`) |
 >
 > **Where each is enforced, and the opt-out.** Every rule is a spanned compile
@@ -53,7 +53,7 @@
 > | `unprotected_pretick_out_write` | `hazard_w4_mixed_alignment_flagged`, `hazard_probe_fsm_flagged` / `hazard_v4_leading_read_not_flagged`, `hazard_v6_post_tick_assign_not_flagged`, `hazard_w8_regout_immunises_mixed_alignment`, `hazard_w9_regout_immunises_the_minimal_case`, `hazard_lfsr_shape_not_flagged`, `hazard_regout_only_module_not_flagged`, and the three DISSOLVED shapes `hazard_v1_assign_then_write_dissolved`, `hazard_v5_trailing_read_dissolved`, `hazard_v7_escape_across_tick_dissolved` | `fail/pretick_alignment.rs` (`mixed_alignment`), `pass/pretick_alignment_ok.rs` (`post_tick_update`, `registered_output`, `leading_read`, `constant_write`, `forwarded_opening_drive`) | `pretick_alignment_hazard_flags_exactly_the_known_divergent_modules`; `EXPECTED_FLAGGED` = {`tests/fixtures/probe_timing_dut.rs::probe_fsm`, `tests/sequential_forwarding_divergence.rs::w4_mixed_alignment`, `tests/fixtures/control_extraction_dut.rs::branch_merge_explicit`, `…::pc_arm_toggle`, `…::pc_arm_write`} |
 > | …constant-write clause | `a_conditional_constant_write_is_flagged` / `an_unconditional_constant_write_is_not_flagged` | `pass/pretick_alignment_ok.rs::constant_write` (no dedicated `fail/` case; the corpus pin carries the positives) | the last three entries of `EXPECTED_FLAGGED` above |
 > | ~~`unprotected_trailing_out_write`~~ | retired 2026-10-23 with phase C; its unit tests, pin and witnesses' opt-outs are gone. `trailing_segment_register_update_agrees` and `branch_trailing_probe` now pin the AGREEMENT | — | — |
-> | `multi_phase_out_write` | `mphase_*` (one per clause: `mphase_constant_pulse_no_input_not_flagged`, `mphase_two_registers_no_input_not_flagged`, `mphase_two_closing_deferred_not_flagged`, `mphase_regout_not_flagged`, `mphase_single_phase_not_flagged` / `mphase_two_registers_plus_unrelated_read_flagged`, `mphase_trailing_immediate_read_flagged`, `mphase_register_free_passthrough_flagged`, `mphase_mixed_closing_and_opening_flagged`, `mphase_linear_route_flagged`) | `fail/multi_phase_out_write.rs` (`mixed_anchors`), `pass/pretick_alignment_ok.rs` (`two_phase_opening_mux`, `two_phase_closing_mux`) | `multi_phase_out_write_flags_exactly_the_demonstration_modules`; `EXPECTED_MULTI_PHASE` = the eight refused `e*` probes in `tests/sequential_forwarding_divergence.rs` (`e7`, `e7w`, `e2x`, `e4`, `e5`, `e6`, `e4i`, `e5f`); `pulse_plain` is clean under this rule |
+> | `multi_phase_out_write` | `mphase_*` (one per clause: `mphase_constant_pulse_no_input_not_flagged`, `mphase_two_registers_no_input_not_flagged`, `mphase_two_closing_deferred_not_flagged`, `mphase_regout_not_flagged`, `mphase_single_phase_not_flagged`, `mphase_two_registers_plus_unrelated_read_not_flagged` (flagged until 2026-10-26) / `mphase_trailing_immediate_read_flagged`, `mphase_register_free_passthrough_flagged`, `mphase_mixed_closing_and_opening_flagged`, `mphase_linear_route_flagged`, `mphase_opening_write_then_trailing_immediate_read_flagged`, `mphase_wait_loop_read_before_opening_writes_flagged`) | `fail/multi_phase_out_write.rs` (`mixed_anchors`), `pass/pretick_alignment_ok.rs` (`two_phase_opening_mux`, `two_phase_opening_mux_with_unrelated_read`, `two_phase_closing_mux`) | `multi_phase_out_write_flags_exactly_the_demonstration_modules`; `EXPECTED_MULTI_PHASE` = the seven refused `e*` probes in `tests/sequential_forwarding_divergence.rs` (`e7`, `e7w`, `e4`, `e5`, `e6`, `e4i`, `e5f`; `e2x` left on 2026-10-26); `pulse_plain` is clean under this rule |
 > | `pretick_out_write_before_update` | `v8a_write_between_read_and_update_flagged`, `v8t_trailing_write_before_update_flagged` / `v8b_write_after_update_not_flagged`, `v8c_write_before_read_not_flagged`, `v8_constant_write_not_flagged`, `v8_regout_not_flagged`, `v8_unrelated_update_after_write_not_flagged`, `v8t_trailing_write_after_update_not_flagged` | `fail/write_before_update.rs` (`stale_publish`), `pass/pretick_alignment_ok.rs` (`v8b_publish_after_update`, `v8c_publish_before_read`), `pass/single_loop_local_ok.rs::accum` (reordered to V8c) | `write_before_update_flags_exactly_the_demonstration_modules`; `EXPECTED_WRITE_BEFORE_UPDATE` = {`tests/sequential_forwarding_divergence.rs::v8a_read_write_update`, `…::v8d_temp_renamed_update`, `tests/fixtures/out_phase_dut.rs::out_from_reg_before_commit`, `…::v8t_stage_publish_then_load`} |
 >
 > The four corpus pins scan every clocked (`sequential` / `synchronizer`) module
@@ -68,15 +68,18 @@
 > *today's* verdict and flips loudly when a divergence is fixed or a dissolution
 > regresses).
 >
-> **Unguarded shapes (2026-10-23, phase E).** Two single-phase shapes diverge by
-> one cycle and are refused by **no** rule; they are pinned as `*_unguarded_gap`
-> tests in the same file and derived in `CYCLE_DATAFLOW_SEMANTICS.md` §9.4:
-> **e9** (`e9_a_read_in_another_state_demotes_an_opening_write_…`) — a plain `Out`
-> written from a committed register in a state with no read is still edge-sampled
-> because the module reads an input in another state, since codegen's opening
-> predicate is statement-granular over the whole extracted `match pc`; the remedy
-> is arm-granular opening tracking in `shir_lower::lower_stmt_list`, which would
-> also let clause 2 of `multi_phase_out_write` go. **e8**
+> **Unguarded shapes (2026-10-23, phase E).** Two single-phase shapes diverged by
+> one cycle and were refused by **no** rule; they are derived in
+> `CYCLE_DATAFLOW_SEMANTICS.md` §9.4. **e9** is **FIXED (2026-10-26)**: a plain
+> `Out` written from a committed register in a state with no read was edge-sampled
+> because the module read an input in another state, since codegen's opening
+> predicate was statement-granular over the whole extracted `match pc`; the walk is
+> now arm-granular (`shir_lower::lower_stmt_list`), the drive takes phase C's mux +
+> hold form, `e9_a_read_in_another_state_leaves_an_opening_write_opening_agrees`
+> pins the agreement, and clause 2 of `multi_phase_out_write` went with it. The
+> same change flipped the D1 witnesses `pc_arm_write`, `pc_arm_toggle` and
+> `probe_fsm` to agreement (the D1 rules are retained pending their own
+> re-derivation). **e8** remains, pinned as an `*_unguarded_gap` test: **e8**
 > (`e8_single_phase_trailing_immediate_read_…`) — a trailing plain `Out` written
 > from an input read in the same statement is immediate in the simulator and a
 > closing drive in codegen; the fix (an opening-edge sampling form, or a refusal)
@@ -371,10 +374,13 @@ noted it could not explain V7. That line of reasoning was looking at the wrong a
   extracted pulse are now a forwarded mux with a hold register — and **phase E
   the same day derived and measured the whole class** (`CYCLE_DATAFLOW_SEMANTICS.md`
   §9, the `e*` battery): the rule is narrowed to the shapes whose emitted form
-  still cannot show the simulator's trace (linear route, an input read anywhere
-  with an opening write, a register-free body with reads, mixed anchors), and
-  the input-free and all-closing classes are accepted. The paragraph below is
-  the 2026-08-25 landing record.
+  still cannot show the simulator's trace (linear route, a register-free body
+  with reads, mixed anchors, a wait loop's read before an opening write), and
+  the all-opening and all-closing classes are accepted — "all-opening" meaning
+  no input read reaches any write of the port, whatever the body reads elsewhere,
+  since the arm-granular opening walk of 2026-10-26 retired the "input read
+  anywhere" clause (`e2x` agrees). The paragraph below is the 2026-08-25 landing
+  record.
 
   So the fix is `Cfg::multi_phase_out_write`, enforced in both front-ends
   (`copper-macros/src/lib.rs` and `copper-codegen/src/lib.rs::transpile_target`)
@@ -681,7 +687,13 @@ same way before landing:
 > `a_conditional_constant_write_is_flagged`,
 > `an_unconditional_constant_write_is_not_flagged`; sim-vs-Verilator witnesses:
 > `a_write_in_a_state_arm_leads_the_hardware_by_one_cycle`,
-> `the_state_arm_lead_is_systematic_not_a_first_cycle_artifact`.
+> `the_state_arm_lead_is_systematic_not_a_first_cycle_artifact` — **both AGREE
+> since 2026-10-26** (renamed `a_write_in_a_state_arm_agrees_under_arm_granular_opening`,
+> `the_state_arm_toggle_agrees_on_every_cycle`): the lead was codegen's
+> statement-granular opening walk, not the phase shift it was read as, and the
+> arm-granular walk emits the `pc == 1` arm's constant as an opening mux arm
+> (`CYCLE_DATAFLOW_SEMANTICS.md` §9.4). The clause is retained; re-deriving it on
+> this evidence is a decision of its own.
 
 That is the discriminator §5.4 asked for, and it was hiding in plain sight: *a
 constant is idempotent across the phase shift only if it is written on every path.*
@@ -701,6 +713,27 @@ taken (2026-08-25) is to **limit the design expressions instead**: keep "a value
 live across a `clk.tick().await` is a register", keep one value per variable (no
 current/next distinction, as in §10.1's languages), and reject the shapes that
 diverge rather than growing the machinery that reconciles them.
+
+**2026-10-26 — the witnesses re-measured under the arm-granular opening walk.**
+`pc_arm_write` and `pc_arm_toggle` now AGREE: their lead was codegen's
+statement-granular opening predicate (the `sel.read()` in the `pc == 0` arm marked
+the whole extracted `match pc`, so the `pc == 1` arm's constant was edge-sampled
+one edge late), and with the walk arm-granular that arm is an opening mux arm
+(`CYCLE_DATAFLOW_SEMANTICS.md` §9.4). `branch_merge_explicit` does **not** agree:
+its `tail_o` is also written behind the deferred `sel` read (closing), a
+mixed-anchor port that stays edge-sampled, and it still leads by one cycle when
+the first cycle takes the `sel == 1` path — measured sim `tail_o = 1` at cycle 0,
+SV `0`. Its `build.rs` `SKIP` row stays, reworded. **Blind spot, recorded, not
+fixed:** the corpus sweep's per-module seed drives `sel == 0` first for both
+twins, under which the lag is invisible (`tail_o` goes high at the closing edge
+and holds), so the live, unflagged twin `branch_merge` passes the sweep by its
+seed alone — the same `tail_o` under the same emission diverges under `sel == 1`
+first. Neither D1 clause flags the async twin (its `tail_o` write sits after the
+branch merge, not on a path of its own). Candidate remedies, none taken here: a
+drive-level emission that anchors each write of a port separately (§9.4's
+drive-level form), a rule that reaches the async spelling, or sweep stimulus that
+varies the first cycle. This clause is retained as it stands; re-deriving it on
+the `pc_arm_*` evidence is a decision of its own.
 
 ### 5.6 The write BETWEEN a leading read and the update — DERIVED, then measured, then GUARDED 2026-08-26
 
@@ -1023,7 +1056,10 @@ That is the same defect class this whole document is about, introduced while fix
   now subsumed and can be retired.~~ **Resolved 2026-08-21** — §7 3a: the
   `allow_pretick_alignment` opt-out; `probe_fsm` carries it, stays in
   `EXPECTED_FLAGGED`, and `tests/probe_timing_investigation.rs::probe_fsm_sim_matches_verilog`
-  stays `#[ignore]`d as the W4-class demonstration.
+  stays `#[ignore]`d as the W4-class demonstration. **2026-10-26:** that test is
+  un-ignored and `probe_fsm`'s `SKIP` row is lifted — it agrees under the
+  arm-granular opening walk (its write sits only on the read-free path); the
+  W4 class's remaining divergent witness is `w4_mixed_alignment`.
 - ~~**Three `fast_counter` copies** live in two examples and one test. Migrating them
   changes `two_domain_counter.rs`'s printed timeline and its prose, which already
   mis-describes the latency decomposition.~~ **Resolved 2026-08-21** — §7 3b:

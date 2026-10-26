@@ -96,10 +96,17 @@ async fn branch_merge(
 
 // `allow_pretick_alignment` since 2026-08-25: this hand-written FSM is now a
 // DEMONSTRATION of the pre-tick hazard as well as of the extracted shape. Its
-// conditionally-written constant `tail_o` leads its own emitted SystemVerilog by one
-// cycle (measured; pinned as sequential_forwarding_divergence.rs::pc_arm_write), and
-// the D1 rule rejects that shape for real designs. The flag silences the error, not
-// the detection — the module stays visible to every corpus scan, and its twin
+// conditionally-written constant `tail_o` led its own emitted SystemVerilog by one
+// cycle (measured; the minimal pair sequential_forwarding_divergence.rs::pc_arm_write),
+// and the D1 rule rejects that shape for real designs. Since 2026-10-26 (arm-granular
+// opening tracking in codegen) `pc_arm_write` AGREES, and `head_o` here (written before
+// the read in the `pc == 0` arm) takes phase C's mux + hold form, byte-identically in
+// both twins — but `tail_o` does not: it is also written behind the deferred `sel`
+// read, a mixed-anchor port that stays edge-sampled, and it still leads by one when
+// the first cycle takes the `sel == 1` path (measured; the sweep's seed takes
+// `sel == 0` first, which masks it in BOTH twins — build.rs SKIP row). The rule is
+// retained pending its own re-derivation. The flag silences the error, not the
+// detection — the module stays visible to every corpus scan, and its twin
 // `branch_merge` is deliberately left unflagged so the structural comparison still
 // pairs the same port styles.
 #[hardware(sequential, allow_pretick_alignment)]

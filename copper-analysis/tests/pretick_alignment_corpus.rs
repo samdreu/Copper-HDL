@@ -201,9 +201,11 @@ fn pretick_alignment_hazard_flags_exactly_the_known_divergent_modules() {
 /// modules, ~30 with passing equivalence tests). Writing a plain `Out` after a
 /// tick is the ordinary multi-phase pattern; writing it in *two* phases is what
 /// this rule keys on — and since phase E it refuses only the measured divergent
-/// classes (mixed anchors, register-free passthrough reads, the linear route),
-/// admitting the input-free extracted class (`pulse_plain`, `e2`, `e3`) and the
-/// all-closing class (`e5d`) that phase C's emission shows exactly. Each listed
+/// classes (mixed anchors, register-free passthrough reads, the linear route,
+/// plus the unmeasured wait-loop shape by construction), admitting the extracted
+/// class whose writes no input read reaches (`pulse_plain`, `e2`, `e3`, and since
+/// 2026-10-26 `e2x`, whose read sits in another state) and the all-closing class
+/// (`e5d`) that phase C's emission shows exactly. Each listed
 /// module is one row of the verdict table in
 /// `tests/sequential_forwarding_divergence.rs` (the `e*` tests pin its traces).
 ///
@@ -218,8 +220,9 @@ const EXPECTED_MULTI_PHASE: &[&str] = &[
     // edge-sampled through the phase-guarded hold path (e7w)
     "tests/sequential_forwarding_divergence.rs::e7_linear_two_registers",
     "tests/sequential_forwarding_divergence.rs::e7w_linear_phase_local_wires",
-    // an input read anywhere demotes every drive to edge-sampled (clause i)
-    "tests/sequential_forwarding_divergence.rs::e2x_two_registers_plus_unrelated_read",
+    // (e2x_two_registers_plus_unrelated_read left this set 2026-10-26: codegen's
+    // opening walk is arm-granular, so a read in another state demotes nothing
+    // and the port takes the mux + hold form — measured agreeing)
     // mixed anchors: one closing drive, one opening (clause ii)
     "tests/sequential_forwarding_divergence.rs::e4_closing_then_opening",
     "tests/sequential_forwarding_divergence.rs::e5_two_closing",

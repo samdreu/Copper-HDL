@@ -1161,13 +1161,15 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                         "output port `{port}` is driven in more than one clock phase (on both \
                          sides of a `clk.tick().await`) in a shape whose synthesized form \
                          shows one of the writes a cycle after the simulator does. A write \
-                         with no input read before it runs at its cycle's opening; once the \
-                         body reads any input, or on the linear multi-tick path, the port is \
-                         emitted as an edge-sampled register and that write lands one \
-                         observation late (measured, phase E). Accepted shapes: a body that \
-                         reads no input at all, or one where every write of `{port}` follows \
-                         an input read with a `clk.tick().await` after it (all writes then \
-                         land at the edge on both sides). Otherwise declare `{port}` as \
+                         with no input read before it in its own phase runs at its cycle's \
+                         opening; once an input read precedes some write of `{port}` (its own \
+                         operand, a branch condition, a wait loop's exit test), or on the \
+                         linear multi-tick path, the port is emitted as an edge-sampled \
+                         register and that write lands one observation late (measured, phase \
+                         E). Accepted shapes: no write of `{port}` preceded by an input read \
+                         in its phase (a read in another phase is fine), or every write of it \
+                         following an input read with a `clk.tick().await` after it (all \
+                         writes then land at the edge on both sides). Otherwise declare `{port}` as \
                          `RegOut<…>` (a registered output, immune because it commits at the \
                          clock edge), or drive it in exactly one phase. If this module exists \
                          to DEMONSTRATE the divergence, opt out explicitly with \

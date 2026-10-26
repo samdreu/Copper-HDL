@@ -13,6 +13,15 @@
 // If `probe_fsm` (sim == verilog) picks one sampling schedule, that schedule IS
 // the hardware-accurate answer, and whichever of {multi-tick sim, multi-tick
 // transpiler} matches it is the correct execution model.
+//
+// `probe_fsm` itself diverged from its own transpiled Verilog by one cycle until
+// 2026-10-26: the `inp.read()` in the `phase == 0` arm marked codegen's whole
+// statement walk, so the `phase == 1` arm's `out.write(x)` was edge-sampled one
+// edge after the simulator's opening-instant write. With the walk arm-granular the
+// drive is opening in its own arm, takes phase C's mux + hold form, and sim ==
+// verilog (`probe_fsm_sim_matches_verilog`, un-ignored; the module sweeps). The D1
+// rule still flags it (W4 class, `allow_pretick_alignment`); `w4_mixed_alignment`
+// is that class's remaining divergent witness.
 
 #[hardware(sequential)]
 async fn probe(

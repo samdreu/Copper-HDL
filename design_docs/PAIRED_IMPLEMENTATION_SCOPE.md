@@ -245,8 +245,11 @@ edge-sampled (`e5d`). `multi_phase_out_write` was **narrowed, not retired** —
 the linear route, an input read anywhere with an opening write, register-free
 bodies with reads, and mixed anchors stay refused, each with a flipping pair.
 No emission changed (sv-baseline delta: the new probes only). Two single-phase
-divergences the battery exposed (`e8`, `e9`) are recorded unguarded in §9.4 and
-are the next candidate codegen change (arm-granular opening tracking).
+divergences the battery exposed (`e8`, `e9`) were recorded unguarded in §9.4.
+**`e9` is fixed (2026-10-26):** the opening walk is arm-granular, the "input read
+anywhere" clause is retired, and the sv-baseline delta was seven modules (`e9`,
+`e2x`, `pc_arm_write`, `pc_arm_toggle`, `probe_fsm`, the `branch_merge` twins'
+`head_o`), every pinned lag among them flipping to agreement. `e8` remains.
 
 ## 3. Gates (every phase)
 

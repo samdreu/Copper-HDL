@@ -1094,11 +1094,15 @@ impl Cfg {
     /// moves it to the pre-edge settle of the closing edge. The emission has a
     /// predicate of its own (`vlir_lower::opening_hold_outputs`): a conditionally
     /// driven port whose every drive is an opening drive **as codegen sees it** —
-    /// no `In` read anywhere in the statement walk before the drive, and under
-    /// control extraction that walk is the whole `match pc`, so **any input read in
-    /// the module** demotes every drive — becomes a forwarded combinational mux with
-    /// a hold register (visible from the opening observation); any other port is an
-    /// edge-sampled register under `pc` guards (visible from the closing one).
+    /// no `In` read precedes the drive in its own arm's walk (arm-granular since
+    /// 2026-10-26; until then the walk was the whole `match pc`, so any input read
+    /// in the module demoted every drive) — becomes a forwarded combinational mux
+    /// with a hold register (visible from the opening observation); any other port
+    /// is an edge-sampled register under `pc` guards (visible from the closing one).
+    /// Codegen's anchor is control-flow, not dataflow: a read that comb-reaches the
+    /// drive in its segment — the drive's own operand, the condition of an
+    /// enclosing branch, the exit test of a wait loop the write is duplicated into
+    /// — counts whether the simulator treats that read as deferred or immediate.
     ///
     /// Predicted on paper, then measured on the probes in
     /// `tests/sequential_forwarding_divergence.rs` (one `#[test]` per row, traces
@@ -1110,32 +1114,42 @@ impl Cfg {
     /// | two committed registers, no input (`e2_two_registers`) | opening, opening | mux + hold | **agree** |
     /// | forwarded next-state then committed (`e3_forwarded_then_committed`) | opening, opening | mux + hold | **agree** |
     /// | both writes behind a deferred read, module has registers (`e5d_two_closing_deferred`) | closing, closing | edge-sampled | **agree** |
-    /// | register-valued writes plus an unrelated read elsewhere (`e2x_…`) | opening, opening | edge-sampled | DIVERGE, opening drives one late |
+    /// | register-valued writes plus an unrelated read in another state (`e2x_…`) | opening, opening | mux + hold (arm-granular, 2026-10-26) | **agree** |
     /// | deferred read then a constant (`e4_…`), via a wire (`e6_…`) | closing, opening | edge-sampled | DIVERGE, the opening drive one late |
     /// | one deferred, one trailing *immediate* read (`e5_two_closing`) | closing, opening | edge-sampled | DIVERGE (one tick moved flips it to `e5d`) |
     /// | register-free module, reads feeding the writes (`e4i_…`, `e5f_…`) | opening (passthrough-immediate) | edge-sampled | DIVERGE |
     /// | linear route, register values (`e7_…`) | opening, opening | **refused** by `vlir_lower` (multiply driven) | refused one IR late |
     /// | linear route, phase-local wires (`e7w_…`) | opening, opening | phase-guarded hold register | DIVERGE, one late |
     ///
-    /// So the port agrees iff it is on the **extracted** route and either (i) the
-    /// module reads no `In` port at all — every drive is opening on both sides and
-    /// phase C's mux shows it — or (ii) every write of the port is reached by a
-    /// **deferred** read in its own phase and the module has registers — every drive
-    /// is closing on both sides and the edge-sampled form shows it. Everything else
-    /// is refused: the mixed class (some drive opening in the simulator while
-    /// codegen edge-samples the whole port), the register-free class (a read
-    /// feeding a plain `Out` in a register-free body is an *immediate* passthrough
-    /// read in the simulator, `classify_reads`, so the write is opening however it
-    /// is spelled), and the linear route, where no mux form exists and the lowering
-    /// refuses or edge-samples one IR later — the macro must refuse it too, or a
-    /// module compiles that does not transpile (front-end parity).
+    /// So the port agrees iff it is on the **extracted** route and either (i) no
+    /// write of the port has an input read comb-reaching it — every drive is
+    /// opening on both sides and phase C's mux shows it, whether or not the module
+    /// reads an input in some other state (`e2`, `e2x`) — or (ii) every write of
+    /// the port is reached by a **deferred** read in its own phase and the module
+    /// has registers — every drive is closing on both sides and the edge-sampled
+    /// form shows it. Everything else is refused: the mixed class (some write
+    /// opening in the simulator while a read reaching some write of the port makes
+    /// codegen edge-sample the whole port — a deferred read reaching another write,
+    /// `e4`, `e6`, or a trailing *immediate* read reaching this one, `e5`), the
+    /// register-free class (a read feeding a plain `Out` in a register-free body is
+    /// an *immediate* passthrough read in the simulator, `classify_reads`, so the
+    /// write is opening however it is spelled), and the linear route, where no mux
+    /// form exists and the lowering refuses or edge-samples one IR later — the
+    /// macro must refuse it too, or a module compiles that does not transpile
+    /// (front-end parity). Until 2026-10-26 a further clause refused any input
+    /// read anywhere in the body while a write of the port was opening, because
+    /// codegen's walk was statement-granular; the arm-granular walk retired it
+    /// (`e2x` flipped to agreement, and the single-phase `e9` with it).
     ///
     /// Unmeasured shapes land on the refusing side by construction: a write after a
     /// folded tick-bearing loop that reads an input (a wait loop) is not reached by
-    /// that read over Comb edges, so it counts as opening, and a body extraction
-    /// handles only because of a `continue` has no nested tick, so it counts as
-    /// linear. Both can be measured and admitted later; neither is admitted by
-    /// guess.
+    /// that read over Comb edges, so the simulator side counts it as opening, while
+    /// control extraction duplicates that write into the loop's exit arm under the
+    /// read's condition, where codegen sees a read before it — so an opening write
+    /// of a multi-phase port in a body with such a loop is refused outright (the
+    /// folded clause; no witness measured); and a body extraction handles only
+    /// because of a `continue` has no nested tick, so it counts as linear. Both can
+    /// be measured and admitted later; neither is admitted by guess.
     ///
     /// # Why not widen the D1 rule instead
     ///
@@ -1192,6 +1206,10 @@ impl Cfg {
         }
         let reads_input = self.reads_any_input();
         let register_free = self.registers().is_empty();
+        let folded_input_read = self
+            .nodes
+            .iter()
+            .any(|n| n.folded && n.is_tick && !n.uses.is_disjoint(&self.inputs));
         phases
             .into_iter()
             .filter(|(_, (p, _))| p.len() > 1)
@@ -1200,17 +1218,26 @@ impl Cfg {
                 if !self.has_nested_tick {
                     return true;
                 }
-                // (i) No input anywhere: every drive opening on both sides.
-                if !reads_input {
-                    return false;
-                }
-                // Register-free: the reads feeding the writes are immediate
-                // passthroughs, so the writes are opening in the simulator.
-                if register_free {
+                // Register-free with reads: the reads feeding the writes are
+                // immediate passthroughs, so the writes are opening in the
+                // simulator while codegen sees a read before them.
+                if register_free && reads_input {
                     return true;
                 }
-                // (ii) Every write closing on both sides — else mixed.
-                !writes.iter().all(|&w| self.deferred_read_reaches(w))
+                // A write is OPENING in the simulator unless a deferred read
+                // reaches it; codegen edge-samples the whole port once ANY input
+                // read reaches any write of it. An opening write under an
+                // edge-sampled port is the divergent class: mixed anchors (`e4`,
+                // `e6`) or a trailing immediate read before a write (`e5`).
+                let any_opening = writes.iter().any(|&w| !self.deferred_read_reaches(w));
+                let edge_sampled = writes.iter().any(|&w| self.leading_read_reaches(w));
+                if any_opening && edge_sampled {
+                    return true;
+                }
+                // Unmeasured, refused by construction: a wait loop's read is no
+                // Comb predecessor of the write after it, but the extracted form
+                // duplicates that write into the exit arm behind the read.
+                any_opening && folded_input_read
             })
             .map(|(port, _)| port)
             .collect()
@@ -4148,16 +4175,53 @@ mod tests {
     }
 
     /// `e2x_two_registers_plus_unrelated_read`: the same, plus one input read in
-    /// the head. Codegen edge-samples every drive once the module reads an input;
-    /// the opening drives lag. DIVERGES — flagged. The flipping pair for clause (i).
+    /// the head, which no write of `o` is reached by. Flagged until 2026-10-26,
+    /// when codegen's opening walk was statement-granular over the whole extracted
+    /// `match pc`; arm-granular, the read in another state demotes nothing and
+    /// phase C's mux shows both drives. AGREES — not flagged.
     #[test]
-    fn mphase_two_registers_plus_unrelated_read_flagged() {
+    fn mphase_two_registers_plus_unrelated_read_not_flagged() {
         let src = r#"
             #[hardware(sequential)]
             async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
                 let mut a: Bits<8> = Bits::zero();
                 let mut b: Bits<8> = Bits::zero();
                 loop { a = x.read(); b = b + Bits::from_lit::<3>(); for _ in 0..2 { clk.tick().await; } o.write(a); clk.tick().await; o.write(b); }
+            }
+        "#;
+        assert!(mphase(src).is_empty());
+    }
+
+    /// An opening write from a register, then a trailing write whose own operand
+    /// reads the input: every write is opening in the simulator (a trailing read
+    /// is immediate), but the read reaching the second write edge-samples the
+    /// whole port, so the first lands one observation late. Flagged — the
+    /// `e8` mechanism inside a multi-phase port (derived; `e5` is the measured
+    /// neighbour with a deferred first read).
+    #[test]
+    fn mphase_opening_write_then_trailing_immediate_read_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut a: Bits<8> = Bits::zero();
+                loop { a = a + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(a); for _ in 0..2 { clk.tick().await; } o.write(x.read() + a); }
+            }
+        "#;
+        assert_eq!(mphase(src), vec!["o".to_string()]);
+    }
+
+    /// A wait loop (`while x.read() == 0 { tick }`) before two opening writes:
+    /// the folded read is no Comb predecessor of either write, yet control
+    /// extraction duplicates the first write into the loop's exit arm behind the
+    /// read's condition. Unmeasured — refused by construction (the folded clause).
+    #[test]
+    fn mphase_wait_loop_read_before_opening_writes_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut a: Bits<8> = Bits::zero();
+                let mut b: Bits<8> = Bits::zero();
+                loop { a = a + Bits::from_lit::<1>(); b = b + Bits::from_lit::<3>(); while x.read() == Bits::zero() { clk.tick().await; } o.write(a); clk.tick().await; o.write(b); }
             }
         "#;
         assert_eq!(mphase(src), vec!["o".to_string()]);

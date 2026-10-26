@@ -121,12 +121,15 @@ pub fn trailing_regout_reads_input(f: &ItemFn) -> Vec<String> {
 
 /// Plain combinational `Out` ports driven in **more than one clock phase** whose
 /// emitted form cannot show the simulator's trace — narrowed 2026-10-23 (phase E)
-/// to the measured divergent classes: a write anchored differently on the two
-/// sides (an input read anywhere in an extracted body edge-samples every drive;
-/// a trailing or register-free read is immediate in the simulator), and the
-/// linear route, which has no mux form. An input-free extracted module, and one
-/// whose every write of the port sits behind a deferred read, are accepted and
-/// measured agreeing. Returns the offending ports, sorted; empty for a
+/// to the measured divergent classes, and again 2026-10-26 when codegen's opening
+/// walk became arm-granular: a write anchored differently on the two sides (an
+/// input read reaching some write of the port edge-samples every drive of it; a
+/// trailing or register-free read is immediate in the simulator), a wait loop's
+/// read before an opening write (unmeasured, refused by construction), and the
+/// linear route, which has no mux form. An extracted module none of whose writes
+/// of the port is reached by an input read (whatever it reads elsewhere), and
+/// one whose every write of the port sits behind a deferred read, are accepted
+/// and measured agreeing. Returns the offending ports, sorted; empty for a
 /// combinational module, one with no top-level loop, or one whose outputs are all
 /// `RegOut`.
 ///

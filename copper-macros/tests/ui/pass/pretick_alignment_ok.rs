@@ -127,6 +127,23 @@ async fn two_phase_opening_mux(clk: Clock<MainClk>, o: Out<Bits<8>, MainClk>) {
     }
 }
 
+// …also when the body reads an input in ANOTHER phase that no write of the port
+// is reached by (2026-10-26: codegen's opening walk is arm-granular, so the read
+// demotes nothing; `e2x_two_registers_plus_unrelated_read`, measured agreeing)…
+#[hardware(sequential)]
+async fn two_phase_opening_mux_with_unrelated_read(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut a: Bits<8> = Bits::zero();
+    let mut b: Bits<8> = Bits::zero();
+    loop {
+        a = x.read();
+        b = b + Bits::from_lit::<3>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(a);
+        clk.tick().await;
+        o.write(b);
+    }
+}
+
 // …and when every write of it sits behind an input read that a tick follows:
 // every drive then lands at the closing edge on both sides
 // (`e5d_two_closing_deferred`, measured agreeing).
