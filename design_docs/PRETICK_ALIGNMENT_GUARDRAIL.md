@@ -39,11 +39,11 @@
 > error in the `#[hardware(sequential)]` arm of `copper-macros/src/lib.rs`, and
 > every one is silenced — *detection unchanged* — by
 > `#[hardware(sequential, allow_pretick_alignment)]` (`ALLOW_PRETICK` in the
-> macro). `multi_phase_out_write` is additionally enforced by the transpiler in
-> `copper-codegen/src/lib.rs::transpile_target`, with the same opt-out read by
-> `opts_out_of_pretick_alignment`; the other three are macro-only (a module that
-> reaches the transpiler has already compiled through the macro). The opt-out is
-> for modules that exist to *demonstrate* a divergence and must never be reached
+> macro). Since front-end parity (2026-10-23) every rule is also run by the
+> transpiler in `copper-codegen/src/lib.rs::transpile_target`, with the same
+> opt-out read by `opts_out_of_pretick_alignment`
+> (`copper-analysis/tests/front_end_parity.rs` is the standing audit). The opt-out
+> is for modules that exist to *demonstrate* a divergence and must never be reached
 > for in a real design.
 >
 > **The pins.** Each rule has three layers, all green as of 2026-09-01:
@@ -67,6 +67,20 @@
 > `#[test]`s, none ignored, all sim-vs-Verilator on the transpiled SV; each records
 > *today's* verdict and flips loudly when a divergence is fixed or a dissolution
 > regresses).
+>
+> **Unguarded shapes (2026-10-23, phase E).** Two single-phase shapes diverge by
+> one cycle and are refused by **no** rule; they are pinned as `*_unguarded_gap`
+> tests in the same file and derived in `CYCLE_DATAFLOW_SEMANTICS.md` §9.4:
+> **e9** (`e9_a_read_in_another_state_demotes_an_opening_write_…`) — a plain `Out`
+> written from a committed register in a state with no read is still edge-sampled
+> because the module reads an input in another state, since codegen's opening
+> predicate is statement-granular over the whole extracted `match pc`; the remedy
+> is arm-granular opening tracking in `shir_lower::lower_stmt_list`, which would
+> also let clause 2 of `multi_phase_out_write` go. **e8**
+> (`e8_single_phase_trailing_immediate_read_…`) — a trailing plain `Out` written
+> from an input read in the same statement is immediate in the simulator and a
+> closing drive in codegen; the fix (an opening-edge sampling form, or a refusal)
+> is undecided. `RegOut` is the agreed form for both until then.
 >
 > **Read first:** `SYNCHRONOUS_SEMANTICS.md` §Output timing. This is the **third**
 > member of the blocking/non-blocking family, after the `Out`-hold semantics and the

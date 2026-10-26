@@ -460,6 +460,31 @@ rather than papered over (`SKIP` in `build.rs`):
 - a phase-gated cross-tick read (`probe_fsm`, the W4 path-dependent boundary
   from the guardrail doc).
 
+**Unguarded divergences** — two shapes that disagree by one cycle and that **no
+rule refuses yet**, found by the phase-E probe battery (2026-10-23) and pinned as
+`*_unguarded_gap` tests in `tests/sequential_forwarding_divergence.rs` so the
+verdict flips loudly if either is fixed (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md`
+§9.4 has the derivation):
+
+- **e9** — a conditionally driven plain `Out` written from a committed register
+  in one FSM state, in a module that reads an input in *another* state. The write
+  is an opening drive in the simulator, but the transpiler's opening-prefix scan
+  is statement-granular over the whole extracted `match pc`, so one input read
+  anywhere makes it edge-sample every drive of the port: the output is published
+  one cycle late. Phase C's mux-plus-hold form is therefore reached only by
+  input-free extracted modules. The remedy is arm-granular opening tracking in
+  codegen, not a rule.
+- **e8** — a plain `Out` written after the last tick from an input read in that
+  same trailing statement (`o.write(x.read() + cnt)`). The simulator reads the
+  input immediately and shows the result at the opening observation; the emitted
+  drive samples the input one observation later. The D2 passthrough class inside a
+  conditional arm; the fix is either a drive form that samples at the opening edge
+  or a refusal rule, and that choice is open.
+
+A real design that hits either shape today gets no error. Until they are closed,
+write such an output as a `RegOut`, which is the registered form both sides agree
+on.
+
 One correctness rule is worth knowing when reading the generated Verilog: an
 output drive that is *sampled at the clock edge* is emitted from the values the
 registers hold **before** that edge, while one emitted as a continuous `assign` is
