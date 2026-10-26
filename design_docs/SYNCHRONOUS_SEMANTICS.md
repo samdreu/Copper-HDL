@@ -199,7 +199,13 @@ and an extracted body is one `match pc` statement, so the mux + hold form is
 emitted only for modules that read **no** input; an extracted module with an
 input read anywhere edge-samples every conditionally driven plain `Out` and shows
 an opening write one cycle late (`e9_read_in_another_state_opening_write`,
-unguarded — `CYCLE_DATAFLOW_SEMANTICS.md` §9.4).
+unguarded — `CYCLE_DATAFLOW_SEMANTICS.md` §9.4). The same battery found a second
+unguarded single-phase shape, `e8_single_phase_trailing_immediate_read`: a plain
+`Out` written in the trailing region from an input read in that same statement is
+an immediate read here and a closing drive in the emitted SystemVerilog, one
+observation apart. Neither shape is refused by any rule today; both are pinned as
+`*_unguarded_gap` tests in `tests/sequential_forwarding_divergence.rs`, and
+`RegOut` is the form both sides agree on for either.
 
 **Startup — refused where it is observable (2026-10-23).** An `Out` whose every
 write is a constant and whose first write executes only *after the second clock
