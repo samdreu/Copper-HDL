@@ -34,6 +34,7 @@
 > | ~~`unprotected_trailing_out_write`~~ (§5.4; narrowed 2026-08-27; **RETIRED 2026-10-23**) | refused the same hazard past the *last* tick on the extraction route, which emitted a trailing plain-`Out` drive one cycle late. Phase C fixed the emission (`vlir_lower::opening_hold_outputs`), both witnesses agree, and the rule is deleted | 1 real module when it landed (`rv32i_cpu_pipelined`'s `program_counter`, → `RegOut`; commit `56233ce`) |
 > | `multi_phase_out_write` (**narrowed 2026-10-23**, phase E — `CYCLE_DATAFLOW_SEMANTICS.md` §9) | a plain `Out` driven in more than one clock phase on the linear route, or with an input read anywhere while a write is opening, or in a register-free body with reads, or with mixed anchors; the input-free and all-closing extracted classes are accepted | 9 modules when it landed as "any two phases", six of them its own witnesses, three real (`rv32i_cpu` — since replaced by `rv32i_cpu_transpilable` — and `uart_tx`/`uart_rx`, → `RegOut`; commit `99290da`); 0 live modules at the narrowing |
 > | `pretick_out_write_before_update` (§5.6, 2026-08-26; trailing clause 2026-08-27) | a plain `Out` written before the update of a register it reads — behind a leading read in the pre-tick segment, or anywhere in the trailing segment (whose updates commit at the opening edge) | 0 real modules at landing (caught a compile-only UI fixture; commit `7abfd98`); the trailing clause then caught THREE real sim-only-tested modules (`tests/module_composition_hybrid.rs`'s stages, measured divergent as `v8t_stage_publish_then_load`, migrated to the canonical write/read/tick/update spelling; commit `b439894`) |
+> | `trailing_out_reads_input` (**2026-10-26**, the e8 class — `CYCLE_DATAFLOW_SEMANTICS.md` §9.4) | a plain `Out` written after the last tick from an `In` read directly at an immediate site, in a body that crosses more than one edge: the extraction route edge-samples the drive one observation late (`e8`, `e8p`) and the linear multi-tick route emits a continuous assign the phase does not gate (`e8m`); the single-tick body agrees (`e8l`, `e8lr`) and is exempt, as is a value held in a register or a deferred read | 0 live modules; the witnesses are the opted-out probes (`e8`, `e8m`, `e8p`, and phase E's `e5_two_closing`, whose second write is this shape) |
 >
 > **Where each is enforced, and the opt-out.** Every rule is a spanned compile
 > error in the `#[hardware(sequential)]` arm of `copper-macros/src/lib.rs`, and
@@ -55,32 +56,32 @@
 > | ~~`unprotected_trailing_out_write`~~ | retired 2026-10-23 with phase C; its unit tests, pin and witnesses' opt-outs are gone. `trailing_segment_register_update_agrees` and `branch_trailing_probe` now pin the AGREEMENT | — | — |
 > | `multi_phase_out_write` | `mphase_*` (one per clause: `mphase_constant_pulse_no_input_not_flagged`, `mphase_two_registers_no_input_not_flagged`, `mphase_two_closing_deferred_not_flagged`, `mphase_regout_not_flagged`, `mphase_single_phase_not_flagged` / `mphase_two_registers_plus_unrelated_read_flagged`, `mphase_trailing_immediate_read_flagged`, `mphase_register_free_passthrough_flagged`, `mphase_mixed_closing_and_opening_flagged`, `mphase_linear_route_flagged`) | `fail/multi_phase_out_write.rs` (`mixed_anchors`), `pass/pretick_alignment_ok.rs` (`two_phase_opening_mux`, `two_phase_closing_mux`) | `multi_phase_out_write_flags_exactly_the_demonstration_modules`; `EXPECTED_MULTI_PHASE` = the eight refused `e*` probes in `tests/sequential_forwarding_divergence.rs` (`e7`, `e7w`, `e2x`, `e4`, `e5`, `e6`, `e4i`, `e5f`); `pulse_plain` is clean under this rule |
 > | `pretick_out_write_before_update` | `v8a_write_between_read_and_update_flagged`, `v8t_trailing_write_before_update_flagged` / `v8b_write_after_update_not_flagged`, `v8c_write_before_read_not_flagged`, `v8_constant_write_not_flagged`, `v8_regout_not_flagged`, `v8_unrelated_update_after_write_not_flagged`, `v8t_trailing_write_after_update_not_flagged` | `fail/write_before_update.rs` (`stale_publish`), `pass/pretick_alignment_ok.rs` (`v8b_publish_after_update`, `v8c_publish_before_read`), `pass/single_loop_local_ok.rs::accum` (reordered to V8c) | `write_before_update_flags_exactly_the_demonstration_modules`; `EXPECTED_WRITE_BEFORE_UPDATE` = {`tests/sequential_forwarding_divergence.rs::v8a_read_write_update`, `…::v8d_temp_renamed_update`, `tests/fixtures/out_phase_dut.rs::out_from_reg_before_commit`, `…::v8t_stage_publish_then_load`} |
+> | `trailing_out_reads_input` | `trailing_out_from_immediate_input_past_folded_loop_flagged`, `trailing_out_from_immediate_input_linear_two_ticks_flagged` / `trailing_out_single_tick_passthrough_not_flagged`, `trailing_out_from_register_fed_by_input_not_flagged`, `pretick_out_from_input_not_flagged_by_the_trailing_rule`, `trailing_out_from_deferred_input_not_flagged` | `fail/trailing_out_reads_input.rs` | `trailing_out_reads_input_flags_exactly_the_demonstration_modules`; `EXPECTED_TRAILING_OUT_INPUT` = `e5_two_closing`, `e8_single_phase_trailing_immediate_read`, `e8m_linear_two_ticks`, `e8p_extracted_passthrough` in `tests/sequential_forwarding_divergence.rs` |
 >
-> The four corpus pins scan every clocked (`sequential` / `synchronizer`) module
+> The corpus pins scan every clocked (`sequential` / `synchronizer`) module
 > under `examples/`, `src/` and `tests/` and print the scanned count
 > (`cargo test -p copper-analysis --test pretick_alignment_corpus -- --nocapture`);
 > that printout, not any figure in this document, is the current corpus size. Every
 > pinned module carries `allow_pretick_alignment`, so the pins are also the proof
 > that the opt-out silences the error and not the detection.
 >
-> **Measured, not argued:** `tests/sequential_forwarding_divergence.rs` (34
+> **Measured, not argued:** `tests/sequential_forwarding_divergence.rs` (38
 > `#[test]`s, none ignored, all sim-vs-Verilator on the transpiled SV; each records
 > *today's* verdict and flips loudly when a divergence is fixed or a dissolution
 > regresses).
 >
-> **Unguarded shapes (2026-10-23, phase E).** Two single-phase shapes diverge by
-> one cycle and are refused by **no** rule; they are pinned as `*_unguarded_gap`
-> tests in the same file and derived in `CYCLE_DATAFLOW_SEMANTICS.md` §9.4:
+> **Unguarded shape (2026-10-23, phase E).** One single-phase shape diverges by
+> one cycle and is refused by **no** rule; it is pinned as an `*_unguarded_gap`
+> test in the same file and derived in `CYCLE_DATAFLOW_SEMANTICS.md` §9.4:
 > **e9** (`e9_a_read_in_another_state_demotes_an_opening_write_…`) — a plain `Out`
 > written from a committed register in a state with no read is still edge-sampled
 > because the module reads an input in another state, since codegen's opening
 > predicate is statement-granular over the whole extracted `match pc`; the remedy
 > is arm-granular opening tracking in `shir_lower::lower_stmt_list`, which would
-> also let clause 2 of `multi_phase_out_write` go. **e8**
-> (`e8_single_phase_trailing_immediate_read_…`) — a trailing plain `Out` written
-> from an input read in the same statement is immediate in the simulator and a
-> closing drive in codegen; the fix (an opening-edge sampling form, or a refusal)
-> is undecided. `RegOut` is the agreed form for both until then.
+> also let clause 2 of `multi_phase_out_write` go. `RegOut` is the agreed form until
+> then. Its sibling **e8** (`e8_single_phase_trailing_immediate_read_…`, a trailing
+> plain `Out` from an input read in the same statement) was unguarded for three
+> days and is refused by `trailing_out_reads_input` since 2026-10-26 (row above).
 >
 > **Read first:** `SYNCHRONOUS_SEMANTICS.md` §Output timing. This is the **third**
 > member of the blocking/non-blocking family, after the `Out`-hold semantics and the

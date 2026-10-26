@@ -119,6 +119,16 @@ pub fn trailing_regout_reads_input(f: &ItemFn) -> Vec<String> {
     Cfg::build(f).map(|c| c.trailing_regout_reads_input()).unwrap_or_default()
 }
 
+/// Plain `Out` ports written in the trailing region from an *immediate* `In` read
+/// (directly, not through a register) in a body that crosses more than one clock
+/// edge: the simulator shows the result at the opening observation, and neither
+/// emitted trailing drive form samples the input then (the e8 class, 2026-10-26).
+/// A single-tick body is exempt and agrees. See
+/// [`Cfg::trailing_out_reads_input`]. Returns the offending ports, sorted.
+pub fn trailing_out_reads_input(f: &ItemFn) -> Vec<String> {
+    Cfg::build(f).map(|c| c.trailing_out_reads_input()).unwrap_or_default()
+}
+
 /// Plain combinational `Out` ports driven in **more than one clock phase** whose
 /// emitted form cannot show the simulator's trace — narrowed 2026-10-23 (phase E)
 /// to the measured divergent classes: a write anchored differently on the two

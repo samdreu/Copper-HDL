@@ -407,6 +407,19 @@ fn transpile_target(
                  and write the port from the register"
             ));
         }
+        // …and its plain-`Out` sibling (the e8 class): a trailing plain `Out` from an
+        // immediate input read in a multi-edge body. Neither trailing drive form
+        // samples the input when the simulator's immediate read did
+        // (`Cfg::trailing_out_reads_input`); a single-tick body is exempt.
+        if let Some(port) = copper_analysis::trailing_out_reads_input(target).first() {
+            return Err(format!(
+                "output port '{port}' is written after the last clk.tick().await from an \
+                 input read in that same region, in a body that crosses more than one clock \
+                 edge — the emitted drive samples the input one observation later than the \
+                 simulator's immediate read. Read the input before the tick, or latch it \
+                 into a register and write the port from the register"
+            ));
+        }
     }
 
     // The memory-port staging rules, for the same reason and from the same place:

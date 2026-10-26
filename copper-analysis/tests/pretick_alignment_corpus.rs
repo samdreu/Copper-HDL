@@ -403,6 +403,70 @@ fn trailing_regout_reads_input_flags_exactly_the_demonstration_modules() {
     assert!(missing.is_empty(), "no longer flagged — the module changed: {missing:?}");
 }
 
+// ── The trailing-plain-`Out`-from-an-input rule (2026-10-26, the e8 class) ──────────────────────
+
+/// Plain `Out` ports written after the last top-level tick from an `In` port read
+/// directly at an immediate read site, in a body that crosses more than one clock
+/// edge (`copper_analysis::trailing_out_reads_input`).
+///
+/// The e8 class phase E found unguarded and the user chose to refuse (2026-10-26):
+/// the simulator shows the immediate read's result at the opening observation, the
+/// extraction route edge-samples the drive one observation late, and the linear
+/// multi-tick route emits an ungated continuous assign. The single-tick body agrees
+/// and is exempt. The witnesses are the measured probes in
+/// (`e5_two_closing` is phase E's mixed-anchor probe, whose second write is exactly
+/// this shape: a trailing immediate read, measured diverging)
+/// `tests/sequential_forwarding_divergence.rs` (all opted out); the ui/fail case
+/// `trailing_out_reads_input.rs` is the compile-time witness. A module joining this
+/// set is either a real divergence to measure or a rule regression to fix.
+const EXPECTED_TRAILING_OUT_INPUT: &[&str] = &[
+    "tests/sequential_forwarding_divergence.rs::e5_two_closing",
+    "tests/sequential_forwarding_divergence.rs::e8_single_phase_trailing_immediate_read",
+    "tests/sequential_forwarding_divergence.rs::e8m_linear_two_ticks",
+    "tests/sequential_forwarding_divergence.rs::e8p_extracted_passthrough",
+];
+
+#[test]
+fn trailing_out_reads_input_flags_exactly_the_demonstration_modules() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    for dir in ["examples", "src", "tests"] {
+        rs_files(&root.join(dir), &mut files);
+    }
+    files.sort();
+
+    let mut scanned = 0usize;
+    let mut flagged: BTreeSet<String> = BTreeSet::new();
+    for path in &files {
+        let Ok(src) = fs::read_to_string(path) else { continue };
+        let Ok(file) = syn::parse_file(&src) else { continue };
+        let mut fns = Vec::new();
+        clocked_hardware_fns(&file.items, &mut fns);
+        for f in &fns {
+            scanned += 1;
+            if !copper_analysis::trailing_out_reads_input(f).is_empty() {
+                let rel = path.strip_prefix(&root).unwrap_or(path).display();
+                flagged.insert(format!("{rel}::{}", f.sig.ident));
+            }
+        }
+    }
+
+    assert!(scanned >= 40, "expected to scan the corpus, only saw {scanned} clocked modules");
+
+    let expected: BTreeSet<String> =
+        EXPECTED_TRAILING_OUT_INPUT.iter().map(|s| s.to_string()).collect();
+    let unexpected: Vec<_> = flagged.difference(&expected).cloned().collect();
+    let missing: Vec<_> = expected.difference(&flagged).cloned().collect();
+    assert!(
+        unexpected.is_empty(),
+        "newly flagged by the trailing-Out-from-input rule. Either the module HAS \
+         the divergence — check it against its transpiled SV; the remedy is to read \
+         the input before the tick or through a register — or the rule has regressed \
+         into a false positive: {unexpected:?}"
+    );
+    assert!(missing.is_empty(), "no longer flagged — the module changed: {missing:?}");
+}
+
 // ── The write-between-read-and-update rule (V8, m1) ──────────────────────────
 
 /// Plain `Out` ports written between a leading `In` read and the update of a

@@ -1141,6 +1141,39 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
+            // A plain `Out` written in the TRAILING region from an input read directly,
+            // in a body that crosses more than one clock edge (the e8 class): the
+            // simulator shows the immediate read's result at the opening observation;
+            // the extraction route edge-samples the drive one observation late and the
+            // linear multi-tick route emits an ungated continuous assign. A single-tick
+            // body agrees and is exempt (`Cfg::trailing_out_reads_input`).
+            let trailing_out_input = if allow_pretick_alignment {
+                Vec::new()
+            } else {
+                cfg.as_ref().map(|c| c.trailing_out_reads_input()).unwrap_or_default()
+            };
+            if let Some(port) = trailing_out_input.first() {
+                let span = port_param_span(&input_fn.sig, port)
+                    .unwrap_or_else(|| input_fn.sig.ident.span());
+                return Error::new(
+                    span,
+                    format!(
+                        "output `{port}` is written after the last `clk.tick().await` from an \
+                         input read in that same region, in a body that crosses more than one \
+                         clock edge. The simulator reads the input the instant the write \
+                         executes and shows the result at the next observation; the emitted \
+                         drive samples the input one observation later (an edge-sampled \
+                         register on the extraction route, an ungated continuous assign on \
+                         the linear route), and the two silently disagree by one cycle. Read \
+                         the input before the `clk.tick().await`, or latch it into a register \
+                         and write `{port}` from the register (a held value is the same on \
+                         both sides). If this module exists to DEMONSTRATE the divergence, opt \
+                         out explicitly with `#[hardware(sequential, {ALLOW_PRETICK})]`."
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
             // A plain `Out` driven in more than one clock phase, in a class whose
             // emitted form cannot show the simulator's trace (narrowed 2026-10-23,
             // phase E: mixed anchors, a register-free passthrough read, or the

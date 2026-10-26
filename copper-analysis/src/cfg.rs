@@ -1028,6 +1028,58 @@ impl Cfg {
         flagged.into_iter().collect()
     }
 
+    /// Plain `Out` ports written in the **trailing region** (after the last
+    /// top-level tick) whose value reads an `In` port **directly** at an
+    /// *immediate* read site, in a body that crosses **more than one clock edge**
+    /// (`crosses_more_than_one_tick`). Returns the ports, sorted. The e8 class,
+    /// 2026-10-26; the plain-`Out` sibling of
+    /// [`trailing_regout_reads_input`](Self::trailing_regout_reads_input).
+    ///
+    /// The simulator reads the input the instant the write executes (an immediate
+    /// read: no tick is comb-reachable from it) and shows the result at the opening
+    /// observation of that cycle. Neither emitted form for a trailing drive in a
+    /// multi-edge body samples the input then: on the extraction route the drive
+    /// is edge-sampled (a closing drive — the read precedes it in its own arm — so
+    /// phase C's opening mux does not apply) and publishes one observation late
+    /// (`e8_single_phase_trailing_immediate_read`, `e8p_extracted_passthrough`);
+    /// on the linear multi-tick route the drive is a continuous assign over the
+    /// input, ungated by the phase, so it tracks the input every cycle where the
+    /// simulator holds the value for the rest of the loop (`e8m_linear_two_ticks`).
+    /// All three are measured in `tests/sequential_forwarding_divergence.rs`.
+    ///
+    /// The single-tick linear body is exempt and measured agreeing
+    /// (`e8l_linear_passthrough`, `e8lr_linear_with_register`): its trailing region
+    /// is the whole phase, the drive is a continuous assign that is live every
+    /// cycle, and the immediate read and the assign see the same input — the D2
+    /// passthrough form. Through a register the input is held and the write agrees
+    /// (the same clause as the `RegOut` rule); a deferred read (a tick
+    /// comb-reachable from the site) samples the closing edge on both sides and
+    /// is fine. Remedies in the message: read the input before the tick, or latch
+    /// it into a register the write reads. `RegOut` is **not** a remedy here — a
+    /// `RegOut` written from a trailing immediate read is the sibling rule's shape.
+    pub fn trailing_out_reads_input(&self) -> Vec<String> {
+        if !self.crosses_more_than_one_tick() {
+            return Vec::new();
+        }
+        let trailing: Vec<usize> = (0..self.nodes.len())
+            .filter(|&n| {
+                n != self.head && !self.nodes[n].folded && self.tick_free_reaches(n, self.head)
+            })
+            .collect();
+        let regs: BTreeSet<String> = self.registers().into_iter().collect();
+        let mut flagged: BTreeSet<String> = BTreeSet::new();
+        for &w in &trailing {
+            if self.nodes[w].writes.is_empty() {
+                continue;
+            }
+            let (_, input_sites) = self.value_sources(w, &trailing, &regs);
+            if input_sites.iter().any(|(_, at)| !self.comb_reaches_tick(*at)) {
+                flagged.extend(self.nodes[w].writes.iter().cloned());
+            }
+        }
+        flagged.into_iter().collect()
+    }
+
     /// [`comb_reaches`](Self::comb_reaches) from `a` to `b`, except that a path
     /// through a node (other than `a` itself) that re-defines `name` does not
     /// count: the definition at `a` is killed there.
@@ -3791,6 +3843,124 @@ mod tests {
             }
         "#;
         assert_eq!(v8(src), ["o"]);
+    }
+
+    // ── trailing plain `Out` written from an immediate input read (e8) ──────────
+
+    fn trailing_out(src: &str) -> Vec<String> {
+        Cfg::build(&parse(src)).map(|c| c.trailing_out_reads_input()).unwrap_or_default()
+    }
+
+    /// The refused shape (`e8`): a trailing write from an inline immediate read
+    /// past a folded tick-bearing loop. The extraction route edge-samples it one
+    /// observation late.
+    #[test]
+    fn trailing_out_from_immediate_input_past_folded_loop_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop {
+                    cnt = cnt + Bits::from_lit::<1>();
+                    for _ in 0..2 { clk.tick().await; }
+                    o.write(x.read() + cnt);
+                }
+            }
+        "#;
+        assert_eq!(trailing_out(src), ["o"]);
+    }
+
+    /// The linear two-tick route (`e8m`) is flagged too: its continuous assign is
+    /// ungated by the phase, a different emission with the same disagreement.
+    #[test]
+    fn trailing_out_from_immediate_input_linear_two_ticks_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop {
+                    clk.tick().await;
+                    clk.tick().await;
+                    let v = x.read();
+                    o.write(v);
+                }
+            }
+        "#;
+        assert_eq!(trailing_out(src), ["o"]);
+    }
+
+    /// A single-tick body is one phase: the trailing region is the whole cycle
+    /// and the continuous assign sees the same input the immediate read did
+    /// (`e8l`, `e8lr` agree). Not flagged.
+    #[test]
+    fn trailing_out_single_tick_passthrough_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop {
+                    cnt = cnt + Bits::from_lit::<1>();
+                    clk.tick().await;
+                    o.write(x.read() + cnt);
+                }
+            }
+        "#;
+        assert!(trailing_out(src).is_empty());
+    }
+
+    /// Through a register the input is held, and a held value is the same on
+    /// both sides (`trailing_update`'s agreeing shape).
+    #[test]
+    fn trailing_out_from_register_fed_by_input_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut r: Bits<8> = Bits::zero();
+                loop {
+                    for _ in 0..2 { clk.tick().await; }
+                    r = x.read();
+                    for _ in 0..2 { clk.tick().await; }
+                    o.write(r);
+                }
+            }
+        "#;
+        assert!(trailing_out(src).is_empty());
+    }
+
+    /// A pre-tick write is not trailing: the read is deferred to the closing
+    /// edge and the drive samples that edge on both sides.
+    #[test]
+    fn pretick_out_from_input_not_flagged_by_the_trailing_rule() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop {
+                    o.write(x.read());
+                    clk.tick().await;
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(trailing_out(src).is_empty());
+    }
+
+    /// A trailing read with a tick comb-reachable from it is deferred, so both
+    /// sides sample the closing edge.
+    #[test]
+    fn trailing_out_from_deferred_input_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, halt: In<Logic, C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop {
+                    clk.tick().await;
+                    clk.tick().await;
+                    let h = halt.read();
+                    let v = x.read();
+                    if h == Logic::One { loop { clk.tick().await; } }
+                    o.write(v);
+                }
+            }
+        "#;
+        assert!(trailing_out(src).is_empty());
     }
 
     // ── trailing `RegOut` written from an immediate input read ────────────────
