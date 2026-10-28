@@ -154,6 +154,7 @@ fn every_module_a_macro_rule_flags_carries_the_opt_out_the_transpiler_honours() 
             ("write-before-update", !copper_analysis::pretick_out_write_before_update(f).is_empty()),
             ("multi-phase", !copper_analysis::multi_phase_out_write(f).is_empty()),
             ("trailing RegOut from input", !copper_analysis::trailing_regout_reads_input(f).is_empty()),
+            ("trailing Out from input", !copper_analysis::trailing_out_reads_input(f).is_empty()),
             ("late constant", !copper_analysis::out_first_driven_late(f).is_empty()),
         ]
         .into_iter()

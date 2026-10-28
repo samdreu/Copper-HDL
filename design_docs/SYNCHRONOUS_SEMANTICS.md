@@ -170,6 +170,12 @@ tracking its inputs for the rest of that cycle.
   shape is refused by `Cfg::trailing_regout_reads_input` (both front-ends; remedy:
   read before the tick, or through a register). Reads with a tick comb-reachable
   from them are deferred and agree (`ex_regfile`'s reads before its halt loop).
+  A plain `Out` written in `C` from such a read has the same problem in a body
+  that crosses more than one edge — the extraction route edge-samples the drive
+  one observation late and the linear multi-tick route emits a continuous assign
+  the phase does not gate — and is refused by `Cfg::trailing_out_reads_input`
+  (2026-10-26, same remedies; the single-tick body, whose trailing region is the
+  whole cycle, agrees and is exempt — the `e8*` probes measure every variant).
 
 **Both lowering routes realize this (phase C, landed 2026-10-23).** The **linear**
 multi-tick path commits trailing updates at the opening edge exactly as stated
@@ -199,13 +205,13 @@ and an extracted body is one `match pc` statement, so the mux + hold form is
 emitted only for modules that read **no** input; an extracted module with an
 input read anywhere edge-samples every conditionally driven plain `Out` and shows
 an opening write one cycle late (`e9_read_in_another_state_opening_write`,
-unguarded — `CYCLE_DATAFLOW_SEMANTICS.md` §9.4). The same battery found a second
-unguarded single-phase shape, `e8_single_phase_trailing_immediate_read`: a plain
-`Out` written in the trailing region from an input read in that same statement is
-an immediate read here and a closing drive in the emitted SystemVerilog, one
-observation apart. Neither shape is refused by any rule today; both are pinned as
-`*_unguarded_gap` tests in `tests/sequential_forwarding_divergence.rs`, and
-`RegOut` is the form both sides agree on for either.
+unguarded — `CYCLE_DATAFLOW_SEMANTICS.md` §9.4; pinned as an `*_unguarded_gap`
+test in `tests/sequential_forwarding_divergence.rs`, and `RegOut` is the form both
+sides agree on until it is fixed). The same battery found a second single-phase
+shape, `e8_single_phase_trailing_immediate_read` — a plain `Out` written in the
+trailing region from an input read in that same statement, immediate here and a
+closing drive in the emitted SystemVerilog — which is refused since 2026-10-26 by
+`Cfg::trailing_out_reads_input` (see *Trailing statements*).
 
 **Startup — refused where it is observable (2026-10-23).** An `Out` whose every
 write is a constant and whose first write executes only *after the second clock
@@ -391,9 +397,9 @@ and `the_state_arm_lead_is_systematic_not_a_first_cycle_artifact`).
 (`copper-macros/src/lib.rs`) and the transpiler's `transpile_target` (`copper-codegen/src/lib.rs`)
 run the same rules from the shared crate: `check_nested_loop_shape`, `check_awaits`,
 `check_reachability`, `multi_write_collapse`, `unprotected_pretick_out_write`,
-`pretick_out_write_before_update`, `trailing_regout_reads_input`, `multi_phase_out_write`,
-`out_first_driven_late`, `check_memory_staging` and `memory_result_drives_plain_out`. The five
-pre-tick alignment rules honour `allow_pretick_alignment` in both (a module that exists to
+`pretick_out_write_before_update`, `trailing_regout_reads_input`, `trailing_out_reads_input`,
+`multi_phase_out_write`, `out_first_driven_late`, `check_memory_staging` and
+`memory_result_drives_plain_out`. The six pre-tick alignment rules honour `allow_pretick_alignment` in both (a module that exists to
 demonstrate a divergence must still transpile, or there is nothing to measure it against);
 `multi_write_collapse`, the memory rules and the two shape rules have no opt-out in either. A
 module that compiles therefore transpiles, or is refused by both — the standing audit is

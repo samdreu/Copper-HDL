@@ -1,0 +1,5 @@
+error: output `o` is written after the last `clk.tick().await` from an input read in that same region, in a body that crosses more than one clock edge. The simulator reads the input the instant the write executes and shows the result at the next observation; the emitted drive samples the input one observation later (an edge-sampled register on the extraction route, an ungated continuous assign on the linear route), and the two silently disagree by one cycle. Read the input before the `clk.tick().await`, or latch it into a register and write `o` from the register (a held value is the same on both sides). If this module exists to DEMONSTRATE the divergence, opt out explicitly with `#[hardware(sequential, allow_pretick_alignment)]`.
+  --> tests/ui/fail/trailing_out_reads_input.rs:18:80
+   |
+18 | async fn trailing_out_from_input(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+   |                                                                                ^

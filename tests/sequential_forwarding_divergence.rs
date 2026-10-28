@@ -2385,22 +2385,25 @@ fn e7w_linear_route_phase_local_wires_diverge_known_gap() {
 // `shir_lower::lower_stmt_list`, and a treatment of immediate reads), which is
 // outside phase E's scope and must be decided before anything is retired.
 
-/// DIVERGE — UNGUARDED. A trailing write `o.write(x.read() + cnt)` after a wait
+/// DIVERGE — REFUSED since 2026-10-26 (`trailing_out_reads_input`; unguarded when
+/// phase E found it). A trailing write `o.write(x.read() + cnt)` after a wait
 /// loop: the read has no tick after it, so it is immediate and the simulator
 /// shows `x_N + cnt` at the opening observation; codegen edge-samples
-/// `x_{N+1} + cnt` one observation later.
+/// `x_{N+1} + cnt` one observation later. The `e8l`/`e8lr`/`e8m`/`e8p` probes
+/// below scope the rule.
 #[test]
-fn e8_single_phase_trailing_immediate_read_diverges_unguarded_gap() {
+fn e8_single_phase_trailing_immediate_read_diverges_refused() {
     let sim = sim_e_in(e8_single_phase_trailing_immediate_read);
     assert_eq!(sim, vec![0, 12, 12, 15, 15, 18, 18, 21, 21, 24, 24, 27, 27], "simulator behaviour changed");
     let f: syn::ItemFn = syn::parse_str(E8_SRC).unwrap();
     assert!(copper_analysis::multi_phase_out_write(&f).is_empty(), "single-phase: not the multi-phase rule's business");
+    assert_eq!(copper_analysis::trailing_out_reads_input(&f), vec!["o".to_string()], "the rule must flag e8");
     if !verilator_available() {
         return;
     }
     let sv = transpile_and_run_driven(E8_SRC, "e8_single_phase_trailing_immediate_read");
     assert_eq!(sv, vec![0, 0, 13, 13, 16, 16, 19, 19, 22, 22, 25, 25, 28], "transpiled SV behaviour changed");
-    assert_ne!(sim, sv, "sim and SV now AGREE for e8 — the immediate-read class is realized; record it in CYCLE_DATAFLOW_SEMANTICS.md Phase E");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e8 — the immediate-read class is realized; retire trailing_out_reads_input and record it in CYCLE_DATAFLOW_SEMANTICS.md §9.4");
 }
 
 /// DIVERGE — UNGUARDED. The read is in a DIFFERENT state (`r = x.read()` two
@@ -2440,4 +2443,153 @@ fn e10_middle_phase_write_before_update_agrees() {
     }
     let sv = transpile_and_run_driven(E10_SRC, "e10_middle_phase_write_before_update");
     assert_eq!(sim, sv, "sim and SV diverge for a middle-phase write-before-update — the edge-sampled arm form regressed, and the V8 rule needs a middle clause");
+}
+
+// ── e8 variants: the trailing-input shapes that scope `trailing_out_reads_input` (2026-10-26) ──
+
+const E8L_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e8l_linear_passthrough(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    loop {
+        clk.tick().await;
+        o.write(x.read());
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e8l_linear_passthrough(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    loop {
+        clk.tick().await;
+        o.write(x.read());
+    }
+}
+
+const E8LR_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e8lr_linear_with_register(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(x.read() + cnt);
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e8lr_linear_with_register(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(x.read() + cnt);
+    }
+}
+
+const E8M_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e8m_linear_two_ticks(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        clk.tick().await;
+        o.write(x.read() + cnt);
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e8m_linear_two_ticks(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        clk.tick().await;
+        o.write(x.read() + cnt);
+    }
+}
+
+const E8P_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e8p_extracted_passthrough(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e8p_extracted_passthrough(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    loop {
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+    }
+}
+
+/// AGREE. The single-tick linear body: the trailing region is the whole phase,
+/// the drive is a continuous assign of the immediate read, live every cycle —
+/// the D2 passthrough form. Exempt from `trailing_out_reads_input`.
+#[test]
+fn e8l_single_tick_linear_passthrough_agrees() {
+    let sim = sim_e_in(e8l_linear_passthrough);
+    assert_eq!(sim, vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E8L_SRC).unwrap();
+    assert!(copper_analysis::trailing_out_reads_input(&f).is_empty(), "the single-tick body is exempt");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E8L_SRC, "e8l_linear_passthrough");
+    assert_eq!(sim, sv, "e8l no longer agrees — the single-tick exemption of trailing_out_reads_input is unsound");
+}
+
+/// AGREE. The same with a register in the expression: still one phase, still a
+/// continuous assign over the input and the committed register.
+#[test]
+fn e8lr_single_tick_linear_with_register_agrees() {
+    let sim = sim_e_in(e8lr_linear_with_register);
+    assert_eq!(sim, vec![11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E8LR_SRC).unwrap();
+    assert!(copper_analysis::trailing_out_reads_input(&f).is_empty(), "the single-tick body is exempt");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E8LR_SRC, "e8lr_linear_with_register");
+    assert_eq!(sim, sv, "e8lr no longer agrees — the single-tick exemption of trailing_out_reads_input is unsound");
+}
+
+/// DIVERGE — REFUSED (`trailing_out_reads_input`). The linear TWO-tick route: the
+/// trailing drive is emitted as a continuous assign over the input, ungated by
+/// the phase, so it tracks `x + cnt` every cycle where the simulator holds the
+/// value it computed at the opening observation for the rest of the loop. Not a
+/// one-cycle shift but the same family — an immediate read the drive form cannot
+/// sample at the right instant.
+#[test]
+fn e8m_linear_two_ticks_diverges_refused() {
+    let sim = sim_e_in(e8m_linear_two_ticks);
+    assert_eq!(sim, vec![0, 12, 12, 15, 15, 18, 18, 21, 21, 24, 24, 27, 27], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E8M_SRC).unwrap();
+    assert_eq!(copper_analysis::trailing_out_reads_input(&f), vec!["o".to_string()], "the rule must flag the linear two-tick shape");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E8M_SRC, "e8m_linear_two_ticks");
+    assert_eq!(sv, vec![11, 12, 14, 15, 17, 18, 20, 21, 23, 24, 26, 27, 29], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e8m — the linear multi-tick trailing drive is phase-gated; re-derive trailing_out_reads_input");
+}
+
+/// DIVERGE — REFUSED (`trailing_out_reads_input`). The register-free extracted
+/// passthrough: edge-sampled one observation late, like `e8`.
+#[test]
+fn e8p_extracted_passthrough_diverges_refused() {
+    let sim = sim_e_in(e8p_extracted_passthrough);
+    assert_eq!(sim, vec![0, 11, 11, 13, 13, 15, 15, 17, 17, 19, 19, 21, 21], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E8P_SRC).unwrap();
+    assert_eq!(copper_analysis::trailing_out_reads_input(&f), vec!["o".to_string()], "the rule must flag the extracted passthrough");
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_and_run_driven(E8P_SRC, "e8p_extracted_passthrough");
+    assert_eq!(sv, vec![0, 0, 12, 12, 14, 14, 16, 16, 18, 18, 20, 20, 22], "transpiled SV behaviour changed");
+    // Not a value-preserving shift: the late sample sees the NEXT stimulus value
+    // (`x_{N+1}`), so the vectors differ in value as well as in timing, like `e8`.
+    assert_ne!(sim, sv, "sim and SV now AGREE for e8p — the immediate-read class is realized; retire trailing_out_reads_input");
 }

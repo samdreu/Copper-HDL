@@ -262,7 +262,12 @@ receive/clone one.
   read directly; a `RegOut` write takes effect at the first clock edge after it
   executes, so the flip-flop would sample the input one drive late) and
   `out_first_driven_late` (a constant-only plain `Out` first written after the second
-  edge: a startup transient the `assign` cannot show) — every one with an exact-set
+  edge: a startup transient the `assign` cannot show), and 2026-10-26 by
+  `trailing_out_reads_input` (the plain-`Out` sibling of the `RegOut` rule: a plain
+  `Out` written after the last tick from an input read directly, in a body that
+  crosses more than one edge — neither trailing drive form samples the input when the
+  simulator's immediate read did; the single-tick body agrees and is exempt) — every
+  one with an exact-set
   corpus pin in `copper-analysis/tests/pretick_alignment_corpus.rs` and enforced in
   both front-ends. A former fifth, `unprotected_trailing_out_write`, was retired
   2026-10-23 when phase C landed (see below). **D1** is **guarded** (rule
@@ -298,8 +303,9 @@ receive/clone one.
   `pulse_plain` now agree, and `unprotected_trailing_out_write` is gone. **Reach of
   phase C (measured 2026-10-23):** the opening predicate is statement-granular over
   the whole extracted `match pc`, so the mux form is emitted only for modules with
-  no input read; `e9`/`e8` in the same battery pin two resulting single-phase
-  divergences that no rule guards yet (`CYCLE_DATAFLOW_SEMANTICS.md` §9.4). The doc also records **five** rejected fixes with
+  no input read; `e9` in the same battery pins the resulting single-phase
+  divergence, which no rule guards yet (`CYCLE_DATAFLOW_SEMANTICS.md` §9.4; `e8`,
+  the other one, is refused by `trailing_out_reads_input` since 2026-10-26). The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in

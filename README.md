@@ -418,6 +418,14 @@ counterexample rather than lowered to something plausible:
   a write commits at the next edge, where the flip-flop samples the input one
   drive later than the simulator's read. Read the input before the tick, or
   through a register (`trailing_regout_reads_input`).
+- **A plain `Out` written after the last tick from an input read directly, in a
+  body that crosses more than one clock edge**: the simulator reads the input the
+  instant the write executes; the emitted drive samples it one observation later
+  (edge-sampled on the extraction route, an ungated continuous assign on the
+  linear multi-tick route). A single-tick body agrees and is not refused. Read
+  the input before the tick, or through a register
+  (`trailing_out_reads_input`; the `e8` probes in
+  `tests/sequential_forwarding_divergence.rs` measure every variant).
 - **A constant-only `Out` first written after the second clock edge** of a
   multi-tick body: the simulator shows the initial value at the first
   observation, the emitted `assign` drives the constant from time 0. Write it in
@@ -460,11 +468,12 @@ rather than papered over (`SKIP` in `build.rs`):
 - a phase-gated cross-tick read (`probe_fsm`, the W4 path-dependent boundary
   from the guardrail doc).
 
-**Unguarded divergences** — two shapes that disagree by one cycle and that **no
+**Unguarded divergence** — one shape that disagrees by one cycle and that **no
 rule refuses yet**, found by the phase-E probe battery (2026-10-23) and pinned as
-`*_unguarded_gap` tests in `tests/sequential_forwarding_divergence.rs` so the
-verdict flips loudly if either is fixed (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md`
-§9.4 has the derivation):
+an `*_unguarded_gap` test in `tests/sequential_forwarding_divergence.rs` so the
+verdict flips loudly when it is fixed (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md`
+§9.4 has the derivation; its sibling `e8` became the trailing-input rule above on
+2026-10-26):
 
 - **e9** — a conditionally driven plain `Out` written from a committed register
   in one FSM state, in a module that reads an input in *another* state. The write
@@ -474,16 +483,9 @@ verdict flips loudly if either is fixed (`design_docs/CYCLE_DATAFLOW_SEMANTICS.m
   one cycle late. Phase C's mux-plus-hold form is therefore reached only by
   input-free extracted modules. The remedy is arm-granular opening tracking in
   codegen, not a rule.
-- **e8** — a plain `Out` written after the last tick from an input read in that
-  same trailing statement (`o.write(x.read() + cnt)`). The simulator reads the
-  input immediately and shows the result at the opening observation; the emitted
-  drive samples the input one observation later. The D2 passthrough class inside a
-  conditional arm; the fix is either a drive form that samples at the opening edge
-  or a refusal rule, and that choice is open.
 
-A real design that hits either shape today gets no error. Until they are closed,
-write such an output as a `RegOut`, which is the registered form both sides agree
-on.
+A real design that hits this shape today gets no error. Until it is closed, write
+such an output as a `RegOut`, which is the registered form both sides agree on.
 
 One correctness rule is worth knowing when reading the generated Verilog: an
 output drive that is *sampled at the clock edge* is emitted from the values the

@@ -523,7 +523,20 @@ written in one phase (pinned as `*_unguarded_gap` tests):
   the opening observation) and a closing drive in codegen (`x_{N+1} + cnt` one
   observation later). This is the D2 passthrough class inside a conditional arm;
   realizing it needs a drive form that samples the input at the *opening* edge
-  (a register loaded on state entry), or a refusal rule. Not decided here.
+  (a register loaded on state entry), or a refusal rule. **DECIDED 2026-10-26:
+  refused**, by `Cfg::trailing_out_reads_input` (both front-ends, the pre-tick
+  opt-out), scoped by four more probes in the same file: the single-tick linear
+  body **agrees** (`e8l_linear_passthrough`, `e8lr_linear_with_register` — the
+  trailing region is the whole phase and the continuous assign sees the input the
+  immediate read saw, the D2 form), so the rule requires a body that crosses more
+  than one edge; the register-free extracted passthrough diverges one late like
+  `e8` (`e8p_extracted_passthrough`); and the linear two-tick body diverges
+  *differently* (`e8m_linear_two_ticks`: the trailing drive is a continuous assign
+  the phase does not gate, so it tracks `x + cnt` every cycle where the simulator
+  holds it) — a second emission defect of the same family, refused by the same
+  clause. Through a register or behind a deferred read the write agrees, as for
+  the `RegOut` sibling. 0 live corpus modules; `e5_two_closing` joins the pin
+  because its second write is exactly this shape.
 
 A third control, **`e10_middle_phase_write_before_update`** (the V8a shape
 `let s = x.read(); o.write(r); r = r + s` in a *middle* phase, which neither

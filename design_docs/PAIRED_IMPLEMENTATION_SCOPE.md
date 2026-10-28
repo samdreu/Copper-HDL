@@ -245,8 +245,10 @@ edge-sampled (`e5d`). `multi_phase_out_write` was **narrowed, not retired** —
 the linear route, an input read anywhere with an opening write, register-free
 bodies with reads, and mixed anchors stay refused, each with a flipping pair.
 No emission changed (sv-baseline delta: the new probes only). Two single-phase
-divergences the battery exposed (`e8`, `e9`) are recorded unguarded in §9.4 and
-are the next candidate codegen change (arm-granular opening tracking).
+divergences the battery exposed (`e8`, `e9`) were recorded unguarded in §9.4;
+`e8` is refused since 2026-10-26 (`Cfg::trailing_out_reads_input`, with the
+single-tick body measured agreeing and exempt), and `e9` is the next codegen
+change (arm-granular opening tracking, in progress).
 
 ## 3. Gates (every phase)
 
