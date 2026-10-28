@@ -4,10 +4,11 @@
 // Each module here is its trailing-form sibling plus a branch-nested halt wait
 // (`if halt { loop { tick } }`), which is what forces extraction.
 //
-// Ports are `RegOut`: with `In`-fed writes in an extracted body the pretick
-// guard refuses a plain `Out` (path-dependent boundary via the halt path), and
-// registration is its prescribed remedy — the differential still measures the
-// array/forwarding timing, one registered cycle later.
+// Ports are `RegOut`: with `In`-fed writes in an extracted body a plain `Out`
+// would sit on the pretick guard's refusing side (the halt path gives its drives
+// mixed anchors), and registration is the guard's prescribed remedy — the
+// differential still measures the array/forwarding timing, one registered cycle
+// later.
 //
 //   - `ex_regfile`        — regfile_dut's write-through module, extracted:
 //                           array-register commit timing and the staging-net

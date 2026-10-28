@@ -15,7 +15,11 @@ emission form and retired the trailing rule; **phase E was derived and measured
 the same day (§9 below)** — `multi_phase_out_write` is **narrowed, not retired**:
 the input-free and all-closing classes are admitted, the mixed, register-free and
 linear classes stay refused, and the battery found two single-phase divergences
-that no rule guards (§9.4). The executor was **not** changed — scoping showed it already implements
+that no rule guards (§9.4; both closed 2026-10-26). **D1 was re-derived 2026-10-28
+(§10)** against the arm-granular opening walk: the rule now refuses exactly the two
+head-segment hazards the model derives (mixed anchors, a forwarded guard), its
+constant-write clause and "unprotected assignment" conjunct are gone, and four
+measured divergences it had missed are refused. The executor was **not** changed — scoping showed it already implements
 the model (`PAIRED_IMPLEMENTATION_SCOPE.md` §0). The normative statement of the
 model now lives in `SYNCHRONOUS_SEMANTICS.md` (rebased 2026-08-27, commit c1bf21f);
 this document is the derivation record. Decided 2026-08-26 as:
@@ -553,10 +557,8 @@ different mechanism and remains pinned as an `*_unguarded_gap` test:
   `branch_merge` passes the sweep for that reason alone, a pre-existing blind
   spot recorded here and in `PRETICK_ALIGNMENT_GUARDRAIL.md` §5.5, not fixed.
   No referenced module (BaseJump, the pipelined CPU lane, the golden fixtures,
-  `pattern_detector_010`, the CDC reference) changed. The D1 rules are untouched
-  by that change: their witnesses now agree, and re-deriving the constant-write
-  clause and the W4 class on that evidence is a decision of its own, not a side
-  effect of an emission change.
+  `pattern_detector_010`, the CDC reference) changed. The D1 rules were untouched
+  by that change; their re-derivation on this evidence is §10 (2026-10-28).
 - **`e8_single_phase_trailing_immediate_read`** — `for{tick}; o.write(x.read()
   + cnt)`. A trailing read is immediate in the simulator (it shows `x_N + cnt` at
   the opening observation) and a closing drive in codegen (`x_{N+1} + cnt` one
@@ -584,3 +586,156 @@ arm the drive is edge-sampled and the flop samples the pre-update register
 exactly as the barrier-parked write reads it. The head-segment V8a diverges only
 because its drive is a continuous assign. The V8 rule's head-plus-trailing scope
 is therefore sufficient, and the test pins that.
+
+## 10. The D1 re-derivation — `unprotected_pretick_out_write` (derived and measured 2026-10-28)
+
+The arm-granular opening walk (§9.4, 2026-10-26) flipped every witness of D1's
+constant-write clause and the W4 witness `probe_fsm` to agreement without
+touching the rule. This section re-derives the rule from §9.1's two anchor
+predicates for the **head segment** — loop head to the first tick — and
+narrows it to what the model says diverges. Same method as phase E: every row of
+§10.2 was written from the model before its probe ran, and every verdict matched
+on the first run (the `d*` tests in `tests/sequential_forwarding_divergence.rs`,
+sixteen probes, both traces pinned each).
+
+### 10.1 The model, per drive
+
+In a body with registers every head-segment `In` read is deferred (`classify_reads`:
+a tick follows it, and the register-free passthrough exception does not apply), so
+for a drive `W` of a plain `Out` port `o`:
+
+- **Simulator, per path.** `W` is *closing* on a path where a read precedes it —
+  the barrier parks the task, the write runs in the pre-edge settle and is
+  visible at the next observation, with forwarded locals equal to the committing
+  values. It is *opening* on a path with no read before it — it runs in the
+  post-edge settle of the edge that opened the cycle, on committed registers and
+  same-segment forwarded locals, and is visible at that cycle's observation. The
+  same drive can be closing on one path and opening on another (W4).
+- **Transpiler, per drive, port-wide form.** `W` is closing iff some read
+  comb-reaches it on *any* path: the walk seeds each arm from its own condition
+  but carries a read from any arm past the branch (`shir_lower::lower_stmt_list`).
+  The port's form is then port-wide: driven on **every** path it is an
+  `always_comb` continuous assign (forwarded if opening, committed if closing) or
+  mux, whose **guards take the committed form** (`emit.rs`: `always_comb` uses
+  `condition`, the edge form is taken only by the `always_ff` split); driven on
+  **some** paths it is phase C's forwarded mux + hold register when every drive is
+  opening, else an edge-sampled register with edge-form guards.
+- **One more simulator fact the probes exposed.** A closing write followed by the
+  next iteration's opening write of the same port is **never observed**: the
+  opening write runs in the post-edge settle of the same edge, before the
+  observation. So a port with both kinds of write shows only its opening writes
+  in the simulator, while the SV shows both (`d2b`: sim `[2, 2, 2, …]`, SV
+  `[2, 1, 2, 1, …]`).
+
+Two hazards follow, and the derivation finds no third in the head segment:
+
+- **(A) Mixed anchors.** A read reaches some drive of `o` (codegen: closing →
+  edge-sampled or committed-form) while some drive of `o` has a read-free path
+  from the head (simulator: opening on that path). The opening write lands one
+  observation late in the SV, or is overwritten-and-shown where the simulator
+  overwrote it unseen. Unobservable in exactly one case: a **single drive on every
+  path** (a continuous assign) whose read-free path assigns no register the drive
+  reads — the opening write then publishes the committed register, which is
+  what `assign o = r` shows (`d3a`).
+- **(B) Forwarded guard.** An opening drive (no read reaches it, so its comb copy
+  is the one that is observed) nested under an `if`/`match` whose test reads a
+  register assigned earlier on the path. The simulator tests the forwarded value,
+  the comb copy the committed one. In the hold form the hold register, loaded
+  under the edge-form guard, catches the pulse one observation late (`d4a`); in
+  the every-path form nothing does (`d4c`).
+
+The pre-2026-10-28 rule — "a conditional or register-reading, read-preceded
+write in a segment that assigns a register no read reaches" — was a proxy for
+these: the unprotected assignment coincides with (B) when it feeds a guard and
+with (A)'s continuous-assign exception when it feeds the value, and with nothing
+when it feeds neither (`pc_arm_*`, `d1b`, `d1c`, `d3a`, `d4b` — all refused,
+all agreeing). It also exempted every-path writes outright, which is where
+`d1g`, `d2b` and `d4c` hid, and required the unprotected assignment, which is
+where `d2a` hid.
+
+### 10.2 Predicted, then measured
+
+Constant-operand drives (`x` is the `Bits<8>` input driven `10 + k`; `pc`/`phase`/
+`cnt` are registers):
+
+| probe | shape | sim anchors | emission | verdict |
+|---|---|---|---|---|
+| `pc_arm_write`, `pc_arm_toggle` | constant in an arm the read's sibling arm cannot reach | opening | mux + hold | **AGREE** (since 2026-10-26) |
+| `d1b_const_read_in_arm` | `cnt = cnt+1; if x.read()[0] { o.write(7) }` | closing | edge-sampled, edge-form guard | **AGREE** |
+| `d1c_const_no_read` | constants in two of three state arms, no input | opening | mux + hold | **AGREE** |
+| `d1d_const_all_paths_read` | `if x.read()[0] { o.write(7) } else { o.write(3) }` | closing / closing | comb mux over `x` | **AGREE** |
+| `d1e_const_all_paths_no_read` | `if pc == 0 { o.write(7); pc = 1 } else { o.write(3); pc = 0 }` | opening / opening | comb mux on committed `pc` | **AGREE** |
+| `d1f_const_path_dependent_hold` | read on one arm; `if phase == 0 { o.write(7) }` after the merge | opening on the read-free path (closing path never writes) | edge-sampled (read carried past the branch) | DIVERGE: SV `[0, 7, …]` vs sim `[7, 7, …]` |
+| `d1g_const_path_dependent_all_paths` | `d1f` with an `else { o.write(3) }` | closing / opening | comb mux on committed `phase` | DIVERGE: sim holds 7, SV alternates |
+| `d2a_mixed_two_drives_hold` | `if pc == 1 { o.write(5) }; if x.read()[0] { o.write(9); pc = 1 } else { pc = 0 }` — no unprotected assignment | opening / closing | edge-sampled | DIVERGE: sim `[0, 5, 5, …]`, SV `[0, 9, 5, 9, 5, …]` |
+| `d2b_mixed_two_drives_all_paths` | `if phase == 0 { x.read(); o.write(1); … } else { o.write(2); … }` | closing / opening | comb mux | DIVERGE: sim `[2, 2, …]`, SV `[2, 1, 2, 1, …]` |
+| `d2c_two_closing_drives_hold` | `d2a` with the first drive moved behind the read | closing / closing | edge-sampled | **AGREE** |
+
+Register-operand drives (the W4 family) and guards:
+
+| probe | shape | sim anchors | emission | verdict |
+|---|---|---|---|---|
+| `w4_mixed_alignment` | `if phase == 0 { r = x.read() } else { r = r + 1 }; o.write(r)` | closing / opening, forwards `r + 1` | `assign o = r` (committed) | DIVERGE (sim holds `i + 1`, SV alternates) |
+| `d3a_w4_unrelated_register` | the read-free arm assigns `phase` only | closing / opening, forwards nothing `o` reads | `assign o = r` | **AGREE** |
+| `d3b_w4_read_on_every_path` | both arms read | closing / closing | `assign o = r` | **AGREE** |
+| `d3c_w4_hold` | W4 with `if phase == 0 { o.write(r) }` after the merge | opening on the read-free path | edge-sampled | DIVERGE: SV one late |
+| `probe_fsm` | the write in the read's sibling arm | opening | mux + hold | **AGREE** (since 2026-10-26) |
+| `d4a_forwarded_guard_hold` | `cnt = cnt+1; if cnt == 3 { o.write(7); cnt = 0 }`, no input | opening, forwarded guard | mux + hold, comb guard on committed `cnt` | DIVERGE: SV `[0, 0, 7, …]` vs sim `[0, 7, 7, …]` |
+| `d4b_committed_guard_hold` | `if cnt == 2 { o.write(7); cnt = 0 } else { cnt = cnt+1 }` | opening, committed guard | mux + hold | **AGREE** |
+| `d4c_forwarded_guard_all_paths` | `d4a` with an `else { o.write(3) }` | opening, forwarded guard | comb mux on committed `cnt` | DIVERGE: SV never shows 7 |
+| `d4d_forwarded_guard_closing` | `d4a` behind `x.read()` on every path | closing | edge-sampled, edge-form guard | **AGREE** |
+
+Every row matched its prediction on the first run. The old rule's verdicts on the
+same table: it refused `d1b`, `d1c`, `d1f`, `d3a`, `d3c`, `d4a`, `d4b`, `w4`,
+`pc_arm_*`, `probe_fsm` and admitted the rest — four false positives among the
+agreeing rows (`d1b`, `d1c`, `d3a`, `d4b`, plus the three re-blessed witnesses)
+and four false negatives among the diverging ones (`d1g`, `d2a`, `d2b`, `d4c`).
+
+### 10.3 The decision: re-derived, both clauses flipping
+
+`Cfg::unprotected_pretick_out_write` (both front-ends, the same opt-out) refuses a
+plain `Out` iff, among its drives `D` in the pre-tick region of a body with
+registers:
+
+1. **(A)** some drive is comb-reached by an `In` read **and** some drive has a
+   read-free path from the loop head (`Cfg::read_free_path_reaches`), **and** the
+   mismatch is observable: the port is held on some path, or has more than one
+   drive, or some drive's read-free path assigns a register the drive reads. The
+   exempt case is the single every-path drive forwarding nothing it reads (`d3a`).
+   Witnesses: `w4_mixed_alignment`, `d1f`, `d1g`, `d2a`, `d2b`, `d3c`,
+   `branch_merge_explicit` (`tail_o`). Flips: `d3a`, `d3b`, `d1b`, `d2c`,
+   `probe_fsm`, `pc_arm_*`.
+2. **(B)** some drive no read reaches sits under a branch (`Node::guards`, recorded
+   by the CFG builder) whose test reads a register that some node assigns on a
+   path to that branch. Witnesses: `d4a`, `d4c`. Flips: `d4b`, `d4d`, `d1c`.
+
+The register-free body is excluded (its reads are immediate; `multi_phase_out_write`
+clause 3 and `trailing_out_reads_input` own those shapes). The CFG is value-blind:
+a drive whose guard is false on the read-free path still counts as mixed, which
+is the refusing direction for an unmeasured shape, as everywhere in the family.
+
+**Corpus cost: zero live modules.** The exact-set pin (`EXPECTED_FLAGGED`) is now
+`w4_mixed_alignment`, `branch_merge_explicit` and the seven refused `d*` probes;
+`probe_fsm`, `pc_arm_write` and `pc_arm_toggle` left it and compile without an
+opt-out, as do the agreeing `d*` probes. No other pre-tick rule claims any `d*`
+probe (`d_the_rederived_rule_flags_exactly_the_diverging_probes` asserts both
+halves). The sv-baseline delta is the new probe modules only — a rule change,
+not an emission change — so `branch_merge`'s seed-masked `tail_o` lag (§9.4) is
+unchanged and still out of scope.
+
+Pins: `cfg.rs` unit tests `d1f_…_flagged` / `d1b_…_not_flagged`,
+`d2a_…_flagged` / `d2c_…_not_flagged`, `d2b_…_flagged` / `d1d_…_not_flagged`,
+`hazard_w4_mixed_alignment_flagged` / `d3a_…_not_flagged` / `d3b_…_not_flagged`,
+`d4a_…_flagged` / `d4b_…_not_flagged`, `d4c_…_flagged` / `d4d_…_not_flagged`,
+`hazard_probe_fsm_sibling_arm_read_not_flagged`, `d1c_…_not_flagged`;
+`copper-macros/tests/ui/fail/pretick_alignment.rs` (W4),
+`ui/fail/pretick_mixed_anchors.rs` (`d2a`), `ui/fail/pretick_forwarded_guard.rs`
+(`d4a`) and the four admitted shapes added to `ui/pass/pretick_alignment_ok.rs`;
+`front_end_parity.rs` unchanged (same function, both front-ends).
+
+**Not done, recorded.** Hazard (B) is an emission limitation — the comb copy of a
+branch guarding an opening drive could take the edge form, as the `always_ff`
+copy already does (`TODO` cause N is the mirror image) — and (A)'s two-drive
+and path-dependent forms would need the drive-level emission §9.4 names. Both
+are codegen changes with their own sv-baseline decision; the rule refuses the
+shapes until then.

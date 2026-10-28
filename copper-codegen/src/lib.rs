@@ -377,11 +377,12 @@ fn transpile_target(
     if !opts_out_of_pretick_alignment(target) {
         if let Some(port) = copper_analysis::unprotected_pretick_out_write(target).first() {
             return Err(format!(
-                "output port '{port}'s pre-tick region has a path-dependent boundary: an input \
-                 read reaches the write on some paths but a register is assigned with no \
-                 protecting read on another (or a constant is written on only some paths), so \
-                 no single emission matches the simulator. Make the boundary uniform, or declare \
-                 it as RegOut<…>"
+                "output port '{port}' is driven before the first clk.tick().await with mixed \
+                 anchors (an input read reaches some write of it while some write has a \
+                 read-free path from the loop head) or a forwarded guard (a write no read \
+                 reaches sits under a test of a register assigned earlier in the segment), so \
+                 no single emission matches the simulator. Make the anchor uniform, test only \
+                 committed state, or declare it as RegOut<…>"
             ));
         }
         if let Some(port) = copper_analysis::pretick_out_write_before_update(target).first() {

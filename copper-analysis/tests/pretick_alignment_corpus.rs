@@ -82,56 +82,39 @@ fn clocked_hardware_fns(items: &[Item], out: &mut Vec<ItemFn>) {
 
 /// The modules the detector must flag, as `file::module`.
 ///
-/// After the phase-3 migration these are **exactly** the fixtures that exist to
-/// *demonstrate* the divergence. Each carries
-/// `#[hardware(sequential, allow_pretick_alignment)]`, so the macro permits it while
-/// this analysis still reports it — deliberately: the opt-out silences the *error*,
-/// not the *detection*, so an opted-out module cannot quietly disappear from the
-/// corpus view.
+/// These are **exactly** the fixtures that exist to *demonstrate* a divergence.
+/// Each carries `#[hardware(sequential, allow_pretick_alignment)]`, so the macro
+/// permits it while this analysis still reports it — deliberately: the opt-out
+/// silences the *error*, not the *detection*, so an opted-out module cannot
+/// quietly disappear from the corpus view.
 ///
-/// The set today (after the 2026-08-26 narrowing to READ-PRECEDED register-reading
-/// writes and the constant-write clause — see the entries and their dated notes):
+/// The set today (re-derived 2026-10-28 against the arm-granular opening walk —
+/// `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10; every entry is a probe whose
+/// sim and SV traces are pinned in `tests/sequential_forwarding_divergence.rs`):
 ///
-/// * `probe_fsm` / `w4_mixed_alignment` — the retained class: a read reaches the
-///   write on one path only (the path-dependent region boundary).
-/// * `pc_arm_write` / `pc_arm_toggle` / `branch_merge_explicit` — the constant-write
-///   clause: a constant written on *some* paths, where the alternative is the held
-///   value, so the phase shift is observable.
+/// * clause (A), **mixed anchors** — a read reaches some drive of the port while
+///   some drive has a read-free path from the loop head: `w4_mixed_alignment`
+///   (the continuous assign forwarding a register the read-free arm assigns),
+///   `d1f` / `d3c` (held, path-dependent), `d2a` (two drives, held), `d1g` / `d2b`
+///   (two drives on every path), `branch_merge_explicit` (`tail_o`, written
+///   behind the `sel` read and in the `pc == 1` arm).
+/// * clause (B), **forwarded guard** — an opening drive under a branch that tests
+///   a register assigned earlier on the path: `d4a` (held), `d4c` (every path).
 ///
-/// `add_then_write` / `fast_counter` (the original D1 witnesses) and `ram_prewrite`
-/// were in this set until 2026-08-26 and left it — the history is recorded inline
-/// below. The real designs that used to appear here — the three `fast_counter`
-/// copies in `examples/cdc/` and `two_domain_hierarchy_cdc.rs` — were migrated to
-/// update the sticky flag *after* the tick, the form measured to match the
-/// independent hand-written SV reference.
+/// Left the set 2026-10-28, measured AGREEING and compiling without an opt-out:
+/// `probe_fsm`, `pc_arm_write`, `pc_arm_toggle` (the arm-granular walk of
+/// 2026-10-26 made their drives opening on both sides). `add_then_write`,
+/// `fast_counter` and `ram_prewrite` left on 2026-08-26 (forwarded emission).
 const EXPECTED_FLAGGED: &[&str] = &[
-    "tests/fixtures/probe_timing_dut.rs::probe_fsm",
-    // `ram_prewrite` also left the set in the phase-D narrowing: its write is not
-    // read-preceded, so it falls on the dissolved side of the discriminator. It
-    // never had a behavioral verdict (it does not transpile; its only test is
-    // `#[ignore]`d), so nothing measured contradicts the narrowing — if it ever
-    // transpiles, the corpus sweep covers it the moment it does.
-    // REMOVED 2026-08-26 (cycle-dataflow phase D): `add_then_write` and the
-    // `fast_counter` witness were DISSOLVED by phase B's forwarded emission —
-    // measured agreeing (`pre_tick_update_forwarding_agrees_end_to_end`,
-    // `independent_hardware_anchors_the_corrected_spelling`) — and the rule was
-    // narrowed to READ-PRECEDED register-reading writes (the path-dependent
-    // region boundary), so the no-read opening shapes are legal now.
-    //
-    // ADDED the same day: `w4_mixed_alignment` — the retained class's own
-    // demonstration witness (a read reaches the write on one path only),
-    // measured DIVERGENT under forwarded emission (sim holds, SV alternates;
-    // pinned in `d_narrowing_battery_verdicts`).
-    "tests/sequential_forwarding_divergence.rs::w4_mixed_alignment",
-    // Added 2026-08-25 when the CONSTANT-WRITE exemption was narrowed to
-    // unconditional writes (guardrail 5.5). All three are measured divergences, not
-    // rule regressions: each leads its own emitted SystemVerilog by exactly one
-    // cycle, with both traces pinned in sequential_forwarding_divergence.rs. The
-    // hold clause is untouched by forwarded emission (they write constants), so
-    // the phase-D narrowing keeps all three.
     "tests/fixtures/control_extraction_dut.rs::branch_merge_explicit",
-    "tests/sequential_forwarding_divergence.rs::pc_arm_toggle",
-    "tests/sequential_forwarding_divergence.rs::pc_arm_write",
+    "tests/sequential_forwarding_divergence.rs::d1f_const_path_dependent_hold",
+    "tests/sequential_forwarding_divergence.rs::d1g_const_path_dependent_all_paths",
+    "tests/sequential_forwarding_divergence.rs::d2a_mixed_two_drives_hold",
+    "tests/sequential_forwarding_divergence.rs::d2b_mixed_two_drives_all_paths",
+    "tests/sequential_forwarding_divergence.rs::d3c_w4_hold",
+    "tests/sequential_forwarding_divergence.rs::d4a_forwarded_guard_hold",
+    "tests/sequential_forwarding_divergence.rs::d4c_forwarded_guard_all_paths",
+    "tests/sequential_forwarding_divergence.rs::w4_mixed_alignment",
 ];
 
 #[test]

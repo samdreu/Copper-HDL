@@ -19,9 +19,12 @@
 // statement walk, so the `phase == 1` arm's `out.write(x)` was edge-sampled one
 // edge after the simulator's opening-instant write. With the walk arm-granular the
 // drive is opening in its own arm, takes phase C's mux + hold form, and sim ==
-// verilog (`probe_fsm_sim_matches_verilog`, un-ignored; the module sweeps). The D1
-// rule still flags it (W4 class, `allow_pretick_alignment`); `w4_mixed_alignment`
-// is that class's remaining divergent witness.
+// verilog (`probe_fsm_sim_matches_verilog`, un-ignored; the module sweeps). Since
+// the D1 re-derivation (2026-10-28) the rule ADMITS it — the read in the sibling
+// arm reaches the write on no path, so its anchor is opening on both sides — and it
+// compiles without an opt-out; `w4_mixed_alignment` (the read-free arm assigning
+// the register the shared write reads) is the continuous-assign class's divergent
+// witness.
 
 #[hardware(sequential)]
 async fn probe(
@@ -37,7 +40,7 @@ async fn probe(
     }
 }
 
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn probe_fsm(
     clk: Clock<MainClk>,
     inp: In<Bits<8>, MainClk>,

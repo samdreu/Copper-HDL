@@ -132,8 +132,9 @@ const SKIP: &[(&str, &str)] = &[
          and this module's `head_o` — does not reach it. This sweep's seeded stimulus takes \
          `sel == 0` first, under which the lag is invisible (the row lifted, the case passes; so does \
          the live twin `branch_merge`, a seed-masked blind spot recorded in guardrail §5.5), so a \
-         green here would prove nothing. The D1 rule REJECTS this shape; the module keeps \
-         `allow_pretick_alignment` because it exists to demonstrate it",
+         green here would prove nothing. The re-derived D1 rule (2026-10-28, clause A: mixed \
+         anchors) REJECTS `tail_o`; the module keeps `allow_pretick_alignment` because it exists \
+         to demonstrate it",
     ),
 ];
 

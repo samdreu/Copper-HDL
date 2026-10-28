@@ -1030,14 +1030,17 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
-            // Pre-tick alignment hazard: the module assigns a register in its
-            // pre-tick segment on a path no `In` read precedes, and drives a plain
-            // combinational `Out` from a register in that same segment. With no
-            // leading read there is no `pre_edge_barrier`, so that segment runs in
-            // the PREVIOUS tick's post-edge settle and the observation is a cycle
-            // early — silently disagreeing with the synthesized `always_ff`. Reject
-            // it, pointing at `RegOut` (immune: it commits at the edge). See
-            // `design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md` for the measurements.
+            // Pre-tick alignment hazard (D1, re-derived 2026-10-28): before the
+            // first tick a plain `Out` has MIXED anchors — an `In` read reaches some
+            // write of it (that write runs in the pre-edge settle, behind the read's
+            // barrier) while some write has a read-free path from the loop head (it
+            // runs in the post-edge settle, at the cycle's opening) — and codegen,
+            // which emits one form per port, lands the opening write one observation
+            // late; or a write no read reaches sits under a test of a register the
+            // segment just assigned, which the emitted comb copy tests in its
+            // committed form. Reject it, pointing at `RegOut` (immune: it commits at
+            // the edge). See `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10 for the
+            // derivation and `PRETICK_ALIGNMENT_GUARDRAIL.md` §5.8 for the record.
             // (The trailing-segment companion rule, `unprotected_trailing_out_write`,
             // was retired 2026-10-23 when phase C landed: the extraction route's
             // trailing plain-`Out` drive is now emitted as a forwarded combinational
@@ -1055,18 +1058,19 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 return Error::new(
                     span,
                     format!(
-                        "output port `{port}`'s pre-tick region has a PATH-DEPENDENT boundary: \
-                         an input read reaches the write on some paths but a register is \
-                         assigned with no protecting read on another, so the write executes at \
-                         the cycle's opening on one path and at the pre-edge on the other — no \
-                         single synthesized emission can match both, and the simulator silently \
-                         disagrees with the hardware (or, for a constant written on only some \
-                         paths, the held value makes the phase shift observable). Make the \
-                         boundary uniform (read the input on every path before the register \
-                         update), declare `{port}` as `RegOut<…>` (registered, immune because \
-                         it commits at the clock edge), or move the register update after the \
-                         `clk.tick().await`. If this module exists to DEMONSTRATE the \
-                         divergence, opt out explicitly with \
+                        "output port `{port}` is driven before the first `clk.tick().await` with \
+                         MIXED anchors or a FORWARDED guard: either an input read reaches some write \
+                         of the port while some write of it has a read-free path from the loop head \
+                         (the simulator runs that write at the cycle's opening; the emitted \
+                         SystemVerilog edge-samples the port, or muxes it on the committed state, one \
+                         observation late), or a write no input read reaches sits under an `if`/`match` \
+                         whose test reads a register assigned earlier in the same segment (the \
+                         simulator tests the forwarded value, the hardware the committed one). Make \
+                         the anchor uniform (read the input before every write of the port, or before \
+                         none), test only committed state (update the register after the test), \
+                         declare `{port}` as `RegOut<…>` (registered, immune because it commits at the \
+                         clock edge), or move the writes after the `clk.tick().await`. If this module \
+                         exists to DEMONSTRATE the divergence, opt out explicitly with \
                          `#[hardware(sequential, {ALLOW_PRETICK})]`."
                     ),
                 )

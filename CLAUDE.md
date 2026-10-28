@@ -256,8 +256,8 @@ receive/clone one.
   `design_docs/OUTDATED/` is historical, not authoritative.
 - **`PRETICK_ALIGNMENT_GUARDRAIL.md`** — the pre-tick alignment family: four rules
   (`Cfg::unprotected_pretick_out_write`, `multi_phase_out_write`,
-  `pretick_out_write_before_update`, plus the constant-write clause inside the
-  first), joined 2026-10-23 by two more of the same discipline —
+  `pretick_out_write_before_update`; the first's constant-write clause was retired
+  2026-10-28), joined 2026-10-23 by two more of the same discipline —
   `trailing_regout_reads_input` (a `RegOut` written after the last tick from an input
   read directly; a `RegOut` write takes effect at the first clock edge after it
   executes, so the flip-flop would sample the input one drive late) and
@@ -271,15 +271,25 @@ receive/clone one.
   corpus pin in `copper-analysis/tests/pretick_alignment_corpus.rs` and enforced in
   both front-ends. A former fifth, `unprotected_trailing_out_write`, was retired
   2026-10-23 when phase C landed (see below). **D1** is **guarded** (rule
-  2026-08-21, narrowed 2026-08-26): in the pre-tick segment, a plain `Out` write is a
-  compile error when the segment also assigns a register that no leading `In` read
-  reaches AND the write is observable across the phase shift — either it reads a
-  register *and* an `In` read comb-reaches it (the path-dependent boundary, W4 /
-  `probe_fsm`), or it is not written on every path (the constant-write clause,
-  `pc_arm_*`). A register-reading write that no `In` read reaches is an
+  2026-08-21, narrowed 2026-08-26, **re-derived 2026-10-28** —
+  `CYCLE_DATAFLOW_SEMANTICS.md` §10, guardrail §5.8): before the first tick, a plain
+  `Out` is a compile error when its drives have **mixed anchors** — an `In` read
+  comb-reaches some write of the port while some write has a read-free path from the
+  loop head (the simulator runs that write at the opening, the SV edge-samples the
+  port or muxes it on committed state one observation late), unobservable only for a
+  single every-path drive that forwards no register it reads (`d3a`) — or when a
+  write no read reaches sits under an `if`/`match` that tests a register assigned
+  earlier in the segment (a **forwarded guard**: the comb copy tests the committed
+  value; `d4a`). Witnesses `w4_mixed_alignment`, `branch_merge_explicit`, and the
+  seven refused `d*` probes; `pc_arm_*` and `probe_fsm` (a read in a sibling arm
+  reaches nothing) are admitted and compile clean, as is a constant behind its own
+  read. The former constant-write clause and its "unprotected register assignment"
+  conjunct are gone. A register-reading write that no `In` read reaches is an
   opening-prefix drive and is **legal** — forwarded continuous-assign emission gives
-  it the meaning the simulator always had. Fix a real hit with `RegOut`, or move the
-  register update after the tick. A module that exists to *demonstrate* the hazard
+  it the meaning the simulator always had. Fix a real hit with `RegOut`, make the
+  anchor uniform (read the input before every write of the port or before none),
+  test only committed state, or move the writes after the tick. A module that
+  exists to *demonstrate* the hazard
   opts out with `#[hardware(sequential, allow_pretick_alignment)]` — this silences the
   error, not the detection, and must never be reached for in a real design.
   **D2 is FIXED** (2026-08-21) — a read feeding a combinational `Out` in a
@@ -307,9 +317,9 @@ receive/clone one.
   phase C:** since 2026-10-26 the opening predicate is **arm-granular** (an
   `if`/`match` seeds each arm's walk from its condition's reads alone), so the mux
   form reaches any extracted module whose drives have no read before them in their
-  own arm — `e9` agrees, and so do the D1 witnesses `pc_arm_*` and `probe_fsm`
-  (sv-baseline delta: seven modules, no referenced one; the D1 rules themselves are
-  unchanged and their re-derivation is a separate decision). Until then the predicate
+  own arm — `e9` agrees, and so do the former D1 witnesses `pc_arm_*` and `probe_fsm`
+  (sv-baseline delta: seven modules, no referenced one; D1 was re-derived on that
+  evidence 2026-10-28, see above). Until then the predicate
   was statement-granular over the whole `match pc` and the form was emitted only for
   input-free modules. `e8`, the battery's other single-phase divergence, is refused
   by `trailing_out_reads_input` since the same day (`CYCLE_DATAFLOW_SEMANTICS.md`

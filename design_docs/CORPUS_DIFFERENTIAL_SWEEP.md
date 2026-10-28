@@ -26,8 +26,9 @@ the findings are the argument for the sweep.
   that had been in the tree for weeks. A measured sim ≠ synth divergence —
   `branch_merge_explicit` and its async twin transpile to byte-identical
   SystemVerilog, the twin agrees with it for 200 random cycles and it leads by one
-  (D1's constant-write exemption is unsound for a conditionally-written `Out`;
-  `PRETICK_ALIGNMENT_GUARDRAIL.md` §5.5, pinned in
+  (read then as "D1's constant-write exemption is unsound for a
+  conditionally-written `Out`", `PRETICK_ALIGNMENT_GUARDRAIL.md` §5.5; re-derived
+  2026-10-28 as a mixed-anchor port, §5.8 — pinned in
   `tests/sequential_forwarding_divergence.rs`). And invalid emitted SystemVerilog —
   `event_source` has a port named `event`, a keyword missing from the legalizer's
   reserved list. Neither was reachable from the existing tests: that example is
