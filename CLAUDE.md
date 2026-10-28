@@ -80,6 +80,13 @@ tools/regression-remote.sh                  # HEAD, which must already be on ori
 tools/regression-remote.sh --sync           # this working tree instead (not for numbers)
 ```
 
+`--sync` deliberately does **not** preserve file times (`rsync --checksum --no-times`):
+cargo calls a source fresh when its mtime predates the last build's fingerprint, so a
+file edited before the previous remote run and synced after it would never be
+recompiled (measured 2026-10-28: a stale proc-macro `.so` failed a ui case that passed
+locally). Two sessions must not `--sync` into the same remote clone — give each its own
+`--dir`/`--scratch` (clone `~/Copper-HDL` beside itself and run `--setup` once).
+
 Note an example's `main()` is a real self-check — several assert against
 independent BaseJump Verilog and `exit(1)` on mismatch — and `cargo test` only
 *builds* examples, never runs them. That is why examples are in the default path.
