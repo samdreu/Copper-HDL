@@ -23,6 +23,19 @@
 //! "49 clocked modules / 8" figures are the 2026-08-21 sweep, kept as history; the
 //! current exact sets live in `copper-analysis/tests/pretick_alignment_corpus.rs`.
 //!
+//! **2026-10-26, arm-granular opening (`e9`).** Codegen's opening-prefix walk
+//! (`shir_lower::lower_stmt_list`) now seeds each arm of an `if`/`match` from the
+//! reads of its condition alone, instead of marking the whole statement — under
+//! control extraction the whole body is one `match pc`, so one input read anywhere
+//! had demoted every conditional plain-`Out` drive to the edge-sampled form. Four
+//! pinned one-cycle lags flipped to agreement on the first run and are re-blessed
+//! below: `e9`, `e2x`, and the D1 constant-write clause's own witnesses `pc_arm_write`
+//! / `pc_arm_toggle` (and the `#[ignore]`d `probe_fsm_sim_matches_verilog`, the W4
+//! witness, passes). The *rules* are unchanged except `multi_phase_out_write`, whose
+//! "input read anywhere" clause existed only for the statement-granular walk: D1's
+//! constant-write clause and the W4 class still refuse their shapes on the source, and
+//! re-deriving them now that their witnesses agree is a decision of its own.
+//!
 //! # Divergence 1 — a pre-tick register update is forwarded to a same-segment read
 //!
 //! ```text
@@ -832,6 +845,15 @@ fn trailing_segment_register_update_agrees() {
 // Narrowing the exemption is a rule widening whose corpus cost has to be measured
 // first (see §5.4 for two widenings that were measured and rejected), so these pin
 // today's behaviour and flip loudly when it changes.
+//
+// IT CHANGED (2026-10-26): the lead was codegen's statement-granular opening walk,
+// not the phase shift it was read as. The `sel.read()` in the `pc == 0` arm marked
+// the whole `match pc`, so the `pc == 1` arm's constant was edge-sampled one edge
+// after the simulator's opening-instant write. With the walk arm-granular the drive
+// is opening and phase C's mux + hold shows it at the same observation — both DUTs
+// below AGREE, trace for trace. The D1 clause they justified is untouched here (the
+// first test pins that it still fires); whether it should be re-derived is a rule
+// decision with its own corpus pin, not a side effect of an emission change.
 
 const PC_ARM_SRC: &str = r#"
 #[hardware(sequential, allow_pretick_alignment)]
@@ -914,56 +936,51 @@ fn sim_pc_arm(toggle: bool) -> Vec<u8> {
 }
 
 /// The corpus instance's shape: `o` is written only in the `pc == 1` arm, so the
-/// other path leaves it holding. The simulator shows the write a cycle before the
-/// hardware performs it. It shows up once because the output latches high — which
-/// is exactly why a hand-written vector set never caught it, and why 200 cycles of
-/// random stimulus did.
+/// other path leaves it holding. Until 2026-10-26 the simulator showed the write a
+/// cycle before the hardware performed it (sim `[1, 1, …]`, SV `[0, 1, 1, …]`),
+/// once, because the output latches high — which is exactly why a hand-written
+/// vector set never caught it and 200 cycles of random stimulus did. The cause was
+/// codegen's statement-granular opening walk: the `sel.read()` in the OTHER arm
+/// demoted this arm's drive to an edge-sampled register. Arm-granular, the drive is
+/// opening in its own arm and phase C's mux + hold form shows it at the opening
+/// observation — AGREES.
 #[test]
-fn a_write_in_a_state_arm_leads_the_hardware_by_one_cycle() {
+fn a_write_in_a_state_arm_agrees_under_arm_granular_opening() {
     let sim = sim_pc_arm(false);
-    assert_eq!(
-        sim,
-        vec![1u8; CYCLES],
-        "simulator behaviour changed; if it now starts at 0 the divergence is FIXED"
-    );
+    assert_eq!(sim, vec![1u8; CYCLES], "simulator behaviour changed");
 
-    // The D1 guard now COVERS this shape (2026-08-25): the constant-write exemption
-    // was narrowed to UNCONDITIONAL writes, because a constant is only idempotent
-    // across the phase shift if it is written on every path — where the alternative
-    // is the port's held value, when the write lands is observable. The divergence
-    // below is unchanged; what changed is that the language rejects the shape rather
-    // than emitting it. The DUT keeps `allow_pretick_alignment` because it exists to
-    // demonstrate the hazard, and the flag silences the error, not the detection.
+    // The D1 guard still COVERS this shape (narrowed to it 2026-08-25, when the
+    // lead was measured): a conditional constant's write instant was observable
+    // then. The clause is NOT re-derived here — a rule change takes its own corpus
+    // pin and decision — so the DUT keeps `allow_pretick_alignment` as its witness,
+    // and this pins that the clause still fires on it.
     let f: syn::ItemFn = syn::parse_str(PC_ARM_SRC).expect("parses");
     assert_eq!(
         copper_analysis::unprotected_pretick_out_write(&f),
         vec!["o".to_string()],
-        "the rule stopped flagging the shape it was narrowed to catch — this DUT is \
-         in EXPECTED_FLAGGED in pretick_alignment_corpus.rs, and the traces below \
-         still diverge, so silently accepting it again would ship the divergence"
+        "the D1 constant-write clause stopped flagging its witness — this DUT is in \
+         EXPECTED_FLAGGED in pretick_alignment_corpus.rs; narrowing the clause is a \
+         rule decision to take there, with the measured evidence, not here"
     );
 
     if !verilator_available() {
         return;
     }
     let sv = transpile_and_run(PC_ARM_SRC, "pc_arm_write", "clk", "o", "t->sel = 1;");
-    let mut expected_sv = vec![1u8; CYCLES];
-    expected_sv[0] = 0;
-    assert_eq!(sv, expected_sv, "transpiled SV behaviour changed");
-    assert_ne!(
+    assert_eq!(
         sim, sv,
-        "sim and SV now AGREE — this divergence is FIXED. Promote it to a real \
-         equivalence test and un-ignore \
-         corpus_equivalence.rs::branch_merge_explicit_differential_case, which is \
-         the same shape in the corpus."
+        "sim and SV diverge again for a constant written in one state arm — the \
+         arm-granular opening walk (shir_lower::lower_stmt_list) or phase C's \
+         mux + hold form regressed (before 2026-10-26 the SV lagged by one cycle)"
     );
 }
 
-/// The same machine with the other arm driving the port low. The two traces are
-/// each other shifted by exactly one cycle, for all 13 — so this is a phase shift,
-/// not an initialisation artifact, and it is worth the second DUT to say so.
+/// The same machine with the other arm driving the port low, so a lag would show
+/// on every cycle rather than once. Before 2026-10-26 the two traces were each
+/// other shifted by exactly one cycle for all 13 (a phase shift, not an
+/// initialisation artifact); now they are equal for all 13.
 #[test]
-fn the_state_arm_lead_is_systematic_not_a_first_cycle_artifact() {
+fn the_state_arm_toggle_agrees_on_every_cycle() {
     let sim = sim_pc_arm(true);
     let expected_sim: Vec<u8> = (0..CYCLES).map(|i| u8::from(i % 2 == 0)).collect();
     assert_eq!(sim, expected_sim, "simulator behaviour changed");
@@ -972,13 +989,10 @@ fn the_state_arm_lead_is_systematic_not_a_first_cycle_artifact() {
         return;
     }
     let sv = transpile_and_run(PC_ARM_TOGGLE_SRC, "pc_arm_toggle", "clk", "o", "t->sel = 1;");
-    let expected_sv: Vec<u8> = (0..CYCLES).map(|i| u8::from(i % 2 == 1)).collect();
-    assert_eq!(sv, expected_sv, "transpiled SV behaviour changed");
     assert_eq!(
-        sim[1..],
-        sv[..CYCLES - 1],
-        "the divergence is no longer a clean one-cycle shift — it changed shape, \
-         which means something other than the phase alignment moved"
+        sim, sv,
+        "sim and SV diverge again for the toggling state-arm constant — see \
+         a_write_in_a_state_arm_agrees_under_arm_granular_opening"
     );
 }
 
@@ -2188,8 +2202,8 @@ fn phase_e_the_narrowed_rule_flags_exactly_the_diverging_probes() {
     assert!(flagged(E2_SRC).is_empty(), "e2: two committed registers, no input");
     assert!(flagged(E3_SRC).is_empty(), "e3: forwarded then committed, no input");
     assert!(flagged(E5D_SRC).is_empty(), "e5d: both writes behind a deferred read");
+    assert!(flagged(E2X_SRC).is_empty(), "e2x: a read in another state reaches no write (arm-granular, 2026-10-26)");
     // DIVERGE or REFUSED one IR late — flagged
-    assert_eq!(flagged(E2X_SRC), o, "e2x: an unrelated read demotes every drive");
     assert_eq!(flagged(E4_SRC), o, "e4: deferred read then a constant (mixed)");
     assert_eq!(flagged(E5_SRC), o, "e5: trailing immediate read (mixed)");
     assert_eq!(flagged(E6_SRC), o, "e6: deferred read via a wire then a constant (mixed)");
@@ -2246,22 +2260,24 @@ fn e5d_two_closing_writes_in_two_phases_agree() {
     assert_eq!(sim, sv, "sim and SV diverge for two closing drives in two phases — the edge-sampled form regressed");
 }
 
-/// DIVERGE — flagged. `e2` plus one unrelated input read in the head. Codegen's
-/// opening-prefix scan covers the whole extracted `match pc`, so one read
-/// anywhere demotes every drive to an edge-sampled register, and the opening
-/// drives show one cycle after the simulator. The flipping pair for clause (i):
-/// the only difference from `e2` is `a = x.read()` for `a = a + 1`.
+/// AGREE (since 2026-10-26) — accepted. `e2` plus one input read in the head
+/// state, which no write of `o` is reached by. Until the arm-granular opening walk
+/// codegen's opening-prefix scan covered the whole extracted `match pc`, so that
+/// one read demoted every drive to an edge-sampled register and the SV showed the
+/// simulator shifted by one cycle (`[0, 0, 10, 3, 3, 13, …]`). Arm-granular, both
+/// drives are opening on both sides and phase C emits `o = a` / `o = b` under `pc`
+/// guards with a hold register. The rule's former clause (an input read anywhere
+/// while a write is opening) existed only for that limitation and is retired; the
+/// only difference from `e2` is `a = x.read()` for `a = a + 1`.
 #[test]
-fn e2x_an_unrelated_read_elsewhere_makes_the_opening_drives_lag_known_gap() {
+fn e2x_an_unrelated_read_in_another_state_agrees() {
     let sim = sim_e_in(e2x_two_registers_plus_unrelated_read);
     assert_eq!(sim, vec![0, 10, 3, 3, 13, 6, 6, 16, 9, 9, 19, 12, 12], "simulator behaviour changed");
     if !verilator_available() {
         return;
     }
     let sv = transpile_and_run_driven(E2X_SRC, "e2x_two_registers_plus_unrelated_read");
-    assert_eq!(sv, vec![0, 0, 10, 3, 3, 13, 6, 6, 16, 9, 9, 19, 12], "transpiled SV behaviour changed");
-    assert_eq!(sim[..CYCLES - 1], sv[1..], "the lag is no longer a clean one-cycle shift");
-    assert_ne!(sim, sv, "sim and SV now AGREE for e2x — codegen's opening predicate became arm-granular; re-derive clause (i) of multi_phase_out_write and re-bless EXPECTED_MULTI_PHASE");
+    assert_eq!(sim, sv, "sim and SV diverge for e2x — the arm-granular opening walk or phase C's mux + hold form regressed (before 2026-10-26 the SV lagged by one cycle); if the lag is back, the retired clause of multi_phase_out_write must come back with it");
 }
 
 /// DIVERGE — flagged. A deferred read feeds the first write (closing, agrees at
@@ -2373,17 +2389,14 @@ fn e7w_linear_route_phase_local_wires_diverge_known_gap() {
     assert_ne!(sim, sv, "sim and SV now AGREE for e7w — the linear hold path forwards; re-derive the linear clause");
 }
 
-// ── Found by the phase-E battery, OUTSIDE the multi-phase rule — UNGUARDED ────
+// ── Found by the phase-E battery, OUTSIDE the multi-phase rule ────────────────
 //
-// Two single-phase shapes diverge today and no rule flags them. Both are the
-// same mechanism the mixed class above exposes, in a port written in ONE phase:
-// under control extraction codegen's opening-prefix scan runs over the whole
-// `match pc` statement, so any `In` read anywhere in the body marks every
-// conditional plain-`Out` drive as closing and edge-samples it, one observation
-// after the simulator's opening-instant write. These pin the measured gap; the
-// remedy is a codegen change (arm-granular opening tracking in
-// `shir_lower::lower_stmt_list`, and a treatment of immediate reads), which is
-// outside phase E's scope and must be decided before anything is retired.
+// Two single-phase shapes diverged when the battery landed (2026-10-23) and no
+// rule flagged them. One is fixed: `e9` was the statement-granular opening walk
+// (any `In` read anywhere in the extracted `match pc` edge-sampled every
+// conditional plain-`Out` drive), and the arm-granular walk of 2026-10-26 flips it
+// to agreement below. The other, `e8`, is a different mechanism — an immediate
+// trailing read feeding the drive — and is pinned as it was measured.
 
 /// DIVERGE — REFUSED since 2026-10-26 (`trailing_out_reads_input`; unguarded when
 /// phase E found it). A trailing write `o.write(x.read() + cnt)` after a wait
@@ -2406,13 +2419,16 @@ fn e8_single_phase_trailing_immediate_read_diverges_refused() {
     assert_ne!(sim, sv, "sim and SV now AGREE for e8 — the immediate-read class is realized; retire trailing_out_reads_input and record it in CYCLE_DATAFLOW_SEMANTICS.md §9.4");
 }
 
-/// DIVERGE — UNGUARDED. The read is in a DIFFERENT state (`r = x.read()` two
-/// ticks earlier) and the write reads only the committed register, yet the drive
-/// is edge-sampled: the whole-`match` scan saw a read. Without the read this is
-/// `trailing_update`'s agreeing shape. Phase C's mux + hold is therefore reached
-/// only by input-free extracted modules today.
+/// AGREE (since 2026-10-26). The read is in a DIFFERENT state (`r = x.read()` two
+/// ticks earlier) and the write reads only the committed register. Until the
+/// arm-granular opening walk the drive was edge-sampled because the whole-`match`
+/// scan had seen a read, and the SV lagged the simulator by one cycle
+/// (`[0, 0, 0, 0, 12, …]` against `[0, 0, 0, 12, …]`) — so phase C's mux + hold
+/// form was reached only by input-free extracted modules. Now the drive is opening
+/// in its own arm and the form shows it, exactly as for `trailing_update` (this
+/// shape without the read). Single-phase, so outside the multi-phase rule.
 #[test]
-fn e9_a_read_in_another_state_demotes_an_opening_write_diverges_unguarded_gap() {
+fn e9_a_read_in_another_state_leaves_an_opening_write_opening_agrees() {
     let sim = sim_e_in(e9_read_in_another_state_opening_write);
     assert_eq!(sim, vec![0, 0, 0, 12, 12, 12, 12, 16, 16, 16, 16, 20, 20], "simulator behaviour changed");
     let f: syn::ItemFn = syn::parse_str(E9_SRC).unwrap();
@@ -2421,9 +2437,7 @@ fn e9_a_read_in_another_state_demotes_an_opening_write_diverges_unguarded_gap() 
         return;
     }
     let sv = transpile_and_run_driven(E9_SRC, "e9_read_in_another_state_opening_write");
-    assert_eq!(sv, vec![0, 0, 0, 0, 12, 12, 12, 12, 16, 16, 16, 16, 20], "transpiled SV behaviour changed");
-    assert_eq!(sim[..CYCLES - 1], sv[1..], "the lag is no longer a clean one-cycle shift");
-    assert_ne!(sim, sv, "sim and SV now AGREE for e9 — codegen's opening predicate became arm-granular; re-derive clause (i) of multi_phase_out_write, which can then admit modules with reads");
+    assert_eq!(sim, sv, "sim and SV diverge for e9 — the arm-granular opening walk (shir_lower::lower_stmt_list) or phase C's mux + hold form regressed (before 2026-10-26 the SV lagged by one cycle)");
 }
 
 /// AGREE. The V8a shape (read; publish; update) in a MIDDLE phase, which neither

@@ -317,14 +317,25 @@ fn lower_stmt_list(
     for stmt in stmts {
         // Opening-prefix tracking: mark BEFORE lowering, so a drive whose own
         // expression reads an `In` port counts as behind its read's barrier
-        // (`leading_read_reaches` includes the write's own reads). Conservative
-        // for branches — a read anywhere inside this statement marks the walk —
-        // which only ever keeps a drive on today's unforwarded emission.
-        if fwd.forward_opening_drives && !fwd.seen_in_read {
-            let ins = fwd.in_ports.clone();
-            let mut hit = false;
-            collect_expr_vars_in_stmt(stmt, &mut |v: &str| hit |= ins.contains(v));
-            fwd.seen_in_read = hit;
+        // (`leading_read_reaches` includes the write's own reads).
+        //
+        // The mark is ARM-GRANULAR for a branch (2026-10-26, `e9`): an `if` or
+        // `match` seeds each arm's walk from the reads of its condition or
+        // scrutinee (and guards) alone, because the simulator runs ONE arm per
+        // cycle and a read in a sibling arm parks nothing before this arm's
+        // drive. Under control extraction the whole body is one `match pc`, so
+        // the former statement-granular mark — a read anywhere inside the
+        // statement — made every drive closing in any module that reads an
+        // input anywhere, and phase C's mux + hold form was reached only by
+        // input-free extracted modules (`e9_read_in_another_state_opening_write`
+        // and `e2x_two_registers_plus_unrelated_read`, measured one cycle late).
+        // AFTER the branch the walk carries the whole-statement mark as before:
+        // a later drive cannot know which arm ran, and that keeps it on the
+        // edge-sampled emission, the conservative side.
+        let tracking = fwd.forward_opening_drives && !fwd.seen_in_read;
+        let stmt_reads_input = tracking && stmt_reads_in(stmt, &fwd.in_ports);
+        if tracking && !matches!(stmt, CHIRStmt::If { .. } | CHIRStmt::Match { .. }) {
+            fwd.seen_in_read = stmt_reads_input;
         }
         match stmt {
             // A reassignment of a known combinational wire → another blocking
@@ -385,12 +396,18 @@ fn lower_stmt_list(
                 // and only `vlir_lower::split_output_reg` knows which. Emitting the
                 // unforwarded test in the `always_ff` copy is `TODO` cause N — it
                 // made `c = c + 1; if c == 3 { … }` fire a cycle late.
+                // The arms' opening-prefix walk starts from the condition's
+                // reads alone (arm-granular, see the top of the loop).
+                let mut arm_fwd = fwd.clone();
+                if tracking {
+                    arm_fwd.seen_in_read = expr_reads_in(condition, &fwd.in_ports);
+                }
                 let condition = rename_vars(lower_expr(condition)?, renames);
                 let edge_condition = fwd.at_edge(&condition);
                 let then_stmts =
-                    lower_stmt_list(then_body, promoted_names, renames, wire_types, &mut fwd.clone())?;
+                    lower_stmt_list(then_body, promoted_names, renames, wire_types, &mut arm_fwd.clone())?;
                 let else_stmts = else_body.as_ref()
-                    .map(|eb| lower_stmt_list(eb, promoted_names, renames, wire_types, &mut fwd.clone()))
+                    .map(|eb| lower_stmt_list(eb, promoted_names, renames, wire_types, &mut arm_fwd.clone()))
                     .transpose()?;
                 // A branch that exists only to GATE memory staging is edge-
                 // sampled through and through: its staged values already take
@@ -415,12 +432,21 @@ fn lower_stmt_list(
             }
             CHIRStmt::Match { scrutinee, arms, .. } => {
                 // Both forms, for the reason given on the `If` arm above.
+                // The arms' opening-prefix walk starts from the scrutinee's and
+                // the guards' reads alone (arm-granular, see the top of the loop).
+                let mut arm_fwd = fwd.clone();
+                if tracking {
+                    arm_fwd.seen_in_read = expr_reads_in(scrutinee, &fwd.in_ports)
+                        || arms.iter().any(|arm| {
+                            arm.guard.as_ref().is_some_and(|g| expr_reads_in(g, &fwd.in_ports))
+                        });
+                }
                 let scrutinee = rename_vars(lower_expr(scrutinee)?, renames);
                 let edge_scrutinee = fwd.at_edge(&scrutinee);
                 let shir_arms = arms.iter()
                     .map(|arm| {
                         let stmts = lower_stmt_list(
-                            &arm.body, promoted_names, renames, wire_types, &mut fwd.clone(),
+                            &arm.body, promoted_names, renames, wire_types, &mut arm_fwd.clone(),
                         )?;
                         Ok(SHIRMatchArm {
                             patterns: arm.patterns.iter()
@@ -488,9 +514,29 @@ fn lower_stmt_list(
             // this segment see the value it produced.
             _ => {}
         }
+        // Past the statement the walk carries its whole mark — for a branch,
+        // a read in any arm (see the top of the loop).
+        if tracking {
+            fwd.seen_in_read = stmt_reads_input;
+        }
         fwd.advance(stmt, renames)?;
     }
     Ok(out)
+}
+
+/// Whether a CHIR statement reads any of the module's `In` ports, anywhere
+/// inside it (branches included).
+fn stmt_reads_in(stmt: &CHIRStmt, ins: &HashSet<String>) -> bool {
+    let mut hit = false;
+    collect_expr_vars_in_stmt(stmt, &mut |v: &str| hit |= ins.contains(v));
+    hit
+}
+
+/// Whether a CHIR expression reads any of the module's `In` ports.
+fn expr_reads_in(expr: &CHIRExpr, ins: &HashSet<String>) -> bool {
+    let mut hit = false;
+    collect_expr_vars(expr, &mut |v: &str| hit |= ins.contains(v));
+    hit
 }
 
 fn lower_submodule(sub: &CHIRSubmoduleInst) -> Result<SHIRSubmoduleInst, SHIRLowerError> {

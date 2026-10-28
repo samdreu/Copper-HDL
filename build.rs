@@ -56,11 +56,6 @@ const SKIP: &[(&str, &str)] = &[
          divergence, so sim ≠ SV is its purpose. probe_timing_investigation.rs measures it",
     ),
     (
-        "probe_fsm",
-        "a pinned divergence (probe_fsm_sim_matches_verilog is #[ignore]d for it): a phase-gated \
-         cross-tick read still disagrees with the transpiler",
-    ),
-    (
         "rv32i_cpu_pipelined",
         "ANCHORED OUTSIDE THIS SWEEP as of 2026-08-27: tests/rv32i_pipelined_verilator.rs \
          runs all 13 architectural programs on the simulator AND on the transpiled core \
@@ -128,11 +123,17 @@ const SKIP: &[(&str, &str)] = &[
     (
         "branch_merge_explicit",
         "a demonstration of the pre-tick hazard since 2026-08-25: its conditionally-written \
-         constant `tail_o` leads the identical emitted SV by one cycle (pinned as \
-         sequential_forwarding_divergence.rs::a_write_in_a_state_arm_leads_the_hardware_by_one_cycle, \
-         guardrail 5.5). The D1 rule now REJECTS this shape; the module keeps \
-         `allow_pretick_alignment` because it exists to demonstrate it, so it still diverges and \
-         cannot be swept",
+         constant `tail_o` leads the identical emitted SV by one cycle when the FIRST cycle takes \
+         the `sel == 1` path (measured 2026-10-26: sim tail_o = 1 at cycle 0, SV = 0). `tail_o` is \
+         written both behind the deferred `sel` read (closing) and in the `pc == 1` arm (opening), \
+         a mixed-anchor port that stays edge-sampled, so the arm-granular opening walk of \
+         2026-10-26 — which fixed the minimal pair \
+         sequential_forwarding_divergence.rs::a_write_in_a_state_arm_agrees_under_arm_granular_opening \
+         and this module's `head_o` — does not reach it. This sweep's seeded stimulus takes \
+         `sel == 0` first, under which the lag is invisible (the row lifted, the case passes; so does \
+         the live twin `branch_merge`, a seed-masked blind spot recorded in guardrail §5.5), so a \
+         green here would prove nothing. The D1 rule REJECTS this shape; the module keeps \
+         `allow_pretick_alignment` because it exists to demonstrate it",
     ),
 ];
 

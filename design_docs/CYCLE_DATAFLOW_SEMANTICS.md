@@ -406,10 +406,15 @@ on each side, and the two sides decide it differently:
   immediate, and the write they feed is opening.
 - **Transpiler** (`shir_lower::lower_stmt_list`, `SHIRStmt::PortDrive::opening`;
   `vlir_lower::opening_hold_outputs`). A drive is *opening* when no `In` read
-  appears in the statement walk before it — and the walk is **statement-granular**:
-  a read anywhere inside a statement marks everything from that statement on.
-  Under control extraction the whole body is one `match pc` statement, so **any
-  input read anywhere in an extracted module makes every drive closing**. A
+  precedes it in the walk of **its own arm**: an `if` or `match` seeds each arm
+  from the reads of its condition or scrutinee alone, and past the branch the
+  walk carries a read from any arm (**arm-granular since 2026-10-26**; until then
+  the walk was statement-granular — a read anywhere inside a statement marked
+  everything from that statement on, and since under control extraction the whole
+  body is one `match pc` statement, any input read anywhere in an extracted
+  module made every drive closing). The anchor is control-flow, not dataflow: the
+  drive's own operand, an enclosing condition, and the exit test of a wait loop
+  the write is duplicated into all count, deferred or immediate. A
   conditionally driven port whose drives are all opening is emitted as a forwarded
   combinational mux with a `<port>_hold` register (phase C); any other
   conditionally driven port is an edge-sampled register under `pc` guards. On the
@@ -427,10 +432,11 @@ Write-window arithmetic (§1) then gives the verdict per write:
 | closing | comb mux | cannot occur: a read before the drive makes it closing on the codegen side too | — |
 
 So a multi-phase port agrees iff **every one of its writes has the same anchor on
-both sides**, and since codegen's predicate is port-wide, that means: either no
-write is closing on the codegen side (the module reads no input at all) or every
-write is closing on the simulator side (each is reached by a deferred read, in a
-module with registers). A port with one opening write and one closing write is
+both sides**, and since codegen's emission is port-wide, that means: either no
+write is closing on the codegen side (no input read reaches any write of the port
+— whatever the module reads in other states) or every write is closing on the
+simulator side (each is reached by a deferred read, in a module with registers).
+A port with one opening write and one closing write is
 **mixed**: the closing write drags the port into the edge-sampled form and the
 opening write lands one observation late. That is the "mixed generation" of §4 in
 its multi-phase form — not a mixed-generation *value* but a mixed-anchor *mux* —
@@ -451,7 +457,7 @@ tick added) is the shape the row meant.
 | `e2_two_registers` | committed `a` / committed `b`, no input | opening / opening | mux + hold | **AGREE** |
 | `e3_forwarded_then_committed` | `r = r+1; o.write(r)` / `o.write(r)`, no input | opening / opening | mux + hold (`r + 1` / `r`) | **AGREE** |
 | `e5d_two_closing_deferred` | `x.read()` / `x.read() + cnt`, both followed by a tick | closing / closing | edge-sampled | **AGREE** |
-| `e2x_two_registers_plus_unrelated_read` | `e2` plus `a = x.read()` in the head | opening / opening | edge-sampled (a read anywhere) | DIVERGE: SV = sim shifted one cycle |
+| `e2x_two_registers_plus_unrelated_read` | `e2` plus `a = x.read()` in the head | opening / opening | edge-sampled (a read anywhere) until 2026-10-26; mux + hold since (arm-granular) | DIVERGE: SV = sim shifted one cycle → **AGREE** since 2026-10-26 |
 | `e4_closing_then_opening` | `x.read()` / `Bits::zero()` | closing / opening | edge-sampled | DIVERGE: the constant one cycle late |
 | `e6_closing_via_wire_then_opening` | `let r = x.read(); o.write(r)` / `Bits::zero()` | closing / opening | edge-sampled | DIVERGE: as `e4` |
 | `e5_two_closing` | `x.read()` / trailing `x.read() + cnt` (no tick after) | closing / **opening** (immediate read) | edge-sampled | DIVERGE: second write one cycle late |
@@ -473,27 +479,42 @@ opt-out). A port written in more than one phase is refused iff any of:
    trigger): `vlir_lower` refuses or edge-samples it one IR later, and the macro
    must refuse what the transpiler refuses (front-end parity). Witness `e7`,
    `e7w`; flipping pair `e2` (the same writes under a folded wait loop, accepted).
-2. **an input read anywhere** in the body while some write of the port is opening
-   in the simulator — codegen edge-samples the whole port. Witness `e2x`; flipping
-   pair `e2` (one `a = a + 1` for `a = x.read()`).
+2. ~~**an input read anywhere** in the body while some write of the port is
+   opening in the simulator — codegen edge-samples the whole port.~~ **Retired
+   2026-10-26**: it existed only for the statement-granular walk. Its witness
+   `e2x` now agrees (its read sits in another state and reaches no write of the
+   port) and is accepted; the flipping pair with `e2` is one `a = a + 1` for
+   `a = x.read()` in the other direction.
 3. **register-free body** with input reads — the reads feeding the writes are
    immediate passthroughs, so the writes are opening however they are spelled.
    Witness `e4i`, `e5f`; flipping pair `e5d` (one `let mut` added).
-4. **mixed anchors** — some write is reached by a deferred read, some is not.
-   Witness `e4`, `e6`, `e5`; flipping pair `e5d` (one tick added after `e5`'s
-   trailing write).
+4. **mixed anchors** — some write of the port is opening in the simulator (no
+   deferred read reaches it) while an input read reaches some write of the port,
+   so codegen edge-samples the whole port: a deferred read reaching another write
+   (witness `e4`, `e6`; flipping pair `e5d`, one tick added after `e5`'s trailing
+   write), or a trailing *immediate* read reaching this write (witness `e5`; the
+   `e8` mechanism inside a multi-phase port — derived for the all-opening case,
+   `mphase_opening_write_then_trailing_immediate_read_flagged`).
+5. **a wait loop's read before an opening write** — a folded tick-bearing loop
+   that reads an input is no Comb predecessor of the write after it, so the
+   simulator side counts the write as opening, while control extraction
+   duplicates that write into the loop's exit arm under the read's condition,
+   where codegen sees a read before it. Unmeasured; refused by construction
+   (`mphase_wait_loop_read_before_opening_writes_flagged`).
 
-Accepted, each measured agreeing: the **input-free extracted** class
-(`pulse_plain`, `e2`, `e3`) and the **all-closing** class (`e5d`). Unmeasured
-shapes fall on the refusing side by construction (a write after a folded
-input-reading wait loop counts as opening; a body extraction handles only because
-of a `continue` counts as linear). `pulse_plain` left `EXPECTED_MULTI_PHASE` and
+Accepted, each measured agreeing: the **extracted all-opening** class — no input
+read reaches any write of the port, whatever the module reads in other states
+(`pulse_plain`, `e2`, `e3`, and since 2026-10-26 `e2x`) — and the **all-closing**
+class (`e5d`). Unmeasured shapes fall on the refusing side by construction (clause
+5; a body extraction handles only because of a `continue` counts as linear).
+`pulse_plain` left `EXPECTED_MULTI_PHASE` and
 keeps its opt-out for `out_first_driven_late` alone, which treats a constant past
 a folded loop as late in the refusing direction although the module agrees
 (§8-3's rule, conservative by design).
 
 Pins: `copper-analysis/src/cfg.rs` unit tests `mphase_*` (one per clause);
-`pretick_alignment_corpus.rs::EXPECTED_MULTI_PHASE` (the eight refused probes);
+`pretick_alignment_corpus.rs::EXPECTED_MULTI_PHASE` (the seven refused probes —
+eight until `e2x` left it on 2026-10-26);
 `copper-macros/tests/ui/fail/multi_phase_out_write.rs` (the `e4` shape) and the
 two accepted shapes in `ui/pass/pretick_alignment_ok.rs`; the `e*` tests and
 `phase_e_the_narrowed_rule_flags_exactly_the_diverging_probes` in
@@ -501,23 +522,41 @@ two accepted shapes in `ui/pass/pretick_alignment_ok.rs`; the `e*` tests and
 delta is the new probe modules (no existing module's SV changed — the change is
 a rule, not an emission).
 
-### 9.4 Found on the way, outside the rule — UNGUARDED
+### 9.4 Found on the way, outside the rule — one UNGUARDED, one FIXED
 
 The battery's single-phase controls exposed two divergences that **no rule
-flags today**, both the statement-granular predicate of §9.1 at work in a port
-written in one phase (pinned as `*_unguarded_gap` tests):
+flagged** when it landed (2026-10-23); one was the statement-granular predicate
+of §9.1 at work in a port written in one phase and is fixed, the other is a
+different mechanism and remains pinned as an `*_unguarded_gap` test:
 
 - **`e9_read_in_another_state_opening_write`** — `for{tick}; r = x.read();
   for{tick}; o.write(r)`. The write reads only a committed register and no read
-  precedes it in its own state, yet the drive is edge-sampled because the module
+  precedes it in its own state, yet the drive was edge-sampled because the module
   reads an input somewhere. Without the read this is `trailing_update`, which
-  agrees. Consequence: **phase C's mux + hold form is reached only by input-free
-  extracted modules**; every extracted module with an input and a conditionally
-  driven plain `Out` from a register publishes it one cycle late. The remedy is
-  arm-granular opening tracking in `shir_lower::lower_stmt_list` (scan the
-  scrutinee or condition, then recurse into each arm with its own `seen_in_read`),
-  which would also admit clause 2 above — a codegen change, to be scoped and
-  measured on its own (an sv-baseline diff will show which live modules move).
+  agrees. Consequence then: **phase C's mux + hold form was reached only by
+  input-free extracted modules**. **FIXED 2026-10-26** by arm-granular opening
+  tracking in `shir_lower::lower_stmt_list` (an `if`/`match` seeds each arm from
+  its condition's reads alone; past the branch the walk carries a read from any
+  arm), pinned as `e9_a_read_in_another_state_leaves_an_opening_write_opening_agrees`;
+  clause 2 above retired with it. The sv-baseline delta of that change was
+  **seven** modules, every one a conditionally driven plain `Out` from a register
+  or constant in an arm with no read: `e9`, `e2x`, `pc_arm_write`, `pc_arm_toggle`,
+  `probe_fsm`, and `head_o` of the byte-identical twins `branch_merge` /
+  `branch_merge_explicit`. All seven now take the mux + hold form, and **every
+  pinned one-cycle lag among them flipped to agreement on the first run** —
+  including the D1 constant-write clause's own witnesses (`pc_arm_*`) and the W4
+  witness `probe_fsm` (its `#[ignore]`d sim-vs-Verilog test passes and it sweeps).
+  `branch_merge_explicit`'s own lag is not among them: its `tail_o` is also
+  written behind the deferred `sel` read — a mixed-anchor port, edge-sampled —
+  and it still leads by one when the first cycle takes the `sel == 1` path
+  (measured 2026-10-26), which the seeded sweep never does: the live twin
+  `branch_merge` passes the sweep for that reason alone, a pre-existing blind
+  spot recorded here and in `PRETICK_ALIGNMENT_GUARDRAIL.md` §5.5, not fixed.
+  No referenced module (BaseJump, the pipelined CPU lane, the golden fixtures,
+  `pattern_detector_010`, the CDC reference) changed. The D1 rules are untouched
+  by that change: their witnesses now agree, and re-deriving the constant-write
+  clause and the W4 class on that evidence is a decision of its own, not a side
+  effect of an emission change.
 - **`e8_single_phase_trailing_immediate_read`** — `for{tick}; o.write(x.read()
   + cnt)`. A trailing read is immediate in the simulator (it shows `x_N + cnt` at
   the opening observation) and a closing drive in codegen (`x_{N+1} + cnt` one

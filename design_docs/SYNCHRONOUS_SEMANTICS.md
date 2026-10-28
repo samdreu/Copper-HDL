@@ -200,14 +200,16 @@ and so does `pulse_plain`, the `multi_phase_out_write` witness (phase E then
 derived and measured the multi-phase class and narrowed that rule, §9 of
 `CYCLE_DATAFLOW_SEMANTICS.md`; the input-free pulse is accepted). The rule that
 refused the class, `unprotected_trailing_out_write`, is retired. **Reach of the
-form, measured 2026-10-23:** the opening-prefix predicate is statement-granular,
-and an extracted body is one `match pc` statement, so the mux + hold form is
-emitted only for modules that read **no** input; an extracted module with an
-input read anywhere edge-samples every conditionally driven plain `Out` and shows
-an opening write one cycle late (`e9_read_in_another_state_opening_write`,
-unguarded — `CYCLE_DATAFLOW_SEMANTICS.md` §9.4; pinned as an `*_unguarded_gap`
-test in `tests/sequential_forwarding_divergence.rs`, and `RegOut` is the form both
-sides agree on until it is fixed). The same battery found a second single-phase
+form:** since 2026-10-26 the opening-prefix predicate is **arm-granular** — an
+`if`/`match` seeds each arm's walk from its condition's reads alone — so a
+conditionally driven plain `Out` whose drives have no read before them *in their
+own arm* takes the mux + hold form whatever the module reads in other states
+(`e9_read_in_another_state_opening_write` agrees, and so do the D1 witnesses
+`pc_arm_write`, `pc_arm_toggle`, `probe_fsm` and `head_o` of the `branch_merge`
+twins, the whole sv-baseline delta). Until then the predicate was
+statement-granular over the whole extracted `match pc`, so the form was emitted
+only for modules that read **no** input and `e9` lagged by one cycle
+(`CYCLE_DATAFLOW_SEMANTICS.md` §9.4). The same battery found a second single-phase
 shape, `e8_single_phase_trailing_immediate_read` — a plain `Out` written in the
 trailing region from an input read in that same statement, immediate here and a
 closing drive in the emitted SystemVerilog — which is refused since 2026-10-26 by
@@ -339,16 +341,19 @@ about its region is what separates them.
   `CYCLE_DATAFLOW_SEMANTICS.md` §9) to the measured divergent class.** Such a port is a mux over FSM
   state, and it agrees iff every write has the same anchor on both sides. The simulator anchors a
   write by whether a *deferred* `In` read parks the task before it; the transpiler anchors it by
-  whether any read appears earlier in its statement walk — and under control extraction that walk
-  is the whole `match pc`, so one input read anywhere edge-samples every drive. Accepted and
-  measured agreeing: an **input-free** extracted body (every drive opening on both sides, phase C's
-  mux — `pulse_plain`, `e2_two_registers`, `e3_forwarded_then_committed`) and a body where **every
-  write of the port follows a deferred read** in a module with registers (every drive closing on
-  both sides — `e5d_two_closing_deferred`). Refused, each with a flipping witness one edit away:
-  the **linear** route (no mux form; `vlir_lower` refuses it as multiply driven or edge-samples the
-  hold path — `e7`, `e7w`), an **input read anywhere** with an opening write (`e2x`), a
-  **register-free** body with reads (immediate passthroughs — `e4i`, `e5f`), and **mixed anchors**
-  (`e4`, `e5`, `e6`). History: the rule landed 2026-08-25 (commit `99290da`) as "any port in two
+  whether an input read precedes it in the walk of its own arm (arm-granular since 2026-10-26;
+  until then the walk was the whole extracted `match pc`, so one input read anywhere edge-sampled
+  every drive). Accepted and measured agreeing: an extracted body **none of whose writes of the port
+  an input read reaches**, whatever it reads in other states (every drive opening on both sides,
+  phase C's mux — `pulse_plain`, `e2_two_registers`, `e3_forwarded_then_committed`, and since
+  2026-10-26 `e2x_two_registers_plus_unrelated_read`) and a body where **every write of the port
+  follows a deferred read** in a module with registers (every drive closing on both sides —
+  `e5d_two_closing_deferred`). Refused, each with a flipping witness one edit away: the **linear**
+  route (no mux form; `vlir_lower` refuses it as multiply driven or edge-samples the hold path —
+  `e7`, `e7w`), a **register-free** body with reads (immediate passthroughs — `e4i`, `e5f`),
+  **mixed anchors** (`e4`, `e5`, `e6`), and — unmeasured, refused by construction — a **wait loop's
+  read before an opening write** (the extracted form duplicates the write into the exit arm behind
+  the read). History: the rule landed 2026-08-25 (commit `99290da`) as "any port in two
   phases", forced by the one-cycle pulse `loop { for _ in 0..3 { tick } dv.write(One); tick;
   dv.write(Zero); }` found while writing the UART receiver's first sim-vs-Verilator test, which
   diverged by one cycle until phase C's emission form; the three real modules it flagged then
@@ -370,9 +375,18 @@ phase shift, not an initialization artifact — and `branch_merge_explicit`, whi
 cited as *agreeing*: it does not. It transpiles byte-identically to its twin, its twin agrees with
 it, and it leads its own emitted SystemVerilog by one. Narrowing the exemption (2026-08-25, commit
 `348ddd0`) cost exactly those three modules corpus-wide, and all three are in the
-`unprotected_pretick_out_write` pin's listed set today (traces pinned by
-`tests/sequential_forwarding_divergence.rs::a_write_in_a_state_arm_leads_the_hardware_by_one_cycle`
-and `the_state_arm_lead_is_systematic_not_a_first_cycle_artifact`).
+`unprotected_pretick_out_write` pin's listed set today. **2026-10-26:** `pc_arm_write` and
+`pc_arm_toggle` AGREE under the arm-granular opening walk (the lead was codegen's statement-granular
+predicate, see phase C's reach above, not a property of the shape); their traces are pinned as
+`tests/sequential_forwarding_divergence.rs::a_write_in_a_state_arm_agrees_under_arm_granular_opening`
+and `the_state_arm_toggle_agrees_on_every_cycle`. `branch_merge_explicit` does **not** agree: its
+`tail_o` is also written behind the deferred `sel` read, a mixed-anchor port that stays edge-sampled,
+and it still leads by one cycle when the first cycle takes the `sel == 1` path (measured 2026-10-26;
+the seeded sweep happens to take `sel == 0` first, which masks it — in the live, unflagged twin
+`branch_merge` too, a recorded blind spot). The clause is **retained** — the three stay in the listed
+set with their opt-out —
+because re-deriving it on this evidence is a rule decision with its own corpus pin, not a side effect
+of an emission change.
 
 - **`pretick_out_write_before_update`** (2026-08-26) — a plain `Out` written **between a leading
   `In` read and the update of a register the write reads**. The read's barrier parks the task at the

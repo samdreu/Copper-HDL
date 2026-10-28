@@ -76,12 +76,16 @@ fn probe_timing_four_way() {
     assert_eq!(&samples(&probe_fsm_sim)[..3], &[10, 12, 14], "probe_fsm read timing regressed");
 }
 
-/// Cross-check demonstrating the discrepancy: even the SINGLE-tick `probe_fsm`
-/// (phase-gated cross-tick read) has sim != transpiled Verilog — so the "1 tick →
-/// agree" boundary is really "no phase-gated cross-tick read". Intentionally
-/// failing (verilator: FAIL); kept as an executable record of the finding.
+/// Cross-check that was the discrepancy's executable record: until 2026-10-26 even
+/// the SINGLE-tick `probe_fsm` (phase-gated cross-tick read) had sim != transpiled
+/// Verilog by one cycle — the "1 tick → agree" boundary looked like "no phase-gated
+/// cross-tick read" (the W4/probe_fsm path-dependent boundary, guardrail §5.7), and
+/// this test was `#[ignore]`d as the demonstration. The lag was codegen's
+/// statement-granular opening walk: the read in the `phase == 0` arm demoted the
+/// `phase == 1` arm's drive to an edge-sampled register. Arm-granular, the drive is
+/// opening and sim == verilog; un-ignored on 2026-10-26, and the module sweeps.
+/// `accum_2` was once cited as the same case and was un-ignored on 2026-08-21.
 #[test]
-#[ignore = "demonstration: a phase-gated cross-tick (mid-phase) read still diverges from the transpiler by one cycle — the pinned W4/probe_fsm path-dependent boundary (design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md §5.7; build.rs SKIP row `probe_fsm`). accum_2 was once cited as the same case; it was measured to AGREE and un-ignored on 2026-08-21, so this one stands alone"]
 fn probe_fsm_sim_matches_verilog() {
     let mut eq = EquivalenceTest::for_module("probe_fsm", DUT_SRC, Some("probe_fsm"));
     let mut clk = Clock::<MainClk>::new();

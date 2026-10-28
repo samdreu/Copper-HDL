@@ -287,10 +287,13 @@ receive/clone one.
   instead of lagging it.
   The other rules: **`multi_phase_out_write`** (a plain `Out` driven in more than one
   clock phase, **narrowed 2026-10-23 by cycle-dataflow phase E** to the measured
-  divergent class — the linear route, an input read anywhere while a write is
-  opening, a register-free body with reads, or mixed anchors; an input-free extracted
-  body and one whose every write follows a deferred read are accepted and measured
-  agreeing — `CYCLE_DATAFLOW_SEMANTICS.md` §9, the `e*` battery in
+  divergent class — the linear route, a register-free body with reads, mixed anchors
+  (an input read reaching some write of the port while another write is opening), or
+  a wait loop's read before an opening write (unmeasured, refused by construction);
+  an extracted body none of whose writes of the port an input read reaches (whatever
+  it reads elsewhere) and one whose every write follows a deferred read are accepted
+  and measured agreeing — the "input read anywhere" clause was retired 2026-10-26 —
+  `CYCLE_DATAFLOW_SEMANTICS.md` §9, the `e*` battery in
   `tests/sequential_forwarding_divergence.rs`; enforced in both front-ends);
   **`pretick_out_write_before_update`** (a
   plain `Out` written from a register before that register's update in the same
@@ -301,11 +304,16 @@ receive/clone one.
   instead of an edge-sampled register, which is what made the control-extraction
   route's trailing drives one cycle late; `trailing_update`, `branch_trailing` and
   `pulse_plain` now agree, and `unprotected_trailing_out_write` is gone. **Reach of
-  phase C (measured 2026-10-23):** the opening predicate is statement-granular over
-  the whole extracted `match pc`, so the mux form is emitted only for modules with
-  no input read; `e9` in the same battery pins the resulting single-phase
-  divergence, which no rule guards yet (`CYCLE_DATAFLOW_SEMANTICS.md` §9.4; `e8`,
-  the other one, is refused by `trailing_out_reads_input` since 2026-10-26). The doc also records **five** rejected fixes with
+  phase C:** since 2026-10-26 the opening predicate is **arm-granular** (an
+  `if`/`match` seeds each arm's walk from its condition's reads alone), so the mux
+  form reaches any extracted module whose drives have no read before them in their
+  own arm — `e9` agrees, and so do the D1 witnesses `pc_arm_*` and `probe_fsm`
+  (sv-baseline delta: seven modules, no referenced one; the D1 rules themselves are
+  unchanged and their re-derivation is a separate decision). Until then the predicate
+  was statement-granular over the whole `match pc` and the form was emitted only for
+  input-free modules. `e8`, the battery's other single-phase divergence, is refused
+  by `trailing_out_reads_input` since the same day (`CYCLE_DATAFLOW_SEMANTICS.md`
+  §9.4), so both gaps phase E found are closed. The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in
