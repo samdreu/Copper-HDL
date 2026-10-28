@@ -276,7 +276,9 @@ single-tick body measured agreeing and exempt).
 * **No current/next split for locals** — the standing decision holds.
 * **No memory changes** — m3 anchored the family to the denotation as-is.
 * `probe_fsm`, `pc_arm_*`, `branch_merge_explicit`, V8a/V8d stay refused, each
-  with its derived justification.
+  with its derived justification. (2026-10-28: `probe_fsm` and `pc_arm_*` are
+  admitted by the re-derived D1 rule — `CYCLE_DATAFLOW_SEMANTICS.md` §10 — and
+  `branch_merge_explicit` is refused as a mixed-anchor port; V8a/V8d unchanged.)
 
 ## 5. Effort shape
 

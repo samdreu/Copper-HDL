@@ -126,6 +126,12 @@ struct Node {
     /// conservative all-outputs over-approximation (not a real single `port.write`).
     /// The multi-write-collapse detector must not read it as an explicit write.
     folded: bool,
+    /// The branch nodes (`if` conditions, `match` scrutinees) whose arms this node
+    /// sits inside, innermost last — the guards an emitted drive at this node is
+    /// nested under. Recorded by the builder (an arm's nodes are exactly the ones
+    /// created while its branch is built); the pre-tick alignment rule's
+    /// forwarded-guard clause reads it. Empty for a top-level node.
+    guards: Vec<usize>,
     /// True iff this is a folded **tick-bearing** nested loop that can nonetheless
     /// be left *without* ever reaching one of its ticks — a `loop`/`while` whose
     /// body can `break` (or fall out of a `while` test) before its first tick.
@@ -162,6 +168,7 @@ impl Node {
             regout_writes: BTreeSet::new(),
             mem: Vec::new(),
             folded: false,
+            guards: Vec::new(),
             may_exit_without_tick: false,
             const_write: false,
             span,
@@ -552,68 +559,89 @@ impl Cfg {
         out
     }
 
-    /// Combinational `Out` ports whose value is exposed to the **pre-tick alignment
-    /// hazard**: the pre-tick segment assigns a register on a path with **no `In`
-    /// read preceding it**, and drives a plain `Out` in that same segment whose
-    /// write is *observable across the phase shift* — it reads a register **and** an
-    /// `In` read comb-reaches it (the path-dependent region boundary, W4 /
-    /// `probe_fsm`), or it is not written on every path (the constant-write clause,
-    /// `pc_arm_*`). Since the 2026-08-26 narrowing (see the `NARROWED` note in the
-    /// body) a register-reading write that NO `In` read reaches is an opening-prefix
-    /// drive and is legal: forwarded continuous-assign emission gives it the
-    /// simulator's meaning. Returns the offending ports, sorted; empty for a
-    /// combinational module, a module with no top-level loop, or one whose outputs
-    /// are all `RegOut`. Exact corpus pin: `EXPECTED_FLAGGED` in
-    /// `copper-analysis/tests/pretick_alignment_corpus.rs`.
+    /// Plain combinational `Out` ports whose **pre-tick** (head-segment) drives the
+    /// emitted SystemVerilog cannot align with the simulator — the D1 rule of the
+    /// pre-tick alignment family, **re-derived 2026-10-28** against the arm-granular
+    /// opening walk (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10; the probe
+    /// battery is the `d*` tests in `tests/sequential_forwarding_divergence.rs`,
+    /// every trace pinned). Returns the offending ports, sorted; empty for a
+    /// combinational module, a module with no top-level loop, a module without
+    /// registers (its reads are immediate and belong to the D2 / trailing rules),
+    /// or one whose outputs are all `RegOut`. Exact corpus pin: `EXPECTED_FLAGGED`
+    /// in `copper-analysis/tests/pretick_alignment_corpus.rs`.
     ///
-    /// # The hazard
+    /// # The model (two anchors, one drive at a time)
     ///
-    /// A leading `In` read classifies `Deferred` (impl-plan item 3) and injects
-    /// `pre_edge_barrier()`, which parks the task at the barrier so the pre-tick
-    /// segment runs in the **pre-edge** phase. With no such read the task parks at the
-    /// tick instead, and the segment for cycle *N+1* runs during cycle *N*'s
-    /// **post-edge settle** — so the post-edge observation of cycle *N* sees *N+1*'s
-    /// value. Codegen emits a non-blocking `r <= …`, which cannot reproduce that.
-    /// Measured: `loop { r = r+1; o.write(r); tick; }` simulates `[2,3,4,…]` against
-    /// the SV's `[1,2,3,…]`.
+    /// In a body with registers every head-segment `In` read is deferred, so a
+    /// drive is **closing** on a path where a read precedes it (the read's barrier
+    /// parks the task; the write runs in the pre-edge settle and is visible at the
+    /// next observation) and **opening** on a path with no read before it (it runs
+    /// in the post-edge settle and is visible at the observation of the cycle it
+    /// opened). Codegen decides per drive, not per path: a drive is closing iff
+    /// some read comb-reaches it on *any* path (`shir_lower::lower_stmt_list`
+    /// seeds each arm from its own condition but carries a read from any arm past
+    /// the branch), and a port's form is port-wide — driven on every path it is an
+    /// `always_comb` assign or mux (guards in the committed form); driven on some
+    /// paths it is a forwarded mux with a hold register when every drive is
+    /// opening (phase C) and an edge-sampled register otherwise (guards in the
+    /// edge form). Two hazards follow, and nothing else in the head segment does:
+    ///
+    /// * **(A) mixed anchors** — a read reaches some drive of the port while some
+    ///   drive of the port (the same one, on another path, or a different one) has
+    ///   a read-free path from the loop head. The simulator runs the opening write
+    ///   at the opening, and any closing write it performed is overwritten by the
+    ///   next iteration's opening write before it is observed; the SV edge-samples
+    ///   the port, or muxes it on the committed guard, one observation late. It is
+    ///   unobservable in exactly one case: a single drive on every path (a
+    ///   continuous assign) whose read-free path assigns no register the drive
+    ///   reads — the opening write then publishes the committed register, which is
+    ///   what the assign shows (`d3a`). Witnesses: `w4_mixed_alignment` (the
+    ///   register-reading assign), `d1f`/`d3c` (held, path-dependent), `d2a` (two
+    ///   drives, held), `d1g`/`d2b` (two drives on every path),
+    ///   `branch_merge_explicit`'s `tail_o`. Flips: `d3a`, `d3b` (a read on every
+    ///   path), `d1b`/`d2c` (every drive behind the read), `probe_fsm`/`pc_arm_*`
+    ///   (the read in a sibling arm reaches nothing).
+    /// * **(B) forwarded guard** — an opening drive nested under a branch whose test
+    ///   reads a register assigned earlier on that path. The simulator tests the
+    ///   forwarded value; the comb copy of the mux (hold form or all-paths form)
+    ///   tests the committed register. Witnesses: `d4a` (held), `d4c` (every
+    ///   path). Flips: `d4b` (the update after the test), `d4d` (behind a read, so
+    ///   edge-sampled with the edge-form guard), `d1c`.
+    ///
+    /// # What the earlier rule got wrong, and why
+    ///
+    /// Until 2026-10-28 the rule refused any plain `Out` driven conditionally in a
+    /// segment with an "unprotected" register assignment (the constant-write
+    /// clause), plus register-reading writes a read reaches. The constant-write
+    /// witnesses (`pc_arm_write`, `pc_arm_toggle`, `probe_fsm`) diverged only
+    /// because codegen's opening walk was statement-granular; with the arm-granular
+    /// walk (2026-10-26) they agree, and the clause also refused agreeing shapes it
+    /// had never measured (`d1b`, `d1c`, `d3a`, `d4b`) while missing measured
+    /// divergent ones (`d1g`, `d2a`, `d2b`, `d4c`). The unprotected-assignment
+    /// conjunct was a proxy: it coincides with (B) when the assignment feeds the
+    /// guard and with (A)'s continuous-assign case when it feeds the value, and
+    /// with nothing otherwise.
     ///
     /// # Why it keys on the `Out` write, not on the register
     ///
     /// **`RegOut` is immune by construction** — it buffers and commits at the edge, so
-    /// the phase at which the write executes cannot be observed. This was established
-    /// by changing *only* the port type on otherwise-identical modules: both the
-    /// minimal case and a mixed-alignment case flip from diverging to agreeing. An
-    /// earlier rule keyed on registers and therefore rejected `mac_fsm`,
-    /// `if_tick_explicit` and `branch_merge_explicit` — all correct `RegOut` designs.
-    /// `Node::writes` already holds only combinational outputs, so `RegOut` is
-    /// excluded here for free, exactly as it is in
-    /// [`multi_write_collapse`](Self::multi_write_collapse).
+    /// the phase at which the write executes cannot be observed (measured by
+    /// changing only the port type: W8/W9). `Node::writes` holds only
+    /// combinational outputs, so `RegOut` is excluded here for free, exactly as it
+    /// is in [`multi_write_collapse`](Self::multi_write_collapse).
     ///
-    /// # Why the write must read a register
+    /// # Scope
     ///
-    /// The misalignment changes *when* the write happens, so it is observable only if
-    /// the value written differs between the two phases. A write of a **constant** is
-    /// idempotent across the shift — measured on `branch_merge_explicit`, which drives
-    /// three plain `Out`s from an unprotected path and **agrees** with its transpiled
-    /// SV because every write is `Logic::One`.
-    ///
-    /// # Why the read must *precede* the assignment
-    ///
-    /// The barrier suspends at the point the read appears, so a read placed *after*
-    /// the assignment does not protect it — measured, and the reason this uses
-    /// `leading_read_reaches` (a comb-path query) rather than "the module reads an
-    /// input somewhere". Mixed alignment does **not** protect either: a module with a
-    /// read on one branch and an unprotected assignment on another still diverges.
-    ///
-    /// # Known false negative
-    ///
-    /// Only the pre-tick segment is examined, so a hazard in a *middle* segment of a
-    /// multi-tick loop would not be caught. This is **theoretical** — the case
-    /// originally cited for it, `accum_2`, was measured and does not diverge (its
-    /// `#[ignore]` was stale; it is un-ignored now). There is no known instance;
-    /// measure one before widening the rule. Tracked as Q5 in
-    /// `design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md`.
+    /// Only the pre-tick segment is examined; the trailing and middle segments have
+    /// their own rules (`multi_phase_out_write`, `trailing_out_reads_input`,
+    /// `pretick_out_write_before_update`'s trailing clause). The CFG is
+    /// value-blind: a drive whose guard is false on the read-free path still counts
+    /// as mixed, which is the refusing direction for an unmeasured shape.
     pub fn unprotected_pretick_out_write(&self) -> Vec<String> {
+        let regs: BTreeSet<String> = self.registers().into_iter().collect();
+        if regs.is_empty() {
+            return Vec::new();
+        }
         let region = self.pre_tick_region();
         let head_entries: Vec<usize> = self.nodes[self.head]
             .succs
@@ -622,65 +650,89 @@ impl Cfg {
             .map(|&(s, _)| s)
             .collect();
 
-        let regs: BTreeSet<String> = self.registers().into_iter().collect();
-
-        // (ii) plain combinational `Out` ports whose VALUE differs between the two
-        // phases, which is the only way the misalignment becomes observable. Two ways
-        // that happens, and the second was missing until 2026-08-25:
-        //
-        //   * the port is driven **from a register**, so the value depends on when
-        //     the write runs relative to the update; or
-        //   * the port is driven **conditionally** — some path through the segment
-        //     leaves it unwritten, so it HOLDS there. A write of a constant is
-        //     idempotent across the phase shift only if it happens on every path;
-        //     where the alternative is the held value, *when* the write lands is
-        //     observable even though the value written never changes.
-        //
-        // The second clause is `pc_arm_write` in sequential_forwarding_divergence.rs
-        // (5.5 of the guardrail): a `match pc` whose arms write a constant or nothing
-        // at all, measured leading its own emitted SystemVerilog by one cycle.
-        //
-        // A `folded` node carries the conservative all-outputs over-approximation for
-        // a nested loop, not a real `port.write`, so it is not evidence either way.
-        let mut driven: BTreeSet<String> = BTreeSet::new();
+        // The drives of each plain `Out` in the region. A `folded` node carries the
+        // conservative all-outputs over-approximation for a nested loop, not a real
+        // `port.write`, so it is not evidence either way.
+        let mut drives: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for &n in &region {
             let node = &self.nodes[n];
-            if node.folded || node.writes.is_empty() {
+            if node.folded {
                 continue;
             }
             for w in &node.writes {
-                // NARROWED 2026-08-26 (cycle-dataflow phase D, measured — see
-                // `d_narrowing_battery_verdicts` in
-                // tests/sequential_forwarding_divergence.rs): a register-reading
-                // write with NO In read comb-reaching it is an OPENING-PREFIX
-                // drive, and phase B's forwarded continuous-assign emission gives
-                // it the meaning the simulator always had — V1, V5 (trailing
-                // read), V7 (escape across the tick) and both `fast_counter`
-                // ports were re-measured AGREEING. What remains divergent is the
-                // READ-PRECEDED write — the path-dependent region boundary (W4,
-                // `probe_fsm`: a read reaches the write on one path only, so the
-                // write executes at the opening on one path and the pre-edge on
-                // the other, and no single emission matches both). The
-                // hold/conditional clause below stays unconditional: `pc_arm_*`
-                // and `branch_merge_explicit` write constants, are untouched by
-                // forwarded emission, and still diverge (their pins are green).
-                let register_read_hazard =
-                    !node.uses.is_disjoint(&regs) && self.leading_read_reaches(n);
-                if register_read_hazard || !self.written_on_all_paths(w, &head_entries) {
-                    driven.insert(w.clone());
+                drives.entry(w.clone()).or_default().push(n);
+            }
+        }
+
+        let mut flagged = Vec::new();
+        for (port, ds) in &drives {
+            // (A) mixed anchors.
+            let some_closing = ds.iter().any(|&d| self.leading_read_reaches(d));
+            let some_opening = ds.iter().any(|&d| self.read_free_path_reaches(d, None));
+            let mixed = some_closing && some_opening;
+            let observable = ds.len() > 1
+                || !self.written_on_all_paths(port, &head_entries)
+                || ds.iter().any(|&d| {
+                    let used: BTreeSet<String> =
+                        self.nodes[d].uses.intersection(&regs).cloned().collect();
+                    !used.is_empty() && self.read_free_path_reaches(d, Some(&used))
+                });
+            // (B) forwarded guard on an opening drive.
+            let forwarded_guard = ds.iter().any(|&d| {
+                !self.leading_read_reaches(d)
+                    && self.nodes[d].guards.iter().any(|&b| {
+                        let tested: BTreeSet<String> =
+                            self.nodes[b].uses.intersection(&regs).cloned().collect();
+                        !tested.is_empty()
+                            && (0..self.nodes.len()).any(|a| {
+                                !self.nodes[a].defs.is_disjoint(&tested) && self.comb_reaches(a, b)
+                            })
+                    })
+            });
+            if (mixed && observable) || forwarded_guard {
+                flagged.push(port.clone());
+            }
+        }
+        flagged
+    }
+
+    /// Is there a path from the loop head to `n` over `Comb` edges on which no node
+    /// (including `n` itself) reads an `In` port — a path on which the simulator
+    /// runs `n` at the cycle's **opening**? With `assigning = Some(regs)`, the path
+    /// must additionally assign one of `regs` before reaching `n`, so that the
+    /// value `n` forwards differs from the committed register.
+    fn read_free_path_reaches(&self, n: usize, assigning: Option<&BTreeSet<String>>) -> bool {
+        // State = (node, "assigned one of `regs` so far"); the region is acyclic
+        // apart from the head, which the walk never re-enters.
+        let mut seen = vec![[false; 2]; self.nodes.len()];
+        let mut stack: Vec<(usize, bool)> = self.nodes[self.head]
+            .succs
+            .iter()
+            .filter(|(_, k)| *k == EdgeKind::Comb)
+            .map(|&(s, _)| (s, false))
+            .collect();
+        while let Some((cur, assigned)) = stack.pop() {
+            if cur == self.head || std::mem::replace(&mut seen[cur][usize::from(assigned)], true) {
+                continue;
+            }
+            let node = &self.nodes[cur];
+            if !node.uses.is_disjoint(&self.inputs) {
+                continue;
+            }
+            let assigned = assigned || assigning.is_some_and(|r| !node.defs.is_disjoint(r));
+            if cur == n {
+                if assigning.is_none() || assigned {
+                    return true;
+                }
+                continue;
+            }
+            for &(s, k) in &node.succs {
+                if k == EdgeKind::Comb {
+                    stack.push((s, assigned));
                 }
             }
         }
-        if driven.is_empty() {
-            return Vec::new();
-        }
-
-        // (i) a register assigned on a path no leading `In` read reaches.
-        let unprotected = region.iter().any(|&n| {
-            !self.nodes[n].defs.is_disjoint(&regs) && !self.leading_read_reaches(n)
-        });
-
-        if unprotected { driven.into_iter().collect() } else { Vec::new() }
+        false
     }
 
     /// Does every path from the loop head to a clock edge drive `port`?
@@ -2394,6 +2446,10 @@ impl Builder {
         }
         match expr {
             Expr::If(ei) => {
+                // Every node created while the arms are built is inside them
+                // (`next` already exists), so the branch node guards exactly
+                // the range `[arms_start, branch)`.
+                let arms_start = self.nodes.len();
                 let then_entry = self.build_block(&ei.then_branch.stmts, next);
                 let else_entry = match &ei.else_branch {
                     Some((_, e)) => self.build_expr(e, next),
@@ -2401,14 +2457,19 @@ impl Builder {
                 };
                 let mut uses = BTreeSet::new();
                 collect_reads(&ei.cond, &mut uses);
-                self.new_node(Node {
+                let branch = self.new_node(Node {
                     uses,
                     mem: mem_accesses(&ei.cond, &self.mems),
                     succs: vec![(then_entry, EdgeKind::Comb), (else_entry, EdgeKind::Comb)],
                     ..Node::empty(ei.span())
-                })
+                });
+                for n in arms_start..branch {
+                    self.nodes[n].guards.push(branch);
+                }
+                branch
             }
             Expr::Match(em) => {
+                let arms_start = self.nodes.len();
                 let mut succs = Vec::with_capacity(em.arms.len());
                 for arm in &em.arms {
                     let body_entry = self.build_expr(&arm.body, next);
@@ -2439,12 +2500,18 @@ impl Builder {
                 }
                 let mut uses = BTreeSet::new();
                 collect_reads(&em.expr, &mut uses);
-                self.new_node(Node {
+                let branch = self.new_node(Node {
                     uses,
                     mem: mem_accesses(&em.expr, &self.mems),
                     succs,
                     ..Node::empty(em.span())
-                })
+                });
+                // As for `if`: the arms' nodes (pattern/guard entries included)
+                // are exactly those created since `arms_start`.
+                for n in arms_start..branch {
+                    self.nodes[n].guards.push(branch);
+                }
+                branch
             }
             // A bare block is just its statements.
             Expr::Block(b) => self.build_block(&b.block.stmts, next),
@@ -4151,9 +4218,11 @@ mod tests {
         assert!(hazard(src).is_empty());
     }
 
-    /// W4 — MIXED alignment: a read on one arm, an unprotected assignment on the
-    /// other. Measured to DIVERGE, which refuted the "any read in the module
-    /// protects it" hypothesis.
+    /// W4 — MIXED anchors on a continuous assign: a read on one arm, and on the
+    /// other an assignment to the register the shared write reads, so the opening
+    /// write forwards `r + 1` where `assign o = r` shows the committed register.
+    /// Measured to DIVERGE (sim holds `i + 1`, SV alternates); its flip is
+    /// `d3a_w4_unrelated_register_not_flagged`.
     #[test]
     fn hazard_w4_mixed_alignment_flagged() {
         let src = r#"
@@ -4206,10 +4275,14 @@ mod tests {
         assert!(hazard(src).is_empty());
     }
 
-    /// `probe_fsm` — measured to diverge, and measured to be the SAME defect as V1
-    /// (adding a leading read on every path fixes it). Plain `Out`, so flagged.
+    /// `probe_fsm` — the write sits in the arm WITHOUT the read, which reaches it
+    /// on no path: opening on both sides, phase C's mux + hold. Measured AGREEING
+    /// since the arm-granular opening walk (2026-10-26, `probe_fsm_sim_matches_verilog`,
+    /// and it sweeps); admitted by the re-derived rule (2026-10-28). It was the W4
+    /// witness of the old rule only because that rule keyed on an unprotected
+    /// register assignment anywhere in the segment.
     #[test]
-    fn hazard_probe_fsm_flagged() {
+    fn hazard_probe_fsm_sibling_arm_read_not_flagged() {
         let src = r#"
             #[hardware(sequential)]
             async fn m(clk: Clock<C>, inp: In<Bits<8>, C>, out: Out<Bits<8>, C>) {
@@ -4222,7 +4295,7 @@ mod tests {
                 }
             }
         "#;
-        assert_eq!(hazard(src), ["out"]);
+        assert!(hazard(src).is_empty());
     }
 
     /// `lfsr`-shaped: the guard reads inputs before every assignment, so the whole
@@ -4245,22 +4318,15 @@ mod tests {
         assert!(hazard(src).is_empty());
     }
 
-    /// `branch_merge_explicit` — drives three plain `Out`s from an unprotected path,
-    /// but every write is the CONSTANT `Logic::One`. Measured to AGREE: the shift
-    /// changes *when* the write happens, which is unobservable when the value does
-    /// not depend on a register. Witness for the "write must read a register" clause.
+    /// `branch_merge_explicit` — `tail_o` has MIXED anchors: written behind the
+    /// deferred `sel` read in the `pc == 0` arm (closing) and in the `pc == 1` arm
+    /// with no read before it (opening). The port is held, so it is edge-sampled
+    /// and the opening write lands one observation late — measured 2026-10-26
+    /// (sim `tail_o = 1` at cycle 0 when the first cycle takes `sel == 1`, SV 0).
+    /// `head_o` (written before the read) and `mid_o` (only behind it) are clean.
+    /// Clause (A); the minimal pair is `d2a` in sequential_forwarding_divergence.rs.
     #[test]
     fn a_conditional_constant_write_is_flagged() {
-        // This is `branch_merge_explicit`, and it was pinned here as a module the rule
-        // must NOT flag — "a constant write is idempotent across the phase shift".
-        //
-        // MEASURED FALSE, 2026-08-25, by the corpus differential sweep: it leads its
-        // own emitted SystemVerilog by exactly one cycle. The premise holds only when
-        // the write happens on EVERY path; here the `pc == 1` arm writes `tail_o` and
-        // the `pc == 0` arm may not, so the alternative is the port's HELD value and
-        // *when* the write lands is observable. Both traces are pinned in
-        // sequential_forwarding_divergence.rs (`pc_arm_write`, `pc_arm_toggle`) and
-        // written up as 5.5 of the guardrail.
         let src = r#"
             #[hardware(sequential)]
             async fn m(clk: Clock<C>, sel: In<Logic, C>, head_o: Out<Logic, C>, mid_o: Out<Logic, C>, tail_o: Out<Logic, C>) {
@@ -4279,11 +4345,273 @@ mod tests {
                 }
             }
         "#;
-        assert!(
-            !hazard(src).is_empty(),
-            "the conditionally-written constant is the measured divergence — not \
-             flagging it lets a design through that disagrees with its own hardware"
-        );
+        assert_eq!(hazard(src), ["tail_o"], "only the mixed-anchor port is refused");
+    }
+
+    // ── the re-derived clauses (2026-10-28): one flipping pair per clause ──────
+    //
+    // Each source below is a probe measured in tests/sequential_forwarding_divergence.rs
+    // (the `d*` tests pin both traces); the verdict is in the test name.
+
+    /// (A, held, path-dependent) `d1f`: the read on one arm only, the constant
+    /// written after the merge on the read-free path. DIVERGES — flagged.
+    #[test]
+    fn d1f_path_dependent_constant_held_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut phase: u8 = 0;
+                loop {
+                    if phase == 0 { let _ = x.read(); phase = 1; } else { phase = 0; }
+                    if phase == 0 { o.write(Bits::from_lit::<7>()); }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert_eq!(hazard(src), ["o"]);
+    }
+
+    /// (A flip) `d1b`: the constant behind the read in its own arm — closing on
+    /// both sides, edge-sampled. AGREES — not flagged, although a register is
+    /// assigned unprotected (the old constant-write clause refused this).
+    #[test]
+    fn d1b_constant_behind_its_read_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop {
+                    cnt = cnt + Bits::from_lit::<1>();
+                    if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(hazard(src).is_empty());
+    }
+
+    /// (A flip) `d1c` / `pc_arm_write`: constants in arms no read reaches, the
+    /// state register assigned unprotected. All opening, mux + hold. AGREES.
+    #[test]
+    fn d1c_state_arm_constants_no_read_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
+                let mut pc: u8 = 0;
+                loop {
+                    match pc {
+                        0u8 => { pc = 1; }
+                        1u8 => { o.write(Bits::from_lit::<7>()); pc = 2; }
+                        2u8 => { o.write(Bits::from_lit::<3>()); pc = 0; }
+                        _ => {}
+                    }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(hazard(src).is_empty());
+        let pc_arm = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, sel: In<Logic, C>, o: Out<Logic, C>) {
+                let mut pc: u8 = 0;
+                loop {
+                    match pc {
+                        0u8 => { if sel.read() == Logic::One { pc = 1; } }
+                        1u8 => { o.write(Logic::One); pc = 0; }
+                        _ => {}
+                    }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(hazard(pc_arm).is_empty(), "pc_arm_write agrees since 2026-10-26");
+    }
+
+    /// (A, two drives, held) `d2a`: an opening drive on committed state, then a
+    /// closing one behind the read, with NO unprotected register assignment.
+    /// DIVERGES — flagged (the old rule missed it).
+    #[test]
+    fn d2a_mixed_two_drives_held_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut pc: u8 = 0;
+                loop {
+                    if pc == 1 { o.write(Bits::from_lit::<5>()); }
+                    if x.read()[0] == Logic::One { o.write(Bits::from_lit::<9>()); pc = 1; } else { pc = 0; }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert_eq!(hazard(src), ["o"]);
+    }
+
+    /// (A flip) `d2c`: `d2a` with the committed-state drive moved behind the read.
+    /// All closing. AGREES — not flagged.
+    #[test]
+    fn d2c_two_closing_drives_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut pc: u8 = 0;
+                loop {
+                    if x.read()[0] == Logic::One { o.write(Bits::from_lit::<9>()); pc = 1; } else { pc = 0; }
+                    if pc == 1 { o.write(Bits::from_lit::<5>()); }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(hazard(src).is_empty());
+    }
+
+    /// (A, two drives on every path) `d2b`: a comb mux with one arm behind its read
+    /// and one not. DIVERGES — flagged (the old rule exempted every-path writes).
+    #[test]
+    fn d2b_mixed_two_drives_every_path_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut phase: u8 = 0;
+                loop {
+                    if phase == 0 { let _ = x.read(); o.write(Bits::from_lit::<1>()); phase = 1; }
+                    else { o.write(Bits::from_lit::<2>()); phase = 0; }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert_eq!(hazard(src), ["o"]);
+    }
+
+    /// (A flip) `d1d`: both arms of the mux behind the read in its condition.
+    /// AGREES — not flagged.
+    #[test]
+    fn d1d_mux_behind_read_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop {
+                    cnt = cnt + Bits::from_lit::<1>();
+                    if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(hazard(src).is_empty());
+    }
+
+    /// (A, continuous assign) `d3a`: W4 with the read-free arm assigning only a
+    /// register the write does NOT read — the opening write publishes the
+    /// committed register, which is what `assign o = r` shows. AGREES — not
+    /// flagged (the old register-reading clause refused it). The flip of
+    /// `hazard_w4_mixed_alignment_flagged`, one assignment apart.
+    #[test]
+    fn d3a_w4_unrelated_register_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut phase: u8 = 0;
+                let mut r: Bits<8> = Bits::zero();
+                loop {
+                    if phase == 0 { r = x.read(); phase = 1; } else { phase = 0; }
+                    o.write(r);
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(hazard(src).is_empty());
+    }
+
+    /// (A flip) `d3b`: W4 with a read on EVERY path — all closing. AGREES.
+    #[test]
+    fn d3b_w4_read_on_every_path_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut phase: u8 = 0;
+                let mut r: Bits<8> = Bits::zero();
+                loop {
+                    if phase == 0 { r = x.read(); phase = 1; } else { let _ = x.read(); r = r + Bits::from_lit::<1>(); phase = 0; }
+                    o.write(r);
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(hazard(src).is_empty());
+    }
+
+    /// (B, held) `d4a`: an opening drive whose guard tests a register assigned
+    /// just before it — the comb copy tests the committed value. DIVERGES — flagged.
+    #[test]
+    fn d4a_forwarded_guard_held_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop {
+                    cnt = cnt + Bits::from_lit::<1>();
+                    if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert_eq!(hazard(src), ["o"]);
+    }
+
+    /// (B flip) `d4b`: the same pulse with the update AFTER the test — the guard
+    /// reads the committed register. AGREES — not flagged.
+    #[test]
+    fn d4b_committed_guard_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop {
+                    if cnt == Bits::from_lit::<2>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+                    else { cnt = cnt + Bits::from_lit::<1>(); }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(hazard(src).is_empty());
+    }
+
+    /// (B, every path) `d4c`: the forwarded guard over a comb mux. DIVERGES —
+    /// flagged (the old rule exempted every-path writes).
+    #[test]
+    fn d4c_forwarded_guard_every_path_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop {
+                    cnt = cnt + Bits::from_lit::<1>();
+                    if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+                    else { o.write(Bits::from_lit::<3>()); }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert_eq!(hazard(src), ["o"]);
+    }
+
+    /// (B flip) `d4d`: the forwarded guard behind a read on every path — the
+    /// drive is closing, edge-sampled with the edge-form guard. AGREES — not flagged.
+    #[test]
+    fn d4d_forwarded_guard_behind_read_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop {
+                    let _ = x.read();
+                    cnt = cnt + Bits::from_lit::<1>();
+                    if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert!(hazard(src).is_empty());
     }
 
     /// An UNCONDITIONAL constant write stays exempt, which is what keeps the rule off

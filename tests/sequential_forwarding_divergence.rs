@@ -31,10 +31,21 @@
 //! pinned one-cycle lags flipped to agreement on the first run and are re-blessed
 //! below: `e9`, `e2x`, and the D1 constant-write clause's own witnesses `pc_arm_write`
 //! / `pc_arm_toggle` (and the `#[ignore]`d `probe_fsm_sim_matches_verilog`, the W4
-//! witness, passes). The *rules* are unchanged except `multi_phase_out_write`, whose
-//! "input read anywhere" clause existed only for the statement-granular walk: D1's
-//! constant-write clause and the W4 class still refuse their shapes on the source, and
-//! re-deriving them now that their witnesses agree is a decision of its own.
+//! witness, passes). The *rules* were unchanged then except `multi_phase_out_write`,
+//! whose "input read anywhere" clause existed only for the statement-granular walk.
+//!
+//! **2026-10-28, D1 re-derived (`Cfg::unprotected_pretick_out_write`,
+//! `CYCLE_DATAFLOW_SEMANTICS.md` §10).** The `d*` battery at the end of this file
+//! derived and measured every head-segment shape the two-anchor model
+//! distinguishes. The rule now refuses exactly two hazards — (A) a port with MIXED
+//! anchors (a read reaches some drive while some drive has a read-free path;
+//! unobservable only for a single every-path drive that forwards no register it
+//! reads) and (B) an opening drive under a guard that tests a register assigned
+//! earlier on the path (the comb copy tests the committed value). The old
+//! constant-write clause and its "unprotected register assignment" conjunct are
+//! gone: `pc_arm_write`, `pc_arm_toggle` and `probe_fsm` compile without an opt-out,
+//! `w4_mixed_alignment` stays refused, and four measured divergences the old rule
+//! missed (`d1g`, `d2a`, `d2b`, `d4c`) are refused now.
 //!
 //! # Divergence 1 — a pre-tick register update is forwarded to a same-segment read
 //!
@@ -856,7 +867,7 @@ fn trailing_segment_register_update_agrees() {
 // decision with its own corpus pin, not a side effect of an emission change.
 
 const PC_ARM_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn pc_arm_write(clk: Clock<C>, sel: In<Logic, C>, o: Out<Logic, C>) {
     let mut pc: u8 = 0;
     loop {
@@ -870,7 +881,7 @@ async fn pc_arm_write(clk: Clock<C>, sel: In<Logic, C>, o: Out<Logic, C>) {
 }
 "#;
 
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn pc_arm_write(clk: Clock<C>, sel: In<Logic, C>, o: Out<Logic, C>) {
     let mut pc: u8 = 0;
     loop {
@@ -887,7 +898,7 @@ async fn pc_arm_write(clk: Clock<C>, sel: In<Logic, C>, o: Out<Logic, C>) {
 /// on every cycle instead of only the first — `pc_arm_write`'s output latches high
 /// and can only show it once.
 const PC_ARM_TOGGLE_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn pc_arm_toggle(clk: Clock<C>, sel: In<Logic, C>, o: Out<Logic, C>) {
     let mut pc: u8 = 0;
     loop {
@@ -901,7 +912,7 @@ async fn pc_arm_toggle(clk: Clock<C>, sel: In<Logic, C>, o: Out<Logic, C>) {
 }
 "#;
 
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn pc_arm_toggle(clk: Clock<C>, sel: In<Logic, C>, o: Out<Logic, C>) {
     let mut pc: u8 = 0;
     loop {
@@ -949,18 +960,16 @@ fn a_write_in_a_state_arm_agrees_under_arm_granular_opening() {
     let sim = sim_pc_arm(false);
     assert_eq!(sim, vec![1u8; CYCLES], "simulator behaviour changed");
 
-    // The D1 guard still COVERS this shape (narrowed to it 2026-08-25, when the
-    // lead was measured): a conditional constant's write instant was observable
-    // then. The clause is NOT re-derived here — a rule change takes its own corpus
-    // pin and decision — so the DUT keeps `allow_pretick_alignment` as its witness,
-    // and this pins that the clause still fires on it.
+    // Re-derived 2026-10-28: the write sits in an arm no read reaches (the
+    // `sel.read()` is in the sibling arm), so its anchor is opening on both
+    // sides and the rule ADMITS it — the DUT compiles without an opt-out and
+    // is the flip of `d2a` (the same machine with a second, closing write of
+    // `o` in the reading arm, which diverges).
     let f: syn::ItemFn = syn::parse_str(PC_ARM_SRC).expect("parses");
-    assert_eq!(
-        copper_analysis::unprotected_pretick_out_write(&f),
-        vec!["o".to_string()],
-        "the D1 constant-write clause stopped flagging its witness — this DUT is in \
-         EXPECTED_FLAGGED in pretick_alignment_corpus.rs; narrowing the clause is a \
-         rule decision to take there, with the measured evidence, not here"
+    assert!(
+        copper_analysis::unprotected_pretick_out_write(&f).is_empty(),
+        "the re-derived D1 rule refuses pc_arm_write again — it agrees with its SV \
+         (measured below); see the d* battery and CYCLE_DATAFLOW_SEMANTICS.md §10"
     );
 
     if !verilator_available() {
@@ -2606,4 +2615,667 @@ fn e8p_extracted_passthrough_diverges_refused() {
     // Not a value-preserving shift: the late sample sees the NEXT stimulus value
     // (`x_{N+1}`), so the vectors differ in value as well as in timing, like `e8`.
     assert_ne!(sim, sv, "sim and SV now AGREE for e8p — the immediate-read class is realized; retire trailing_out_reads_input");
+}
+
+// ── The D1 re-derivation battery (`d*`, 2026-10-28) ────────────────────────────
+//
+// `Cfg::unprotected_pretick_out_write` re-derived against the arm-granular
+// opening walk (`CYCLE_DATAFLOW_SEMANTICS.md` §10). Same method as phase E:
+// every verdict below was written from the two-anchor model before the probe
+// ran, then measured. Head-segment plain `Out` drives only, one `Bits<8>` input
+// `x` driven `10 + k` on cycle k (`e_stimulus`) where the probe reads one.
+//
+// The model, per drive W of a plain `Out` in the head segment of a body with
+// registers (so every head read is deferred):
+//   * simulator anchor on a path: CLOSING iff an `In` read precedes W on that
+//     path (the barrier parks the task), OPENING otherwise;
+//   * codegen anchor: CLOSING iff some read comb-reaches W on ANY path (the walk
+//     is arm-granular but carries a read from any arm past the branch);
+//   * port form: driven on every path → `always_comb` (a continuous assign, or a
+//     mux whose guards are the COMMITTED registers); driven on some paths → mux +
+//     hold when every drive is opening, else an edge-sampled register whose
+//     guards take the edge (forwarded) form.
+// Two hazards fall out. (A) MIXED ANCHORS: a read reaches some drive of the
+// port while some drive has a read-free path — the opening write lands one
+// observation late in the SV (or, for a continuous assign, shows the committed
+// register where the simulator forwarded one). (B) FORWARDED GUARD: an opening
+// drive under a branch whose test reads a register assigned earlier on that
+// path — the comb copy tests the committed register, the simulator the
+// forwarded one.
+
+/// (d1b) Constant written on SOME paths, the read in the writing arm's own
+/// condition, an unprotected register assignment before it. Closing on both
+/// sides (edge-sampled, edge-form guard). Predicted AGREE. The pre-2026-10-28
+/// rule refused it (constant-write clause).
+const D1B_SRC: &str = r#"
+#[hardware(sequential)]
+async fn d1b_const_read_in_arm(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn d1b_const_read_in_arm(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+    }
+}
+
+/// (d1c) Constants written on SOME paths, no input anywhere, guards on the
+/// committed state register. All opening → mux + hold. Predicted AGREE. The
+/// pre-2026-10-28 rule refused it (constant-write clause: `pc` is assigned unprotected).
+const D1C_SRC: &str = r#"
+#[hardware(sequential)]
+async fn d1c_const_no_read(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut pc: u8 = 0;
+    loop {
+        match pc {
+            0u8 => { pc = 1; }
+            1u8 => { o.write(Bits::from_lit::<7>()); pc = 2; }
+            2u8 => { o.write(Bits::from_lit::<3>()); pc = 0; }
+            _ => {}
+        }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn d1c_const_no_read(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut pc: u8 = 0;
+    loop {
+        match pc {
+            0u8 => { pc = 1; }
+            1u8 => { o.write(Bits::from_lit::<7>()); pc = 2; }
+            2u8 => { o.write(Bits::from_lit::<3>()); pc = 0; }
+            _ => {}
+        }
+        clk.tick().await;
+    }
+}
+
+/// (d1d) Constants written on EVERY path behind the read. Closing on both
+/// sides; a comb mux over the input. Predicted AGREE. Admitted by both the old and the re-derived rule.
+const D1D_SRC: &str = r#"
+#[hardware(sequential)]
+async fn d1d_const_all_paths_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn d1d_const_all_paths_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+    }
+}
+
+/// (d1e) Constants written on EVERY path, no input, committed-state guard.
+/// Opening on both sides; a comb mux. Predicted AGREE. Admitted by both the old and the re-derived rule.
+const D1E_SRC: &str = r#"
+#[hardware(sequential)]
+async fn d1e_const_all_paths_no_read(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut pc: u8 = 0;
+    loop {
+        if pc == 0 { o.write(Bits::from_lit::<7>()); pc = 1; } else { o.write(Bits::from_lit::<3>()); pc = 0; }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn d1e_const_all_paths_no_read(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut pc: u8 = 0;
+    loop {
+        if pc == 0 { o.write(Bits::from_lit::<7>()); pc = 1; } else { o.write(Bits::from_lit::<3>()); pc = 0; }
+        clk.tick().await;
+    }
+}
+
+/// (d1f) The PATH-DEPENDENT constant, hold form: the read sits on one arm of
+/// the first branch only, and the port is written after the merge on the
+/// read-free path. Codegen carries the read past the branch (closing, edge-
+/// sampled); the simulator runs that write at the opening. Predicted DIVERGE
+/// (the SV one observation late). Hazard (A).
+const D1F_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d1f_const_path_dependent_hold(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    loop {
+        if phase == 0 { let _ = x.read(); phase = 1; } else { phase = 0; }
+        if phase == 0 { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d1f_const_path_dependent_hold(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    loop {
+        if phase == 0 { let _ = x.read(); phase = 1; } else { phase = 0; }
+        if phase == 0 { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+    }
+}
+
+/// (d1g) The path-dependent constant, ALL-PATHS form: a comb mux whose closing
+/// arm's write is overwritten by the next iteration's opening write before any
+/// observation. Predicted DIVERGE (sim holds 7, SV alternates). Hazard (A).
+/// Not refused by the old rule (written on every path); refused by the re-derived one.
+const D1G_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d1g_const_path_dependent_all_paths(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    loop {
+        if phase == 0 { let _ = x.read(); phase = 1; } else { phase = 0; }
+        if phase == 0 { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d1g_const_path_dependent_all_paths(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    loop {
+        if phase == 0 { let _ = x.read(); phase = 1; } else { phase = 0; }
+        if phase == 0 { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+    }
+}
+
+/// (d2a) MIXED anchors through two drives, hold form, with NO unprotected
+/// register assignment: an opening drive guarded by committed state, then a
+/// closing drive behind the read. The port is edge-sampled, so the opening
+/// write lands one observation late. Predicted DIVERGE. Hazard (A). Not refused by the
+/// old rule (every register assignment sits behind the read); refused by the re-derived one.
+const D2A_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d2a_mixed_two_drives_hold(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut pc: u8 = 0;
+    loop {
+        if pc == 1 { o.write(Bits::from_lit::<5>()); }
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<9>()); pc = 1; } else { pc = 0; }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d2a_mixed_two_drives_hold(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut pc: u8 = 0;
+    loop {
+        if pc == 1 { o.write(Bits::from_lit::<5>()); }
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<9>()); pc = 1; } else { pc = 0; }
+        clk.tick().await;
+    }
+}
+
+/// (d2b) MIXED anchors through two drives, ALL-PATHS form: one arm writes
+/// behind its read, the other writes with no read. Predicted DIVERGE (sim shows
+/// the opening arm's value only; the SV mux alternates). Hazard (A). Not
+/// refused by the old rule; refused by the re-derived one.
+const D2B_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d2b_mixed_two_drives_all_paths(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    loop {
+        if phase == 0 { let _ = x.read(); o.write(Bits::from_lit::<1>()); phase = 1; }
+        else { o.write(Bits::from_lit::<2>()); phase = 0; }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d2b_mixed_two_drives_all_paths(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    loop {
+        if phase == 0 { let _ = x.read(); o.write(Bits::from_lit::<1>()); phase = 1; }
+        else { o.write(Bits::from_lit::<2>()); phase = 0; }
+        clk.tick().await;
+    }
+}
+
+/// (d2c) d2a with the committed-state drive moved AFTER the read: both drives
+/// closing, edge-sampled with edge-form guards. Predicted AGREE. The flipping
+/// pair of d2a.
+const D2C_SRC: &str = r#"
+#[hardware(sequential)]
+async fn d2c_two_closing_drives_hold(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut pc: u8 = 0;
+    loop {
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<9>()); pc = 1; } else { pc = 0; }
+        if pc == 1 { o.write(Bits::from_lit::<5>()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn d2c_two_closing_drives_hold(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut pc: u8 = 0;
+    loop {
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<9>()); pc = 1; } else { pc = 0; }
+        if pc == 1 { o.write(Bits::from_lit::<5>()); }
+        clk.tick().await;
+    }
+}
+
+/// (d3a) W4 with the read-free arm assigning only a register the write does
+/// NOT read: the opening write publishes the committed `r`, which is what the
+/// continuous assign shows. Predicted AGREE. The pre-2026-10-28 rule refused it
+/// (register-reading clause: `phase = 0` is an unprotected assignment).
+const D3A_SRC: &str = r#"
+#[hardware(sequential)]
+async fn d3a_w4_unrelated_register(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        if phase == 0 { r = x.read(); phase = 1; } else { phase = 0; }
+        o.write(r);
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn d3a_w4_unrelated_register(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        if phase == 0 { r = x.read(); phase = 1; } else { phase = 0; }
+        o.write(r);
+        clk.tick().await;
+    }
+}
+
+/// (d3b) W4 with a read on EVERY path: all closing, `assign o = r` shows the
+/// value the pre-edge write forwarded. Predicted AGREE. Admitted by both the old and the re-derived rule.
+const D3B_SRC: &str = r#"
+#[hardware(sequential)]
+async fn d3b_w4_read_on_every_path(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        if phase == 0 { r = x.read(); phase = 1; } else { let _ = x.read(); r = r + Bits::from_lit::<1>(); phase = 0; }
+        o.write(r);
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn d3b_w4_read_on_every_path(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        if phase == 0 { r = x.read(); phase = 1; } else { let _ = x.read(); r = r + Bits::from_lit::<1>(); phase = 0; }
+        o.write(r);
+        clk.tick().await;
+    }
+}
+
+/// (d3c) W4 in the HOLD form: the register-reading write sits under a guard
+/// after the path-dependent merge, on the read-free path. Edge-sampled against
+/// an opening write. Predicted DIVERGE. Hazard (A); refused by both the old and the re-derived rule.
+const D3C_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d3c_w4_hold(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        if phase == 0 { r = x.read(); phase = 1; } else { r = r + Bits::from_lit::<1>(); phase = 0; }
+        if phase == 0 { o.write(r); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d3c_w4_hold(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut phase: u8 = 0;
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        if phase == 0 { r = x.read(); phase = 1; } else { r = r + Bits::from_lit::<1>(); phase = 0; }
+        if phase == 0 { o.write(r); }
+        clk.tick().await;
+    }
+}
+
+/// (d4a) FORWARDED GUARD, hold form, no input: the opening drive's branch tests
+/// a register assigned just before it. The comb copy of the mux tests the
+/// committed `cnt`, which never reaches 3. Predicted DIVERGE (the SV never
+/// fires). Hazard (B); refused by both the old and the re-derived rule.
+const D4A_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d4a_forwarded_guard_hold(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d4a_forwarded_guard_hold(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+        clk.tick().await;
+    }
+}
+
+/// (d4b) The same pulse with the guard on the COMMITTED register (the update
+/// after the test). Opening on both sides, mux + hold. Predicted AGREE. The
+/// flipping pair of d4a; the pre-2026-10-28 rule refused it (constant-write clause).
+const D4B_SRC: &str = r#"
+#[hardware(sequential)]
+async fn d4b_committed_guard_hold(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt == Bits::from_lit::<2>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+        else { cnt = cnt + Bits::from_lit::<1>(); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn d4b_committed_guard_hold(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt == Bits::from_lit::<2>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+        else { cnt = cnt + Bits::from_lit::<1>(); }
+        clk.tick().await;
+    }
+}
+
+/// (d4c) Forwarded guard, ALL-PATHS form: the comb mux tests the committed
+/// register. Predicted DIVERGE. Hazard (B); not refused by the old rule, refused by the re-derived one.
+const D4C_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d4c_forwarded_guard_all_paths(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+        else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn d4c_forwarded_guard_all_paths(clk: Clock<C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+        else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+    }
+}
+
+/// (d4d) Forwarded guard behind a read on every path: closing, edge-sampled
+/// with the edge-form guard. Predicted AGREE. Admitted by both the old and the re-derived rule.
+const D4D_SRC: &str = r#"
+#[hardware(sequential)]
+async fn d4d_forwarded_guard_closing(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn d4d_forwarded_guard_closing(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
+        clk.tick().await;
+    }
+}
+
+/// The verdict table, as a test: which probe sources the re-derived rule
+/// flags. Every DIVERGE row is flagged and every AGREE row is clean, and no
+/// other pre-tick rule claims any `d*` probe (so an admitted shape is admitted
+/// outright, and a refused one is refused by this rule alone).
+#[test]
+fn d_the_rederived_rule_flags_exactly_the_diverging_probes() {
+    let d1 = |src: &str| {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        copper_analysis::unprotected_pretick_out_write(&f)
+    };
+    let o = vec!["o".to_string()];
+    // AGREE — admitted
+    assert!(d1(PC_ARM_SRC).is_empty(), "pc_arm_write: constant in an arm no read reaches");
+    assert!(d1(PC_ARM_TOGGLE_SRC).is_empty(), "pc_arm_toggle: both constants opening");
+    assert!(d1(D1B_SRC).is_empty(), "d1b: constant behind its read, held");
+    assert!(d1(D1C_SRC).is_empty(), "d1c: constants in state arms, no input");
+    assert!(d1(D1D_SRC).is_empty(), "d1d: mux behind the read");
+    assert!(d1(D1E_SRC).is_empty(), "d1e: mux on committed state, no input");
+    assert!(d1(D2C_SRC).is_empty(), "d2c: two closing drives");
+    assert!(d1(D3A_SRC).is_empty(), "d3a: W4 with an unrelated register on the read-free arm");
+    assert!(d1(D3B_SRC).is_empty(), "d3b: W4 with a read on every path");
+    assert!(d1(D4B_SRC).is_empty(), "d4b: committed guard");
+    assert!(d1(D4D_SRC).is_empty(), "d4d: forwarded guard behind a read");
+    // DIVERGE — flagged
+    assert_eq!(d1(W4_SRC), o, "w4: register-reading continuous assign, path-dependent");
+    assert_eq!(d1(D1F_SRC), o, "d1f: path-dependent constant, held");
+    assert_eq!(d1(D1G_SRC), o, "d1g: path-dependent constant mux");
+    assert_eq!(d1(D2A_SRC), o, "d2a: mixed anchors through two drives, held");
+    assert_eq!(d1(D2B_SRC), o, "d2b: mixed anchors through two drives, every path");
+    assert_eq!(d1(D3C_SRC), o, "d3c: W4 held");
+    assert_eq!(d1(D4A_SRC), o, "d4a: forwarded guard, held");
+    assert_eq!(d1(D4C_SRC), o, "d4c: forwarded guard, every path");
+    // No other pre-tick rule owns any of them.
+    for src in [D1B_SRC, D1C_SRC, D1D_SRC, D1E_SRC, D1F_SRC, D1G_SRC, D2A_SRC, D2B_SRC, D2C_SRC,
+                D3A_SRC, D3B_SRC, D3C_SRC, D4A_SRC, D4B_SRC, D4C_SRC, D4D_SRC] {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        assert!(copper_analysis::multi_phase_out_write(&f).is_empty());
+        assert!(copper_analysis::pretick_out_write_before_update(&f).is_empty());
+        assert!(copper_analysis::trailing_out_reads_input(&f).is_empty());
+        assert!(copper_analysis::trailing_regout_reads_input(&f).is_empty());
+        assert!(copper_analysis::out_first_driven_late(&f).is_empty());
+    }
+}
+
+/// AGREE. Constant behind its own read, held: closing on both sides.
+#[test]
+fn d1b_constant_behind_its_read_agrees() {
+    let sim = sim_e_in(d1b_const_read_in_arm);
+    assert_eq!(sim, vec![0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(D1B_SRC, "d1b_const_read_in_arm");
+    assert_eq!(sim, sv, "d1b no longer agrees — a closing held constant is not edge-sampled with its edge-form guard any more");
+}
+
+/// AGREE. Constants in state arms, no input: all opening, mux + hold.
+#[test]
+fn d1c_state_arm_constants_no_input_agree() {
+    let sim = sim_e_free(d1c_const_no_read);
+    assert_eq!(sim, vec![7, 3, 3, 7, 3, 3, 7, 3, 3, 7, 3, 3, 7], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run(D1C_SRC, "d1c_const_no_read", "clk", "o", "");
+    assert_eq!(sim, sv, "d1c no longer agrees — phase C's mux + hold form regressed");
+}
+
+/// AGREE. A mux over the input, both arms behind the read in its condition.
+#[test]
+fn d1d_mux_behind_read_agrees() {
+    let sim = sim_e_in(d1d_const_all_paths_read);
+    assert_eq!(sim, vec![3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(D1D_SRC, "d1d_const_all_paths_read");
+    assert_eq!(sim, sv, "d1d no longer agrees");
+}
+
+/// AGREE. A mux on committed state, no input, written on every path.
+#[test]
+fn d1e_mux_on_committed_state_agrees() {
+    let sim = sim_e_free(d1e_const_all_paths_no_read);
+    assert_eq!(sim, vec![3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run(D1E_SRC, "d1e_const_all_paths_no_read", "clk", "o", "");
+    assert_eq!(sim, sv, "d1e no longer agrees");
+}
+
+/// DIVERGE — REFUSED (clause A). The path-dependent constant, held: the SV
+/// edge-samples the carried-closing drive one observation after the simulator's
+/// opening write; visible once, because the port latches.
+#[test]
+fn d1f_path_dependent_constant_held_diverges_refused() {
+    let sim = sim_e_in(d1f_const_path_dependent_hold);
+    assert_eq!(sim, vec![7; CYCLES], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(D1F_SRC, "d1f_const_path_dependent_hold");
+    assert_eq!(sv, vec![0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for d1f — the path-dependent held constant is realized; re-derive clause A of unprotected_pretick_out_write");
+}
+
+/// DIVERGE — REFUSED (clause A). The path-dependent constant as a comb mux: the
+/// closing arm's write is overwritten by the next iteration's opening write
+/// before any observation, so the simulator holds 7 while the SV mux alternates.
+#[test]
+fn d1g_path_dependent_constant_mux_diverges_refused() {
+    let sim = sim_e_in(d1g_const_path_dependent_all_paths);
+    assert_eq!(sim, vec![7; CYCLES], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(D1G_SRC, "d1g_const_path_dependent_all_paths");
+    assert_eq!(sv, vec![3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for d1g — re-derive clause A of unprotected_pretick_out_write");
+}
+
+/// DIVERGE — REFUSED (clause A). Mixed anchors through two drives of a held
+/// port, with every register assignment behind the read: the closing drive
+/// edge-samples the port, and the opening drive (on committed state) lands one
+/// observation late. The simulator's closing write is never observed (the next
+/// iteration's opening write overwrites it); the SV shows both. Not refused by
+/// the pre-2026-10-28 rule.
+#[test]
+fn d2a_mixed_two_drives_held_diverges_refused() {
+    let sim = sim_e_in(d2a_mixed_two_drives_hold);
+    assert_eq!(sim, vec![0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(D2A_SRC, "d2a_mixed_two_drives_hold");
+    assert_eq!(sv, vec![0, 9, 5, 9, 5, 9, 5, 9, 5, 9, 5, 9, 5], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for d2a — re-derive clause A of unprotected_pretick_out_write");
+}
+
+/// DIVERGE — REFUSED (clause A). Mixed anchors through two drives on every
+/// path: a comb mux whose closing arm is never observed in the simulator.
+#[test]
+fn d2b_mixed_two_drives_every_path_diverges_refused() {
+    let sim = sim_e_in(d2b_mixed_two_drives_all_paths);
+    assert_eq!(sim, vec![2; CYCLES], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(D2B_SRC, "d2b_mixed_two_drives_all_paths");
+    assert_eq!(sv, vec![2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for d2b — re-derive clause A of unprotected_pretick_out_write");
+}
+
+/// AGREE. `d2a` with the committed-state drive moved behind the read: two
+/// closing drives, edge-sampled with edge-form guards. The flip of `d2a`.
+#[test]
+fn d2c_two_closing_drives_agree() {
+    let sim = sim_e_in(d2c_two_closing_drives_hold);
+    assert_eq!(sim, vec![0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(D2C_SRC, "d2c_two_closing_drives_hold");
+    assert_eq!(sim, sv, "d2c no longer agrees — two closing drives of a held port stopped agreeing");
+}
+
+/// AGREE. W4 with the read-free arm assigning only a register the write does
+/// not read: the opening write publishes the committed `r`, and so does the
+/// continuous assign. The flip of `w4_mixed_alignment`, one assignment apart.
+#[test]
+fn d3a_w4_unrelated_register_agrees() {
+    let sim = sim_e_in(d3a_w4_unrelated_register);
+    assert_eq!(sim, vec![10, 10, 12, 12, 14, 14, 16, 16, 18, 18, 20, 20, 22], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(D3A_SRC, "d3a_w4_unrelated_register");
+    assert_eq!(sim, sv, "d3a no longer agrees — an opening continuous-assign drive of a committed register regressed");
+}
+
+/// AGREE. W4 with a read on every path: all closing; `assign o = r` shows the
+/// value the pre-edge write forwarded.
+#[test]
+fn d3b_w4_read_on_every_path_agrees() {
+    let sim = sim_e_in(d3b_w4_read_on_every_path);
+    assert_eq!(sim, vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(D3B_SRC, "d3b_w4_read_on_every_path");
+    assert_eq!(sim, sv, "d3b no longer agrees");
+}
+
+/// DIVERGE — REFUSED (clause A). W4 in the held form: the register-reading
+/// write under a guard after the path-dependent merge, edge-sampled against the
+/// simulator's opening write of the forwarded `r + 1`.
+#[test]
+fn d3c_w4_held_diverges_refused() {
+    let sim = sim_e_in(d3c_w4_hold);
+    assert_eq!(sim, vec![11, 11, 13, 13, 15, 15, 17, 17, 19, 19, 21, 21, 23], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(D3C_SRC, "d3c_w4_hold");
+    assert_eq!(sv, vec![0, 11, 11, 13, 13, 15, 15, 17, 17, 19, 19, 21, 21], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for d3c — re-derive clause A of unprotected_pretick_out_write");
+}
+
+/// DIVERGE — REFUSED (clause B). An opening held drive whose guard tests a
+/// register assigned just before it: the mux's comb copy tests the committed
+/// `cnt` (never 3) and only the hold register, loaded under the edge-form guard,
+/// catches the pulse — one observation late.
+#[test]
+fn d4a_forwarded_guard_held_diverges_refused() {
+    let sim = sim_e_free(d4a_forwarded_guard_hold);
+    assert_eq!(sim, vec![0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run(D4A_SRC, "d4a_forwarded_guard_hold", "clk", "o", "");
+    assert_eq!(sv, vec![0, 0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for d4a — the comb copy of an opening drive's guard takes the edge form; re-derive clause B of unprotected_pretick_out_write");
+}
+
+/// AGREE. The same pulse with the update after the test: the guard reads the
+/// committed register on both sides. The flip of `d4a`.
+#[test]
+fn d4b_committed_guard_pulse_agrees() {
+    let sim = sim_e_free(d4b_committed_guard_hold);
+    assert_eq!(sim, vec![0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run(D4B_SRC, "d4b_committed_guard_hold", "clk", "o", "");
+    assert_eq!(sim, sv, "d4b no longer agrees — phase C's mux + hold form regressed");
+}
+
+/// DIVERGE — REFUSED (clause B). The forwarded guard over a comb mux written on
+/// every path: no hold register to catch it, so the SV never shows the pulse.
+#[test]
+fn d4c_forwarded_guard_mux_diverges_refused() {
+    let sim = sim_e_free(d4c_forwarded_guard_all_paths);
+    assert_eq!(sim, vec![3, 7, 3, 3, 7, 3, 3, 7, 3, 3, 7, 3, 3], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run(D4C_SRC, "d4c_forwarded_guard_all_paths", "clk", "o", "");
+    assert_eq!(sv, vec![3; CYCLES], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for d4c — re-derive clause B of unprotected_pretick_out_write");
+}
+
+/// AGREE. The forwarded guard behind a read on every path: the drive is closing,
+/// edge-sampled with the edge-form guard. The flip of `d4a` by anchor.
+#[test]
+fn d4d_forwarded_guard_behind_read_agrees() {
+    let sim = sim_e_in(d4d_forwarded_guard_closing);
+    assert_eq!(sim, vec![0, 0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(D4D_SRC, "d4d_forwarded_guard_closing");
+    assert_eq!(sim, sv, "d4d no longer agrees — a closing drive's edge-form guard regressed");
 }

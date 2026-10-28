@@ -405,12 +405,16 @@ counterexample rather than lowered to something plausible:
   independent reference, not the only one that works.
 - **The pre-tick alignment family**: four compile-time rules refuse plain-`Out`
   drive shapes whose phase would silently differ between the simulator and the
-  synthesized FSM (a path-dependent read boundary, a port written in more than
-  one clock phase where the two sides anchor a write differently — a port none of
-  whose writes an input read reaches, or one whose every write follows an input
-  read a tick follows, is accepted — and a write that precedes its register's
-  update). The remedy each error
-  names is usually `RegOut`. Five *rejected* fixes are recorded with measured
+  synthesized FSM: before the first tick, a port with *mixed anchors* (an input
+  read reaches some write of it while some write has a read-free path from the
+  loop head) or an opening write guarded by a test of a register the same segment
+  just assigned (`unprotected_pretick_out_write`, re-derived 2026-10-28 on a
+  sixteen-probe battery — a constant written in a state arm no read reaches, or
+  behind its own read, is accepted); a port written in more than one clock phase
+  where the two sides anchor a write differently (a port none of whose writes an
+  input read reaches, or one whose every write follows an input read a tick
+  follows, is accepted); and a write that precedes its register's update. The
+  remedy each error names is usually `RegOut`. Five *rejected* fixes are recorded with measured
   evidence in
   [`design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md`](design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md)
   so they are not re-tried.
@@ -466,8 +470,11 @@ counterexample rather than lowered to something plausible:
 on by one cycle, kept as `#[ignore]`d sweep cases with the reason attached
 rather than papered over (`SKIP` in `build.rs`):
 
-- a phase-gated cross-tick read (`probe_fsm`, the W4 path-dependent boundary
-  from the guardrail doc).
+- `branch_merge_explicit`'s `tail_o`, a mixed-anchor port (written behind an
+  input read and, in another state, with no read before it) that leads its SV by
+  one cycle when the first cycle takes the `sel == 1` path — a stimulus the
+  seeded sweep never produces, so its row stays a `SKIP` rather than a false
+  green. (`probe_fsm`, listed here until 2026-10-26, agrees and sweeps.)
 
 The phase-E probe battery (2026-10-23) found two single-phase shapes that
 disagreed by one cycle and that no rule guarded; both are closed as of
@@ -477,7 +484,10 @@ the same statement) is refused by `trailing_out_reads_input`, listed above. **e9
 input read in *another* FSM state) was fixed by making the transpiler's
 opening-prefix walk arm-granular, and the same change brought the D1 witnesses
 `pc_arm_*` and `probe_fsm` into agreement (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md`
-§9.4 has both derivations).
+§9.4 has both derivations). D1 itself was then re-derived against that emission
+(2026-10-28, §10 there): the rule now refuses exactly the two head-segment hazards
+the model derives, its constant-write clause is gone, and four measured
+divergences it had missed are refused.
 
 One correctness rule is worth knowing when reading the generated Verilog: an
 output drive that is *sampled at the clock edge* is emitted from the values the

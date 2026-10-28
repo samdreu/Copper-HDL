@@ -91,18 +91,19 @@ pub fn multi_write_collapse(f: &ItemFn) -> Vec<String> {
     Cfg::build(f).map(|c| c.multi_write_collapse()).unwrap_or_default()
 }
 
-/// Combinational `Out` ports exposed to the **pre-tick alignment hazard** — the
-/// module assigns a register in its pre-tick segment on a path no `In` read precedes,
-/// and drives a plain `Out` in that same segment. Returns the offending ports, sorted;
-/// empty for a combinational module, one with no top-level loop, or one whose outputs
-/// are all `RegOut`.
+/// Combinational `Out` ports exposed to the **pre-tick alignment hazard** (D1,
+/// re-derived 2026-10-28): before the first tick the port's drives have **mixed
+/// anchors** — an `In` read comb-reaches some drive while some drive has a read-free
+/// path from the loop head — or a drive no read reaches sits under a branch testing
+/// a register assigned earlier in the segment (a **forwarded guard**). Returns the
+/// offending ports, sorted; empty for a combinational module, one with no top-level
+/// loop, one without registers, or one whose outputs are all `RegOut`.
 ///
 /// The fix to point an author at is `RegOut`, which is immune by construction — the
-/// same remedy [`multi_write_collapse`] points at. See
-/// [`Cfg::unprotected_pretick_out_write`] for the mechanism, why the rule keys on the
-/// output write rather than the register, and the known multi-tick false negative;
-/// and `design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md` for the measurements behind each
-/// clause.
+/// same remedy [`multi_write_collapse`] points at — or a uniform anchor (read the
+/// input before every write of the port, or before none) and committed-state
+/// guards. See [`Cfg::unprotected_pretick_out_write`] for the derivation, and
+/// `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10 for the measured verdict table.
 pub fn unprotected_pretick_out_write(f: &ItemFn) -> Vec<String> {
     Cfg::build(f)
         .map(|c| c.unprotected_pretick_out_write())

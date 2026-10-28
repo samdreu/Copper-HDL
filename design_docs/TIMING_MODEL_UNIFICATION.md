@@ -132,8 +132,11 @@ in modules that are currently correct — a one-off measurement on 2026-08-21, r
 The first application of this policy landed the same day: §5.5's constant-write
 exemption was narrowed to unconditional writes (commit `348ddd0`), at a measured corpus
 cost of three modules, all of them the measured divergences and none of them a correct
-design — `branch_merge_explicit`, `pc_arm_write`, `pc_arm_toggle`, which are still the
+design — `branch_merge_explicit`, `pc_arm_write`, `pc_arm_toggle`, then the
 listed set of `copper-analysis/tests/pretick_alignment_corpus.rs::pretick_alignment_hazard_flags_exactly_the_known_divergent_modules`
+(the clause was retired 2026-10-28 when D1 was re-derived — `PRETICK_ALIGNMENT_GUARDRAIL.md`
+§5.8: `branch_merge_explicit` stays listed as a mixed-anchor hit, the `pc_arm` pair
+agrees and left the set)
 together with the later `probe_fsm` and `w4_mixed_alignment`. That
 is the shape future work here should take — a discriminator sharp enough to reject
 only what actually diverges, verified against the sweep before it lands.

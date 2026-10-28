@@ -204,9 +204,10 @@ form:** since 2026-10-26 the opening-prefix predicate is **arm-granular** — an
 `if`/`match` seeds each arm's walk from its condition's reads alone — so a
 conditionally driven plain `Out` whose drives have no read before them *in their
 own arm* takes the mux + hold form whatever the module reads in other states
-(`e9_read_in_another_state_opening_write` agrees, and so do the D1 witnesses
+(`e9_read_in_another_state_opening_write` agrees, and so do the former D1 witnesses
 `pc_arm_write`, `pc_arm_toggle`, `probe_fsm` and `head_o` of the `branch_merge`
-twins, the whole sv-baseline delta). Until then the predicate was
+twins, the whole sv-baseline delta; D1 itself was re-derived on that evidence
+2026-10-28, see the rule list below). Until then the predicate was
 statement-granular over the whole extracted `match pc`, so the form was emitted
 only for modules that read **no** input and `e9` lagged by one cycle
 (`CYCLE_DATAFLOW_SEMANTICS.md` §9.4). The same battery found a second single-phase
@@ -310,19 +311,30 @@ writing a plain `Out` after a tick is the *ordinary* multi-phase pattern and is 
 that cannot say which region it is looking at drowns in false positives. What each rule may assume
 about its region is what separates them.
 
-- **`unprotected_pretick_out_write`** — the head segment (loop head → first tick). **NARROWED
-  2026-08-26 (cycle-dataflow phase D)**: phase B's forwarded continuous-assign emission gave the
-  no-read opening shapes their defined meaning (`assign o = r + 1` — the meaning the simulator
-  always had; V1/V5/V7 and both `fast_counter` ports re-measured agreeing), so the register-reading
-  clause now also requires the write to be **read-preceded**. What remains refused is the
-  **path-dependent region boundary** — a read reaches the write on one path while a register is
-  assigned unprotected on another (W4, `probe_fsm`: the write executes at the opening on one path
-  and the pre-edge on the other, and no single emission matches both) — plus the unchanged
-  conditional/constant hold clause below. `RegOut` remains immune. Pins:
-  `pretick_alignment_corpus.rs::pretick_alignment_hazard_flags_exactly_the_known_divergent_modules`
-  (as of 2026-09-01 the listed set is `probe_fsm`, `w4_mixed_alignment`, `branch_merge_explicit`,
-  `pc_arm_toggle`, `pc_arm_write`), `copper-macros/tests/ui/fail/pretick_alignment.rs` and
-  `ui/pass/pretick_alignment_ok.rs` (the no-read opening shape compiles clean).
+- **`unprotected_pretick_out_write`** — the head segment (loop head → first tick). **RE-DERIVED
+  2026-10-28** (`CYCLE_DATAFLOW_SEMANTICS.md` §10, guardrail §5.8) against the arm-granular opening
+  walk, from the two-anchor model, one drive at a time: in a body with registers a head-segment
+  drive is *closing* on a path where an input read precedes it and *opening* on a path where none
+  does, while codegen decides per drive (closing iff a read comb-reaches it on any path) and emits
+  per port (a continuous assign or committed-guard mux on every path; a forwarded mux + hold when
+  every drive is opening; an edge-sampled register with edge-form guards otherwise). Exactly two
+  hazards follow, and the rule refuses exactly those: **(A) mixed anchors** — a read reaches some
+  drive of the port while some drive has a read-free path from the head (the opening write lands
+  one observation late in the SV; the simulator never even shows the closing write, since the next
+  iteration's opening write overwrites it before the observation), unobservable only for a single
+  every-path drive that forwards no register it reads; and **(B) a forwarded guard** — a drive no
+  read reaches, nested under an `if`/`match` that tests a register assigned earlier on the path (the
+  comb copy tests the committed value). The earlier clauses — "a register-reading, read-preceded
+  write or a conditional write in a segment with an unprotected register assignment" — were a
+  proxy: measured on the sixteen-probe `d*` battery they had four false positives (`d1b`, `d1c`,
+  `d3a`, `d4b`, plus the re-blessed witnesses `pc_arm_write`, `pc_arm_toggle`, `probe_fsm`, which
+  compile without an opt-out now) and four false negatives (`d1g`, `d2a`, `d2b`, `d4c`, refused
+  now). `w4_mixed_alignment` and `branch_merge_explicit` (`tail_o`) stay refused. `RegOut` remains
+  immune. Pins: `pretick_alignment_corpus.rs::pretick_alignment_hazard_flags_exactly_the_known_divergent_modules`
+  (`EXPECTED_FLAGGED`: `w4_mixed_alignment`, `branch_merge_explicit`, and the seven refused `d*`
+  probes), one flipping unit-test pair per clause in `cfg.rs`, `copper-macros/tests/ui/fail/pretick_alignment.rs`,
+  `ui/fail/pretick_mixed_anchors.rs`, `ui/fail/pretick_forwarded_guard.rs`, and the admitted shapes in
+  `ui/pass/pretick_alignment_ok.rs`.
 - **`unprotected_trailing_out_write`** — the trailing hazard, now precisely classified as an
   **extraction lowering limitation** rather than a semantics rule. Two gates, each with a measured
   flipping pair: the body must cross **more than one clock edge** per iteration (in a single-tick
@@ -363,30 +375,20 @@ about its region is what separates them.
   the `mphase_*` unit tests in `cfg.rs`, `ui/fail/multi_phase_out_write.rs`, and the two accepted
   shapes in `ui/pass/pretick_alignment_ok.rs`.
 
-**The constant-write exemption is narrower than it looks.** The misalignment changes *when* a write
-happens, so it is observable only if the value written differs between the phases — which is why a
-write of a constant was exempt. That premise holds only when the write happens on **every** path.
-Where a port is written on some paths and not others (the enabled-`Out` idiom), or different arms
-write different constants, the alternative is the port's *held* value, so *when* the write lands is
-observable even though the value written never changes. Both D1 rules therefore flag a port that is
-driven from a register **or** not written on all paths through the region. The witnesses are
-`pc_arm_write` and `pc_arm_toggle`, whose traces are each other shifted by exactly one cycle — a
-phase shift, not an initialization artifact — and `branch_merge_explicit`, which this doc previously
-cited as *agreeing*: it does not. It transpiles byte-identically to its twin, its twin agrees with
-it, and it leads its own emitted SystemVerilog by one. Narrowing the exemption (2026-08-25, commit
-`348ddd0`) cost exactly those three modules corpus-wide, and all three are in the
-`unprotected_pretick_out_write` pin's listed set today. **2026-10-26:** `pc_arm_write` and
-`pc_arm_toggle` AGREE under the arm-granular opening walk (the lead was codegen's statement-granular
-predicate, see phase C's reach above, not a property of the shape); their traces are pinned as
-`tests/sequential_forwarding_divergence.rs::a_write_in_a_state_arm_agrees_under_arm_granular_opening`
-and `the_state_arm_toggle_agrees_on_every_cycle`. `branch_merge_explicit` does **not** agree: its
-`tail_o` is also written behind the deferred `sel` read, a mixed-anchor port that stays edge-sampled,
-and it still leads by one cycle when the first cycle takes the `sel == 1` path (measured 2026-10-26;
-the seeded sweep happens to take `sel == 0` first, which masks it — in the live, unflagged twin
-`branch_merge` too, a recorded blind spot). The clause is **retained** — the three stay in the listed
-set with their opt-out —
-because re-deriving it on this evidence is a rule decision with its own corpus pin, not a side effect
-of an emission change.
+**The constant-write clause — found 2026-08-25, retired 2026-10-28.** The sweep found
+`branch_merge_explicit` leading its own emitted SystemVerilog by one cycle, and the minimal pairs
+`pc_arm_write` / `pc_arm_toggle` reproduced it; the explanation given then — "a constant is
+idempotent across the phase shift only if it is written on every path" — produced a clause keyed on
+the write's conditionality. The arm-granular opening walk (2026-10-26) flipped `pc_arm_write` and
+`pc_arm_toggle` to agreement (their lead was codegen's statement-granular opening predicate), and
+the re-derivation (above; `CYCLE_DATAFLOW_SEMANTICS.md` §10) showed the clause was a proxy for the
+mixed-anchor hazard: `branch_merge_explicit`'s `tail_o` diverges because it is written both behind
+the deferred `sel` read and in the `pc == 1` arm with no read before it — mixed anchors, the shape
+`d2a` isolates — and still leads by one when the first cycle takes `sel == 1` (measured
+2026-10-26; the seeded sweep takes `sel == 0` first, which masks it, in the live unflagged twin
+`branch_merge` too, a recorded blind spot). Conditionality and constant-ness play no part in the
+rule any more: an every-path mux with mixed anchors diverges (`d1g`, `d2b`) and a held constant
+behind its own read agrees (`d1b`).
 
 - **`pretick_out_write_before_update`** (2026-08-26) — a plain `Out` written **between a leading
   `In` read and the update of a register the write reads**. The read's barrier parks the task at the
