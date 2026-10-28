@@ -21,7 +21,10 @@
 #   --sync       rsync this working tree (uncommitted changes included) onto the
 #                remote clone instead. For "does my change pass", not for numbers;
 #                the header says SYNCED WORKING TREE and records `git describe
-#                --dirty` from here.
+#                --dirty` from here. Changed files are written with the remote's
+#                current mtime (see the rsync flags below) so cargo rebuilds them;
+#                a preserved laptop mtime older than the last remote build would
+#                make cargo keep the stale artifact.
 #   --setup      One-time: create the scratch target directory, point the clone's
 #                `target/` at it with a symlink (the harness writes
 #                `target/verilator/…` relative to the repo, so CARGO_TARGET_DIR
@@ -145,7 +148,15 @@ LOCAL_DESC=$(git describe --always --dirty 2>/dev/null)
 
 if [ "$MODE" = sync ]; then
   echo "== syncing the working tree to $HOST:$DIR"
-  rsync -az --delete \
+  # --checksum --no-times, NOT -a's preserved mtimes: cargo decides "fresh" by
+  # comparing a source file's mtime with the previous build's fingerprint, so a
+  # file changed on the laptop BEFORE the last remote build but synced AFTER it
+  # arrives with an mtime older than that fingerprint and is never recompiled —
+  # measured 2026-10-28: a merged proc-macro source synced with its merge-time
+  # mtime was treated as unchanged and the stale .so failed a trybuild case that
+  # passed locally. With --checksum unchanged files are skipped by content, and
+  # every file that does change is written with the remote's current time.
+  rsync -rlpgoDz --checksum --no-times --delete \
     --exclude target --exclude 'target.nfs-*' --exclude .git --exclude .claude \
     --exclude paper --exclude waveforms --exclude '*.log' \
     ./ "$HOST:$DIR/" || { echo "rsync failed" >&2; exit 2; }
