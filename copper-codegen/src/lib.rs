@@ -322,6 +322,12 @@ fn transpile_target(
     // keep their own copies as defence in depth, the way `check_reachability` is.
     copper_analysis::check_nested_loop_shape(target).map_err(|e| e.to_string())?;
     copper_analysis::check_awaits(target).map_err(|e| e.to_string())?;
+    // A pre-loop register's initializer is its power-on value and must be a
+    // constant or `Bits::x()` (2026-10-29, same rule and message as the macro).
+    // `chir_lower::lower_register_init` then folds the constant into the
+    // register's `initial` assignment; what it cannot fold is an error there, never
+    // a dropped value.
+    copper_analysis::check_register_initializers(target).map_err(|e| e.to_string())?;
     // A plain `Out` driven in more than one clock phase, in a class whose emitted
     // form cannot show the simulator's trace (narrowed 2026-10-23, phase E).
     // `vlir_lower` refuses the linear-path instance as multiply driven, but control

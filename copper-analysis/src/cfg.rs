@@ -2988,11 +2988,14 @@ fn write_operand_is_constant(expr: &Expr) -> bool {
 /// `Logic::One`, an associated const); a single-segment `SCREAMING_CASE` path (a
 /// `const` item or const generic); a call through a multi-segment path whose
 /// arguments are all constant (`Bits::zero()`, `Bits::from_lit::<1>()`,
-/// `Bits::<8>::from_u8(9)`); and parentheses, casts, unary and binary operators
-/// over constants. A method call (`a.read()`), a local, or a macro is not — the test
+/// `Bits::<8>::from_u8(9)`); parentheses, casts, unary and binary operators
+/// over constants; and an array literal or repeat of constants. A method call (`a.read()`), a local, or a macro is not — the test
 /// is conservative in the direction of **not** calling something constant, which
-/// for [`Cfg::out_first_driven_late`] is the direction of not refusing.
-fn is_constant_expr(e: &Expr) -> bool {
+/// for [`Cfg::out_first_driven_late`] is the direction of not refusing — and for
+/// the register power-on rule (`crate::init`, where it is exported from) the
+/// direction of refusing: an initializer this does not call constant has no
+/// stated power-on value.
+pub fn is_constant_expr(e: &Expr) -> bool {
     match e {
         Expr::Lit(_) => true,
         Expr::Path(p) => {
@@ -3015,6 +3018,12 @@ fn is_constant_expr(e: &Expr) -> bool {
         Expr::Cast(c) => is_constant_expr(&c.expr),
         Expr::Unary(u) => is_constant_expr(&u.expr),
         Expr::Binary(b) => is_constant_expr(&b.left) && is_constant_expr(&b.right),
+        // An array of constants is a constant: `[Logic::Zero; 16]` (a packed
+        // shift register's start), `[Bits::<8>::zero(); 8]` (a register file's).
+        // Added 2026-10-29 for the register power-on rule; no corpus write operand
+        // has this shape, so `out_first_driven_late`'s exact-set pin is unmoved.
+        Expr::Repeat(r) => is_constant_expr(&r.expr) && is_constant_expr(&r.len),
+        Expr::Array(a) => a.elems.iter().all(is_constant_expr),
         _ => false,
     }
 }

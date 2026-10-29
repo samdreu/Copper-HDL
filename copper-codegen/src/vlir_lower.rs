@@ -3601,7 +3601,10 @@ endmodule
     }
 
     /// Bit-indexing (`d[7]`) + `Logic::One` constant + conditional register
-    /// update lower end-to-end to a bit-select, comparison, and ternary.
+    /// update lower end-to-end to a bit-select, comparison, and ternary. Re-blessed
+    /// 2026-10-29: `r`'s `Bits::from_u8(0)` initializer now reaches the SV as its
+    /// `initial` value (and the `initial` block brings the MULTIDRIVEN pragma that
+    /// `lint_multidriven` adds for any initialized register); nothing else moved.
     #[test]
     fn bit_index_golden_output() {
         let src = r#"
@@ -3625,9 +3628,15 @@ module m (
 
     logic [7:0] r;
 
+    initial begin
+        r = 8'd0;
+    end
+
+    /* verilator lint_off MULTIDRIVEN */
     always_ff @(posedge clk) begin
         r <= ((d[7] == 1'b1) ? d : r);
     end
+    /* verilator lint_on MULTIDRIVEN */
 
     assign o = r;
 
@@ -3665,9 +3674,15 @@ module m (
 
     logic [7:0] r;
 
+    initial begin
+        r = 8'd0;
+    end
+
+    /* verilator lint_off MULTIDRIVEN */
     always_ff @(posedge clk) begin
         r <= (sel ? ((d >> 8'd1) ^ r) : (d >> 8'd1));
     end
+    /* verilator lint_on MULTIDRIVEN */
 
     assign o = r;
 

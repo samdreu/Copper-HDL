@@ -119,6 +119,9 @@ fn every_corpus_module_passes_the_rules_the_transpiler_alone_used_to_enforce() {
         if let Err(e) = copper_analysis::check_awaits(f) {
             why.push(format!("await: {e}"));
         }
+        if let Err(e) = copper_analysis::check_register_initializers(f) {
+            why.push(format!("register power-on value: {e}"));
+        }
         if let Err(e) = copper_analysis::check_memory_staging(f) {
             why.push(format!("memory staging: {e}"));
         }
