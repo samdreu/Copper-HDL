@@ -1005,6 +1005,200 @@ fn the_state_arm_toggle_agrees_on_every_cycle() {
     );
 }
 
+// ── branch_merge — the live twin's seed-masked `tail_o` lag ────────────────────
+//
+// `tests/fixtures/control_extraction_dut.rs::branch_merge` is the ASYNC twin of
+// `branch_merge_explicit`: byte-identical SystemVerilog (asserted by
+// control_extraction_structural.rs), and no D1 clause reaches it (its single
+// `tail_o` write sits after the branch merge, behind a read on every path of the
+// head region). The guardrail's §5.5 note of 2026-10-26 recorded that the corpus
+// sweep's per-module seed drives `sel == 0` first, under which `tail_o` goes high
+// at the closing edge and holds — so the lag that the explicit twin's SKIP row
+// describes was invisible for the live twin, and it passed the sweep by its seed
+// alone. The two DUTs below are a verbatim copy of the fixture's async twin; the
+// probe drives `sel == 1` on the FIRST cycle and measures.
+//
+// MEASURED 2026-10-28 (this probe), `(head_o, mid_o, tail_o)` per cycle with
+// `sel = 1` on cycle 0 and `0` after:
+//
+//   sim  [(1, 0, 1), (1, 0, 1), (1, 1, 1), (1, 1, 1), …]
+//   sv   [(1, 0, 0), (1, 0, 1), (1, 1, 1), (1, 1, 1), …]
+//
+// `tail_o` is 1 in the simulator from cycle 0 and 0 in the SV at cycle 0 — one
+// cycle, once, because the port latches high. `head_o` and `mid_o` agree on every
+// cycle. The same DUT under `sel = 0` first agrees on
+// every port for every cycle (the sweep's historical verdict, re-pinned here so
+// the two readings stay side by side).
+//
+// This is what the sweep's multi-sequence stimulus policy (2026-10-28,
+// `design_docs/CORPUS_DIFFERENTIAL_SWEEP.md` §3.2) exists to catch: the module's
+// input is one bit wide, so the sweep now starts one sequence from EACH initial
+// input vector, and the `sel = 1` sequence fails. The fixture's `build.rs` SKIP
+// row records that verdict; this test pins the trace behind it.
+
+const BRANCH_MERGE_SRC: &str = r#"
+#[hardware(sequential)]
+async fn branch_merge(
+    clk: Clock<C>,
+    sel: In<Logic, C>,
+    head_o: Out<Logic, C>,
+    mid_o: Out<Logic, C>,
+    tail_o: Out<Logic, C>,
+) {
+    loop {
+        head_o.write(Logic::One);
+        if sel.read() == Logic::One {
+            clk.tick().await;
+        } else {
+            mid_o.write(Logic::One);
+        }
+        tail_o.write(Logic::One);
+        clk.tick().await;
+    }
+}
+"#;
+
+#[hardware(sequential)]
+async fn branch_merge(
+    clk: Clock<C>,
+    sel: In<Logic, C>,
+    head_o: Out<Logic, C>,
+    mid_o: Out<Logic, C>,
+    tail_o: Out<Logic, C>,
+) {
+    loop {
+        head_o.write(Logic::One);
+        if sel.read() == Logic::One {
+            clk.tick().await;
+        } else {
+            mid_o.write(Logic::One);
+        }
+        tail_o.write(Logic::One);
+        clk.tick().await;
+    }
+}
+
+/// `(head_o, mid_o, tail_o)` per cycle under the given per-cycle `sel`.
+fn sim_branch_merge(sel: &[u8]) -> Vec<(u8, u8, u8)> {
+    let mut clk = Clock::<C>::new();
+    let mut exec = HardwareExecutor::new();
+    let (sel_drv, sel_in) = wire::<Logic, C>(Logic::Zero);
+    let (h, h_obs) = wire::<Logic, C>(Logic::Zero);
+    let (m, m_obs) = wire::<Logic, C>(Logic::Zero);
+    let (t, t_obs) = wire::<Logic, C>(Logic::Zero);
+    let handles = vec![h.dirty_handle(), m.dirty_handle(), t.dirty_handle()];
+    let reads = vec![sel_in.wire_id()];
+    exec.spawn_wired(branch_merge(clk.clone(), sel_in, h, m, t), handles, reads);
+    sel.iter()
+        .map(|&s| {
+            sel_drv.write(if s == 1 { Logic::One } else { Logic::Zero });
+            exec.tick_clock(&mut clk);
+            (
+                u8::from(h_obs.read() == Logic::One),
+                u8::from(m_obs.read() == Logic::One),
+                u8::from(t_obs.read() == Logic::One),
+            )
+        })
+        .collect()
+}
+
+/// Like `run_sv`, but with `sel` driven per cycle from `sel`.
+fn sv_branch_merge(sel: &[u8]) -> Vec<(u8, u8, u8)> {
+    let sv = copper_codegen::transpile_source(
+        BRANCH_MERGE_SRC,
+        Some("branch_merge"),
+        &copper_codegen::EmitConfig::default(),
+    )
+    .expect("transpile");
+    let n = TMP_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let work = std::env::temp_dir()
+        .join(format!("copper_fwd_branch_merge_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("branch_merge.sv"), &sv).unwrap();
+    let mut tb = String::from(
+        "#include \"Vbranch_merge.h\"\n#include \"verilated.h\"\n#include <iostream>\n\
+         int main(int c, char** v) { Verilated::commandArgs(c, v);\n\
+         Vbranch_merge* t = new Vbranch_merge(); t->clk = 0; t->sel = 0; t->eval();\n",
+    );
+    for &s in sel {
+        tb.push_str(&format!(
+            "t->sel = {s}; t->clk=0; t->eval(); t->clk=1; t->eval(); \
+             std::cout << (int)t->head_o << \" \" << (int)t->mid_o << \" \" << (int)t->tail_o << std::endl;\n"
+        ));
+    }
+    tb.push_str("return 0; }\n");
+    std::fs::write(work.join("tb.cpp"), tb).unwrap();
+    let out = verilator_command()
+        .current_dir(&work)
+        .args([
+            "--cc", "--exe", "--build", "--top-module", "branch_merge",
+            "-Wno-DECLFILENAME", "-Wno-WIDTHEXPAND", "-CFLAGS", "-std=c++14",
+            "branch_merge.sv", "tb.cpp",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "verilator build failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let run = std::process::Command::new(work.join("obj_dir/Vbranch_merge")).output().unwrap();
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let _ = std::fs::remove_dir_all(&work);
+    stdout
+        .lines()
+        .map(|l| {
+            let v: Vec<u8> = l.split_whitespace().map(|x| x.parse().unwrap()).collect();
+            (v[0], v[1], v[2])
+        })
+        .collect()
+}
+
+/// `sel == 1` on the first cycle: the live twin leads its own SV by one cycle on
+/// `tail_o`, once. The seed-masked blind spot of guardrail §5.5, measured on the
+/// unflagged module itself.
+#[test]
+fn branch_merge_tail_leads_its_sv_when_the_first_cycle_takes_sel_one() {
+    let mut sel = vec![0u8; CYCLES];
+    sel[0] = 1;
+    let sim = sim_branch_merge(&sel);
+    // Cycle 0 takes the `sel == 1` path (two ticks: `mid_o` stays low through
+    // cycle 1); every later iteration takes the other path and writes all three.
+    let mut expected_sim = vec![(1u8, 1u8, 1u8); CYCLES];
+    expected_sim[0] = (1, 0, 1);
+    expected_sim[1] = (1, 0, 1);
+    assert_eq!(sim, expected_sim, "simulator behaviour changed");
+
+    if !verilator_available() {
+        return;
+    }
+    let sv = sv_branch_merge(&sel);
+    let mut expected_sv = expected_sim.clone();
+    expected_sv[0] = (1, 0, 0); // tail_o one cycle late — the only difference
+    assert_eq!(
+        sv, expected_sv,
+        "the emitted SV's trace changed — re-measure the sweep's SKIP row for branch_merge"
+    );
+    assert_ne!(sim, sv, "sim and SV now AGREE under sel == 1 first: the branch_merge SKIP row in build.rs is stale");
+    assert_eq!(
+        sim.iter().map(|c| c.2).collect::<Vec<_>>()[1..],
+        sv.iter().map(|c| c.2).collect::<Vec<_>>()[1..],
+        "the lag is no longer confined to cycle 0"
+    );
+}
+
+/// `sel == 0` on the first cycle: every port agrees on every cycle — the sweep's
+/// historical single-seed verdict, which is why the lag was invisible.
+#[test]
+fn branch_merge_agrees_when_the_first_cycle_takes_sel_zero() {
+    let mut sel = vec![0u8; CYCLES];
+    sel[1] = 1;
+    sel[4] = 1;
+    let sim = sim_branch_merge(&sel);
+    if !verilator_available() {
+        return;
+    }
+    let sv = sv_branch_merge(&sel);
+    assert_eq!(sim, sv, "sim and SV diverge under sel == 0 first — a new divergence, not the §5.5 one");
+}
+
 // ── m1 / V8 — a write between a leading read and the register update ──────────
 //
 // `design_docs/DERIVATION_TABLE.md` F2, measured (m1 in its §5). The

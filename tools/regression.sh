@@ -180,10 +180,18 @@ if [ "$RUN_TEST" -eq 1 ]; then
   # covering nothing is the expensive failure — the same reason G-A/G-B/G-C exist.
   grep -q "^test every_corpus_module_has_a_generated_case \.\.\. ok" "$TMP/test.log" \
     || fail "G-D: the corpus sweep's coverage guard did not run"
+  # ...and under the stimulus policy the design doc states (several sequences per
+  # module, every initial vector for a narrow one — CORPUS_DIFFERENTIAL_SWEEP.md
+  # §3.2). The policy is pinned by one test; a sweep that ran without it ran under
+  # some other policy, so its `ok` line is required too.
+  grep -q "^test the_stimulus_policy_is_what_the_design_doc_says \.\.\. ok" "$TMP/test.log" \
+    || fail "G-D: the corpus sweep's stimulus-policy pin did not run or did not pass"
   SWEPT=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_differential \.\.\. ok" "$TMP/test.log")
   SWEPT_SKIP=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_differential \.\.\. ignored" "$TMP/test.log")
   [ "$SWEPT" -gt 0 ] || fail "G-D: no differential cases ran"
-  echo "  G-D ok: corpus sweep ran $SWEPT differential cases ($SWEPT_SKIP ignored-with-reason)"
+  echo "  G-D ok: corpus sweep ran $SWEPT differential cases ($SWEPT_SKIP ignored-with-reason), each under the pinned multi-sequence stimulus policy"
+  POLICY_LINE=$(grep -h "stimulus policy:" "$TMP"/*.log 2>/dev/null | tail -1 | sed 's/.*stimulus policy: //')
+  [ -n "$POLICY_LINE" ] && echo "       policy: $POLICY_LINE"
 
   # G-E — ANCHORING. The sweep checks the simulator against the SystemVerilog the
   # transpiler emitted: two implementations of one source, which proves CONSISTENCY.

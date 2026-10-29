@@ -44,7 +44,19 @@ inline in a `tests/*.rs` file. That sweep
 `design_docs/CORPUS_DIFFERENTIAL_SWEEP.md`) generates one case per module — seeded
 random stimulus, simulator vs the SystemVerilog it transpiles to under Verilator —
 so **a new module is covered the moment it exists**, with no harness to write. A
-module it cannot run gets an `#[ignore]` with a reason, never an omission. Four
+module it cannot run gets an `#[ignore]` with a reason, never an omission. **Each
+case drives several stimulus sequences, not one** (since 2026-10-28, §3.2 of the
+design doc): four independent seeds of 200 cycles, plus a 32-cycle sequence from
+*every* initial input vector for a module with at most 4 input bits (a first-cycle
+pattern list for a wider one; the whole truth table for a combinational module up
+to 8 bits) — all in one testbench run of one Verilated model, restarted from its
+initial state at each boundary, so the cost stays one Verilator build per module. A
+failure names the sequence (`FAIL: … (sequence 5 "first sel=1", cycle 0)`) and
+`COPPER_SWEEP_SEQUENCE=<index>` re-runs that one alone. Before this, a module's
+verdict rested on one seed: `branch_merge` passed for two months while its `tail_o`
+led the SV by a cycle whenever the first cycle took `sel == 1`. The policy is pinned
+by `tests/corpus_generated.rs::the_stimulus_policy_is_what_the_design_doc_says`,
+which G-D requires. Four
 tables in `build.rs` carry what cannot be inferred — `PARAMS` (widths for a generic
 module), `RESET` (a design whose state is X until reset), `SKIP` (why a module is not
 swept), `REFERENCE` (an independent Verilog file to check the module against as

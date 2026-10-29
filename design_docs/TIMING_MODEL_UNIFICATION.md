@@ -104,7 +104,8 @@ refactor that the evidence does not support:
   `vlir_lower::split_output_regs` keeps when the drive becomes a non-blocking
   assignment. All four `regout_forwarding_dut` witnesses
   (`tests/fixtures/regout_forwarding_dut.rs`) agree with their emitted SystemVerilog
-  under the sweep's `SEQ_CYCLES` (200 in `build.rs`) of random stimulus, and
+  under the sweep's `SEED_CYCLES` (200 in `build.rs`; one seed then, four plus
+  first-cycle sequences since 2026-10-28) of random stimulus, and
   `tests/regout_forwarding_equivalence.rs` pins them directly. The TODO entry was
   stale and is now corrected.
 

@@ -121,6 +121,22 @@ const SKIP: &[(&str, &str)] = &[
          to drive (item 4 — the sim wires the hierarchy by hand)",
     ),
     (
+        "mod8",
+        "a precondition the sweep cannot keep, found by the multi-sequence stimulus policy on \
+         2026-10-28: `a % b` with `b == 0` is X in hardware (its header says the divisor is kept \
+         non-zero BY THE STIMULUS), and the sweep does no stimulus masking by design (design doc \
+         §3.4). The single 64-vector seed never drew a zero divisor; the policy's all-zeros and \
+         `only a ones` patterns always do, and two of its four seeds did — measured `o expected \
+         255 got 0` (the simulator's all-X read back as 255 against Verilator's 2-state 0) at \
+         `(sequence 4 \"pattern list\", cycle 0)`, `(sequence 1, cycle 59)`, `(sequence 2, cycle \
+         27)`; every vector with a non-zero divisor agrees. Not a divergence of the lowering: \
+         comparing an undefined value against an undefined value is a test of nothing (the RESET \
+         table's rationale), and the remainder operator stays covered by the hand-written vectors \
+         of tests/wide_and_mod_datapath_equivalence.rs. An X-aware comparison (the simulator's X as don't-care) \
+         would restore this module to the sweep and is the alternative recorded, not taken: it \
+         would turn every X the simulator ever emits into a silent pass",
+    ),
+    (
         "branch_merge_explicit",
         "a demonstration of the pre-tick hazard since 2026-08-25: its conditionally-written \
          constant `tail_o` leads the identical emitted SV by one cycle when the FIRST cycle takes \
@@ -129,12 +145,31 @@ const SKIP: &[(&str, &str)] = &[
          a mixed-anchor port that stays edge-sampled, so the arm-granular opening walk of \
          2026-10-26 — which fixed the minimal pair \
          sequential_forwarding_divergence.rs::a_write_in_a_state_arm_agrees_under_arm_granular_opening \
-         and this module's `head_o` — does not reach it. This sweep's seeded stimulus takes \
-         `sel == 0` first, under which the lag is invisible (the row lifted, the case passes; so does \
-         the live twin `branch_merge`, a seed-masked blind spot recorded in guardrail §5.5), so a \
-         green here would prove nothing. The re-derived D1 rule (2026-10-28, clause A: mixed \
+         and this module's `head_o` — does not reach it. Until 2026-10-28 the sweep's single seed \
+         took `sel == 0` first, under which the lag is invisible; under the multi-sequence stimulus \
+         policy the sweep exposes it directly (the `first sel=1` sequence fails, exactly as it does \
+         for the live twin `branch_merge` — its own row below), so this row is the record of a \
+         measured divergence, not a guess. The re-derived D1 rule (2026-10-28, clause A: mixed \
          anchors) REJECTS `tail_o`; the module keeps `allow_pretick_alignment` because it exists \
          to demonstrate it",
+    ),
+    (
+        "branch_merge",
+        "ONE-CYCLE DIVERGENCE, MEASURED BY THIS SWEEP 2026-10-28 under the multi-sequence stimulus \
+         policy (design doc §3.2): the live, UNFLAGGED async twin of `branch_merge_explicit` \
+         (byte-identical SystemVerilog). Its `tail_o` leads the SV by one cycle, once, whenever \
+         the FIRST cycle takes `sel == 1` — sim `tail_o = 1` at that cycle, SV `0`, agreement from \
+         the next cycle on; `head_o` and `mid_o` agree throughout. Exposed by the first-cycle \
+         sequence `first sel=1` (sequence 5 of 6 — the historical seed, sequence 0, drives \
+         `sel == 0` first and had masked it since 2026-08-25, guardrail §5.5) and by two of the \
+         four seeds (1 and 2, which also open with `sel == 1`): \
+         `FAIL: Cycle 832 tail_o expected 1 got 0 (sequence 5 \"first sel=1\", cycle 0)`. Pinned \
+         with its vectors in \
+         sequential_forwarding_divergence.rs::branch_merge_tail_leads_its_sv_when_the_first_cycle_takes_sel_one. \
+         No D1 clause reaches the async spelling (its one `tail_o` write sits after the branch \
+         merge, behind a read on every path), so the module compiles without an opt-out; the \
+         mechanism is the explicit twin's mixed-anchor `tail_o` under control extraction's \
+         duplication. A FINDING, not a fix: no rule and no emission changed for it",
     ),
 ];
 
@@ -205,6 +240,24 @@ const REFERENCE: &[(&str, &str)] = &[
 
 const RESET: &[(&str, &str, bool)] = &[
     ("shift_register", "rstn", true),
+    // Both found by the multi-sequence stimulus policy on 2026-10-28, on its first
+    // run: the single seed each had before happened to assert `reset_i` on cycle 0,
+    // so the pre-reset state was never observed. `simple_counter` starts from
+    // `Bits::<8>::x()` — the shift_register case exactly (sim X, read back as 255,
+    // against Verilator's 0: `count_o expected 255 got 0` on every sequence whose
+    // first cycle had `reset_i == 0`). `lfsr` (both copies, same source) starts from
+    // a RUST initial value, `let mut state = Bits::from_u32(1)`, which the emitted
+    // SystemVerilog does not carry — its flop has no initializer and no reset value
+    // outside the `reset_i` branch, so the Verilated model starts at 0 and, being an
+    // LFSR, stays there until reset: measured `o expected 1 got 0` with
+    // `reset_i == 0, yumi_i == 0` first, and `o expected 2785017856 got 0` (one shift
+    // of 1 under the taps) with `yumi_i == 1` first — pinned in
+    // tests/lfsr_equivalence.rs. A pre-reset flop is X in hardware, so the row
+    // records the measured difference and starts the comparison at the reset, as
+    // the table has always done; the Rust initializer's reach into the SV is a
+    // transpiler question recorded here, not resolved here.
+    ("lfsr", "reset_i", false),
+    ("simple_counter", "reset_i", false),
     // Held low the core is idle and its boot port owns the memory's write bus, so the
     // sweep's random stimulus reaches a defined state instead of X. This is the first
     // CPU-scale design in the sweep; it got here when `vlir_lower` started casting
@@ -212,9 +265,37 @@ const RESET: &[(&str, &str, bool)] = &[
     ("rv32i_cpu_transpilable", "rstn", true),
 ];
 
-/// Cycles of random stimulus per sequential module.
-const SEQ_CYCLES: usize = 200;
-/// Random input vectors per combinational module (no clock, so `poll_tasks`).
+// ── The multi-sequence stimulus policy (2026-10-28) ────────────────────────────
+//
+// `design_docs/CORPUS_DIFFERENTIAL_SWEEP.md` §3.2. Until 2026-10-28 every module was
+// driven by ONE seeded sequence, so its verdict rested on one stimulus and a
+// divergence that depends on the initial input pattern was invisible —
+// `branch_merge` passed by its seed alone (its SKIP row). Each module is now driven
+// by several independent sequences, back to back in one testbench run of ONE
+// Verilated model (a fresh model instance and a fresh executor per sequence), so the
+// cost stays one Verilator build per module. The constants are here; the plan is
+// built at run time by `tests/common::StimulusPlan` (a width written as a file-scope
+// `const` is not known to this script), and pinned by
+// `tests/corpus_generated.rs::the_stimulus_policy_is_what_the_design_doc_says`.
+
+/// Independent random sequences per module. Sequence 0 uses the historical
+/// per-module seed (`seed_of`), so the pre-policy stimulus is sequence 0 verbatim.
+const SEEDS: usize = 4;
+/// Cycles per seed sequence (a clocked module).
+const SEED_CYCLES: usize = 200;
+/// Cycles per first-cycle sequence: the chosen initial vector on the first live
+/// cycle, random stimulus after.
+const FIRST_CYCLES: usize = 32;
+/// A clocked module with at most this many input bits (its RESET port excluded)
+/// starts one sequence from EVERY initial input vector (≤ 16 sequences); a wider
+/// one from the fixed pattern list (all zeros, all ones, each port alone ones,
+/// each port alone zeros).
+const EXHAUSTIVE_BITS: usize = 4;
+/// A combinational module with at most this many input bits is driven by its whole
+/// truth table (≤ 256 vectors) — strictly stronger than random vectors.
+const COMB_EXHAUSTIVE_BITS: usize = 8;
+/// Random input vectors per seed for a wider combinational module (no clock, so
+/// `poll_tasks`); the pattern list is appended as further vectors.
 const COMB_VECTORS: usize = 64;
 
 fn main() {
@@ -360,8 +441,25 @@ fn main() {
         covered.len() - anchored
     );
 
+    // The policy's constants, for the generated cases and for the pin — one
+    // definition, so the generator and the plan cannot disagree about them.
+    let _ = writeln!(
+        code,
+        "/// The stimulus policy's constants — design_docs/CORPUS_DIFFERENTIAL_SWEEP.md §3.2.\n\
+         pub const BUDGET: crate::common::StimulusBudget = crate::common::StimulusBudget {{\n    \
+         seeds: {SEEDS}, seed_cycles: {SEED_CYCLES}, first_cycles: {FIRST_CYCLES},\n    \
+         exhaustive_bits: {EXHAUSTIVE_BITS}, comb_exhaustive_bits: {COMB_EXHAUSTIVE_BITS},\n    \
+         comb_vectors: {COMB_VECTORS},\n}};"
+    );
+
     // Surfaced in the build log too, so the counts are visible without running.
     println!("cargo:warning=corpus sweep: {emitted} generated, {ignored} ignored-with-reason");
+    println!(
+        "cargo:warning=stimulus policy: {SEEDS} seeds x {SEED_CYCLES} cycles per module, plus a \
+         {FIRST_CYCLES}-cycle sequence from every initial input vector up to {EXHAUSTIVE_BITS} input \
+         bits (a first-cycle pattern list above); combinational: the whole truth table up to \
+         {COMB_EXHAUSTIVE_BITS} bits, else {SEEDS} x {COMB_VECTORS} vectors + the pattern list"
+    );
     let unanchored_names: Vec<&str> = covered
         .iter()
         .filter(|n| {
@@ -694,7 +792,8 @@ fn emit_file(
          use copper_core::types::Bits as __Bits;\n    \
          use copper_core::{{Clock as __Clock, Logic as __Logic}};\n    \
          use copper_sim::HardwareExecutor as __Exec;\n    \
-         use crate::common::{{EquivalenceTest as __Eq, RandStim as __RandStim, Rng as __Rng}};"
+         use crate::common::{{EquivalenceTest as __Eq, RandStim as __RandStim, Rng as __Rng, \
+         StimulusPlan as __Plan}};"
     );
     if !has_own_imports {
         // A fixture: it needs the hardware vocabulary to compile at all.
@@ -787,11 +886,62 @@ fn emit_test(code: &mut String, m: &Module, body: bool) {
         code,
         "        let mut eq = __Eq::differential_only(\"{name}\", SRC, Some(\"{name}\")){with_params}{with_reference};"
     );
-    let _ = writeln!(code, "        let mut rng = __Rng::new({});", seed_of(name));
-    if let Some(c) = clk {
-        let _ = writeln!(code, "        let mut clk = __Clock::<{}>::new();", c.domain);
+    // The stimulus plan: the `In` ports in signature order with their widths, which
+    // are resolved by the compiler (`RandStim::WIDTH`) rather than parsed here, so
+    // a width written as a file-scope `const` or a generic parameter is exact.
+    let ins_decl: Vec<String> = m
+        .ports
+        .iter()
+        .filter(|p| p.kind == Kind::In)
+        .map(|p| format!("(\"{}\", <{} as __RandStim>::WIDTH)", p.name, alias_ty(&p.ty, &m.generics)))
+        .collect();
+    let reset = RESET.iter().find(|(n, _, _)| *n == m.name);
+    let reset_arg = match reset {
+        Some((_, port, active_low)) => {
+            let idx = m
+                .ports
+                .iter()
+                .filter(|p| p.kind == Kind::In)
+                .position(|p| p.name == *port)
+                .unwrap_or_else(|| panic!("RESET names port `{port}` of `{name}`, which is not an `In` port"));
+            format!("Some(({idx}usize, {active_low}))")
+        }
+        None => "None".to_string(),
+    };
+    let _ = writeln!(
+        code,
+        "        let mut __plan = __Plan::new(\"{name}\", {seed}u64, &[{ins}], {clocked}, {reset_arg}, crate::BUDGET);\n        \
+         println!(\"{{}}\", __plan.summary());",
+        seed = seed_of(name),
+        ins = ins_decl.join(", "),
+        clocked = clk.is_some(),
+    );
+
+    // The names the testbench will address the Verilated model by — the EMITTED
+    // ones. Resolved by the transpiler's own rule at run time, not guessed here.
+    for p in m.ports.iter().filter(|p| p.kind != Kind::Clock) {
+        let _ = writeln!(
+            code,
+            "        let {n}_sv = copper_codegen::legalized_port_name(\"{n}\");",
+            n = p.name
+        );
     }
-    let _ = writeln!(code, "        let mut exec = __Exec::new();");
+
+    // One sequence per iteration: a fresh executor, clock and wires, so the
+    // simulator starts from the design's initial state exactly as the Verilated
+    // model does at the boundary `begin_sequence` records.
+    let _ = writeln!(code, "        while __plan.next_sequence() {{");
+    let _ = writeln!(code, "            eq.begin_sequence(&__plan.label());");
+    // Unused (and immutable) in a module with no `In` ports; the lint attribute keeps
+    // such a case warning-free without a second code shape.
+    let _ = writeln!(
+        code,
+        "            #[allow(unused_variables, unused_mut)]\n            let mut rng = __Rng::new(__plan.seed());"
+    );
+    if let Some(c) = clk {
+        let _ = writeln!(code, "            let mut clk = __Clock::<{}>::new();", c.domain);
+    }
+    let _ = writeln!(code, "            let mut exec = __Exec::new();");
 
     for p in &m.ports {
         let (ty, z, d) = (alias_ty(&p.ty, &m.generics), zero_of(&p.ty), &p.domain);
@@ -805,35 +955,25 @@ fn emit_test(code: &mut String, m: &Module, body: bool) {
             Kind::In => {
                 let _ = writeln!(
                     code,
-                    "        let ({n}_drv, {n}_in) = __w::<{ty}, {d}>({z});",
+                    "            let ({n}_drv, {n}_in) = __w::<{ty}, {d}>({z});",
                     n = p.name
                 );
             }
             Kind::Out => {
                 let _ = writeln!(
                     code,
-                    "        let ({n}_out, {n}_obs) = __w::<{ty}, {d}>({z});",
+                    "            let ({n}_out, {n}_obs) = __w::<{ty}, {d}>({z});",
                     n = p.name
                 );
             }
             Kind::RegOut => {
                 let _ = writeln!(
                     code,
-                    "        let ({n}_out, {n}_obs) = __rw::<{ty}, {d}>(&clk, {z});",
+                    "            let ({n}_out, {n}_obs) = __rw::<{ty}, {d}>(&clk, {z});",
                     n = p.name
                 );
             }
         }
-    }
-
-    // The names the testbench will address the Verilated model by — the EMITTED
-    // ones. Resolved by the transpiler's own rule at run time, not guessed here.
-    for p in m.ports.iter().filter(|p| p.kind != Kind::Clock) {
-        let _ = writeln!(
-            code,
-            "        let {n}_sv = copper_codegen::legalized_port_name(\"{n}\");",
-            n = p.name
-        );
     }
 
     let handles: Vec<String> = m
@@ -848,8 +988,8 @@ fn emit_test(code: &mut String, m: &Module, body: bool) {
         .filter(|p| p.kind == Kind::In)
         .map(|p| format!("{}_in.wire_id()", p.name))
         .collect();
-    let _ = writeln!(code, "        let handles = vec![{}];", handles.join(", "));
-    let _ = writeln!(code, "        let reads = vec![{}];", reads.join(", "));
+    let _ = writeln!(code, "            let handles = vec![{}];", handles.join(", "));
+    let _ = writeln!(code, "            let reads = vec![{}];", reads.join(", "));
 
     // Arguments in SIGNATURE order — not inputs-then-outputs, which is merely the
     // usual convention and not a rule any module is obliged to follow.
@@ -864,59 +1004,38 @@ fn emit_test(code: &mut String, m: &Module, body: bool) {
         })
         .collect();
     let turbofish = match params {
-        Some(ps) if !m.generics.is_empty() => format!(
+        Some(_) if !m.generics.is_empty() => format!(
             "::<{}>",
-            m.generics
-                .iter()
-                .map(|g| {
-                    let _ = ps;
-                    format!("P_{g}")
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
+            m.generics.iter().map(|g| format!("P_{g}")).collect::<Vec<_>>().join(", ")
         ),
         _ => String::new(),
     };
     let _ = writeln!(
         code,
-        "        exec.spawn_wired({name}{turbofish}({}), handles, reads);\n",
+        "            exec.spawn_wired({name}{turbofish}({}), handles, reads);\n",
         args.join(", ")
     );
 
-    let cycles = if clk.is_some() { SEQ_CYCLES } else { COMB_VECTORS };
-    let reset = RESET.iter().find(|(n, _, _)| *n == m.name);
-    let _ = writeln!(code, "        for __cycle in 0..{cycles} {{");
-    for p in m.ports.iter().filter(|p| p.kind == Kind::In) {
+    // The cycle loop. Every `In` port asks the plan for its value, once per cycle in
+    // signature order — the plan's reset, first-cycle-vector and random rules are
+    // all in `StimulusPlan::stim`, not here.
+    let _ = writeln!(code, "            for __cycle in 0..__plan.cycles() {{");
+    for (i, p) in m.ports.iter().filter(|p| p.kind == Kind::In).enumerate() {
         let ty = alias_ty(&p.ty, &m.generics);
-        match reset {
-            // Cycle 0 asserts the reset; after that it is random like everything else,
-            // so the reset path keeps being exercised rather than being visited once.
-            Some((_, port, active_low)) if *port == p.name => {
-                let asserted = if *active_low { "__Logic::Zero" } else { "__Logic::One" };
-                let _ = writeln!(
-                    code,
-                    "            let {n}_v = if __cycle == 0 {{ {asserted} }} else {{ \
-                     <{ty} as __RandStim>::rand(&mut rng) }};\n            {n}_drv.write({n}_v);",
-                    n = p.name
-                );
-            }
-            _ => {
-                let _ = writeln!(
-                    code,
-                    "            let {n}_v = <{ty} as __RandStim>::rand(&mut rng);\n            \
-                     {n}_drv.write({n}_v);",
-                    n = p.name
-                );
-            }
-        }
+        let _ = writeln!(
+            code,
+            "                let {n}_v = __plan.stim::<{ty}>(__cycle, {i}usize, &mut rng);\n                \
+             {n}_drv.write({n}_v);",
+            n = p.name
+        );
     }
     let _ = writeln!(
         code,
-        "            {}",
+        "                {}",
         if clk.is_some() { "exec.tick_clock(&mut clk);" } else { "exec.poll_tasks();" }
     );
     for p in m.ports.iter().filter(|p| matches!(p.kind, Kind::Out | Kind::RegOut)) {
-        let _ = writeln!(code, "            let {n}_v = {n}_obs.read();", n = p.name);
+        let _ = writeln!(code, "                let {n}_v = {n}_obs.read();", n = p.name);
     }
     let ins: Vec<String> = m
         .ports
@@ -932,10 +1051,11 @@ fn emit_test(code: &mut String, m: &Module, body: bool) {
         .collect();
     let _ = writeln!(
         code,
-        "            eq.record_differential(&[{}], &[{}]);",
+        "                eq.record_differential(&[{}], &[{}]);",
         ins.join(", "),
         outs.join(", ")
     );
+    let _ = writeln!(code, "            }}");
     let _ = writeln!(code, "        }}");
     let _ = writeln!(code, "        eq.finish();");
     let _ = writeln!(code, "    }}\n");

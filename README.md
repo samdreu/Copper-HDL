@@ -197,13 +197,24 @@ independent hand-written Verilog reference (**G-E**). It prints every
 `build.rs` generates one equivalence case per `#[hardware]` module in `examples/`
 and `tests/fixtures/` (not `src/`, and not modules defined inline in a
 `tests/*.rs` file): seeded random stimulus into the simulator, and the
-SystemVerilog that module transpiles to Verilated against the same trace — 200
-cycles for a sequential module, 64 vectors for a combinational one (`SEQ_CYCLES`
-/ `COMB_VECTORS` in `build.rs`). No reference model is needed — the simulator
-and the emitted SV are two independent implementations of one source, so
-comparing them is already an oracle — which is what makes a case cheap enough to
-have for *every* module rather than for whichever ones someone wrote a harness
-for.
+SystemVerilog that module transpiles to Verilated against the same trace. No
+reference model is needed — the simulator and the emitted SV are two independent
+implementations of one source, so comparing them is already an oracle — which is
+what makes a case cheap enough to have for *every* module rather than for
+whichever ones someone wrote a harness for.
+
+Each case drives **several stimulus sequences**, not one (since 2026-10-28): four
+independent seeds of 200 cycles, plus a 32-cycle sequence starting from *every*
+initial input vector for a module with at most 4 input bits (a fixed first-cycle
+pattern list for a wider one), and the whole truth table for a combinational
+module of up to 8 input bits (`SEEDS`, `SEED_CYCLES`, `FIRST_CYCLES`,
+`EXHAUSTIVE_BITS`, `COMB_EXHAUSTIVE_BITS`, `COMB_VECTORS` in `build.rs`). The
+sequences run back to back in one testbench against one Verilated model,
+restarted from its initial state at each boundary, so the cost stays one
+Verilator build per module. A failure names the sequence it fell in, and
+`COPPER_SWEEP_SEQUENCE=<index>` re-runs that sequence alone. Until then a
+module's verdict rested on one seed — `branch_merge` passed for two months while
+its `tail_o` led the SV by a cycle whenever the first cycle took `sel == 1`.
 
 A module the sweep cannot run gets an `#[ignore]` with its reason, never an
 omission, and G-D fails if the generator quietly stops covering something. Widths
@@ -472,9 +483,12 @@ rather than papered over (`SKIP` in `build.rs`):
 
 - `branch_merge_explicit`'s `tail_o`, a mixed-anchor port (written behind an
   input read and, in another state, with no read before it) that leads its SV by
-  one cycle when the first cycle takes the `sel == 1` path — a stimulus the
-  seeded sweep never produces, so its row stays a `SKIP` rather than a false
-  green. (`probe_fsm`, listed here until 2026-10-26, agrees and sweeps.)
+  one cycle when the first cycle takes the `sel == 1` path — and the same port
+  of its live, unflagged async twin `branch_merge`, which transpiles to the
+  byte-identical SV and which no rule reaches. The single-seed sweep never
+  produced that first cycle for either; the multi-sequence stimulus (above) does,
+  and both rows record the measured trace. (`probe_fsm`, listed here until
+  2026-10-26, agrees and sweeps.)
 
 The phase-E probe battery (2026-10-23) found two single-phase shapes that
 disagreed by one cycle and that no rule guarded; both are closed as of

@@ -9,6 +9,25 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone)]
 pub struct SimulationTrace {
     pub cycles: Vec<CycleData>,
+    /// Stimulus-sequence boundaries, in order (see [`SimulationTrace::begin_sequence`]).
+    /// Empty for a single-sequence trace, which is every trace recorded before
+    /// 2026-10-28 and produces a byte-identical testbench to that date's.
+    pub sequences: Vec<SequenceMark>,
+}
+
+/// The start of one stimulus sequence inside a trace. Every sequence begins from
+/// the design's **initial state**: the generated testbench destroys the Verilated
+/// model and constructs a fresh one at the boundary, so the sequences share one
+/// compiled model and one build but nothing else — the corpus sweep's
+/// multi-sequence stimulus policy (`design_docs/CORPUS_DIFFERENTIAL_SWEEP.md` §3.2)
+/// rests on this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequenceMark {
+    /// Index into `cycles` of the sequence's first cycle.
+    pub start: usize,
+    /// What the sequence is (a seed, a first-cycle vector, …), carried into the
+    /// testbench's `FAIL:` lines so a mismatch names the stimulus that produced it.
+    pub label: String,
 }
 
 /// Represents the data for a single cycle in the simulation, including the cycle number, input signal values, and output signal values. 
@@ -23,12 +42,30 @@ pub struct CycleData {
 impl SimulationTrace {
     /// Create a new empty simulation trace.
     pub fn new() -> Self {
-        SimulationTrace { cycles: Vec::new() }
+        SimulationTrace { cycles: Vec::new(), sequences: Vec::new() }
     }
 
     /// Create a trace from a pre-built list of cycles. Useful for constructing expected traces.
     pub fn from_cycles(cycles: Vec<CycleData>) -> Self {
-        SimulationTrace { cycles }
+        SimulationTrace { cycles, sequences: Vec::new() }
+    }
+
+    /// Begin a new stimulus sequence: the cycles recorded from here on start from
+    /// the design's initial state, on a fresh instance of the Verilated model. Call
+    /// it before the first cycle of every sequence, the first included (a mark at
+    /// index 0 needs no restart and emits none).
+    pub fn begin_sequence(&mut self, label: &str) {
+        self.sequences.push(SequenceMark { start: self.cycles.len(), label: label.to_string() });
+    }
+
+    /// The sequence (its index among the marks and the mark itself) that the cycle
+    /// at position `index` belongs to, if the trace has sequence marks at all.
+    pub fn sequence_of(&self, index: usize) -> Option<(usize, &SequenceMark)> {
+        self.sequences
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, m)| m.start <= index)
     }
 
     /// Add a cycle's data to the trace.
@@ -149,7 +186,11 @@ pub fn generate_testbench(
     if tracing {
         tb.push_str("#include \"verilated_vcd_c.h\"\n");
     }
-    tb.push_str("#include <iostream>\n\n");
+    tb.push_str("#include <iostream>\n");
+    if !trace.sequences.is_empty() && tracing {
+        tb.push_str("#include <string>\n");
+    }
+    tb.push_str("\n");
 
     // main()
     tb.push_str("int main(int argc, char** argv) {\n");
@@ -177,7 +218,41 @@ pub fn generate_testbench(
     tb.push_str("    int failures = 0;\n\n");
 
     // Test cycles
-    for cycle_data in &trace.cycles {
+    for (index, cycle_data) in trace.cycles.iter().enumerate() {
+        // A sequence boundary: the model is destroyed and constructed afresh, so the
+        // sequence starts from the design's initial state exactly as the first one
+        // did (and as the simulator's fresh executor does). A traced run writes one
+        // VCD per sequence, `<argv[1]>.seq<k>` for every sequence after the first.
+        // Marks at index 0 need no restart. The text here is part of the model-cache
+        // key like everything else in the testbench, and is emitted only for a
+        // trace that has marks, so a single-sequence trace is byte-identical to the
+        // pre-2026-10-28 form.
+        if let Some((k, mark)) = trace.sequences.iter().enumerate().find(|(_, m)| m.start == index) {
+            tb.push_str(&format!("    // ── sequence {k}: {} ──\n", cpp_string(&mark.label)));
+            if index > 0 {
+                tb.push_str("    delete top;\n");
+                tb.push_str(&format!("    top = new V{}();\n", module_name));
+                if tracing {
+                    tb.push_str("    tfp->close();\n");
+                    tb.push_str("    delete tfp;\n");
+                    tb.push_str("    tfp = new VerilatedVcdC();\n");
+                    tb.push_str("    top->trace(tfp, 99);\n");
+                    tb.push_str(&format!(
+                        "    tfp->open((std::string(argv[1]) + \".seq{k}\").c_str());\n"
+                    ));
+                }
+            }
+        }
+        // What a FAIL line says about the stimulus: nothing for a single-sequence
+        // trace, the sequence and its local cycle otherwise.
+        let seq_note = match trace.sequence_of(index) {
+            Some((k, mark)) if !trace.sequences.is_empty() => format!(
+                " (sequence {k} \\\"{}\\\", cycle {})",
+                cpp_string(&mark.label),
+                index - mark.start
+            ),
+            _ => String::new(),
+        };
         tb.push_str(&format!("    // Cycle {}\n", cycle_data.cycle));
 
         for (name, values) in &cycle_data.inputs {
@@ -208,7 +283,7 @@ pub fn generate_testbench(
             let expected_val = logic_vec_to_int(expected);
             tb.push_str(&format!(
                 "    if (top->{name} != {exp}) {{\n\
-                 \x20\x20\x20\x20    std::cout << \"FAIL: Cycle {cyc} {name} expected {exp} got \" << (int)top->{name} << std::endl;\n\
+                 \x20\x20\x20\x20    std::cout << \"FAIL: Cycle {cyc} {name} expected {exp} got \" << (int)top->{name} << \"{seq_note}\" << std::endl;\n\
                  \x20\x20\x20\x20    failures++;\n\
                  \x20\x20\x20\x20}} else {{\n\
                  \x20\x20\x20\x20    std::cout << \"PASS: Cycle {cyc} {name}\" << std::endl;\n\
@@ -239,6 +314,16 @@ pub fn generate_testbench(
     tb.push_str("}\n");
 
     tb
+}
+
+/// A label as it may appear inside a C++ string literal or a `//` comment: the two
+/// characters that would end or escape the literal are escaped, and a newline —
+/// which would end the comment and then the literal — is folded to a space.
+fn cpp_string(label: &str) -> String {
+    label
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r'], " ")
 }
 
 /// Convert Logic vector to integer for C++ testbench
