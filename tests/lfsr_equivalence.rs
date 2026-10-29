@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::EquivalenceTest;
+use common::{transpile_fixture, verilator_available, EquivalenceTest};
 use copper_core::port::{wire, In, Out};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
@@ -83,4 +83,74 @@ fn lfsr_sim_matches_transpiled_verilog() {
     }
 
     eq.finish();
+}
+
+/// **Before its reset, the simulator and the emitted SystemVerilog disagree** — found
+/// by the corpus sweep's multi-sequence stimulus policy on 2026-10-28 (the single
+/// seed it had before happened to assert `reset_i` on cycle 0). The module starts
+/// `state` at a Rust initial value, `Bits::from_u32(1)`, which the SV does not
+/// carry: its flop has no initializer and no reset value outside the `reset_i`
+/// branch, so the Verilated model starts at 0 and, being an LFSR, stays there until
+/// reset. Measured: with `reset_i = 0, yumi_i = 0` the simulator reads `o = 1` and
+/// the SV `0` on every pre-reset cycle; with `yumi_i = 1` the simulator advances
+/// from 1 (`2785017856`, then `1392508928`) while the SV stays at 0. The sweep
+/// therefore starts its comparison at the reset (`build.rs`'s `RESET` row). This
+/// pins the difference so it is a recorded fact rather than a lucky seed; whether a
+/// Rust initializer should reach the SV is a transpiler question, not settled here.
+#[test]
+fn before_reset_the_simulator_holds_its_rust_initial_value_and_the_sv_holds_zero() {
+    let mut clk = Clock::<MainClk>::new();
+    let mut exec = HardwareExecutor::new();
+    let (reset_drv, reset_in) = wire::<Logic, MainClk>(Logic::Zero);
+    let (yumi_drv, yumi_in) = wire::<Logic, MainClk>(Logic::Zero);
+    let (o_out, o_obs) = wire::<Bits<32>, MainClk>(Bits::zero());
+    let dh = o_out.dirty_handle();
+    let reads = vec![reset_in.wire_id(), yumi_in.wire_id()];
+    exec.spawn_wired(lfsr(clk.clone(), reset_in, yumi_in, o_out), vec![dh], reads);
+
+    // Never reset: three held cycles, then three shifting ones.
+    let stimulus: Vec<Logic> = vec![Logic::Zero, Logic::Zero, Logic::Zero, Logic::One, Logic::One, Logic::One];
+    let mut trace = copper_sim::SimulationTrace::new();
+    let mut sim: Vec<u32> = Vec::new();
+    for (cycle, &yumi) in stimulus.iter().enumerate() {
+        reset_drv.write(Logic::Zero);
+        yumi_drv.write(yumi);
+        exec.tick_clock(&mut clk);
+        let o = o_obs.read();
+        sim.push(o.as_array().iter().enumerate().fold(0u32, |acc, (i, b)| {
+            if *b == Logic::One { acc | (1 << i) } else { acc }
+        }));
+        trace.add_cycle(
+            cycle,
+            vec![("reset_i".into(), vec![Logic::Zero]), ("yumi_i".into(), vec![yumi])],
+            vec![("o".into(), o.as_array().to_vec())],
+        );
+    }
+    assert_eq!(sim, vec![1, 1, 1, 2785017856, 1392508928, 696254464], "simulator behaviour changed");
+
+    if !verilator_available() {
+        return;
+    }
+    let sv = transpile_fixture("lfsr", DUT_SRC, None);
+    let run = copper_sim::verify_with_verilator_report(
+        sv.to_str().unwrap(),
+        "lfsr",
+        &trace,
+        None,
+        &[],
+        copper_sim::VerilatorCachePolicy::from_env(),
+    )
+    .expect("Verilator ran");
+    assert!(
+        !run.passed,
+        "the SV now agrees with the simulator before reset — the lfsr RESET row in build.rs \
+         is no longer needed, and the Rust initializer reaches the SV"
+    );
+    for (cycle, expected) in sim.iter().enumerate() {
+        assert!(
+            run.output.contains(&format!("FAIL: Cycle {cycle} o expected {expected} got 0")),
+            "cycle {cycle}: expected the SV at 0 before reset; Verilator said:\n{}",
+            run.output
+        );
+    }
 }

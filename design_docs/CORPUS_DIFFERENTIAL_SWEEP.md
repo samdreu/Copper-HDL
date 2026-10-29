@@ -11,9 +11,11 @@ The counts move as the corpus does, so trust the tool over any number written he
 and G-D prints `corpus sweep ran N differential cases (M ignored-with-reason)` on
 every full run. The current counts are in the build and regression printouts above (and in
 `paper/stats/SUMMARY.md`); on 2026-09-01 it was 133 running, 10 ignored-with-reason, out of
-143 modules. Every one of the ten is a row in `build.rs`'s `SKIP` table — a recorded
+143 modules, and on 2026-10-28 146 running, 9 ignored-with-reason, out of 155. Every
+ignored one is a row in `build.rs`'s `SKIP` table — a recorded
 transpiler refusal, a structural module with no simulatable body, a deliberate
-divergence witness, a documented startup transient, or the pipelined CPU, whose
+divergence witness, a measured divergence (`branch_merge`, §0), a stimulus
+precondition the sweep will not keep (`mod8`, §0), or the pipelined CPU, whose
 `Memory` parameter the harness cannot supply. **None is "the generator cannot do
 this."**
 
@@ -61,6 +63,34 @@ the findings are the argument for the sweep.
   layout is the one the hand-written array tests already record. Type rewriting in
   the generator is token-wise (`alias_ty`): `Bits<N_LOG>` must not be rewritten by a
   rule for `N`.
+* **2026-10-28 (the multi-sequence stimulus policy, §3.2): one defect, the one
+  it was built for.** The sweep's verdict had rested on one stimulus per module.
+  `branch_merge` — the live, unflagged async twin of `branch_merge_explicit`,
+  byte-identical SystemVerilog — leads its SV by one cycle on `tail_o` whenever the
+  first cycle takes `sel == 1`, and the per-module seed drives `sel == 0` first, so
+  the module had passed by its seed alone (recorded as a blind spot in
+  `PRETICK_ALIGNMENT_GUARDRAIL.md` §5.5 on 2026-10-26). Measured first, as its own
+  probe (`tests/sequential_forwarding_divergence.rs::branch_merge_tail_leads_its_sv_when_the_first_cycle_takes_sel_one`:
+  sim `tail_o = 1` at cycle 0, SV `0`, agreement from cycle 1 on); then the policy
+  landed and the sweep's `sel == 1` first-cycle sequence failed the case on the first
+  run (`FAIL: Cycle 832 tail_o expected 1 got 0 (sequence 5 "first sel=1", cycle 0)`;
+  two of the four seeds open with `sel == 1` too and fail at their cycle 0), which
+  is the `SKIP` row it carries now. **Three other modules changed verdict on the
+  same run, none a divergence of the lowering, each a precondition the single seed
+  had satisfied by luck:** `simple_counter` starts from `Bits::<8>::x()` and `lfsr`
+  (both copies) from a Rust initial value of 1 that the emitted SV does not carry
+  (its flop has no initializer, so Verilator starts it at 0 and an LFSR at 0 stays
+  there) — every sequence whose first cycle had `reset_i == 0` failed at cycle 0,
+  and the old seed had asserted `reset_i` first for all three. They got `RESET`
+  rows, the table that exists for state-undefined-until-reset, with the measured
+  pre-reset difference in the row's sentence and `lfsr`'s pinned in
+  `tests/lfsr_equivalence.rs` (whether a Rust initializer should reach the SV is a
+  transpiler question recorded there, not settled). `mod8`, a combinational `a % b`
+  whose header says the divisor is kept non-zero *by the stimulus*, drew `b == 0`
+  from the all-zeros pattern and from two seeds — the simulator's all-X against
+  Verilator's 0 — and got a `SKIP` row (the sweep does no stimulus masking, §3.4);
+  its operator stays covered by hand-written vectors. Every other case passed its
+  four seeds and its first-cycle sequences.
 * **After the log:** the `SKIP` table gained `<wrapper>::<module>` keys because the
   *example* copy of `ripple_carry_adder` refused (cause J-b) while the fixture copy
   swept; J-b closed 2026-08-27 and both copies sweep, but the key form stays. On
@@ -109,7 +139,10 @@ mechanical, and mechanical is what makes it complete.
 
 * A divergence that needs a **specific long input sequence** (a deep FSM state
   reached only by an exact pattern). Random stimulus is weak here; hand vectors and
-  the golden traces stay.
+  the golden traces stay. Since 2026-10-28 the *first* cycle is no longer left to
+  chance (§3.2 — every initial vector for a narrow module, a pattern list for a wide
+  one), and four seeds rather than one walk the rest; a rare *later* pattern is
+  still the random stimulus's weak spot.
 * A **shared misunderstanding** — both sides wrong the same way. Only an independent
   reference catches that, which is what `examples/basejump/` and the `REFERENCE`
   table are for (`ANCHORING_A_MODULE.md`). The anchoring is not replaced by this and
@@ -199,19 +232,76 @@ emitting a case that will not compile. Every fixture and example uses `//` heade
 rebuild tracking, so a changed module would silently keep its stale generated test.
 That is this repo's recurring bug class, not a hypothetical.
 
-### 3.2 Stimulus
+### 3.2 Stimulus — the multi-sequence policy (2026-10-28)
 
-A seeded `Rng` (SplitMix64, `tests/common/mod.rs`) produces a fresh random value for
-every `In` port on every cycle, by payload type through the `RandStim` trait: `Logic`
-a random bit, `Bits<N>` N random bits, `[T; N]` element-wise. The seed is a per-module
-FNV-1a hash of the module name (`build.rs`'s `seed_of`), so two modules do not walk
-the same bit pattern and a failure is reproducible from the name alone. `SEQ_CYCLES`
-(200) ticks per sequential module; `COMB_VECTORS` (64) vectors per combinational
-module, settled with `poll_tasks`. Outputs are wired with `wire` or `registered_wire`
-according to whether the port is `Out` or `RegOut`, and read after every tick. A
-module with a `RESET` row has that port driven to its asserted value on cycle 0 and
-randomly thereafter, so the reset path keeps being exercised rather than visited
-once.
+**Until 2026-10-28 each module was driven by ONE sequence** — 200 cycles from one
+per-module seed (64 vectors for a combinational module) — so a module's verdict
+rested on one stimulus, and a divergence that depends on the initial input pattern
+was invisible. The instance that made this a bug rather than a caveat is
+`branch_merge` (§0, 2026-10-28): its seed happened to drive `sel == 0` first, under
+which its `tail_o` lag cannot be seen. The policy below is what replaced it; the
+constants are `build.rs`'s `SEEDS`, `SEED_CYCLES`, `FIRST_CYCLES`,
+`EXHAUSTIVE_BITS`, `COMB_EXHAUSTIVE_BITS`, `COMB_VECTORS`, and the plan itself is
+built at run time by `StimulusPlan` in `tests/common/mod.rs` (the generator cannot
+know a width written as a file-scope `const`), so the policy is one function with
+one pin, `tests/corpus_generated.rs::the_stimulus_policy_is_what_the_design_doc_says`,
+which G-D requires to have run.
+
+Each swept module is driven by **several independent stimulus sequences, back to
+back, in one testbench run of one Verilated model.** In order:
+
+1. **Seed sequences.** `SEEDS` (= 4) independent random sequences of `SEED_CYCLES`
+   (= 200) cycles. Sequence 0 uses the historical per-module seed — the FNV-1a hash
+   of the module name (`seed_of`) — so the pre-policy stimulus is sequence 0
+   *verbatim* and every verdict the sweep ever gave is a subset of the new one.
+   Sequence *k* uses `seed_of("<name>#k")`. A seeded `Rng` (SplitMix64) produces a
+   fresh value for every `In` port on every cycle through `RandStim`, as before.
+2. **First-cycle sequences.** Let *W* be the module's total `In` width, excluding
+   its `RESET` port if it has one, and let the *first live cycle* be cycle 0 — or
+   cycle 1 for a `RESET` module, whose cycle 0 is the asserted reset as before; the
+   pattern cycle deasserts the reset, so the pattern is the first thing the design
+   sees out of reset.
+   * ***W* ≤ `EXHAUSTIVE_BITS` (= 4): one sequence per initial input vector** —
+     every one of the 2^*W* ≤ 16 vectors on the first live cycle, random stimulus
+     for the remaining `FIRST_CYCLES` − 1 (= 31) cycles, under a seed derived from
+     the vector. A one-input-bit module such as `branch_merge` therefore starts
+     once from `sel == 0` and once from `sel == 1`; nothing about the first cycle
+     is left to the seed.
+   * ***W* > 4: a fixed first-cycle pattern list** — all bits zero; all bits one;
+     and for each `In` port, that port all ones with every other port zero, and
+     that port zero with every other port all ones (2 + 2·*P* patterns, *P* the
+     number of `In` ports; every input bit is tried at 0 and at 1 against both
+     backgrounds). Duplicates are dropped, and so is **any pattern whose vector a
+     seed sequence already produced on its first live cycle** — checked at run time
+     against the vectors actually driven, not predicted from the seed, and said so
+     in the sequence's legend line.
+
+   A **combinational** module (no clock; every vector independent) with *W* ≤
+   `COMB_EXHAUSTIVE_BITS` (= 8) is driven by its **whole truth table** — one
+   sequence, every vector once — instead of random vectors, which is strictly
+   stronger; a wider one gets `SEEDS` × `COMB_VECTORS` (= 64) random vectors and the
+   pattern list as further vectors.
+
+**Isolation.** Every sequence starts from the design's initial state on both
+sides: a fresh executor, wires and spawn in the simulator, and a fresh Verilated
+instance in the testbench (`delete top; top = new V<module>()` at each sequence
+boundary — `SimulationTrace::sequences`, `HardwareTest::begin_sequence`). The
+sequences share one compiled testbench, so the cost is **one Verilator build per
+module, exactly as before**; the model cache keys the whole testbench, so the
+policy change itself is one cold miss per module and a repeat is free.
+
+**Reporting.** The case prints a legend — one line per sequence with its index,
+kind, seed or vector, and length — before it runs. A mismatch is reported by the
+testbench as `FAIL: Cycle <global> <port> expected <e> got <g> (sequence <i>
+"<label>", cycle <local>)`, and the harness's failure report lists which sequences
+failed with their labels. `COPPER_SWEEP_SEQUENCE=<i>` re-runs the case with that
+one sequence, so a failure is reproducible from the module name and an index.
+
+**Budget.** Per clocked module: 4 × 200 cycles of seeds plus at most 16 × 32
+first-cycle cycles — **≤ 1,312 cycles per module against 200 before**, about
+5× the testbench text corpus-wide (134,000 cycles against 27,000, estimated from
+the signatures on 2026-10-28), in the same number of Verilator builds. What that
+costs in wall time is a measured number, not an estimate: none worth seeing (§5).
 
 ### 3.3 Comparison
 
@@ -285,7 +375,14 @@ its most-repeated bug class. A sweep without G-D would be one more instance of i
 
 * **Runtime.** One Verilator build per module, a few seconds each, absorbed by
   `cargo test`'s thread pool. It belongs in the full driver run, not `--quick`;
-  `tools/regression.sh` prints the elapsed time of every run.
+  `tools/regression.sh` prints the elapsed time of every run. The multi-sequence
+  policy (§3.2) kept the build count and grew the testbench about 5×; measured on
+  the `recycle` machine (96 cores, no ccache, `tools/regression-remote.sh --sync`
+  into a clone of its own, 2026-10-28), the full regression's wall time was
+  **699 s cold / 323 s warm before** and **704 s cold / 307 s warm after** (cold:
+  every Verilator model built; warm: every model a cache hit) — within the
+  run-to-run noise of a shared box, because the Verilator build dominates and its
+  count did not change.
 * **Noise from undefined inputs.** A module that needs more than the harness's
   rules is usually a finding about the module's contract rather than about the
   sweep; `RESET` and `SKIP` are the two places that finding is recorded.

@@ -145,6 +145,18 @@ impl HardwareTest {
         self
     }
 
+    /// Begin a new stimulus sequence. The cycles recorded after this start from the
+    /// design's initial state: the Verilator testbench destroys the model and
+    /// constructs a fresh one at the boundary (see
+    /// [`SimulationTrace::begin_sequence`]), and the caller does the same on the
+    /// simulator side with a fresh executor. The sequences share one compiled model,
+    /// which is what lets the corpus sweep drive several stimulus sequences per
+    /// module for the cost of one Verilator build. `label` names the sequence in the
+    /// testbench's `FAIL:` lines.
+    pub fn begin_sequence(&mut self, label: &str) {
+        self.actual_trace.begin_sequence(label);
+    }
+
     /// Record one simulation cycle into the actual trace.
     /// Use this for simple combinational or sequential modules.
     pub fn record_cycle(

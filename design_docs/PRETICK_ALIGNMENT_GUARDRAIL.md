@@ -753,7 +753,17 @@ first. Neither D1 clause flags the async twin (its `tail_o` write sits after the
 branch merge, not on a path of its own). Candidate remedies, none taken here: a
 drive-level emission that anchors each write of a port separately (§9.4's
 drive-level form), a rule that reaches the async spelling, or sweep stimulus that
-varies the first cycle. **The clause was retired 2026-10-28 (§5.8):** the
+varies the first cycle. **The blind spot was closed 2026-10-28 by the third
+remedy:** the sweep now drives every module with several stimulus sequences
+(`CORPUS_DIFFERENTIAL_SWEEP.md` §3.2 — four seeds, and for a module this narrow one
+sequence from *each* initial input vector), and `branch_merge` fails its `first
+sel=1` sequence at cycle 0 — `FAIL: Cycle 832 tail_o expected 1 got 0 (sequence 5
+"first sel=1", cycle 0)` — exactly the lag described here, now a `SKIP` row of its
+own with the trace in its sentence and a probe with the pinned vectors
+(`sequential_forwarding_divergence.rs::branch_merge_tail_leads_its_sv_when_the_first_cycle_takes_sel_one`:
+sim `(head, mid, tail)` = `(1, 0, 1)` at cycle 0, SV `(1, 0, 0)`, equal from cycle 1).
+The divergence itself is unchanged — a finding the sweep can now see, not a fix.
+**The clause was retired 2026-10-28 (§5.8):** the
 re-derived rule refuses `branch_merge_explicit`'s `tail_o` as a mixed-anchor port
 (its minimal pair is `d2a`), admits `pc_arm_*` (opening on both sides), and no
 longer keys on the write's conditionality or on an unprotected assignment.
@@ -903,10 +913,12 @@ the graph, for clause (B).
 direction — the edge-form guard for the comb copy of an opening drive (B; the
 mirror image of `TODO` cause N) and the drive-level form of §9.4 for (A) — and
 each is a codegen change with its own sv-baseline decision; the rule refuses
-the shapes until one lands. `branch_merge`'s seed-masked `tail_o` lag (§5.5) is
-untouched: the async twin's single write node has a read on every path within
+the shapes until one lands. `branch_merge`'s `tail_o` lag (§5.5) is untouched by
+the rule: the async twin's single write node has a read on every path within
 the head region, so neither clause reaches it, and the mechanism is the
-multi-phase mixed-anchor one under control extraction's duplication.
+multi-phase mixed-anchor one under control extraction's duplication. Since
+2026-10-28 it is no longer seed-masked — the sweep's multi-sequence stimulus
+exposes it and its `SKIP` row records the measured trace.
 
 ---
 

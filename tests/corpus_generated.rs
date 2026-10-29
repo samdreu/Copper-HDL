@@ -22,6 +22,196 @@ mod common;
 
 include!(concat!(env!("OUT_DIR"), "/corpus_generated.rs"));
 
+/// **The stimulus policy's pin** — `design_docs/CORPUS_DIFFERENTIAL_SWEEP.md` §3.2,
+/// asserted against `StimulusPlan` with the generated `BUDGET`, so the sentence in
+/// the doc and the sequences the sweep drives cannot drift apart silently.
+/// `tools/regression.sh`'s G-D requires this test's `ok` line, the way it requires
+/// the coverage guard's: a sweep that ran under some other policy is not the sweep
+/// the doc describes.
+#[test]
+fn the_stimulus_policy_is_what_the_design_doc_says() {
+    use common::{bits_key, RandStim, Rng, SequenceKind, StimulusPlan};
+    use copper_core::{Bits, Logic};
+    use std::collections::BTreeSet;
+
+    let b = BUDGET;
+    assert_eq!(
+        (b.seeds, b.seed_cycles, b.first_cycles, b.exhaustive_bits, b.comb_exhaustive_bits, b.comb_vectors),
+        (4, 200, 32, 4, 8, 64),
+        "the constants §3.2 states"
+    );
+    let bits = |v: &[u8]| v.iter().map(|x| *x == 1).collect::<Vec<bool>>();
+    let firsts = |p: &StimulusPlan| {
+        p.sequences().iter().filter_map(|s| s.first.as_deref().map(bits_key)).collect::<BTreeSet<_>>()
+    };
+
+    // ── A one-input-bit clocked module (branch_merge's shape): four seeds, then
+    //    one 32-cycle sequence from EACH initial vector. Sequence 0 is the
+    //    historical seed, and every sequence has a seed of its own.
+    let p = StimulusPlan::new("m", 0x1234, &[("sel", 1)], true, None, b).with_only(None);
+    let seqs = p.sequences();
+    assert_eq!(seqs.len(), 4 + 2);
+    assert!(seqs[..4].iter().all(|s| s.kind == SequenceKind::Seed && s.cycles == 200 && s.first.is_none()));
+    assert_eq!(seqs[0].seed, 0x1234, "sequence 0 is the historical per-module seed, verbatim");
+    assert_eq!(seqs.iter().map(|s| s.seed).collect::<BTreeSet<_>>().len(), 6, "distinct seeds");
+    assert!(seqs[4..].iter().all(|s| s.kind == SequenceKind::Exhaustive && s.cycles == 32));
+    assert_eq!(firsts(&p), BTreeSet::from([bits(&[0]), bits(&[1])]));
+    assert_eq!(p.first_live_cycle(), 0);
+
+    // Driving it: sequence 0's stimulus IS the bare seeded walk the single-sequence
+    // sweep made (so every verdict it ever gave is a subset of the new one); the
+    // `sel = 1` sequence drives 1 on cycle 0 and random after.
+    let mut p = p;
+    assert!(p.next_sequence());
+    assert_eq!(p.index(), 0);
+    let mut rng = Rng::new(p.seed());
+    let mut bare = Rng::new(0x1234);
+    for c in 0..p.cycles() {
+        assert_eq!(p.stim::<Logic>(c, 0, &mut rng), bare.logic(), "cycle {c}");
+    }
+    for _ in 0..5 {
+        assert!(p.next_sequence());
+    }
+    assert_eq!(p.index(), 5);
+    assert_eq!(p.label(), "first sel=1");
+    let mut rng = Rng::new(p.seed());
+    assert_eq!(p.stim::<Logic>(0, 0, &mut rng), Logic::One);
+    for c in 1..p.cycles() {
+        let _ = p.stim::<Logic>(c, 0, &mut rng);
+    }
+    assert!(!p.next_sequence());
+    assert_eq!(p.covered().len(), 2, "both initial vectors were driven: {:?}", p.covered());
+
+    // ── Four input bits: still exhaustive (16 sequences); five: the pattern list.
+    let p = StimulusPlan::new("m", 1, &[("a", 1), ("b", 3)], true, None, b);
+    assert_eq!(p.sequences().len(), 4 + 16);
+    assert_eq!(firsts(&p).len(), 16);
+    let p = StimulusPlan::new("m", 1, &[("a", 1), ("b", 4)], true, None, b);
+    assert!(p.sequences()[4..].iter().all(|s| s.kind == SequenceKind::Pattern && s.cycles == 32));
+    assert_eq!(
+        firsts(&p),
+        BTreeSet::from([
+            bits(&[0, 0, 0, 0, 0]), // all zeros
+            bits(&[1, 1, 1, 1, 1]), // all ones
+            bits(&[1, 0, 0, 0, 0]), // only a ones  (= only b zeros)
+            bits(&[0, 1, 1, 1, 1]), // only a zeros (= only b ones)
+        ]),
+        "the pattern list, deduplicated"
+    );
+    assert_eq!(p.sequences().len(), 4 + 4);
+
+    // ── No inputs: seeds only.
+    assert_eq!(StimulusPlan::new("m", 1, &[], true, None, b).sequences().len(), 4);
+
+    // ── A RESET module (shift_register's ports): the reset bit is excluded from W,
+    //    asserted on cycle 0 and DEASSERTED on cycle 1, the first live cycle, where
+    //    the initial vector is driven. In a seed sequence cycle 1's reset is random,
+    //    as it was before the policy.
+    let mut p = StimulusPlan::new(
+        "m", 7, &[("d", 1), ("en", 1), ("dir", 1), ("rstn", 1)], true, Some((3, true)), b,
+    ).with_only(None);
+    assert_eq!(p.width(), 3);
+    assert_eq!(p.sequences().len(), 4 + 8);
+    assert_eq!(p.first_live_cycle(), 1);
+    assert!(p.next_sequence()); // sequence 0, a seed
+    let mut rng = Rng::new(p.seed());
+    let mut bare = Rng::new(7);
+    for c in 0..3 {
+        for port in 0..4 {
+            let v = p.stim::<Logic>(c, port, &mut rng);
+            let expect = if port == 3 && c == 0 { Logic::Zero } else { bare.logic() };
+            assert_eq!(v, expect, "seed sequence, cycle {c} port {port}");
+        }
+    }
+    for _ in 0..4 {
+        assert!(p.next_sequence());
+    }
+    let want = p.sequences()[4].first.clone().unwrap();
+    let mut rng = Rng::new(p.seed());
+    for port in 0..4 {
+        let _ = p.stim::<Logic>(0, port, &mut rng);
+    }
+    let cycle1: Vec<Logic> = (0..4).map(|port| p.stim::<Logic>(1, port, &mut rng)).collect();
+    assert_eq!(cycle1[3], Logic::One, "reset deasserted on the first live cycle");
+    assert_eq!(&cycle1[..3], &want[..], "the initial vector lands on cycle 1");
+
+    // ── Combinational, W ≤ 8: the whole truth table, vector c on cycle c, and
+    //    nothing else; wider: four seeds of 64 vectors plus the pattern list.
+    let mut p = StimulusPlan::new("c", 1, &[("a", 3), ("b", 2)], false, None, b).with_only(None);
+    assert_eq!(p.sequences().len(), 1);
+    assert_eq!(p.sequences()[0].kind, SequenceKind::Vectors);
+    assert_eq!(p.cycles_total(), 32);
+    assert!(p.next_sequence());
+    let mut rng = Rng::new(p.seed());
+    for c in 0..32usize {
+        let a = p.stim::<Bits<3>>(c, 0, &mut rng);
+        let bb = p.stim::<Bits<2>>(c, 1, &mut rng);
+        let got: Vec<Logic> = a.as_bits().into_iter().chain(bb.as_bits()).collect();
+        let want: Vec<Logic> = (0..5).map(|j| if (c >> j) & 1 == 1 { Logic::One } else { Logic::Zero }).collect();
+        assert_eq!(got, want, "vector {c}");
+    }
+    let p = StimulusPlan::new("c", 1, &[("a", 8), ("b", 1)], false, None, b);
+    assert_eq!(p.sequences().len(), 5);
+    assert!(p.sequences()[..4].iter().all(|s| s.kind == SequenceKind::Seed && s.cycles == 64));
+    assert_eq!(p.sequences()[4].kind, SequenceKind::Vectors);
+    assert_eq!(p.sequences()[4].cycles, 4, "the pattern list for (8, 1): zeros, ones, a-only, b-only");
+
+    // ── Run-time dedup: a pattern whose vector a SEED sequence already drove on its
+    //    first live cycle is skipped. Which seed does that is data, so find one — the
+    //    plan for ("a", 1), ("b", 4) has 32 initial vectors and four of them are
+    //    patterns, so some base seed below a few hundred collides.
+    let drive = |p: &mut StimulusPlan| {
+        let mut ran = Vec::new();
+        while p.next_sequence() {
+            ran.push(p.index());
+            let mut rng = Rng::new(p.seed());
+            for c in 0..p.cycles() {
+                let _ = p.stim::<Logic>(c, 0, &mut rng);
+                let _ = p.stim::<Bits<4>>(c, 1, &mut rng);
+            }
+        }
+        ran
+    };
+    let mut found = None;
+    for base in 1..2000u64 {
+        let mut p = StimulusPlan::new("d", base, &[("a", 1), ("b", 4)], true, None, b).with_only(None);
+        let ran = drive(&mut p);
+        if ran.len() < p.sequences().len() {
+            let skipped: Vec<usize> = (0..p.sequences().len()).filter(|i| !ran.contains(i)).collect();
+            for i in &skipped {
+                let s = &p.sequences()[*i];
+                assert_eq!(s.kind, SequenceKind::Pattern, "only a pattern sequence may be dropped");
+                let seed_firsts: BTreeSet<Vec<bool>> = {
+                    // The vectors the four seed sequences drove on cycle 0.
+                    let mut q = StimulusPlan::new("d", base, &[("a", 1), ("b", 4)], true, None, b).with_only(None);
+                    let mut v = BTreeSet::new();
+                    for _ in 0..4 {
+                        assert!(q.next_sequence());
+                        let mut rng = Rng::new(q.seed());
+                        let a = q.stim::<Logic>(0, 0, &mut rng);
+                        let bb = q.stim::<Bits<4>>(0, 1, &mut rng);
+                        v.insert(bits_key(&a.as_bits().into_iter().chain(bb.as_bits()).collect::<Vec<_>>()));
+                    }
+                    v
+                };
+                assert!(
+                    seed_firsts.contains(&bits_key(s.first.as_ref().unwrap())),
+                    "sequence {i} was dropped but no seed drove its vector"
+                );
+            }
+            found = Some((base, skipped));
+            break;
+        }
+    }
+    assert!(found.is_some(), "no base seed below 2000 made a seed sequence cover a pattern — the dedup never fired");
+
+    // ── `COPPER_SWEEP_SEQUENCE=<i>` (here `with_only`): that one sequence runs, alone.
+    let mut p = StimulusPlan::new("m", 1, &[("sel", 1)], true, None, b).with_only(Some(5));
+    assert!(p.next_sequence());
+    assert_eq!(p.index(), 5);
+    assert!(!p.next_sequence());
+}
+
 /// **The guard.** Every `#[hardware]` module in `tests/fixtures/` and `examples/`
 /// must have a case — running, or `#[ignore]`d with a reason. Asserted against a
 /// fresh scan rather than against the generator's own bookkeeping, so a `build.rs`
