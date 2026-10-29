@@ -354,8 +354,9 @@ edge-sampled register of a conditionally driven plain `Out` (`bsg_dff_en`'s
 the harness wire's zero or `Memory::new`'s `T::default()`, a convention of the
 harness rather than anything the module states; `vlir_lower` already gives a
 `<port>_hold` register `initial = 0` on exactly that convention. Whether the rest
-should be stated the same way is **open** (recorded 2026-10-29, not decided), so
-the randomized sweep is a measurement, not a gate. The hand-rolled callers of
+should be stated the same way is **open** (recorded 2026-10-29, not decided; the
+exact set, per module, register and class, is Appendix A), so the randomized sweep
+is a measurement, not a gate. The hand-rolled callers of
 `tests/common::verilator_command` are outside the switch, as they are outside the
 model cache. It is a switch, not the default: the default sweep keeps the
 zero-fill comparison the `RESET` table was written against.
@@ -445,3 +446,72 @@ authoritative register inference in `copper-analysis`, consumed by both front-en
 — `SYNCHRONOUS_SEMANTICS.md`). That refactor touches the lowering's spine, and the
 standing rule for migrations here is to build against a differential oracle and
 keep the old path rather than debug it afterwards. This *is* that oracle, and it was.
+
+---
+
+## Appendix A — the power-on residual, recorded not fixed (2026-10-29)
+
+The 36 of 163 sweep cases that still fail under `COPPER_VERILATOR_X_INITIAL=1` after
+every Rust register initializer reaches the SV (§3.3). Each row lists the registers
+the module's emitted SystemVerilog leaves without an `initial` value, read off the
+emission itself; none is a register the Rust source initializes. The classes:
+
+* **B1** — a `RegOut` port's flop. The simulator shows the harness wire's initial
+  value (zero) until the first write; the SV flop states nothing.
+* **B2** — the edge-sampled register of a conditionally driven plain `Out` (the
+  enabled-register idiom, `vlir_lower::conditional_output_ports`). Same convention,
+  same gap. (The `<port>_hold` register of the opening-drive form already carries
+  `initial = 0` and is not here.)
+* **B3** — a memory's read- and write-stage registers (`<mem>_rd<k>_q<j>`,
+  `<mem>_rd<k>_v<j>`, `<mem>_wr<k>_s<j>_*`), synthesized by the memory lowering;
+  the simulator's pipeline starts empty.
+* **B4** — a cross-state local control extraction hoisted out of its state, whose
+  initializer is an input read (`control_extract::hoist_cross_state_locals`): its
+  value is assigned before any read in the simulator, but the Verilated flop is
+  read through the port's registered path before that in the first cycle.
+* **C** — an unpreloaded `Memory` array (`Memory::new`): the simulator fills it
+  with `T::default()` (zero), the SV array states nothing.
+
+Not a `RESET` row's business (the table is for state that is X by design); a
+decision to state these as `initial = 0` — the convention the `_hold` register
+already encodes — would close every row below, and the switch re-measures it
+without this list being re-derived.
+
+| module | unstated register(s) | class |
+|---|---|---|
+| `examples/basejump/bsg_dff_en.rs::bsg_dff_en` | `data_o` (B2) | B2 |
+| `examples/basejump/sipo_block.rs::sipo_block` | `data_o` (B1), `w0_dbg` (B2), `w0_r` (B4), `w1_dbg` (B2), `w1_r` (B4), `w2_dbg` (B2), `w2_r` (B4), `w3_dbg` (B2) | B1 B2 B4 |
+| `examples/memory/dual_port_ram.rs::dual_port_ram` | `memory[]` (C) | C |
+| `examples/sequential/pipeline_mac.rs::mac_fsm` | `out` (B1) | B1 |
+| `examples/sequential/pipeline_mac.rs::mac_pipeline` | `c_s_r` (B4), `out` (B1), `product_r` (B4), `sum_r` (B4) | B1 B4 |
+| `examples/uart/rx.rs::rx` | `rx_byte` (B1), `rx_dv` (B1) | B1 |
+| `examples/uart/system.rs::uart_rx` | `rx_byte` (B1), `rx_dv` (B1) | B1 |
+| `tests/fixtures/branch_on_updated_reg_dut.rs::branch_on_updated_reg` | `o` (B1) | B1 |
+| `tests/fixtures/continue_skip_dut.rs::skip_on_halt` | `o` (B1) | B1 |
+| `tests/fixtures/cross_state_local_dut.rs::capture_after_wait` | `captured` (B4), `o` (B1) | B1 B4 |
+| `tests/fixtures/extracted_dut.rs::ex_reg_then_wire` | `o` (B1) | B1 |
+| `tests/fixtures/extracted_dut.rs::ex_regfile` | `o` (B1), `o3` (B1), `regs_wr0_s1_addr` (B3), `regs_wr0_s1_data` (B3), `regs_wr0_s1_v` (B3) | B1 B3 |
+| `tests/fixtures/extracted_rom_dut.rs::ram_arms` | `mem[]` (C), `mem_rd0_q0` (B3), `o` (B1) | B1 B3 C |
+| `tests/fixtures/extracted_rom_dut.rs::rom_gated` | `data` (B1), `rom_rd0_q0` (B3) | B1 B3 |
+| `tests/fixtures/extracted_rom_dut.rs::rom_paced` | `data` (B1), `rom_rd0_q0` (B3) | B1 B3 |
+| `tests/fixtures/mac_fsm_dut.rs::mac_fsm` | `out` (B1) | B1 |
+| `tests/fixtures/mac_pipeline_dut.rs::mac_pipeline` | `c_s_r` (B4), `product_r` (B4), `sum_r` (B4) | B4 |
+| `tests/fixtures/mem_address_width_dut.rs::narrow_index_into_narrow_addr` | `mem[]` (C) | C |
+| `tests/fixtures/mem_address_width_dut.rs::wide_index_into_narrow_addr` | `mem[]` (C) | C |
+| `tests/fixtures/mem_address_width_dut.rs::wide_index_sole_consumer` | `mem[]` (C) | C |
+| `tests/fixtures/multiphase_rom_dut.rs::mp_regout` | `data` (B1), `rom_rd0_q0` (B3) | B1 B3 |
+| `tests/fixtures/pipelined_ram_dut.rs::ram_r1w2_wf` | `mem[]` (C), `mem_wr0_s1_addr` (B3), `mem_wr0_s1_data` (B3), `mem_wr0_s1_v` (B3) | B3 C |
+| `tests/fixtures/pipelined_ram_dut.rs::ram_r2w2` | `mem[]` (C), `mem_rd0_q0` (B3), `mem_rd0_v0` (B3), `mem_wr0_s1_addr` (B3), `mem_wr0_s1_data` (B3), `mem_wr0_s1_v` (B3) | B3 C |
+| `tests/fixtures/pipelined_ram_dut.rs::ram_r3w1` | `mem[]` (C), `mem_rd0_q0` (B3), `mem_rd0_q1` (B3), `mem_rd0_v0` (B3), `mem_rd0_v1` (B3) | B3 C |
+| `tests/fixtures/regfile_dut.rs::regfile_read_first` | `regs_wr0_s1_addr` (B3), `regs_wr0_s1_data` (B3), `regs_wr0_s1_v` (B3) | B3 |
+| `tests/fixtures/regfile_dut.rs::regfile_write_through` | `regs_wr0_s1_addr` (B3), `regs_wr0_s1_data` (B3), `regs_wr0_s1_v` (B3) | B3 |
+| `tests/fixtures/regout_forwarding_dut.rs::conditional_plain_out` | `o` (B2) | B2 |
+| `tests/fixtures/regout_multiphase_dut.rs::regout_multiphase` | `lo_r` (B4), `word_o` (B1) | B1 B4 |
+| `tests/fixtures/uart_rx_dut.rs::uart_rx_dut` | `rx_byte` (B1), `rx_dv` (B1) | B1 |
+| `tests/fixtures/valid_ready_dut.rs::vr_read_after_delay` | `sum` (B1) | B1 |
+| `tests/fixtures/valid_ready_dut.rs::vr_sink_moore` | `ready` (B1), `sum` (B1) | B1 |
+| `tests/fixtures/valid_ready_dut.rs::vr_src_regout` | `data` (B1), `valid` (B1) | B1 |
+| `tests/fixtures/valid_ready_dut.rs::vr_src_same_cycle` | `count` (B1), `valid` (B1) | B1 |
+| `tests/fixtures/write_first_ram_dut.rs::ram_read_first` | `mem[]` (C) | C |
+| `tests/fixtures/write_first_ram_dut.rs::ram_wf_priority` | `mem[]` (C) | C |
+| `tests/fixtures/write_first_ram_dut.rs::ram_write_first` | `mem[]` (C) | C |
