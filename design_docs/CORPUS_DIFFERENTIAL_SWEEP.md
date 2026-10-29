@@ -91,6 +91,21 @@ the findings are the argument for the sweep.
   Verilator's 0 — and got a `SKIP` row (the sweep does no stimulus masking, §3.4);
   its operator stays covered by hand-written vectors. Every other case passed its
   four seeds and its first-cycle sequences.
+* **2026-10-29 (register power-on values): the `lfsr` finding fixed at its source.**
+  The transpiler carried a register's initializer into the SV only when it was an
+  integer literal or an enum variant; every constructor call — `Bits::zero()`,
+  `Bits::from_lit::<0>()`, `Bits::from_u32(1)`, `[Logic::Zero; 16]` — was dropped,
+  and the register's flop had no power-on value. Measured first, with the sweep's
+  new randomized-power-on switch (§3.3): 63 of 163 cases failed, every one a
+  register the SV left unstated. Then: every constant initializer folds to the
+  register's `initial` value (`chir_lower::lower_register_init`; a repeated array
+  as a fill), a non-constant one is refused by both front-ends
+  (`copper_analysis::check_register_initializers`, pinned by
+  `register_initializer_corpus.rs` at zero corpus hits), `Bits::x()` stays unstated.
+  The emitted SV of 121 corpus modules gained an `initial` block and nothing else
+  (`sv-baseline diff`), `lfsr`'s `RESET` row is gone and its pin in
+  `tests/lfsr_equivalence.rs` asserts the pre-reset agreement; `simple_counter`
+  keeps its row — it starts from `Bits::<8>::x()`, which is what the table is for.
 * **After the log:** the `SKIP` table gained `<wrapper>::<module>` keys because the
   *example* copy of `ripple_carry_adder` refused (cause J-b) while the fixture copy
   swept; J-b closed 2026-08-27 and both copies sweep, but the key form stays. On
@@ -314,6 +329,37 @@ cannot be reached by accident. A module with a `REFERENCE` row additionally gets
 `with_hand_written_reference`, which replays the same stimulus against the
 independent Verilog (`ANCHORING_A_MODULE.md`).
 
+**Power-on values — the randomized switch (2026-10-29).** Verilator is two-state and
+zero-fills every register the SV does not initialize, so a register whose emitted
+SV states no power-on value *agrees by accident* whenever the simulator's value is
+zero — which is why ~120 `Bits::zero()` registers passed the sweep for two months
+while their initializers were silently dropped by the transpiler, and why `lfsr`'s
+`Bits::from_u32(1)` did not (§0, 2026-10-28). `COPPER_VERILATOR_X_INITIAL=1` closes
+the accident: `verify_with_verilator` builds the model with `--x-initial unique`
+(and `--x-assign unique`) and runs it with `+verilator+rand+reset+2` and a fixed
+seed (`=<n>` picks it), so every register the SV leaves unstated starts at a random
+value, and the only ways to agree are an `initial` assignment the transpiler
+emitted or a reset the `RESET` row asserts before the first observation. The flags
+are Verilator arguments, so they are in the model-cache key and a randomized build
+never aliases a zero-fill one (`copper_sim::VerilatorPowerOn`). What it measures is
+exactly "which observable state has no stated power-on value": before the register
+initializer fix it failed 63 of 163 cases; after it, 36 — and none of those is a
+Rust initializer. Every register they leave unstated is one codegen synthesizes: a
+`RegOut` port flop (`skip_on_halt`'s `o`, `vr_src_regout`'s `valid`/`data`), the
+edge-sampled register of a conditionally driven plain `Out` (`bsg_dff_en`'s
+`data_o`, `conditional_plain_out`'s `o`), a memory's read- and write-stage registers
+(`mem_rd0_q0`, `mem_wr0_s1_*`), a cross-state local hoisted from an input read
+(`mac_pipeline`'s `product_r`) — or an unpreloaded `Memory` array (`ram_*`,
+`dual_port_ram`, the `regs` register file). Their simulator-side power-on value is
+the harness wire's zero or `Memory::new`'s `T::default()`, a convention of the
+harness rather than anything the module states; `vlir_lower` already gives a
+`<port>_hold` register `initial = 0` on exactly that convention. Whether the rest
+should be stated the same way is **open** (recorded 2026-10-29, not decided), so
+the randomized sweep is a measurement, not a gate. The hand-rolled callers of
+`tests/common::verilator_command` are outside the switch, as they are outside the
+model cache. It is a switch, not the default: the default sweep keeps the
+zero-fill comparison the `RESET` table was written against.
+
 ### 3.4 The tables
 
 There is no separate constraint file and no stimulus masking; a module whose
@@ -326,7 +372,7 @@ top of `build.rs`, each row a sentence with an author:
 |---|---|---|
 | `SKIP` | modules the sweep must not run, with the reason; keys are a bare name or `<wrapper>::<module>` for one copy of a duplicated name | every key names a module in the corpus (a dead row fails the build, since 2026-09-01) |
 | `PARAMS` | the monomorphization for a generic module — the same widths its hand-written test uses | a generic module with no complete row is ignored with a reason naming the table |
-| `RESET` | `(module, port, active_low)` for a design whose state is X until reset | — |
+| `RESET` | `(module, port, active_low)` for a design whose state is genuinely X until reset — a `Bits::x()` register, or a memory the reset must define. Not for a constant initializer: that reaches the SV as the register's `initial` value (2026-10-29), so the sweep observes such a module from its first cycle | — |
 | `REFERENCE` | an independent Verilog reference, by module | module exists, file exists, declares `module <name>`, is not `// @generated` |
 
 The generator adds its own ignore reasons where no table applies (`skip_reason`): a

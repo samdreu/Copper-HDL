@@ -111,6 +111,39 @@ the liveness rule under *The CFG model*). These are the four informal invariants
 FSM-state, register, and *every loop path reaches a tick* (reachability well-formedness, below) — now
 each a checked property rather than an accident of construction.
 
+### Register power-on values
+
+A register's **power-on value is its binding's initializer at loop entry** — the value
+the pre-loop `let mut` holds when the top-level `loop` is first entered. The simulator
+starts the binding there, and the transpiler states the same value in the emitted
+SystemVerilog as an `initial` assignment (`initial begin state = 32'd1; end`, one block
+per module, `emit::reg_inits`; an array register's every word, as a fill), so the two
+agree from the first cycle with no reset. That requires the initializer to be a
+**constant** the transpiler can fold without running Rust: an integer literal,
+`true`/`false`, `Logic::One`/`Logic::Zero`, an enum variant, `Bits::zero()`,
+`Bits::from_lit::<K>()`, `Bits::from_u32(k)` / `Bits::<N>::from_u8(k)`, a file-scope
+`const` with a literal value, an array of those (`[Logic::Zero; 16]`,
+`[Bits::<8>::zero(); 8]`), or arithmetic over them — `copper_analysis::is_constant_expr`,
+the same predicate the late-constant rule applies to a write's operand. **`Bits::x()`**
+(and `Logic::X`) is the one non-value: the register starts *undefined*, nothing is
+stated, and the design needs a reset before the register is read; the simulator carries
+X where a two-state model reads 0, which is why such a design sweeps under a `RESET`
+row. A **non-constant** initializer — an input read, a local, a call through a free
+function — is **refused by both front-ends** (`copper_analysis::check_register_initializers`,
+2026-10-29, no opt-out): the hardware has no power-on value for it. Until that day the
+transpiler dropped such an initializer silently, and with it every constructor-call
+constant — `lfsr`'s `Bits::from_u32(1)` never reached its SV (found by the multi-sequence
+sweep 2026-10-28), and some 120 `Bits::zero()` registers agreed with Verilator only
+because its zero-fill is zero (`COPPER_VERILATOR_X_INITIAL=1` randomizes the power-on
+values and measured 63 diverging corpus modules before the fix). A register born *inside*
+the loop is assigned before it is read on every path and has no power-on value to state.
+
+`initial` is honored by simulators and by FPGA tools (the value becomes the flip-flop's
+INIT) and ignored by most ASIC flows, so a design that must work without it needs a
+reset. The value is stated regardless: a four-state simulator otherwise keeps X, and a
+synthesizer may delete an uninitialized self-driven register (Yosys removed
+`sipo_block`'s phase counter and every gate reading it, 2026-09-02).
+
 ### Trailing statements — the segment after the last tick
 
 Decided 2026-08-25 (commit `062724f`); it follows from the definition above rather than adding to

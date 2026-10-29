@@ -127,15 +127,24 @@ pub struct VLIRSeqBody {
 pub struct VLIRRegDecl {
     pub name: String,
     pub width: Width,
-    /// Power-on value, emitted as an `initial` assignment when the register's
-    /// Copper initializer is a literal. Without it the emitted SystemVerilog
-    /// states no start value at all: the simulator starts every register at its
-    /// declared literal and Verilator's two-state model zero-fills, so the two
-    /// agreed by accident, while a four-state simulator keeps X and a synthesizer
-    /// may treat a self-driven uninitialized register as undefined forever and
-    /// delete it (Yosys removed `sipo_block`'s phase counter and every gate that
-    /// read it, 2026-09-02). `None` for a register born inside the loop, whose
-    /// value is assigned before it is read.
+    /// Power-on value, emitted as an `initial` assignment: the register's Copper
+    /// initializer, folded to a literal of the register's width
+    /// (`chir_lower::lower_register_init`). Since 2026-10-29 every constant
+    /// spelling folds — an integer literal, an enum variant, `Bits::zero()`,
+    /// `Bits::from_lit::<K>()`, `Bits::from_u32(k)`, a repeated array, a literal
+    /// `const`, arithmetic over those — and a non-constant initializer is refused
+    /// by both front-ends; before, only a literal or enum variant was carried and
+    /// every constructor call was dropped, so the SV stated no start value: the
+    /// simulator started the register at its Rust value and Verilator's two-state
+    /// model zero-filled, and the two agreed only where that value was zero
+    /// (`lfsr`'s 1 diverged; `COPPER_VERILATOR_X_INITIAL=1` randomizes the power-on
+    /// values and exposed 63 corpus modules). A four-state simulator otherwise
+    /// keeps X, and a synthesizer may treat a self-driven uninitialized register
+    /// as undefined forever and delete it (Yosys removed `sipo_block`'s phase
+    /// counter and every gate that read it, 2026-09-02). `None` for a register
+    /// initialized to `Bits::x()` — undefined, nothing to state, the design needs
+    /// a reset — and for a register born inside the loop, whose value is assigned
+    /// before it is read.
     pub init: Option<VLIRExpr>,
 }
 
