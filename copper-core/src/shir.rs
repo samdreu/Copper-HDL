@@ -196,10 +196,13 @@ pub enum SHIRStmt {
         /// read's `pre_edge_barrier`, in the closing settle) and for the
         /// combinational path and the linear trailing segment, where the
         /// selection does not apply. `vlir_lower` uses it to pick the emitted
-        /// form of a *conditional* plain-`Out` drive: an opening drive becomes a
-        /// forwarded continuous mux with a hold register, a closing one an
-        /// edge-sampled `always_ff` assignment (phase C,
-        /// `design_docs/PAIRED_IMPLEMENTATION_SCOPE.md`).
+        /// form of a *conditional* plain-`Out` drive, per drive (phase C,
+        /// `design_docs/PAIRED_IMPLEMENTATION_SCOPE.md`; drive-level since
+        /// 2026-10-29, `CYCLE_DATAFLOW_SEMANTICS.md` §9.4): a port with any
+        /// opening drive takes the forwarded mux + hold-register form, whose
+        /// comb copy carries the opening drives only while every drive —
+        /// closing ones included — loads the hold register at the edge; a port
+        /// whose drives are all closing is an edge-sampled `always_ff` register.
         opening: bool,
     },
     /// A branch carries its test in BOTH forms, for exactly the reason

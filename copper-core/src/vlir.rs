@@ -129,6 +129,22 @@ pub struct VLIRSeqBody {
     /// of the opening-drive form states the same value through `reg_decls`. Not
     /// declared here (the port list declares them), so they are not `VLIRRegDecl`s.
     pub port_inits: Vec<(String, Width)>,
+    /// The conditionally driven plain `Out` ports this body emits in the forwarded
+    /// mux + `<port>_hold` form (phase C, drive-level since 2026-10-29), with the
+    /// number of opening and closing drives each had. A record of a lowering
+    /// decision, consumed by the corpus audit of mixed-anchor ports
+    /// (`copper_codegen::hold_form_ports`); the emitter does not read it.
+    pub hold_form_ports: Vec<VLIRHoldFormPort>,
+}
+
+/// One port emitted in the mux + hold form — see `VLIRSeqBody::hold_form_ports`.
+/// `closing > 0` is a MIXED-anchor port: its comb copy muxes only the opening
+/// drives, and the hold register is loaded by every drive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VLIRHoldFormPort {
+    pub port: String,
+    pub opening: usize,
+    pub closing: usize,
 }
 
 #[derive(Debug)]
@@ -266,10 +282,13 @@ pub enum VLIRStmt {
         port_name: String,
         value: VLIRExpr,
         edge_value: VLIRExpr,
-        /// See `SHIRStmt::PortDrive::opening`. Decides, for a conditionally
-        /// driven plain `Out`, whether `vlir_lower` registers the drive at the
-        /// edge (closing) or keeps it combinational with a hold register
-        /// (opening). Hoisted defaults carry `false`; they are never split.
+        /// See `SHIRStmt::PortDrive::opening`. Decides, per DRIVE, the emitted
+        /// form of a conditionally driven plain `Out`: a port with at least one
+        /// opening drive takes the mux + hold form, in which this drive stays in
+        /// the comb copy when opening and moves to the hold register's
+        /// `always_ff` load alone when closing (every drive loads the hold
+        /// register); a port with no opening drive is edge-sampled at the edge.
+        /// Hoisted defaults carry `false`; they are never split.
         opening: bool,
     },
     /// `edge_condition` is `condition` in PRE-edge terms, carried for the same

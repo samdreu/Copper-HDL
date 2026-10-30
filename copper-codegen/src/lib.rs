@@ -35,6 +35,18 @@ pub fn transpile_fir(
     registry: &ModuleRegistry,
     config: &EmitConfig,
 ) -> Result<String, String> {
+    let vlir = lower_fir_to_vlir(fir, hardware_fns, registry)?;
+    Ok(emit_verilog(&vlir, config))
+}
+
+/// [`transpile_fir`] up to the VLIR — the whole lowering pipeline (control
+/// extraction, CHIR, SHIR, VLIR) without the text emission, so a caller can read
+/// the lowering's recorded decisions (`VLIRSeqBody::hold_form_ports`).
+pub fn lower_fir_to_vlir(
+    fir: &copper_core::FrontendModuleIR,
+    hardware_fns: &std::collections::HashSet<String>,
+    registry: &ModuleRegistry,
+) -> Result<copper_core::vlir::VLIRModule, String> {
     // Control extraction (FIR→FIR): flatten async control-flow loops whose ticks
     // live inside branches into an explicit single-tick `match pc` FSM — the shape
     // the pipeline below already lowers correctly. No-op for linear modules.
@@ -93,8 +105,7 @@ pub fn transpile_fir(
         }
     })?;
     let shir = lower_to_shir(&chir).map_err(|e| format!("{e}"))?;
-    let vlir = lower_to_vlir(&shir).map_err(|e| format!("{e}"))?;
-    Ok(emit_verilog(&vlir, config))
+    lower_to_vlir(&shir).map_err(|e| format!("{e}"))
 }
 
 /// The pre-loop `let mut` names of a FIR body — the declarations the FIR→FIR
@@ -129,6 +140,27 @@ pub fn transpile_source(
     let prepared = prepare_source(src)?;
     let target = prepared.select_target(module)?;
     transpile_target(target, &prepared, config)
+}
+
+/// The conditionally driven plain `Out` ports of `module` that `vlir_lower` emits
+/// in the forwarded mux + `<port>_hold` form, with each one's opening / closing
+/// drive counts (`VLIRHoldFormPort::closing > 0` marks a MIXED-anchor port, the
+/// drive-level form of 2026-10-29). Runs every front-end rule and the full
+/// lowering exactly as [`transpile_source`] does, so a module the transpiler
+/// refuses is an `Err` here too. Empty for a combinational or structural module.
+/// This is the corpus audit's view of the emission decision — the declared set
+/// an `sv-baseline diff` is checked against (`copper-codegen/tests/hold_form_audit.rs`).
+pub fn hold_form_ports(
+    src: &str,
+    module: Option<&str>,
+) -> Result<Vec<copper_core::vlir::VLIRHoldFormPort>, String> {
+    let prepared = prepare_source(src)?;
+    let target = prepared.select_target(module)?;
+    let vlir = vlir_for_target(target, &prepared)?;
+    Ok(match &vlir.body {
+        copper_core::vlir::VLIRBody::Sequential(seq) => seq.hold_form_ports.clone(),
+        _ => Vec::new(),
+    })
 }
 
 /// Like [`transpile_source`], but emits the selected module **plus every
@@ -309,6 +341,15 @@ fn transpile_target(
     prepared: &PreparedSource,
     config: &EmitConfig,
 ) -> Result<String, String> {
+    let vlir = vlir_for_target(target, prepared)?;
+    Ok(emit_verilog(&vlir, config))
+}
+
+/// [`transpile_target`] up to the VLIR: every front-end rule, then the lowering.
+fn vlir_for_target(
+    target: &syn::ItemFn,
+    prepared: &PreparedSource,
+) -> Result<copper_core::vlir::VLIRModule, String> {
     // c2 (item 2): the transpiler enforces the SAME reachability well-formedness
     // the sim macro does, from the SAME shared analysis on the SAME `&syn::ItemFn`
     // — a tickless loop path is rejected here too (one authoritative check, both
@@ -466,7 +507,7 @@ fn transpile_target(
     let mut fir = capture_frontend_ir(target, &prepared.hardware_fns).map_err(|e| format!("{e:?}"))?;
     fir.enums.extend(prepared.file_enums.iter().cloned());
     inject_file_scope(&mut fir, &prepared.file_scope);
-    transpile_fir(&fir, &prepared.hardware_fns, &prepared.registry, config)
+    lower_fir_to_vlir(&fir, &prepared.hardware_fns, &prepared.registry)
 }
 
 /// Copy captured file-scope items into a module's FIR, mirroring the `enums`
