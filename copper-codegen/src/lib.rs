@@ -383,15 +383,18 @@ fn vlir_for_target(
     if !opts_out_of_pretick_alignment(target) {
         if let Some(port) = copper_analysis::multi_phase_out_write(target).first() {
             return Err(format!(
-                "output port '{port}' is driven in more than one clock phase (across \
-                 clk.tick().await boundaries) in a shape whose emitted form shows one of the \
-                 writes a cycle after the simulator: a write preceded by an input read in its \
-                 phase that the simulator nonetheless runs at the cycle's opening (the read \
-                 has no clk.tick().await after it, the body has no register, or a control \
-                 path skips the read), a wait loop's read before an opening write, or the \
-                 linear multi-tick path. Declare it as RegOut<…>, drive it in exactly one \
-                 phase, or make each write's anchor uniform (behind an input read that a \
-                 clk.tick().await follows on every path to it, or behind none)"
+                "output port '{port}' is driven in a shape whose emitted form shows one of \
+                 its writes a cycle after the simulator — in more than one clock phase \
+                 (across clk.tick().await boundaries), or in a single phase after the first \
+                 by a write an input read reaches on one control path and not on another: \
+                 a write preceded by an input read in its phase that the simulator \
+                 nonetheless runs at the cycle's opening (the read has no clk.tick().await \
+                 after it, the body has no register, or a control path skips the read), a \
+                 wait loop's read before an opening write, or the linear multi-tick path \
+                 for a two-phase port. Declare it as RegOut<…>, drive it in exactly one \
+                 phase that no input read reaches, or make each write's anchor uniform \
+                 (behind an input read that a clk.tick().await follows on every path to \
+                 it, or behind none)"
             ));
         }
         // A plain `Out` FIRST DRIVEN LATE — every write a constant, none before the

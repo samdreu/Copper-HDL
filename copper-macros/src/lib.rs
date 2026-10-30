@@ -1201,7 +1201,10 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             // phase E, and 2026-10-30: a write whose anchors differ between the
             // sides — an immediate or path-dependent read before it — a
             // register-free passthrough read, or the linear route; a mixed port
-            // whose every write is uniformly anchored is realized drive by drive).
+            // whose every write is uniformly anchored is realized drive by drive),
+            // or — since 2026-10-30, §10.6 — in ONE phase after the first by a
+            // path-dependent write (the same mechanism with the port's other
+            // write removed).
             // Control extraction hides the phases by rewriting the body into a
             // single-tick `match pc` FSM, so it is caught here, on the source,
             // where the ticks are still visible.
@@ -1216,24 +1219,28 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 return Error::new(
                     span,
                     format!(
-                        "output port `{port}` is driven in more than one clock phase (on both \
-                         sides of a `clk.tick().await`) in a shape whose synthesized form \
-                         shows one of the writes a cycle after the simulator does. The \
-                         hardware holds a write to the clock edge once an input read precedes \
-                         it in its phase (its own operand, a branch condition, a wait loop's \
-                         exit test); the simulator runs it at its cycle's opening when that \
-                         read has no `clk.tick().await` after it in the iteration, when the \
-                         body has no register (the read is an immediate passthrough), or on a \
-                         control path that skips the read — so such a write lands one \
-                         observation late in the hardware (measured, phase E and 2026-10-30). \
-                         The linear multi-tick path has no mux form at all. Accepted shapes: \
-                         every write of `{port}` either preceded by no input read in its phase \
-                         (a read in another phase is fine) or by an input read on every path \
-                         to it with a `clk.tick().await` after it, in a body with a register — \
-                         in any mix. Otherwise declare `{port}` as `RegOut<…>` (a registered \
-                         output, immune because it commits at the clock edge), or drive it in \
-                         exactly one phase. If this module exists to DEMONSTRATE the \
-                         divergence, opt out explicitly with `#[hardware(sequential, {ALLOW_PRETICK})]`."
+                        "output port `{port}` is driven in a shape whose synthesized form shows \
+                         one of its writes a cycle after the simulator does: in more than one \
+                         clock phase (on both sides of a `clk.tick().await`), or in a single \
+                         phase after the first by a write an input read reaches on one control \
+                         path and not on another. The hardware holds a write to the clock edge \
+                         once an input read precedes it in its phase (its own operand, a branch \
+                         condition, a wait loop's exit test); the simulator runs it at its \
+                         cycle's opening when that read has no `clk.tick().await` after it in \
+                         the iteration, when the body has no register (the read is an immediate \
+                         passthrough), or on a control path that skips the read — so such a \
+                         write lands one observation late in the hardware (measured, phase E \
+                         and 2026-10-30). The linear multi-tick path has no mux form at all for \
+                         a port written in two phases. Accepted shapes: every write of `{port}` \
+                         either preceded by no input read in its phase (a read in another phase \
+                         is fine) or by an input read on every path to it with a \
+                         `clk.tick().await` after it, in a body with a register — in any mix. \
+                         Otherwise declare `{port}` as `RegOut<…>` (a registered output, immune \
+                         because it commits at the clock edge), read the input before every \
+                         write of `{port}` in its phase or before none of them, or drive it in \
+                         exactly one phase that no input read reaches. If this module exists to \
+                         DEMONSTRATE the divergence, opt out explicitly with \
+                         `#[hardware(sequential, {ALLOW_PRETICK})]`."
                     ),
                 )
                 .to_compile_error()

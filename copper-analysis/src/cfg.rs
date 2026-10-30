@@ -1243,6 +1243,12 @@ impl Cfg {
     /// (cycle-dataflow phase E)** from "every port written in two phases" to the
     /// measured divergent class. Returns the offending ports, sorted.
     ///
+    /// Since 2026-10-30 (§10.6) the name is one phase too narrow: the
+    /// path-dependent half of clause 4 also applies to a port written in **one**
+    /// phase, when that phase is not the head's and the body takes the extraction
+    /// route — the shape §10.5 left unmeasured, measured diverging as `e12`. The
+    /// other clauses stay gated on two or more phases.
+    ///
     /// # What a "phase" is here
     ///
     /// A Comb-connected component of the CFG. A tick is the only edge that separates
@@ -1285,6 +1291,9 @@ impl Cfg {
     /// | deferred read then a constant (`e4_…`), via a wire (`e6_…`), a register (`e4r_…`), a forwarded register (`e4f_…`) | closing, opening | edge-sampled until 2026-10-29; drive-level mux + hold since | DIVERGE until 2026-10-29, the opening drive one late; **agree** since (admitted 2026-10-30) |
     /// | one deferred, one trailing *immediate* read (`e5_two_closing`) | closing, opening | edge-sampled | DIVERGE (one tick moved flips it to `e5d`) |
     /// | a path-dependent write in a middle phase — the read in a branch, the write after the merge — beside an opening constant (`e11_…`) or a closing read-fed write (`e11b_…`) | opening on the read-free path, closing on the other; the other write opening / closing | mux + hold / edge-sampled | DIVERGE, the read-free executions one late |
+    /// | the same path-dependent write as the port's ONLY write, in one non-head phase (`e12_…`, §10.6, 2026-10-30) | opening on the read-free path, closing on the other | edge-sampled | DIVERGE, the read-free executions one late — the §10.5 gap, closed |
+    /// | its uniform controls: the read on every path (`e12a_…`), on none (`e12b_…`) | closing / opening | edge-sampled / mux + hold | **agree** |
+    /// | the single-write shape on the LINEAR route (`e13_…`) and its every-path control (`e13a_…`) | opening on even `cnt`, closing on odd / closing on every path | `assign o = cnt` — the route has no closing form for a register-valued drive | DIVERGE, the closing executions one late in the SIMULATOR; `e13a` diverges with no branch, so this is not the path-dependent mechanism and not this rule's (§10.6, recorded) |
     /// | register-free module, reads feeding the writes (`e4i_…`, `e5f_…`) | opening (passthrough-immediate) | edge-sampled | DIVERGE |
     /// | linear route, register values (`e7_…`) | opening, opening | **refused** by `vlir_lower` (multiply driven) | refused one IR late |
     /// | linear route, phase-local wires (`e7w_…`) | opening, opening | phase-guarded hold register | DIVERGE, one late |
@@ -1385,10 +1394,34 @@ impl Cfg {
             .nodes
             .iter()
             .any(|n| n.folded && n.is_tick && !n.uses.is_disjoint(&self.inputs));
+        // The head's phase: the component the loop head's successors and the
+        // trailing segment share. A port written only there is D1's business
+        // (`unprotected_pretick_out_write`), never this rule's.
+        let head_phase = find(&mut parent, self.head);
         phases
             .into_iter()
-            .filter(|(_, (p, _))| p.len() > 1)
-            .filter(|(_, (_, writes))| {
+            .filter(|(_, (p, writes))| {
+                if p.len() == 1 {
+                    // A port written in ONE phase (since 2026-10-30, §10.6): only
+                    // the path-dependent half of clause 4 applies, and only in a
+                    // non-head phase on the extraction route, in a body with
+                    // registers. The head phase is D1's domain; the linear route
+                    // realizes every register-valued drive as a continuous
+                    // assign, so a read before the write is unrealizable there
+                    // whether or not a branch skips it — a different mechanism
+                    // (`e13a` diverges with no branch), recorded in §10.6 and not
+                    // this clause's; an immediate (trailing) read is
+                    // `trailing_out_reads_input`'s (`e8`); a register-free body
+                    // is the passthrough class. `e12` is the witness, `e12a` /
+                    // `e12b` the uniform controls, `d1f` the head-phase boundary.
+                    let phase = *p.iter().next().expect("one phase");
+                    if phase == head_phase || !self.has_nested_tick || register_free {
+                        return false;
+                    }
+                    return writes
+                        .iter()
+                        .any(|&w| self.leading_read_reaches(w) && self.read_free_path_from_phase_entry(w));
+                }
                 // Linear route: no mux form; the lowering refuses or edge-samples.
                 if !self.has_nested_tick {
                     return true;
@@ -5006,8 +5039,11 @@ mod tests {
         assert!(mphase(src).is_empty());
     }
 
-    /// A port written in ONE phase is never this rule's business, whatever the
-    /// anchors (`e8`, `e9` in the battery are single-phase and measured elsewhere).
+    /// A port written in ONE phase with a trailing immediate read (`e8`) is never
+    /// this rule's business: the trailing segment is the head's phase, and the
+    /// immediate-read half of clause 4 stays gated on two phases
+    /// (`trailing_out_reads_input` owns it). `e9` likewise. Since 2026-10-30 the
+    /// path-dependent half does reach a single NON-head phase — the tests below.
     #[test]
     fn mphase_single_phase_not_flagged() {
         let src = r#"
@@ -5015,6 +5051,94 @@ mod tests {
             async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
                 let mut cnt: Bits<8> = Bits::zero();
                 loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read() + cnt); }
+            }
+        "#;
+        assert!(mphase(src).is_empty());
+    }
+
+    // ── §10.6 (2026-10-30): the path-dependent drive in a SINGLE non-head phase ──
+
+    /// `e12_path_dependent_single_phase_extracted`: `e11` with its constant write
+    /// removed — the port's only write, in the `pc == 2` arm, reached by the read
+    /// on the odd path and read-free on the even one. Edge-sampled on the codegen
+    /// side, opening on the even path in the simulator. Measured DIVERGING
+    /// (§10.6) — flagged; compiled with no opt-out before this clause.
+    #[test]
+    fn mphase_single_phase_path_dependent_non_head_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } if cnt[0] == Logic::One { let _ = x.read(); } o.write(cnt); for _ in 0..2 { clk.tick().await; } }
+            }
+        "#;
+        assert_eq!(mphase(src), vec!["o".to_string()]);
+    }
+
+    /// `e12a_read_on_every_path_extracted`: both arms read, so every path to the
+    /// write carries a deferred read — closing on both sides. Measured AGREEING —
+    /// not flagged. One `else { let _ = x.read(); }` flips `e12`.
+    #[test]
+    fn mphase_single_phase_read_on_every_path_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } if cnt[0] == Logic::One { let _ = x.read(); } else { let _ = x.read(); } o.write(cnt); for _ in 0..2 { clk.tick().await; } }
+            }
+        "#;
+        assert!(mphase(src).is_empty());
+    }
+
+    /// `e12b_read_on_no_path_extracted`: no read in the write's phase — opening on
+    /// both sides, phase C's mux + hold form. Measured AGREEING — not flagged.
+    #[test]
+    fn mphase_single_phase_no_read_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(cnt); for _ in 0..2 { clk.tick().await; } }
+            }
+        "#;
+        assert!(mphase(src).is_empty());
+    }
+
+    /// The head-phase boundary: `d1f`'s shape — the same path-dependent drive in
+    /// the HEAD segment of a single-tick body. D1's clause (A1) refuses it; this
+    /// rule leaves the head phase alone (the two are complementary, never
+    /// overlapping on the head). Not flagged here.
+    #[test]
+    fn mphase_single_phase_head_segment_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut phase: u8 = 0;
+                loop { if phase == 0 { let _ = x.read(); phase = 1; } else { phase = 0; } if phase == 0 { o.write(Bits::from_lit::<7>()); } clk.tick().await; }
+            }
+        "#;
+        assert!(mphase(src).is_empty());
+        assert_eq!(
+            Cfg::build(&parse(src)).map(|c| c.unprotected_pretick_out_write()).unwrap_or_default(),
+            vec!["o".to_string()],
+            "the head-phase shape is D1's"
+        );
+    }
+
+    /// The route boundary: `e13_path_dependent_single_phase_linear` — the same
+    /// write in the middle segment of a two-tick LINEAR body. Measured DIVERGING
+    /// (§10.6), but by a different mechanism: the linear route emits
+    /// `assign o = cnt` whatever reads precede the write, so the control with the
+    /// read on EVERY path (`e13a`) diverges too, and a clause keyed on the branch
+    /// would be a proxy. Not flagged by this clause; recorded, with the
+    /// mechanism, in §10.6 — an unguarded gap, pinned in the battery.
+    #[test]
+    fn mphase_single_phase_linear_route_not_flagged() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { let _ = x.read(); } o.write(cnt); clk.tick().await; }
             }
         "#;
         assert!(mphase(src).is_empty());

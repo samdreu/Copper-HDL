@@ -221,6 +221,11 @@ const EXPECTED_MULTI_PHASE: &[&str] = &[
     "tests/sequential_forwarding_divergence.rs::e5_two_closing",
     "tests/sequential_forwarding_divergence.rs::e11_path_dependent_write_in_a_middle_phase",
     "tests/sequential_forwarding_divergence.rs::e11b_path_dependent_write_then_closing",
+    // the same drive as a port's ONLY write, in one non-head phase on the
+    // extraction route (§10.6, 2026-10-30 — the §10.5 gap: it compiled with no
+    // opt-out and diverges; its linear-route twin e13 is a different mechanism,
+    // recorded and not refused)
+    "tests/sequential_forwarding_divergence.rs::e12_path_dependent_single_phase_extracted",
     // register-free: the reads feeding the writes are immediate passthroughs
     "tests/sequential_forwarding_divergence.rs::e4i_register_free_passthrough_then_opening",
     "tests/sequential_forwarding_divergence.rs::e5f_two_closing_register_free",

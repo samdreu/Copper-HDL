@@ -77,6 +77,19 @@
 //! each predicted before running and matched on the first run — `e11b` is a
 //! shape the pre-narrowing clause 4 ADMITTED and that diverges, now refused.
 //!
+//! **2026-10-30, the §10.5 gap closed (`CYCLE_DATAFLOW_SEMANTICS.md` §10.6).**
+//! The path-dependent drive as a port's ONLY write, in one non-head phase: six
+//! probes at the end of this file, every verdict predicted and matched first
+//! run. On the extraction route `e12` diverges exactly as the model says and its
+//! uniform controls `e12a` / `e12b` agree, so clause 4 of `multi_phase_out_write`
+//! now reaches a single non-head phase there (`e12` is refused; it compiled with
+//! no opt-out before). On the linear route `e13` diverges too — but so does its
+//! every-path control `e13a`, with no branch at all: the route emits
+//! `assign o = cnt` whatever reads precede the write, so a closing register-valued
+//! drive has no form there. That is a different mechanism; both are pinned as
+//! `*_unguarded_gap` tests, no rule flags them, and §10.6 records the clause
+//! that would.
+//!
 //! # Divergence 1 — a pre-tick register update is forwarded to a same-segment read
 //!
 //! ```text
@@ -2579,18 +2592,28 @@ fn phase_e_the_narrowed_rule_flags_exactly_the_diverging_probes() {
     assert_eq!(flagged(E5_SRC), o, "e5: trailing immediate read — anchors differ between the sides");
     assert_eq!(flagged(E11_SRC), o, "e11: path-dependent read before a middle-phase write");
     assert_eq!(flagged(E11B_SRC), o, "e11b: the same beside a closing write — admitted before 2026-10-30");
+    assert_eq!(flagged(E12_SRC), o, "e12: the path-dependent write as the port's only write, one non-head phase (§10.6)");
     assert_eq!(flagged(E4I_SRC), o, "e4i: register-free passthrough then a constant");
     assert_eq!(flagged(E5F_SRC), o, "e5f: register-free, both reads passthrough");
     assert_eq!(flagged(E7_SRC), o, "e7: linear route (refused by vlir_lower)");
     assert_eq!(flagged(E7W_SRC), o, "e7w: linear route, phase-local wires");
-    // Single-phase: not this rule's business
+    // Single-phase, outside the §10.6 extension: a trailing immediate read
+    // (e8, trailing_out_reads_input's), a read in another phase (e9), the
+    // middle-phase write-before-update (e10), the two uniform controls (e12a,
+    // e12b, e13b), and the linear route (e13, e13a — diverging by the linear
+    // route's missing closing form, §10.6, not by this clause's mechanism)
     assert!(flagged(E8_SRC).is_empty());
     assert!(flagged(E9_SRC).is_empty());
     assert!(flagged(E10_SRC).is_empty());
+    assert!(flagged(E12A_SRC).is_empty(), "e12a: the read on every path — uniform, agrees");
+    assert!(flagged(E12B_SRC).is_empty(), "e12b: no read — uniform, agrees");
+    assert!(flagged(E13_SRC).is_empty(), "e13: linear route — a different mechanism, recorded not refused");
+    assert!(flagged(E13A_SRC).is_empty(), "e13a: linear route, read on every path — diverges without a branch");
+    assert!(flagged(E13B_SRC).is_empty(), "e13b: linear route, no read — agrees");
     // No other pre-tick rule owns the admitted or the newly refused probes, so the
     // admitted ones compile without an opt-out and the refused ones are refused
     // by THIS rule alone (e5 is also e8's shape, owned by trailing_out_reads_input).
-    for src in [E4_SRC, E6_SRC, E4R_SRC, E4F_SRC, E11_SRC, E11B_SRC] {
+    for src in [E4_SRC, E6_SRC, E4R_SRC, E4F_SRC, E11_SRC, E11B_SRC, E12_SRC, E12A_SRC, E12B_SRC, E13B_SRC] {
         let f: syn::ItemFn = syn::parse_str(src).expect("parses");
         assert!(copper_analysis::unprotected_pretick_out_write(&f).is_empty());
         assert!(copper_analysis::pretick_out_write_before_update(&f).is_empty());
@@ -4166,4 +4189,278 @@ fn e11b_path_dependent_write_then_closing_diverges_refused() {
     let sv = transpile_and_run_driven(E11B_SRC, "e11b_path_dependent_write_then_closing");
     assert_eq!(sv, vec![0, 0, 1, 1, 14, 14, 14, 2, 2, 19, 19, 19, 3], "transpiled SV behaviour changed");
     assert_ne!(sim, sv, "sim and SV now AGREE for e11b_path_dependent_write_then_closing — a path-dependent drive in a middle phase is realized; re-derive clause 4 of multi_phase_out_write");
+}
+
+// ── §10.6 (2026-10-30): the path-dependent drive in a SINGLE non-head phase ──
+//
+// The §10.5 gap: `e11` with its constant write removed. A plain `Out` written
+// once, in one non-head phase, by a drive the input read reaches on one path
+// (odd `cnt`) and not on the other — outside both rules until this section
+// measured it. Each route has its two uniform-anchor controls: the read on
+// every path (both arms read) and on none (no branch at all). Every verdict in
+// `CYCLE_DATAFLOW_SEMANTICS.md` §10.6 was written from the model before the
+// probes ran; the traces below are the first run's.
+
+/// (e12) The gap shape on the EXTRACTION route: the write's phase is the
+/// `pc == 2` arm, the read is carried past the branch, and the port — held in
+/// every other arm, with no opening drive on the codegen side — is edge-sampled.
+/// Predicted DIVERGE: the even-`cnt` (opening) execution one late in the SV.
+const E12_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e12_path_dependent_single_phase_extracted(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        if cnt[0] == Logic::One { let _ = x.read(); }
+        o.write(cnt);
+        for _ in 0..2 { clk.tick().await; }
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e12_path_dependent_single_phase_extracted(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        if cnt[0] == Logic::One { let _ = x.read(); }
+        o.write(cnt);
+        for _ in 0..2 { clk.tick().await; }
+    }
+}
+
+/// (e12a) The uniform-closing control: both arms read, so every path to the
+/// write carries a deferred read. Edge-sampled on the codegen side, closing on
+/// every path in the simulator. Predicted AGREE.
+const E12A_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e12a_read_on_every_path_extracted(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        if cnt[0] == Logic::One { let _ = x.read(); } else { let _ = x.read(); }
+        o.write(cnt);
+        for _ in 0..2 { clk.tick().await; }
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e12a_read_on_every_path_extracted(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        if cnt[0] == Logic::One { let _ = x.read(); } else { let _ = x.read(); }
+        o.write(cnt);
+        for _ in 0..2 { clk.tick().await; }
+    }
+}
+
+/// (e12b) The uniform-opening control: no read anywhere in the write's phase
+/// (`e9` without its read). Phase C's mux + hold form. Predicted AGREE.
+const E12B_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e12b_read_on_no_path_extracted(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(cnt);
+        for _ in 0..2 { clk.tick().await; }
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e12b_read_on_no_path_extracted(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(cnt);
+        for _ in 0..2 { clk.tick().await; }
+    }
+}
+
+/// (e13) The gap shape on the LINEAR route: the write sits in the middle segment
+/// of a two-tick body. The route emits `assign o = cnt` whatever reads precede
+/// the write — the opening form on every path — so the odd-`cnt` (closing)
+/// executions are predicted one late in the SIMULATOR. Predicted DIVERGE.
+const E13_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e13_path_dependent_single_phase_linear(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { let _ = x.read(); }
+        o.write(cnt);
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e13_path_dependent_single_phase_linear(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { let _ = x.read(); }
+        o.write(cnt);
+        clk.tick().await;
+    }
+}
+
+/// (e13a) The uniform-closing control on the linear route: both arms read. The
+/// same `assign o = cnt` — the model predicts DIVERGE with no branch involved:
+/// the linear route has no closing form for a register-valued drive, so every
+/// execution is one late in the simulator. Not the path-dependent mechanism.
+const E13A_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e13a_read_on_every_path_linear(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { let _ = x.read(); } else { let _ = x.read(); }
+        o.write(cnt);
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e13a_read_on_every_path_linear(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { let _ = x.read(); } else { let _ = x.read(); }
+        o.write(cnt);
+        clk.tick().await;
+    }
+}
+
+/// (e13b) The uniform-opening control on the linear route: no read. The
+/// continuous assign of the committed register is the opening form, and the
+/// simulator's write is opening on every path. Predicted AGREE.
+const E13B_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e13b_read_on_no_path_linear(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(cnt);
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e13b_read_on_no_path_linear(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(cnt);
+        clk.tick().await;
+    }
+}
+
+/// DIVERGE (predicted §10.6, matched on the first run 2026-10-30) — refused by
+/// clause 4 of `multi_phase_out_write` since that day, which reaches a single
+/// non-head phase on the extraction route; it compiled with NO opt-out before.
+/// The even-`cnt` (opening) write shows at index 5 in the simulator and 6 in the
+/// SV; the odd one agrees. `e11`'s first drive with the constant gone. See
+/// `E12_SRC`.
+#[test]
+fn e12_path_dependent_single_phase_extracted_diverges_refused() {
+    let sim = sim_e_in(e12_path_dependent_single_phase_extracted);
+    assert_eq!(sim, vec![0, 0, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E12_SRC, "e12_path_dependent_single_phase_extracted");
+    assert_eq!(sv, vec![0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e12_path_dependent_single_phase_extracted — a path-dependent drive in a single non-head phase is realized; re-derive clause 4 of multi_phase_out_write (§10.6)");
+}
+
+/// AGREE (predicted §10.6, measured 2026-10-30). The uniform-closing control:
+/// the read on every path, edge-sampled. Compiles clean. See `E12A_SRC`.
+#[test]
+fn e12a_read_on_every_path_extracted_agrees() {
+    let sim = sim_e_in(e12a_read_on_every_path_extracted);
+    assert_eq!(sim, vec![0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E12A_SRC, "e12a_read_on_every_path_extracted");
+    assert_eq!(sim, sv, "sim and SV diverge for e12a_read_on_every_path_extracted — a uniformly closing single-phase drive is no longer edge-sampled at the simulator's instant");
+}
+
+/// AGREE (predicted §10.6, measured 2026-10-30). The uniform-opening control:
+/// no read in the phase, phase C's mux + hold. Compiles clean. See `E12B_SRC`.
+#[test]
+fn e12b_read_on_no_path_extracted_agrees() {
+    let sim = sim_e_in(e12b_read_on_no_path_extracted);
+    assert_eq!(sim, vec![0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E12B_SRC, "e12b_read_on_no_path_extracted");
+    assert_eq!(sim, sv, "sim and SV diverge for e12b_read_on_no_path_extracted — the opening single-phase drive's mux + hold form regressed");
+}
+
+/// DIVERGE (predicted §10.6, matched on the first run 2026-10-30) — an UNGUARDED
+/// gap, by a mechanism that is NOT the path-dependent one: the linear route emits
+/// `assign o = cnt` whatever reads precede the write, so the odd-`cnt` (closing)
+/// executions land one observation late in the SIMULATOR (indices 0, 4, 8, 12).
+/// `e13a` below diverges the same way with the read on every path, which is why
+/// no branch-keyed clause refuses this; recorded in §10.6, no rule flags it, no
+/// opt-out. See `E13_SRC`.
+#[test]
+fn e13_path_dependent_single_phase_linear_diverges_unguarded_gap() {
+    let sim = sim_e_in(e13_path_dependent_single_phase_linear);
+    assert_eq!(sim, vec![0, 1, 2, 2, 2, 3, 4, 4, 4, 5, 6, 6, 6], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E13_SRC).unwrap();
+    assert!(copper_analysis::multi_phase_out_write(&f).is_empty(), "the linear route is outside clause 4's single-phase extension by design (§10.6)");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E13_SRC, "e13_path_dependent_single_phase_linear");
+    assert_eq!(sv, vec![1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e13_path_dependent_single_phase_linear — the linear route realizes a closing register-valued drive; record it in CYCLE_DATAFLOW_SEMANTICS.md §10.6");
+}
+
+/// DIVERGE (predicted §10.6, matched on the first run 2026-10-30) — the
+/// uniform-closing control on the linear route, and it diverges with NO branch:
+/// every execution is closing in the simulator (one late, indices 0, 2, 4, …)
+/// while `assign o = cnt` shows the committed register from the phase's opening
+/// observation. The linear route has no closing form for a register-valued
+/// drive — a missing emitted form, the class of `e7w`, not a mismatched anchor.
+/// UNGUARDED: no rule flags it, no opt-out; §10.6 records the derived clause
+/// that would. See `E13A_SRC`.
+#[test]
+fn e13a_read_on_every_path_linear_diverges_unguarded_gap() {
+    let sim = sim_e_in(e13a_read_on_every_path_linear);
+    assert_eq!(sim, vec![0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E13A_SRC).unwrap();
+    for (rule, hits) in [
+        ("multi_phase_out_write", copper_analysis::multi_phase_out_write(&f)),
+        ("unprotected_pretick_out_write", copper_analysis::unprotected_pretick_out_write(&f)),
+        ("pretick_out_write_before_update", copper_analysis::pretick_out_write_before_update(&f)),
+        ("trailing_out_reads_input", copper_analysis::trailing_out_reads_input(&f)),
+        ("out_first_driven_late", copper_analysis::out_first_driven_late(&f)),
+        ("multi_write_collapse", copper_analysis::multi_write_collapse(&f)),
+    ] {
+        assert!(hits.is_empty(), "{rule} now flags e13a — a rule for the linear route's closing drive landed; retire this gap test and record it in §10.6");
+    }
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E13A_SRC, "e13a_read_on_every_path_linear");
+    assert_eq!(sv, vec![1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e13a_read_on_every_path_linear — the linear route realizes a closing register-valued drive; record it in CYCLE_DATAFLOW_SEMANTICS.md §10.6");
+}
+
+/// AGREE (predicted §10.6, measured 2026-10-30). The uniform-opening control on
+/// the linear route: no read, `assign o = cnt` is the opening form and the
+/// simulator's write is opening on every path. See `E13B_SRC`.
+#[test]
+fn e13b_read_on_no_path_linear_agrees() {
+    let sim = sim_e_in(e13b_read_on_no_path_linear);
+    assert_eq!(sim, vec![1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7], "simulator behaviour changed");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E13B_SRC, "e13b_read_on_no_path_linear");
+    assert_eq!(sim, sv, "sim and SV diverge for e13b_read_on_no_path_linear — the linear route's continuous assign of a committed register regressed");
 }

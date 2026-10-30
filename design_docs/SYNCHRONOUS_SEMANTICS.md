@@ -433,7 +433,11 @@ about its region is what separates them.
   a write **whose anchors differ between the sides** — an input read reaches it in its phase while
   the simulator runs it at the opening on some path: an immediate read (`e5`) or a read on one path
   to it and not on another (`e11`, `e11b`; the latter a divergent shape the 2026-10-23 clause had
-  admitted). `e4` and `e6`, the clause's former witnesses, agree since 2026-10-29 under the
+  admitted; and since 2026-10-30, §10.6, the same path-dependent write as a port's ONLY write in
+  a non-head phase on the extraction route — `e12`, which compiled with no opt-out and diverges —
+  while its linear-route twin `e13` diverges by a different mechanism, the route's missing closing
+  form, and is recorded as an unguarded gap, not refused). `e4` and `e6`, the clause's former
+  witnesses, agree since 2026-10-29 under the
   drive-level mux + hold form and are admitted since 2026-10-30 with `e4r` and `e4f` (a mixed port
   whose drives each have a uniform anchor is realized drive by drive); and —
   unmeasured, refused by construction — a **wait loop's
@@ -444,10 +448,10 @@ about its region is what separates them.
   diverged by one cycle until phase C's emission form; the three real modules it flagged then
   (`uart_tx`, `uart_rx`, the CPU's program counter) were migrated to `RegOut`, which remains the
   universal remedy. Pins: `pretick_alignment_corpus.rs::multi_phase_out_write_flags_exactly_the_demonstration_modules`
-  (`EXPECTED_MULTI_PHASE`: the seven refused probes `e7`, `e7w`, `e5`, `e11`, `e11b`, `e4i`, `e5f` in
-  `tests/sequential_forwarding_divergence.rs`), the `mphase_*` unit tests in `cfg.rs`,
-  `ui/fail/multi_phase_out_write.rs` (the `e11` shape), and the accepted shapes in
-  `ui/pass/pretick_alignment_ok.rs`.
+  (`EXPECTED_MULTI_PHASE`: the eight refused probes `e7`, `e7w`, `e5`, `e11`, `e11b`, `e12`, `e4i`,
+  `e5f` in `tests/sequential_forwarding_divergence.rs`), the `mphase_*` unit tests in `cfg.rs`,
+  `ui/fail/multi_phase_out_write.rs` (the `e11` shape), `ui/fail/path_dependent_single_phase.rs`
+  (the `e12` shape), and the accepted shapes in `ui/pass/pretick_alignment_ok.rs`.
 
 **The constant-write clause — found 2026-08-25, retired 2026-10-28.** The sweep found
 `branch_merge_explicit` leading its own emitted SystemVerilog by one cycle, and the minimal pairs
