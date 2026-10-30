@@ -256,7 +256,15 @@ twins, the whole sv-baseline delta; D1 itself was re-derived on that evidence
 2026-10-28, see the rule list below). Until then the predicate was
 statement-granular over the whole extracted `match pc`, so the form was emitted
 only for modules that read **no** input and `e9` lagged by one cycle
-(`CYCLE_DATAFLOW_SEMANTICS.md` §9.4). The same battery found a second single-phase
+(`CYCLE_DATAFLOW_SEMANTICS.md` §9.4). **Drive-level since 2026-10-29:** the
+decision is per drive, not per port — a conditionally driven plain `Out` with
+at least one opening drive takes the form, its comb copy muxing the opening
+drives only while every drive, closing ones included, loads the hold register at
+the edge — so a mixed-anchor port realizes both anchors (`branch_merge`'s
+`tail_o`, the sweep's last measured divergence, agrees on every stimulus
+sequence; `d2a`, `e4`, `e6` agree; sv-baseline delta the seven mixed-anchor
+hold-form ports, pinned by `copper-codegen/tests/hold_form_audit.rs`). The rules
+that refuse those shapes are unchanged pending a decision (§9.4). The same battery found a second single-phase
 shape, `e8_single_phase_trailing_immediate_read` — a plain `Out` written in the
 trailing region from an input read in that same statement, immediate here and a
 closing drive in the emitted SystemVerilog — which is refused since 2026-10-26 by
@@ -375,7 +383,9 @@ about its region is what separates them.
   proxy: measured on the sixteen-probe `d*` battery they had four false positives (`d1b`, `d1c`,
   `d3a`, `d4b`, plus the re-blessed witnesses `pc_arm_write`, `pc_arm_toggle`, `probe_fsm`, which
   compile without an opt-out now) and four false negatives (`d1g`, `d2a`, `d2b`, `d4c`, refused
-  now). `w4_mixed_alignment` and `branch_merge_explicit` (`tail_o`) stay refused. `RegOut` remains
+  now). `w4_mixed_alignment` and `branch_merge_explicit` (`tail_o`) stay refused — the latter and
+  `d2a` **agree with their SV since 2026-10-29** under the drive-level mux + hold form, with the
+  rule unchanged pending a decision (`CYCLE_DATAFLOW_SEMANTICS.md` §9.4, §10.3). `RegOut` remains
   immune. Pins: `pretick_alignment_corpus.rs::pretick_alignment_hazard_flags_exactly_the_known_divergent_modules`
   (`EXPECTED_FLAGGED`: `w4_mixed_alignment`, `branch_merge_explicit`, and the seven refused `d*`
   probes), one flipping unit-test pair per clause in `cfg.rs`, `copper-macros/tests/ui/fail/pretick_alignment.rs`,
@@ -409,7 +419,10 @@ about its region is what separates them.
   `e5d_two_closing_deferred`). Refused, each with a flipping witness one edit away: the **linear**
   route (no mux form; `vlir_lower` refuses it as multiply driven or edge-samples the hold path —
   `e7`, `e7w`), a **register-free** body with reads (immediate passthroughs — `e4i`, `e5f`),
-  **mixed anchors** (`e4`, `e5`, `e6`), and — unmeasured, refused by construction — a **wait loop's
+  **mixed anchors** (`e4`, `e5`, `e6` — `e4` and `e6` agree since 2026-10-29 under the
+  drive-level mux + hold form, which realizes a deferred-read closing drive beside an opening one;
+  the clause is unchanged pending a decision, `CYCLE_DATAFLOW_SEMANTICS.md` §9.3), and —
+  unmeasured, refused by construction — a **wait loop's
   read before an opening write** (the extracted form duplicates the write into the exit arm behind
   the read). History: the rule landed 2026-08-25 (commit `99290da`) as "any port in two
   phases", forced by the one-cycle pulse `loop { for _ in 0..3 { tick } dv.write(One); tick;
@@ -430,11 +443,13 @@ the write's conditionality. The arm-granular opening walk (2026-10-26) flipped `
 the re-derivation (above; `CYCLE_DATAFLOW_SEMANTICS.md` §10) showed the clause was a proxy for the
 mixed-anchor hazard: `branch_merge_explicit`'s `tail_o` diverges because it is written both behind
 the deferred `sel` read and in the `pc == 1` arm with no read before it — mixed anchors, the shape
-`d2a` isolates — and still leads by one when the first cycle takes `sel == 1` (measured
-2026-10-26; the seeded sweep takes `sel == 0` first, which masks it, in the live unflagged twin
-`branch_merge` too, a recorded blind spot). Conditionality and constant-ness play no part in the
-rule any more: an every-path mux with mixed anchors diverges (`d1g`, `d2b`) and a held constant
-behind its own read agrees (`d1b`).
+`d2a` isolates — and led by one when the first cycle took `sel == 1` (measured 2026-10-26; the
+seeded sweep took `sel == 0` first, which masked it, in the live unflagged twin `branch_merge`
+too, a blind spot the multi-sequence stimulus exposed 2026-10-28 and the drive-level mux + hold
+form **fixed 2026-10-29** — both twins agree on every sequence and sweep with no row; the rule
+still refuses the explicit twin, pending a decision). Conditionality and constant-ness play no
+part in the rule any more: an every-path mux with mixed anchors diverges (`d1g`, `d2b`) and a
+held constant behind its own read agrees (`d1b`).
 
 - **`pretick_out_write_before_update`** (2026-08-26) — a plain `Out` written **between a leading
   `In` read and the update of a register the write reads**. The read's barrier parks the task at the

@@ -278,7 +278,11 @@ single-tick body measured agreeing and exempt).
 * `probe_fsm`, `pc_arm_*`, `branch_merge_explicit`, V8a/V8d stay refused, each
   with its derived justification. (2026-10-28: `probe_fsm` and `pc_arm_*` are
   admitted by the re-derived D1 rule — `CYCLE_DATAFLOW_SEMANTICS.md` §10 — and
-  `branch_merge_explicit` is refused as a mixed-anchor port; V8a/V8d unchanged.)
+  `branch_merge_explicit` is refused as a mixed-anchor port; V8a/V8d unchanged.
+  2026-10-29: the drive-level mux + hold form — phase C deciding per drive —
+  makes `branch_merge_explicit`, its live twin, `d2a`, `e4` and `e6` agree,
+  sv-baseline delta the seven mixed-anchor hold-form ports; the rules are
+  unchanged pending a decision, `CYCLE_DATAFLOW_SEMANTICS.md` §9.4.)
 
 ## 5. Effort shape
 

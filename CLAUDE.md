@@ -340,7 +340,16 @@ receive/clone one.
   (sv-baseline delta: seven modules, no referenced one; D1 was re-derived on that
   evidence 2026-10-28, see above). Until then the predicate
   was statement-granular over the whole `match pc` and the form was emitted only for
-  input-free modules. `e8`, the battery's other single-phase divergence, is refused
+  input-free modules. **Drive-level since 2026-10-29:** the decision is per
+  drive, not per port — a port with at least one opening drive takes the form, its
+  comb copy muxing the opening drives only while every drive (closing ones
+  included) loads the hold register at the edge — so a mixed-anchor port realizes
+  both anchors: `branch_merge`'s `tail_o` (the sweep's last measured divergence,
+  both twins' `SKIP` rows gone), `d2a`, `e4` and `e6` agree; sv-baseline delta
+  exactly the seven mixed-anchor hold-form ports, pinned as an exact set by
+  `copper-codegen/tests/hold_form_audit.rs` through `copper_codegen::hold_form_ports`;
+  no rule changed — D1 clause A and `multi_phase_out_write` clause 4 still refuse
+  shapes the emission realizes, pending the user's decision. `e8`, the battery's other single-phase divergence, is refused
   by `trailing_out_reads_input` since the same day (`CYCLE_DATAFLOW_SEMANTICS.md`
   §9.4), so both gaps phase E found are closed. The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
