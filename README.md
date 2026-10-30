@@ -427,15 +427,19 @@ counterexample rather than lowered to something plausible:
   FPGA tools and ignored by most ASIC flows.
 - **The pre-tick alignment family**: four compile-time rules refuse plain-`Out`
   drive shapes whose phase would silently differ between the simulator and the
-  synthesized FSM: before the first tick, a port with *mixed anchors* (an input
-  read reaches some write of it while some write has a read-free path from the
-  loop head) or an opening write guarded by a test of a register the same segment
-  just assigned (`unprotected_pretick_out_write`, re-derived 2026-10-28 on a
-  sixteen-probe battery — a constant written in a state arm no read reaches, or
-  behind its own read, is accepted); a port written in more than one clock phase
-  where the two sides anchor a write differently (a port none of whose writes an
-  input read reaches, or one whose every write follows an input read a tick
-  follows, is accepted); and a write that precedes its register's update. The
+  synthesized FSM: before the first tick, a write an input read reaches on one
+  control path and not on another, a port written on every path with a read
+  before some write and not another, or an opening write guarded by a test of a
+  register the same segment just assigned (`unprotected_pretick_out_write`,
+  re-derived 2026-10-28 on a sixteen-probe battery and narrowed 2026-10-30 to
+  what the drive-level mux + hold form leaves — a port written on some paths
+  whose every write is uniformly behind an input read or uniformly not is
+  accepted, as is a constant in a state arm no read reaches); a port written in
+  more than one clock phase where the two sides anchor a write differently (an
+  input read before it in its phase that the simulator nonetheless runs at the
+  cycle's opening: an immediate read, or a read on one path and not another;
+  every other mix of writes is accepted since 2026-10-30); and a write that
+  precedes its register's update. The
   remedy each error names is usually `RegOut`. Five *rejected* fixes are recorded with measured
   evidence in
   [`design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md`](design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md)
@@ -506,8 +510,10 @@ rather than papered over (`SKIP` in `build.rs`): **none as of 2026-10-29.**
   measured against the simulator before codegen changed). Both twins sweep on
   every stimulus sequence. The single-seed sweep had never produced that first
   cycle for either; the multi-sequence stimulus (above) exposed it the day
-  before. (`probe_fsm`, listed here until 2026-10-26, agrees and sweeps.) The
-  rules that refuse the explicit twin's shape are unchanged pending a decision.
+  before. (`probe_fsm`, listed here until 2026-10-26, agrees and sweeps.) On
+  2026-10-30 the two rules that refused the explicit twin's shape were narrowed
+  to what still diverges, and `branch_merge_explicit` compiles without an
+  opt-out and sweeps exactly like its twin.
 
 The phase-E probe battery (2026-10-23) found two single-phase shapes that
 disagreed by one cycle and that no rule guarded; both are closed as of

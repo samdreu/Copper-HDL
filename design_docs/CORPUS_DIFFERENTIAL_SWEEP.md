@@ -106,8 +106,10 @@ the findings are the argument for the sweep.
   first run; both `SKIP` rows are deleted. sv-baseline delta: the seven
   mixed-anchor hold-form ports in the corpus and nothing else (pinned as an exact
   set by `copper-codegen/tests/hold_form_audit.rs`), no referenced module, no
-  golden re-blessed. The rules that refuse the explicit twin's shape are
-  unchanged, pending a decision.
+  golden re-blessed. On 2026-10-30 the two rules that refused the explicit
+  twin's shape were narrowed to what still diverges
+  (`CYCLE_DATAFLOW_SEMANTICS.md` §10.4–10.5); `branch_merge_explicit` dropped
+  its opt-out and sweeps exactly like its twin.
 * **2026-10-29 (register power-on values): the `lfsr` finding fixed at its source.**
   The transpiler carried a register's initializer into the SV only when it was an
   integer literal or an enum variant; every constructor call — `Bits::zero()`,

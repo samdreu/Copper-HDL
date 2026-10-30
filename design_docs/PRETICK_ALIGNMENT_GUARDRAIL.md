@@ -39,12 +39,21 @@
 > mixed-anchor plain `Out` realizes both anchors: `branch_merge`'s `tail_o` —
 > the sweep's last measured divergence — agrees on every stimulus sequence and
 > both twins' `SKIP` rows are gone; clause (A)'s two-drive held witness `d2a`
-> and `multi_phase_out_write`'s `e4` / `e6` agree with it. **The rules are
-> unchanged** and still refuse those shapes (`EXPECTED_FLAGGED`,
-> `EXPECTED_MULTI_PHASE` as they were); whether clause (A) narrows to its
-> path-dependent residue (`w4_mixed_alignment`, `d1f`, `d1g`, `d2b`, `d3c`, all
-> still divergent) and clause 4 to the immediate-read half (`e5`) is a decision
-> of its own, not taken here.
+> and `multi_phase_out_write`'s `e4` / `e6` agree with it. The rules were not
+> changed that day.
+>
+> **2026-10-30 — both mixed-anchor clauses NARROWED (§5.8 tail;
+> `CYCLE_DATAFLOW_SEMANTICS.md` §10.4–10.5).** Derived first: after the
+> drive-level form, what still diverges is a drive whose anchors differ between
+> the two sides — path-dependent (`w4_mixed_alignment`, `d1f`, `d1g`, `d3c`) or
+> fed only by an immediate read (`e5`, `e4i`, `e5f`) — and the every-path mixed
+> mux, which has no hold register (`d2b`). Clause (A) now requires a
+> path-dependent drive or an every-path port; clause 4 is per drive. `d2a`,
+> `branch_merge_explicit`, `e4` and `e6` compile without an opt-out (the
+> explicit twin sweeps like its live one); eleven probes predicted and matched
+> on the first run, one of them (`e11b`) a divergent shape clause 4 had
+> admitted, now refused. Zero live modules either way; sv-baseline delta the
+> new probes only.
 >
 > **The rules.** All four live in `copper-analysis/src/cfg.rs` as methods on `Cfg`
 > (re-exported as free functions from `copper_analysis`). The corpus-cost column is
@@ -54,10 +63,10 @@
 >
 > | rule | what it refuses | corpus cost when it landed (measured once, not a gate) |
 > |---|---|---|
-> | `unprotected_pretick_out_write` (D1, **re-derived 2026-10-28**, §5.8) | a plain `Out` driven before the first tick with **mixed anchors** — an `In` read comb-reaches some drive of the port while some drive has a read-free path from the loop head — unless it is a single every-path drive forwarding no register it reads; or with a **forwarded guard** — a drive no read reaches, nested under an `if`/`match` that tests a register assigned earlier on the path | 0 live modules at the re-derivation; the former witnesses `probe_fsm`, `pc_arm_write`, `pc_arm_toggle` left the set, measured agreeing |
+> | `unprotected_pretick_out_write` (D1, **re-derived 2026-10-28**, **narrowed 2026-10-30**, §5.8) | a plain `Out` driven before the first tick with **mixed anchors** — an `In` read comb-reaches some drive of the port while some drive has a read-free path from the loop head — **and** either a **path-dependent drive** (one drive both reached by a read and reachable read-free; unobservable only for a single every-path drive forwarding no register it reads) or the port **written on every path** (the every-path mux has no hold register); or with a **forwarded guard** — a drive no read reaches, nested under an `if`/`match` that tests a register assigned earlier on the path. A held port whose drives each have a uniform anchor is admitted (the drive-level mux + hold form realizes it) | 0 live modules at the re-derivation and at the narrowing; `probe_fsm`, `pc_arm_write`, `pc_arm_toggle` left the set 2026-10-28, `d2a` and `branch_merge_explicit` 2026-10-30, all measured agreeing |
 > | ~~…its **constant-write** clause~~ (§5.5; **retired 2026-10-28**) | refused a constant written on *some* paths in a segment with an unprotected register assignment. Its witnesses agree under the arm-granular opening walk; the agreeing shapes it refused (`d1b`, `d1c`, `d3a`, `d4b`) and the diverging ones it missed (`d1g`, `d2a`, `d2b`, `d4c`) are in §5.8 | 3 modules when it landed, all measured divergences then (commit `348ddd0`) |
 > | ~~`unprotected_trailing_out_write`~~ (§5.4; narrowed 2026-08-27; **RETIRED 2026-10-23**) | refused the same hazard past the *last* tick on the extraction route, which emitted a trailing plain-`Out` drive one cycle late. Phase C fixed the emission (`vlir_lower::opening_hold_outputs`), both witnesses agree, and the rule is deleted | 1 real module when it landed (`rv32i_cpu_pipelined`'s `program_counter`, → `RegOut`; commit `56233ce`) |
-> | `multi_phase_out_write` (**narrowed 2026-10-23**, phase E — `CYCLE_DATAFLOW_SEMANTICS.md` §9) | a plain `Out` driven in more than one clock phase on the linear route, or in a register-free body with reads, or with mixed anchors (an input read reaching some write of the port while another is opening), or after a wait loop's read (unmeasured, by construction); accepted: an extracted port none of whose writes an input read reaches (whatever the body reads elsewhere — the "input read anywhere" clause was retired 2026-10-26 with the arm-granular opening walk), and the all-closing class | 9 modules when it landed as "any two phases", six of them its own witnesses, three real (`rv32i_cpu` — since replaced by `rv32i_cpu_transpilable` — and `uart_tx`/`uart_rx`, → `RegOut`; commit `99290da`); 0 live modules at the narrowing |
+> | `multi_phase_out_write` (**narrowed 2026-10-23**, phase E — `CYCLE_DATAFLOW_SEMANTICS.md` §9; **clause 4 narrowed again 2026-10-30**, §10.4–10.5) | a plain `Out` driven in more than one clock phase on the linear route, or in a register-free body with reads, or with a write **whose anchors differ between the sides** (an input read reaches it in its phase while the simulator runs it at the opening on some path — every reaching read immediate, `e5`, or the read on one path to it and not on another, `e11`/`e11b`), or after a wait loop's read (unmeasured, by construction); accepted: an extracted port none of whose writes an input read reaches (whatever the body reads elsewhere — the "input read anywhere" clause was retired 2026-10-26 with the arm-granular opening walk), the all-closing class, and since 2026-10-30 the mixed class with uniform per-drive anchors (`e4`, `e6`, `e4r`, `e4f`) | 9 modules when it landed as "any two phases", six of them its own witnesses, three real (`rv32i_cpu` — since replaced by `rv32i_cpu_transpilable` — and `uart_tx`/`uart_rx`, → `RegOut`; commit `99290da`); 0 live modules at the narrowing |
 > | `pretick_out_write_before_update` (§5.6, 2026-08-26; trailing clause 2026-08-27) | a plain `Out` written before the update of a register it reads — behind a leading read in the pre-tick segment, or anywhere in the trailing segment (whose updates commit at the opening edge) | 0 real modules at landing (caught a compile-only UI fixture; commit `7abfd98`); the trailing clause then caught THREE real sim-only-tested modules (`tests/module_composition_hybrid.rs`'s stages, measured divergent as `v8t_stage_publish_then_load`, migrated to the canonical write/read/tick/update spelling; commit `b439894`) |
 > | `trailing_out_reads_input` (**2026-10-26**, the e8 class — `CYCLE_DATAFLOW_SEMANTICS.md` §9.4) | a plain `Out` written after the last tick from an `In` read directly at an immediate site, in a body that crosses more than one edge: the extraction route edge-samples the drive one observation late (`e8`, `e8p`) and the linear multi-tick route emits a continuous assign the phase does not gate (`e8m`); the single-tick body agrees (`e8l`, `e8lr`) and is exempt, as is a value held in a register or a deferred read | 0 live modules; the witnesses are the opted-out probes (`e8`, `e8m`, `e8p`, and phase E's `e5_two_closing`, whose second write is this shape) |
 >
@@ -76,10 +85,10 @@
 >
 > | rule | unit tests (`cfg.rs` `mod tests`, positive / negative) | trybuild (`copper-macros/tests/ui/`) | exact-set corpus pin (`copper-analysis/tests/pretick_alignment_corpus.rs`) |
 > |---|---|---|---|
-> | `unprotected_pretick_out_write` | one flipping pair per clause (2026-10-28): (A) `hazard_w4_mixed_alignment_flagged` / `d3a_w4_unrelated_register_not_flagged`, `d3b_w4_read_on_every_path_not_flagged`; `d1f_path_dependent_constant_held_flagged` / `d1b_constant_behind_its_read_not_flagged`; `d2a_mixed_two_drives_held_flagged` / `d2c_two_closing_drives_not_flagged`; `d2b_mixed_two_drives_every_path_flagged` / `d1d_mux_behind_read_not_flagged`; (B) `d4a_forwarded_guard_held_flagged` / `d4b_committed_guard_not_flagged`; `d4c_forwarded_guard_every_path_flagged` / `d4d_forwarded_guard_behind_read_not_flagged`; admitted: `hazard_probe_fsm_sibling_arm_read_not_flagged`, `d1c_state_arm_constants_no_read_not_flagged`, `a_conditional_constant_write_is_flagged` (`branch_merge_explicit`, `tail_o` only), `an_unconditional_constant_write_is_not_flagged`, `hazard_v4_leading_read_not_flagged`, `hazard_v6_post_tick_assign_not_flagged`, `hazard_w8_regout_immunises_mixed_alignment`, `hazard_w9_regout_immunises_the_minimal_case`, `hazard_lfsr_shape_not_flagged`, `hazard_regout_only_module_not_flagged`, and the three DISSOLVED shapes `hazard_v1_assign_then_write_dissolved`, `hazard_v5_trailing_read_dissolved`, `hazard_v7_escape_across_tick_dissolved` | `fail/pretick_alignment.rs` (`mixed_alignment`, W4), `fail/pretick_mixed_anchors.rs` (`d2a`), `fail/pretick_forwarded_guard.rs` (`d4a`); `pass/pretick_alignment_ok.rs` (`post_tick_update`, `registered_output`, `leading_read`, `constant_write`, `forwarded_opening_drive`, and since 2026-10-28 `state_arm_constant`, `constant_behind_read`, `unrelated_register_on_read_free_arm`, `committed_guard_pulse`) | `pretick_alignment_hazard_flags_exactly_the_known_divergent_modules`; `EXPECTED_FLAGGED` = {`tests/sequential_forwarding_divergence.rs::w4_mixed_alignment`, `tests/fixtures/control_extraction_dut.rs::branch_merge_explicit`, and the seven refused probes `…::d1f_const_path_dependent_hold`, `…::d1g_const_path_dependent_all_paths`, `…::d2a_mixed_two_drives_hold`, `…::d2b_mixed_two_drives_all_paths`, `…::d3c_w4_hold`, `…::d4a_forwarded_guard_hold`, `…::d4c_forwarded_guard_all_paths`} |
-> | ~~…constant-write clause~~ | retired 2026-10-28 (§5.8); `a_conditional_constant_write_is_flagged` now pins `branch_merge_explicit` as a mixed-anchor hit on `tail_o` alone | — | — |
+> | `unprotected_pretick_out_write` | one flipping pair per clause (2026-10-28, re-paired 2026-10-30): (A1) `hazard_w4_mixed_alignment_flagged` / `d3a_w4_unrelated_register_not_flagged`, `d3b_w4_read_on_every_path_not_flagged`; `d1f_path_dependent_constant_held_flagged` / `d1b_constant_behind_its_read_not_flagged`, `d2a_mixed_two_drives_held_not_flagged`, `d5a_const_opening_reg_closing_not_flagged`, `d5f_reg_opening_reg_closing_extracted_not_flagged`; (A2) `d2b_mixed_two_drives_every_path_flagged` / `d1d_mux_behind_read_not_flagged`, `d2a_mixed_two_drives_held_not_flagged`, `d2c_two_closing_drives_not_flagged`; admitted 2026-10-30: `branch_merge_explicit_tail_o_not_flagged`; (B) `d4a_forwarded_guard_held_flagged` / `d4b_committed_guard_not_flagged`; `d4c_forwarded_guard_every_path_flagged` / `d4d_forwarded_guard_behind_read_not_flagged`; admitted: `hazard_probe_fsm_sibling_arm_read_not_flagged`, `d1c_state_arm_constants_no_read_not_flagged`, `an_unconditional_constant_write_is_not_flagged`, `hazard_v4_leading_read_not_flagged`, `hazard_v6_post_tick_assign_not_flagged`, `hazard_w8_regout_immunises_mixed_alignment`, `hazard_w9_regout_immunises_the_minimal_case`, `hazard_lfsr_shape_not_flagged`, `hazard_regout_only_module_not_flagged`, and the three DISSOLVED shapes `hazard_v1_assign_then_write_dissolved`, `hazard_v5_trailing_read_dissolved`, `hazard_v7_escape_across_tick_dissolved` | `fail/pretick_alignment.rs` (`mixed_alignment`, W4), `fail/pretick_mixed_anchors.rs` (`d2b` since 2026-10-30; `d2a` before), `fail/pretick_path_dependent_drive.rs` (`d1f`, 2026-10-30), `fail/pretick_forwarded_guard.rs` (`d4a`); `pass/pretick_alignment_ok.rs` (`post_tick_update`, `registered_output`, `leading_read`, `constant_write`, `forwarded_opening_drive`, since 2026-10-28 `state_arm_constant`, `constant_behind_read`, `unrelated_register_on_read_free_arm`, `committed_guard_pulse`, and since 2026-10-30 `mixed_anchors_held` (`d2a`), `mixed_anchors_held_register_opening` (`d5b`)) | `pretick_alignment_hazard_flags_exactly_the_known_divergent_modules`; `EXPECTED_FLAGGED` = {`tests/sequential_forwarding_divergence.rs::w4_mixed_alignment` and the six refused probes `…::d1f_const_path_dependent_hold`, `…::d1g_const_path_dependent_all_paths`, `…::d2b_mixed_two_drives_all_paths`, `…::d3c_w4_hold`, `…::d4a_forwarded_guard_hold`, `…::d4c_forwarded_guard_all_paths`}; `branch_merge_explicit` and `d2a` left 2026-10-30 |
+> | ~~…constant-write clause~~ | retired 2026-10-28 (§5.8); its witness `branch_merge_explicit` was then a mixed-anchor hit on `tail_o` alone and is admitted since 2026-10-30 (`branch_merge_explicit_tail_o_not_flagged`) | — | — |
 > | ~~`unprotected_trailing_out_write`~~ | retired 2026-10-23 with phase C; its unit tests, pin and witnesses' opt-outs are gone. `trailing_segment_register_update_agrees` and `branch_trailing_probe` now pin the AGREEMENT | — | — |
-> | `multi_phase_out_write` | `mphase_*` (one per clause: `mphase_constant_pulse_no_input_not_flagged`, `mphase_two_registers_no_input_not_flagged`, `mphase_two_closing_deferred_not_flagged`, `mphase_regout_not_flagged`, `mphase_single_phase_not_flagged`, `mphase_two_registers_plus_unrelated_read_not_flagged` (flagged until 2026-10-26) / `mphase_trailing_immediate_read_flagged`, `mphase_register_free_passthrough_flagged`, `mphase_mixed_closing_and_opening_flagged`, `mphase_linear_route_flagged`, `mphase_opening_write_then_trailing_immediate_read_flagged`, `mphase_wait_loop_read_before_opening_writes_flagged`) | `fail/multi_phase_out_write.rs` (`mixed_anchors`), `pass/pretick_alignment_ok.rs` (`two_phase_opening_mux`, `two_phase_opening_mux_with_unrelated_read`, `two_phase_closing_mux`) | `multi_phase_out_write_flags_exactly_the_demonstration_modules`; `EXPECTED_MULTI_PHASE` = the seven refused `e*` probes in `tests/sequential_forwarding_divergence.rs` (`e7`, `e7w`, `e4`, `e5`, `e6`, `e4i`, `e5f`; `e2x` left on 2026-10-26); `pulse_plain` is clean under this rule |
+> | `multi_phase_out_write` | `mphase_*` (one per clause: `mphase_constant_pulse_no_input_not_flagged`, `mphase_two_registers_no_input_not_flagged`, `mphase_two_closing_deferred_not_flagged`, `mphase_regout_not_flagged`, `mphase_single_phase_not_flagged`, `mphase_two_registers_plus_unrelated_read_not_flagged` (flagged until 2026-10-26), `mphase_mixed_closing_and_opening_not_flagged` and `mphase_register_opening_beside_closing_not_flagged` (flagged until 2026-10-30) / `mphase_trailing_immediate_read_flagged`, `mphase_register_free_passthrough_flagged`, `mphase_path_dependent_middle_phase_write_flagged`, `mphase_path_dependent_write_then_closing_flagged` (2026-10-30), `mphase_linear_route_flagged`, `mphase_opening_write_then_trailing_immediate_read_flagged`, `mphase_wait_loop_read_before_opening_writes_flagged`) | `fail/multi_phase_out_write.rs` (`path_dependent_middle_phase`, the `e11` shape; `e4`'s until 2026-10-30), `pass/pretick_alignment_ok.rs` (`two_phase_opening_mux`, `two_phase_opening_mux_with_unrelated_read`, `two_phase_closing_mux`, and since 2026-10-30 `two_phase_mixed_anchors`) | `multi_phase_out_write_flags_exactly_the_demonstration_modules`; `EXPECTED_MULTI_PHASE` = the seven refused `e*` probes in `tests/sequential_forwarding_divergence.rs` (`e7`, `e7w`, `e5`, `e11`, `e11b`, `e4i`, `e5f`; `e2x` left on 2026-10-26, `e4` and `e6` on 2026-10-30); `pulse_plain` is clean under this rule |
 > | `pretick_out_write_before_update` | `v8a_write_between_read_and_update_flagged`, `v8t_trailing_write_before_update_flagged` / `v8b_write_after_update_not_flagged`, `v8c_write_before_read_not_flagged`, `v8_constant_write_not_flagged`, `v8_regout_not_flagged`, `v8_unrelated_update_after_write_not_flagged`, `v8t_trailing_write_after_update_not_flagged` | `fail/write_before_update.rs` (`stale_publish`), `pass/pretick_alignment_ok.rs` (`v8b_publish_after_update`, `v8c_publish_before_read`), `pass/single_loop_local_ok.rs::accum` (reordered to V8c) | `write_before_update_flags_exactly_the_demonstration_modules`; `EXPECTED_WRITE_BEFORE_UPDATE` = {`tests/sequential_forwarding_divergence.rs::v8a_read_write_update`, `…::v8d_temp_renamed_update`, `tests/fixtures/out_phase_dut.rs::out_from_reg_before_commit`, `…::v8t_stage_publish_then_load`} |
 > | `trailing_out_reads_input` | `trailing_out_from_immediate_input_past_folded_loop_flagged`, `trailing_out_from_immediate_input_linear_two_ticks_flagged` / `trailing_out_single_tick_passthrough_not_flagged`, `trailing_out_from_register_fed_by_input_not_flagged`, `pretick_out_from_input_not_flagged_by_the_trailing_rule`, `trailing_out_from_deferred_input_not_flagged` | `fail/trailing_out_reads_input.rs` | `trailing_out_reads_input_flags_exactly_the_demonstration_modules`; `EXPECTED_TRAILING_OUT_INPUT` = `e5_two_closing`, `e8_single_phase_trailing_immediate_read`, `e8m_linear_two_ticks`, `e8p_extracted_passthrough` in `tests/sequential_forwarding_divergence.rs` |
 >
@@ -785,8 +794,9 @@ exactly that for any conditionally driven plain `Out` with at least one opening
 drive, and both twins agree with their byte-identical SV on all six sweep
 sequences. Both `SKIP` rows are deleted; the probe is renamed
 `branch_merge_agrees_when_the_first_cycle_takes_sel_one` and pins the agreement
-with the same vectors. `branch_merge_explicit` keeps its opt-out: the rule still
-refuses its `tail_o` (below), and whether it should is a decision of its own.
+with the same vectors. `branch_merge_explicit` kept its opt-out one more day: the
+rule still refused its `tail_o` (below) until clause (A) was narrowed 2026-10-30
+(§5.8 tail), and it compiles without one now.
 **The clause was retired 2026-10-28 (§5.8):** the
 re-derived rule refuses `branch_merge_explicit`'s `tail_o` as a mixed-anchor port
 (its minimal pair is `d2a`), admits `pc_arm_*` (opening on both sides), and no
@@ -953,10 +963,34 @@ by every drive. Measured flips on the first run: `d2a` (SV `[0, 9, 5, 9, 5, …]
 twin `branch_merge`, §5.5 — sweeps on every sequence, no row). Still divergent,
 as the model says: `w4_mixed_alignment`, `d1f`, `d1g`, `d2b`, `d3c` — one write
 node whose anchor differs per path, or an every-path mux, which no per-drive
-form reaches — and both (B) witnesses. **Clause (A) is unchanged** and still
-refuses `d2a` and `branch_merge_explicit`; `EXPECTED_FLAGGED`, the unit pairs,
-the ui cases and the parity audit are as they were. Narrowing the clause to the
-path-dependent residue on this evidence is a decision of its own.
+form reaches — and both (B) witnesses. Clause (A) was not changed that day.
+
+**2026-10-30 — both mixed-anchor clauses narrowed to the residue
+(`CYCLE_DATAFLOW_SEMANTICS.md` §10.4–10.5).** Derived first, from the three
+emitted forms: a drive agrees iff its codegen anchor (closing once a read
+reaches it on *any* path) equals its simulator anchor on every path that reaches
+it, so what survives the drive-level form is (1) a **path-dependent** drive
+(`w4`, `d1f`, `d1g`, `d3c`; `e11`, `e11b` in a middle phase), (2) a drive fed
+only by an **immediate** read (`e5`, `e4i`, `e5f`), and (3) the **every-path
+mixed mux**, which has no hold register (`d2b`). Clause (A) is now "mixed
+anchors ∧ (a path-dependent drive ∨ written on every path)", observability
+unchanged; clause 4 of `multi_phase_out_write` is "a write an input read
+reaches that the simulator runs at the opening on some path" (no deferred read
+reaches it, or it has a read-free path from its phase's entry —
+`Cfg::read_free_path_from_phase_entry`). Eleven new probes, every verdict
+predicted and matched first run: `d5a`–`d5f` (`d2a` with a register in place of
+either constant, single-tick and extraction route), `e4r`, `e4f` (agree,
+admitted) and `e11`, `e11b` (diverge, refused — `e11b` was *admitted* by the
+old clause 4, which required some write to be opening on every path). `d2a`,
+`branch_merge_explicit`, `e4`, `e6` dropped their opt-outs; the explicit twin
+sweeps with no row. `EXPECTED_FLAGGED` lost `branch_merge_explicit` and `d2a`;
+`EXPECTED_MULTI_PHASE` lost `e4`, `e6` and gained `e11`, `e11b`. Zero live
+modules; sv-baseline delta the ten new probes only; the mixed-anchor hold-form
+audit grew by the nine new ports the form reaches. Both front-ends' diagnostics
+now say what is refused (a write reached by a read on one path and not another;
+an every-path port with a read before some write and not another; a forwarded
+guard) and the remedy (uniform anchors per write, committed-state tests,
+`RegOut`, or writes after the tick).
 
 ---
 

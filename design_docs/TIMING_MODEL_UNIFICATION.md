@@ -136,8 +136,8 @@ cost of three modules, all of them the measured divergences and none of them a c
 design — `branch_merge_explicit`, `pc_arm_write`, `pc_arm_toggle`, then the
 listed set of `copper-analysis/tests/pretick_alignment_corpus.rs::pretick_alignment_hazard_flags_exactly_the_known_divergent_modules`
 (the clause was retired 2026-10-28 when D1 was re-derived — `PRETICK_ALIGNMENT_GUARDRAIL.md`
-§5.8: `branch_merge_explicit` stays listed as a mixed-anchor hit, the `pc_arm` pair
-agrees and left the set)
+§5.8: `branch_merge_explicit` stayed listed as a mixed-anchor hit until the clause was
+narrowed 2026-10-30 and it left the set too; the `pc_arm` pair agrees and left 2026-10-28)
 together with the later `probe_fsm` and `w4_mixed_alignment`. That
 is the shape future work here should take — a discriminator sharp enough to reject
 only what actually diverges, verified against the sweep before it lands.
