@@ -609,12 +609,18 @@ fn lower_seq_body(
         .map(|r| lower_reg_decl(r))
         .collect::<Result<_, _>>()?;
 
-    // Add promoted wire registers
+    // Add promoted wire registers. A promoted wire with no literal initializer is a
+    // loop-born value (`let product = a.read() * b.read(); tick;`) whose flop the
+    // program assigns before it reads — but a registered output can forward the
+    // flop before that, so its power-on value is observable: zero, like every
+    // register codegen synthesizes without a Rust initializer (2026-10-29).
     for (wire_name, wire_ty, wire_init) in &promoted_wires {
         registers.push(SHIRReg {
             name: format!("{}_r", wire_name),
             ty: wire_ty.clone(),
-            init: wire_init.clone(),
+            init: wire_init
+                .clone()
+                .or_else(|| Some(SHIRLit { ty: wire_ty.clone(), value: 0 })),
         });
     }
 

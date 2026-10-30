@@ -907,6 +907,10 @@ fn expr_contains_goto(e: &ExprType) -> bool {
 /// which lands on the pre-loop register path rather than inventing a new one.
 /// A local read only within its own state stays put — hoisting every local would
 /// turn state-local temporaries into flip-flops nobody asked for.
+/// Marker `attrs` entry on a pre-loop `let mut` that [`hoist_cross_state_locals`]
+/// synthesized: its initializer gives the type and nothing else.
+pub(crate) const HOISTED_CROSS_STATE_ATTR: &str = "copper::hoisted_cross_state_local";
+
 fn hoist_cross_state_locals(sm: &mut StateMachine) -> Vec<RawStmt> {
     // (state index, name, init) for every local declared anywhere in a state.
     let mut declared: Vec<(usize, String, ExprType, Option<RawTypeRef>, SourceSpan)> = Vec::new();
@@ -934,7 +938,13 @@ fn hoist_cross_state_locals(sm: &mut StateMachine) -> Vec<RawStmt> {
                 ty,
                 name,
                 init: Some(init),
-                attrs: Vec::new(),
+                // The init is kept for its TYPE only: the declaring state assigns
+                // the local before any state reads it, so the register has no
+                // power-on value to state — and the init is typically an input
+                // read, which `chir_lower::lower_register_init` would otherwise
+                // refuse as a non-constant initializer (2026-10-29). The marker
+                // says so.
+                attrs: vec![HOISTED_CROSS_STATE_ATTR.to_string()],
                 span,
             }),
             text: String::new(),

@@ -85,20 +85,22 @@ fn lfsr_sim_matches_transpiled_verilog() {
     eq.finish();
 }
 
-/// **Before its reset, the simulator and the emitted SystemVerilog disagree** — found
-/// by the corpus sweep's multi-sequence stimulus policy on 2026-10-28 (the single
-/// seed it had before happened to assert `reset_i` on cycle 0). The module starts
-/// `state` at a Rust initial value, `Bits::from_u32(1)`, which the SV does not
-/// carry: its flop has no initializer and no reset value outside the `reset_i`
-/// branch, so the Verilated model starts at 0 and, being an LFSR, stays there until
-/// reset. Measured: with `reset_i = 0, yumi_i = 0` the simulator reads `o = 1` and
-/// the SV `0` on every pre-reset cycle; with `yumi_i = 1` the simulator advances
-/// from 1 (`2785017856`, then `1392508928`) while the SV stays at 0. The sweep
-/// therefore starts its comparison at the reset (`build.rs`'s `RESET` row). This
-/// pins the difference so it is a recorded fact rather than a lucky seed; whether a
-/// Rust initializer should reach the SV is a transpiler question, not settled here.
+/// **Before its reset, the emitted SystemVerilog holds the Rust initial value** — the
+/// module starts `state` at `Bits::from_u32(1)`, and since 2026-10-29 the transpiler
+/// states that value as the flop's `initial` assignment (`initial begin state = 32'd1;
+/// end`), so the Verilated model starts where the simulator does and the pre-reset
+/// cycles agree: with `reset_i = 0, yumi_i = 0` both read `o = 1`, and with `yumi_i =
+/// 1` both advance from 1 (`2785017856`, then `1392508928`).
+///
+/// Until that day this test pinned the opposite — the initializer was silently
+/// dropped (only an integer literal or an enum variant reached the SV), the flop had
+/// no power-on value, Verilator zero-filled it and an LFSR at 0 stays at 0 — a gap the
+/// multi-sequence stimulus policy found on 2026-10-28 (the single seed before it
+/// happened to assert `reset_i` on cycle 0), recorded then as a `RESET` row in
+/// `build.rs`. The row is gone; this is the assertion that keeps it gone. A
+/// Verilator-less environment still checks the emitted text.
 #[test]
-fn before_reset_the_simulator_holds_its_rust_initial_value_and_the_sv_holds_zero() {
+fn before_reset_the_sv_holds_the_rust_initial_value_like_the_simulator() {
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
     let (reset_drv, reset_in) = wire::<Logic, MainClk>(Logic::Zero);
@@ -128,10 +130,17 @@ fn before_reset_the_simulator_holds_its_rust_initial_value_and_the_sv_holds_zero
     }
     assert_eq!(sim, vec![1, 1, 1, 2785017856, 1392508928, 696254464], "simulator behaviour changed");
 
+    let sv = transpile_fixture("lfsr", DUT_SRC, None);
+    let text = std::fs::read_to_string(&sv).expect("read the transpiled lfsr");
+    assert!(
+        text.contains("initial begin\n        state = 32'd1;\n    end"),
+        "the Rust initializer `Bits::from_u32(1)` must reach the SV as `state`'s initial value; \
+         emitted:\n{text}"
+    );
+
     if !verilator_available() {
         return;
     }
-    let sv = transpile_fixture("lfsr", DUT_SRC, None);
     let run = copper_sim::verify_with_verilator_report(
         sv.to_str().unwrap(),
         "lfsr",
@@ -142,15 +151,10 @@ fn before_reset_the_simulator_holds_its_rust_initial_value_and_the_sv_holds_zero
     )
     .expect("Verilator ran");
     assert!(
-        !run.passed,
-        "the SV now agrees with the simulator before reset — the lfsr RESET row in build.rs \
-         is no longer needed, and the Rust initializer reaches the SV"
+        run.passed,
+        "the SV disagrees with the simulator before reset — the register's initial value no \
+         longer reaches the emitted SystemVerilog (the 2026-10-28 gap is back); Verilator \
+         said:\n{}",
+        run.output
     );
-    for (cycle, expected) in sim.iter().enumerate() {
-        assert!(
-            run.output.contains(&format!("FAIL: Cycle {cycle} o expected {expected} got 0")),
-            "cycle {cycle}: expected the SV at 0 before reset; Verilator said:\n{}",
-            run.output
-        );
-    }
 }

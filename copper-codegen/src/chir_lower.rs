@@ -1129,35 +1129,269 @@ fn infer_type_from_suffix(compact: &str) -> Option<CHIRType> {
     None
 }
 
-/// Try to lower a simple init expression to a `CHIRLit`.
-/// Returns `None` for complex expressions (variable references, binary ops, etc.).
-fn lower_init_to_lit(expr: &ExprType, enums: &EnumRegistry) -> Option<CHIRLit> {
-    let compact: String = match expr {
-        ExprType::Lit(lit) => lit.text.chars().filter(|c| !c.is_whitespace()).collect(),
-        ExprType::Path(p) => p.path_text.chars().filter(|c| !c.is_whitespace()).collect(),
-        _ => return None,
+/// How a register's initializer folds (`lower_register_init`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RegisterInit {
+    /// A stated power-on value.
+    Value(u128),
+    /// `Bits::x()` / `Logic::X`: the register starts undefined, nothing is stated.
+    Undefined,
+}
+
+/// The power-on value of register `name` from its initializer, as a literal of the
+/// register's own type `ty` — `Ok(None)` for `Bits::x()` (undefined, unstated),
+/// `Err` for an initializer that cannot be folded.
+///
+/// The front-end rule (`copper_analysis::check_register_initializers`, enforced by
+/// the macro and by `transpile_target` before lowering) has already required the
+/// initializer to be a syntactic constant, so what arrives here is one; this folds
+/// it. Until 2026-10-29 only an integer literal, `true`/`false`, `Logic::One/Zero`
+/// or an enum variant was carried, and every constructor call — `Bits::zero()`,
+/// `Bits::from_lit::<0>()`, `Bits::from_u32(1)` — returned `None` and the
+/// register's `initial` assignment was silently omitted: `lfsr` started at 1 in
+/// the simulator and at Verilator's zero-fill in the SV, and some 120 `Bits::zero()`
+/// registers agreed with Verilator only because zero-fill happens to be zero
+/// (measured with `COPPER_VERILATOR_X_INITIAL=1`: 63 corpus modules diverged).
+/// A constant this cannot fold (a `const` whose value is not an integer literal, an
+/// associated const, a const generic used as a value, a constant free function) is
+/// an error naming the register — a lowering limitation, never a dropped value.
+fn lower_register_init(
+    name: &str,
+    expr: &ExprType,
+    ty: &CHIRType,
+    enums: &EnumRegistry,
+    consts: &[copper_core::frontend_ir::ItemConst],
+    span: SourceSpan,
+) -> Result<Option<CHIRLit>, CHIRLowerError> {
+    let width = width_of_type_concrete(ty);
+    let refuse = |why: String| CHIRLowerError::UnsupportedConstruct {
+        description: format!(
+            "register `{name}` has no power-on value the emitted SystemVerilog can state: its \
+             initializer {why}. Initialize it with a constant (an integer literal, \
+             `Bits::from_u32(k)`, `Bits::<N>::from_u8(k)`, `Bits::from_lit::<K>()`, \
+             `Bits::zero()`, an enum variant) or with `Bits::x()` to leave it undefined \
+             until a reset"
+        ),
+        span,
+        suggested_rewrite: None,
     };
-
-    if let Some((value, _)) = parse_int_literal(&compact) {
-        let ty = infer_type_from_suffix(&compact)
-            .unwrap_or(CHIRType::UInt { width: Width::Concrete(64) });
-        return Some(CHIRLit { ty, value });
+    match fold_const_init(expr, width, enums, consts).map_err(refuse)? {
+        RegisterInit::Undefined => Ok(None),
+        RegisterInit::Value(value) => {
+            let fits = match ty {
+                CHIRType::Bool => value <= 1,
+                _ => match width {
+                    Some(w) if w < 128 => value >> w == 0,
+                    _ => true,
+                },
+            };
+            if !fits {
+                return Err(CHIRLowerError::UnsupportedConstruct {
+                    description: format!(
+                        "register `{name}` is initialized to {value}, which does not fit its \
+                         {}-bit width",
+                        width.unwrap_or(1)
+                    ),
+                    span,
+                    suggested_rewrite: None,
+                });
+            }
+            Ok(Some(CHIRLit { ty: ty.clone(), value }))
+        }
     }
+}
 
-    match compact.as_str() {
-        "true" => return Some(CHIRLit { ty: CHIRType::Bool, value: 1 }),
-        "false" => return Some(CHIRLit { ty: CHIRType::Bool, value: 0 }),
-        "Logic::One" => {
-            return Some(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(1) }, value: 1 })
+/// Mask `v` to `width` bits when the width is known.
+fn mask_to(v: u128, width: Option<usize>) -> u128 {
+    match width {
+        Some(w) if w < 128 => v & ((1u128 << w) - 1),
+        _ => v,
+    }
+}
+
+/// Fold a constant initializer to its value (or to "undefined"). `width` is the
+/// register's concrete width when known, used to give `!`, `-` and casts their
+/// two's-complement meaning; `Err` carries the reason, for `lower_register_init`'s
+/// message.
+fn fold_const_init(
+    expr: &ExprType,
+    width: Option<usize>,
+    enums: &EnumRegistry,
+    consts: &[copper_core::frontend_ir::ItemConst],
+) -> Result<RegisterInit, String> {
+    use RegisterInit::{Undefined, Value};
+    let value_of = |r: RegisterInit, what: &str| -> Result<u128, String> {
+        match r {
+            Value(v) => Ok(v),
+            Undefined => Err(format!("mixes an undefined (`Bits::x()`) value into {what}")),
         }
-        "Logic::Zero" => {
-            return Some(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(1) }, value: 0 })
+    };
+    match expr {
+        ExprType::Lit(lit) => fold_const_text(&compact_ident(&lit.text), enums, consts),
+        ExprType::Path(p) => fold_const_text(&compact_ident(&p.path_text), enums, consts),
+        ExprType::Call(call) => {
+            let path = call_path(call)
+                .ok_or_else(|| "is a call through something other than a path".to_string())?;
+            if path == "x" || path.ends_with("::x") {
+                return Ok(Undefined);
+            }
+            match classify_value_ctor(&path) {
+                Some(ValueCtor::Const { value, .. }) => Ok(Value(value)),
+                Some(ValueCtor::FromInt { width: w }) => {
+                    let [arg] = call.args.as_slice() else {
+                        return Err(format!("calls `{path}` with {} arguments, not one", call.args.len()));
+                    };
+                    let v = value_of(fold_const_init(arg, Some(w), enums, consts)?, "a constructor argument")?;
+                    Ok(Value(v))
+                }
+                None => Err(format!(
+                    "is a call to `{path}`, which is not a `Bits` value constructor the transpiler can fold"
+                )),
+            }
         }
+        ExprType::Unary(un) => {
+            let v = value_of(fold_const_init(&un.expr, width, enums, consts)?, "a unary operator")?;
+            match un.op.as_str() {
+                "!" => match width {
+                    Some(w) if w < 128 => Ok(Value(mask_to(!v, Some(w)))),
+                    _ => Err("applies `!` to a value whose width is not known".to_string()),
+                },
+                "-" => match width {
+                    Some(w) if w < 128 => Ok(Value(mask_to(v.wrapping_neg(), Some(w)))),
+                    _ => Err("applies `-` to a value whose width is not known".to_string()),
+                },
+                op => Err(format!("applies the unary operator `{op}`")),
+            }
+        }
+        ExprType::Binary(bin) => {
+            let l = value_of(fold_const_init(&bin.left, width, enums, consts)?, "arithmetic")?;
+            let r = value_of(fold_const_init(&bin.right, width, enums, consts)?, "arithmetic")?;
+            let v = match bin.op.as_str() {
+                "+" => l.wrapping_add(r),
+                "-" => l.wrapping_sub(r),
+                "*" => l.wrapping_mul(r),
+                "/" => l.checked_div(r).ok_or_else(|| "divides by zero".to_string())?,
+                "%" => l.checked_rem(r).ok_or_else(|| "takes a remainder by zero".to_string())?,
+                "&" => l & r,
+                "|" => l | r,
+                "^" => l ^ r,
+                "<<" => l.checked_shl(r as u32).unwrap_or(0),
+                ">>" => l.checked_shr(r as u32).unwrap_or(0),
+                "==" => (l == r) as u128,
+                "!=" => (l != r) as u128,
+                "<" => (l < r) as u128,
+                "<=" => (l <= r) as u128,
+                ">" => (l > r) as u128,
+                ">=" => (l >= r) as u128,
+                "&&" => (l != 0 && r != 0) as u128,
+                "||" => (l != 0 || r != 0) as u128,
+                op => return Err(format!("uses the operator `{op}`")),
+            };
+            Ok(Value(mask_to(v, width)))
+        }
+        ExprType::Cast(cast) => {
+            let target = resolve_type(&cast.target_ty.ty_text, cast.target_ty.span)
+                .ok()
+                .and_then(|t| width_of_type_concrete(&t));
+            let v = value_of(fold_const_init(&cast.expr, target, enums, consts)?, "a cast")?;
+            Ok(Value(mask_to(v, target)))
+        }
+        // `[elem; n]`: a packed vector of `n` copies of `elem`, element 0 in the low
+        // bits (the layout `lower_repeat` and `Bits<N>` share). A zero element is
+        // zero at any width; a non-zero one needs the element width written in the
+        // constructor or literal suffix.
+        ExprType::Repeat(rep) => {
+            let elem_w = const_elem_width(&rep.expr);
+            let elem = fold_const_init(&rep.expr, elem_w, enums, consts)?;
+            let v = match elem {
+                Undefined => return Ok(Undefined),
+                Value(0) => return Ok(Value(0)),
+                Value(v) => v,
+            };
+            let n = match repeat_len(&rep.len) {
+                Some(Width::Concrete(n)) => n,
+                _ => return Err("repeats a non-zero element a symbolic number of times".to_string()),
+            };
+            let w = elem_w.ok_or_else(|| {
+                "repeats a non-zero element whose width is not written (use `Bits::<W>::…` \
+                 or a suffixed literal)"
+                    .to_string()
+            })?;
+            if n.saturating_mul(w) > 128 {
+                return Err(format!("repeats a {w}-bit element {n} times, wider than 128 bits"));
+            }
+            let mut acc = 0u128;
+            for i in 0..n {
+                acc |= v << (i * w);
+            }
+            Ok(Value(acc))
+        }
+        other => Err(format!("is {}, which is not a constant", other.kind_name())),
+    }
+}
+
+/// The written width of a constant element, for `[elem; n]`: a suffixed literal,
+/// `Logic::*` / `true` / `false` (one bit), or a `Bits` constructor whose width is
+/// in its name or type turbofish.
+fn const_elem_width(elem: &ExprType) -> Option<usize> {
+    match elem {
+        ExprType::Lit(lit) => {
+            let text = compact_ident(&lit.text);
+            match text.as_str() {
+                "true" | "false" => Some(1),
+                _ => parse_int_literal(&text).and_then(|(_, w)| w),
+            }
+        }
+        ExprType::Path(p) => match compact_ident(&p.path_text).as_str() {
+            "true" | "false" | "Logic::One" | "Logic::Zero" | "Logic::X" => Some(1),
+            _ => None,
+        },
+        ExprType::Call(call) => match call_path(call).as_deref().and_then(classify_value_ctor) {
+            Some(ValueCtor::FromInt { width }) => Some(width),
+            Some(ValueCtor::Const { width, .. }) => width,
+            None => None,
+        },
+        _ => None,
+    }
+}
+
+/// Fold a literal or path text: an integer literal, `true`/`false`,
+/// `Logic::One`/`Logic::Zero` (`Logic::X` is undefined), an enum variant, or a
+/// file-scope `const` whose value is an integer or boolean literal.
+fn fold_const_text(
+    compact: &str,
+    enums: &EnumRegistry,
+    consts: &[copper_core::frontend_ir::ItemConst],
+) -> Result<RegisterInit, String> {
+    use RegisterInit::{Undefined, Value};
+    if let Some((value, _)) = parse_int_literal(compact) {
+        return Ok(Value(value));
+    }
+    match compact {
+        "true" | "Logic::One" => return Ok(Value(1)),
+        "false" | "Logic::Zero" => return Ok(Value(0)),
+        "Logic::X" => return Ok(Undefined),
         _ => {}
     }
-
-    // An enum variant path (`State::IDLE`) → its encoded reset value.
-    resolve_enum_path(&compact, enums).map(|(ty, value)| CHIRLit { ty, value })
+    if let Some((_, value)) = resolve_enum_path(compact, enums) {
+        return Ok(Value(value));
+    }
+    if let Some(c) = consts.iter().find(|c| c.name == compact) {
+        let value = compact_ident(&c.value_text);
+        return match (parse_int_literal(&value), value.as_str()) {
+            (Some((v, _)), _) => Ok(Value(v)),
+            (None, "true") => Ok(Value(1)),
+            (None, "false") => Ok(Value(0)),
+            _ => Err(format!(
+                "names `const {compact}`, whose value `{}` is not an integer or boolean literal",
+                c.value_text
+            )),
+        };
+    }
+    if is_ident(compact) {
+        return Err(format!("names `{compact}`, which is not a constant this module can see"));
+    }
+    Err(format!("is `{compact}`, which is not a constant"))
 }
 
 // ── Port wrapper helpers ──────────────────────────────────────────────────────
@@ -1521,7 +1755,29 @@ fn lower_seq_body(
                                 // word).
                                 write_lat: 2,
                                 write_mode: WriteMode::ReadFirst,
-                                init: None,
+                                // The repeated element is every word's power-on
+                                // value (`[Bits::<8>::zero(); 8]`): stated as a
+                                // fill, the form a `from_fn` preload takes, so the
+                                // array starts where the simulator's does. `None`
+                                // only for an undefined (`Bits::x()`) element.
+                                init: match fold_const_init(&rep.expr, Some(w), &enums, &fir.file_consts) {
+                                    Ok(RegisterInit::Value(v)) => Some(CHIRMemInit::Fill {
+                                        var: "__copper_init_i".to_string(),
+                                        value: CHIRExpr::Lit(CHIRLit { ty: elem_ty.clone(), value: v }),
+                                    }),
+                                    Ok(RegisterInit::Undefined) => None,
+                                    Err(why) => {
+                                        return Err(CHIRLowerError::UnsupportedConstruct {
+                                            description: format!(
+                                                "array register `{}` has no power-on value the \
+                                                 emitted SystemVerilog can state: its element {why}",
+                                                local.name
+                                            ),
+                                            span: local.span,
+                                            suggested_rewrite: None,
+                                        })
+                                    }
+                                },
                                 received: false,
                                 span: local.span,
                             });
@@ -1571,12 +1827,18 @@ fn lower_seq_body(
                         for (fname, fty) in
                             struct_fields_in(&sname, &structs_reg, &enums, local.span)?
                         {
-                            let finit = lit
-                                .fields
-                                .iter()
-                                .find(|f| f.member == fname)
-                                .and_then(|f| lower_init_to_lit(&f.expr, &enums));
                             let rname = format!("{}_{fname}", local.name);
+                            let finit = match lit.fields.iter().find(|f| f.member == fname) {
+                                Some(f) => lower_register_init(
+                                    &rname,
+                                    &f.expr,
+                                    &fty,
+                                    &enums,
+                                    &fir.file_consts,
+                                    f.span,
+                                )?,
+                                None => None,
+                            };
                             symbols.insert(rname.clone(), fty.clone());
                             registers.push(CHIRRegDecl {
                                 name: rname,
@@ -1611,7 +1873,33 @@ fn lower_seq_body(
                 // WITHOUT an init has no wire value to take, so it stays a
                 // register conservatively — no corpus instance exists.
                 if fir.registers.iter().any(|r| r == &local.name) || local.init.is_none() {
-                    let init = local.init.as_ref().and_then(|e| lower_init_to_lit(e, &enums));
+                    // A local control extraction hoisted out of its state keeps its
+                    // init for the type (`HOISTED_CROSS_STATE_ATTR`): the state assigns
+                    // it before any read, so its power-on value is unobservable by the
+                    // program. A constant one is stated as it is; a non-constant one —
+                    // typically an input read — gets zero (2026-10-29: the flop still
+                    // exists, and a registered port can forward it before the state
+                    // assigns it, e.g. `mac_pipeline`'s `product_r`) rather than being
+                    // refused as an author's initializer would be.
+                    let hoisted = local
+                        .attrs
+                        .iter()
+                        .any(|a| a == crate::control_extract::HOISTED_CROSS_STATE_ATTR);
+                    let init = match &local.init {
+                        Some(e) => match lower_register_init(
+                            &local.name,
+                            e,
+                            &ty,
+                            &enums,
+                            &fir.file_consts,
+                            local.span,
+                        ) {
+                            Ok(init) => init,
+                            Err(_) if hoisted => Some(CHIRLit { ty: ty.clone(), value: 0 }),
+                            Err(e) => return Err(e),
+                        },
+                        None => None,
+                    };
                     registers.push(CHIRRegDecl {
                         name: local.name.clone(),
                         ty,
@@ -1625,7 +1913,7 @@ fn lower_seq_body(
             RawStmtKind::Local(local) => {
                 // A `Memory<..>` binding is a hardware submodule (an array plus
                 // per-port buses), not a wire — it has no bit width to infer.
-                if let Some((decl, raw_init)) =
+                if let Some((mut decl, raw_init)) =
                     parse_memory_decl(&local.name, local.init.as_ref(), local.span)?
                 {
                     mem_infos.insert(
@@ -1636,9 +1924,19 @@ fn lower_seq_body(
                             write_ports: decl.write_ports,
                         },
                     );
-                    if let Some(raw) = raw_init {
+                    match raw_init {
                         // Lowered once the context exists, like the pre-loop wires.
-                        pending_mem_inits.push((memories.len(), raw));
+                        Some(raw) => pending_mem_inits.push((memories.len(), raw)),
+                        // `Memory::new`: the simulator starts a memory at
+                        // `T::default()`, zero, so the array states a zero fill —
+                        // the same form a `from_fn` preload takes — rather than
+                        // relying on Verilator's zero-fill (2026-10-29).
+                        None => {
+                            decl.init = Some(CHIRMemInit::Fill {
+                                var: "__copper_init_i".to_string(),
+                                value: CHIRExpr::Lit(CHIRLit { ty: decl.elem_ty.clone(), value: 0 }),
+                            });
+                        }
                     }
                     memories.push(decl);
                     continue;
@@ -6110,34 +6408,112 @@ mod tests {
 
     // ── Register init lowering ────────────────────────────────────────────────
 
-    #[test]
-    fn test_lower_init_to_lit_typed_integer() {
-        use copper_core::frontend_ir::ExprLit;
-        let expr = ExprType::Lit(ExprLit { text: "0u8".to_string(), span: span() });
-        let lit = lower_init_to_lit(&expr, &EnumRegistry::new()).unwrap();
-        assert_eq!(lit.value, 0);
-        assert_eq!(lit.ty, CHIRType::UInt { width: Width::Concrete(8) });
-    }
-
-    #[test]
-    fn test_lower_init_to_lit_bool_true() {
-        use copper_core::frontend_ir::ExprLit;
-        let expr = ExprType::Lit(ExprLit { text: "true".to_string(), span: span() });
-        let lit = lower_init_to_lit(&expr, &EnumRegistry::new()).unwrap();
-        assert_eq!(lit.ty, CHIRType::Bool);
-        assert_eq!(lit.value, 1);
-    }
-
-    #[test]
-    fn test_lower_init_to_lit_complex_expr_returns_none() {
-        use copper_core::frontend_ir::{ExprBinary, ExprLit};
-        let expr = ExprType::Binary(ExprBinary {
-            left: Box::new(ExprType::Lit(ExprLit { text: "a".to_string(), span: span() })),
-            op: "+".to_string(),
-            right: Box::new(ExprType::Lit(ExprLit { text: "b".to_string(), span: span() })),
+    fn init_of(src: &str, ty: CHIRType) -> Result<Option<CHIRLit>, CHIRLowerError> {
+        let fir = make_fir(&format!(
+            "async fn m(clk: Clock<MainClk>) {{ let mut r = {src}; loop {{ r = r; clk.tick().await; }} }}"
+        ));
+        let RawStmtKind::Local(local) = &fir.raw_statements[0].kind else { panic!("local") };
+        let mut enums = EnumRegistry::new();
+        enums.insert(
+            "State".to_string(),
+            EnumDef { width: 2, variants: [("IDLE".to_string(), 0u128), ("RUN".to_string(), 2)].into() },
+        );
+        use copper_core::frontend_ir::{ItemConst, RawTypeRef};
+        let konst = |name: &str, ty: &str, value: &str| ItemConst {
+            name: name.to_string(),
+            ty: RawTypeRef { ty_text: ty.to_string(), span: span() },
+            value_text: value.to_string(),
+            attrs: Vec::new(),
             span: span(),
-        });
-        assert!(lower_init_to_lit(&expr, &EnumRegistry::new()).is_none());
+        };
+        let consts = vec![konst("SEED", "u8", "7"), konst("NAME", "&str", "\"x\"")];
+        lower_register_init("r", local.init.as_ref().unwrap(), &ty, &enums, &consts, span())
+    }
+
+    fn u(width: usize) -> CHIRType {
+        CHIRType::UInt { width: Width::Concrete(width) }
+    }
+
+    #[test]
+    fn register_init_folds_every_constant_spelling_to_the_register_width() {
+        let cases: &[(&str, CHIRType, u128)] = &[
+            ("0u8", u(8), 0),
+            ("5", u(8), 5),
+            ("0x1f", u(8), 31),
+            ("true", CHIRType::Bool, 1),
+            ("false", CHIRType::Bool, 0),
+            ("Logic::One", u(1), 1),
+            ("Logic::Zero", u(1), 0),
+            ("State::RUN", u(2), 2),
+            ("Bits::zero()", u(8), 0),
+            ("Bits::<8>::zero()", u(8), 0),
+            ("Bits::from_u32(1)", u(32), 1),
+            ("Bits::<8>::from_u8(3)", u(8), 3),
+            ("Bits::from_lit::<6>()", u(8), 6),
+            ("Bits::<8>::from_u8(SEED)", u(8), 7),
+            ("SEED", u(8), 7),
+            ("Bits::from_u32(1 << 31)", u(32), 1 << 31),
+            ("Bits::from_u32((1 << 4) | 1)", u(32), 17),
+            ("!0u8", u(8), 255),
+            ("-1i8", CHIRType::SInt { width: Width::Concrete(8) }, 255),
+            ("[Logic::Zero; 16]", u(16), 0),
+            ("[Logic::One; 4]", u(4), 0b1111),
+            ("[Bits::<4>::from_u8(0b1010); 2]", u(8), 0b1010_1010),
+            ("[Bits::zero(); 8]", u(64), 0),
+            ("3u32 as u8", u(8), 3),
+        ];
+        for (src, ty, want) in cases {
+            let lit = init_of(src, ty.clone())
+                .unwrap_or_else(|e| panic!("{src}: {e}"))
+                .unwrap_or_else(|| panic!("{src}: folded to undefined"));
+            assert_eq!(lit.value, *want, "{src}");
+            assert_eq!(&lit.ty, ty, "{src}: the literal carries the register's type");
+        }
+    }
+
+    #[test]
+    fn register_init_x_forms_are_undefined_and_unstated() {
+        for src in ["Bits::x()", "Bits::<8>::x()", "Logic::X", "[Logic::X; 4]"] {
+            assert_eq!(init_of(src, u(8)).unwrap(), None, "{src}");
+        }
+    }
+
+    #[test]
+    fn register_init_refuses_what_it_cannot_fold_naming_the_register() {
+        for src in [
+            "a + b",                   // locals
+            "a.read()",                // a method call
+            "seed()",                  // a free function
+            "NAME",                    // a const whose value is not an integer
+            "OTHER",                   // an unknown name
+            "Bits::from_u32(a)",       // a non-constant argument
+            "[Bits::from_lit::<1>(); 4]", // non-zero element with no written width
+            "1u8 / 0",                 // division by zero
+        ] {
+            let err = init_of(src, u(32)).err().unwrap_or_else(|| panic!("{src}: accepted"));
+            let msg = err.to_string();
+            assert!(msg.contains("register `r` has no power-on value"), "{src}: {msg}");
+        }
+        // A value that does not fit the register.
+        let msg = init_of("Bits::from_u32(1 << 20)", u(16)).err().unwrap().to_string();
+        assert!(msg.contains("does not fit its 16-bit width"), "{msg}");
+        let msg = init_of("2", CHIRType::Bool).err().unwrap().to_string();
+        assert!(msg.contains("does not fit"), "{msg}");
+    }
+
+    /// The lfsr gap: a `from_u32` register's initial value reaches the CHIR register.
+    #[test]
+    fn constructor_initializer_reaches_the_register_declaration() {
+        let fir = make_fir(
+            "async fn lfsr(clk: Clock<MainClk>, o: Out<Bits<32>, MainClk>) {
+                let mut state = Bits::from_u32(1);
+                loop { state = state >> 1; o.write(state); clk.tick().await; }
+            }",
+        );
+        let body = lower_seq_body(&fir, &no_hw(), &empty_registry()).unwrap();
+        let reg = body.registers.iter().find(|r| r.name == "state").unwrap();
+        assert_eq!(reg.init.as_ref().map(|l| l.value), Some(1));
+        assert_eq!(reg.init.as_ref().map(|l| l.ty.clone()), Some(u(32)));
     }
 
     #[test]

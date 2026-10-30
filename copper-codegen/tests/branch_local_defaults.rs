@@ -87,13 +87,28 @@ async fn m(clk: Clock<MainClk>, en_i: In<Logic, MainClk>, d_i: In<Bits<4>, MainC
         sv.contains("q <= "),
         "the register must keep a non-blocking update, got:\n{sv}"
     );
+    // The `initial begin … end` block is the register's power-on value (its
+    // `Bits::<4>::zero()` initializer, stated since 2026-10-29) — elaboration-time
+    // state, not a per-cycle default — so its one blocking assignment is exempt.
+    let mut in_initial = false;
     for line in sv.lines() {
         let t = line.trim();
+        if t == "initial begin" {
+            in_initial = true;
+            continue;
+        }
+        if in_initial {
+            if t == "end" {
+                in_initial = false;
+            }
+            continue;
+        }
         assert!(
             !(t.starts_with("q = ")),
             "a register must never get a blocking default, got:\n{sv}"
         );
     }
+    assert!(sv.contains("initial begin\n        q = 4'd0;"), "the power-on value is stated, got:\n{sv}");
 }
 
 /// The pre-existing literal path is unchanged: a constant initializer is moved

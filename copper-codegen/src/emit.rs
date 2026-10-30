@@ -198,14 +198,16 @@ impl Emitter<'_> {
 
     fn seq_body(&mut self, s: &VLIRSeqBody) {
         self.lint_multidriven = matches!(self.cfg.profile, ToolchainProfile::Verilator)
-            && (s.reg_decls.iter().any(|r| r.init.is_some()) || s.memories.iter().any(|m| m.init.is_some()));
+            && (s.reg_decls.iter().any(|r| r.init.is_some())
+                || s.memories.iter().any(|m| m.init.is_some())
+                || !s.port_inits.is_empty());
         for r in &s.reg_decls {
             self.reg_decl(r);
         }
         if !s.reg_decls.is_empty() {
             self.out.push('\n');
         }
-        self.reg_inits(&s.reg_decls);
+        self.reg_inits(&s.reg_decls, &s.port_inits);
 
         self.mem_decls(&s.memories);
 
@@ -404,15 +406,21 @@ impl Emitter<'_> {
     /// unguarded by the clock: elaboration-time state, not a clocked update. See
     /// `VLIRRegDecl::init` for why the value must be stated at all, and
     /// `lint_multidriven` for the lint pragma the `always_ff` block then carries.
-    fn reg_inits(&mut self, regs: &[VLIRRegDecl]) {
+    ///
+    /// `port_inits` are the output ports driven from `always_ff`
+    /// (`VLIRSeqBody::port_inits`): declared by the port list, started at zero here.
+    fn reg_inits(&mut self, regs: &[VLIRRegDecl], port_inits: &[(String, Width)]) {
         let with_init: Vec<&VLIRRegDecl> = regs.iter().filter(|r| r.init.is_some()).collect();
-        if with_init.is_empty() {
+        if with_init.is_empty() && port_inits.is_empty() {
             return;
         }
         self.out.push_str(&format!("{}initial begin\n", self.indent(1)));
         for r in with_init {
             let init = r.init.as_ref().unwrap();
             self.out.push_str(&format!("{}{} = {};\n", self.indent(2), r.name, expr_str(init)));
+        }
+        for (port, width) in port_inits {
+            self.out.push_str(&format!("{}{} = {};\n", self.indent(2), port, lit_str(width, 0)));
         }
         self.out.push_str(&format!("{}end\n\n", self.indent(1)));
     }

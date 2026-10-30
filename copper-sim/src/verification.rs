@@ -495,6 +495,77 @@ impl VerilatorCachePolicy {
     }
 }
 
+/// What the Verilated model's registers hold at power-on, before any `initial`
+/// block runs. Read from the environment by [`VerilatorPowerOn::from_env`].
+///
+/// Verilator is a two-state simulator: by default every uninitialized variable
+/// starts at zero, so a register whose emitted SystemVerilog states no power-on
+/// value and whose Copper initializer is `Bits::zero()` *agrees by accident* — the
+/// SV says nothing, the simulator says 0, Verilator says 0. `Randomized` closes
+/// that accident: the model is built with `--x-initial unique` (and
+/// `--x-assign unique`) and run with `+verilator+rand+reset+2`, so every
+/// register the SV does not initialize starts at a random value, and the only
+/// registers that can agree with the simulator are the ones whose `initial`
+/// assignment the transpiler emitted — or ones a reset defines before the first
+/// observation (the sweep's `RESET` rows). The seed is fixed so a run reproduces;
+/// `COPPER_VERILATOR_X_INITIAL=<n>` picks it. A randomized build is a different
+/// executable from a zero-fill build, and its flags are in the model-cache key
+/// like every other Verilator argument, so the two never alias.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerilatorPowerOn {
+    /// Verilator's default: every uninitialized register starts at zero.
+    ZeroFill,
+    /// Every uninitialized register starts at a seeded random value.
+    Randomized { seed: u32 },
+}
+
+impl VerilatorPowerOn {
+    /// The environment variable: `COPPER_VERILATOR_X_INITIAL=1` randomizes with
+    /// seed 1, `=<n>` with seed `n`; unset, empty, `0`, `off`, `false` or `no` is
+    /// the zero-fill default.
+    pub const ENV: &'static str = "COPPER_VERILATOR_X_INITIAL";
+
+    /// The policy the environment asks for.
+    pub fn from_env() -> Self {
+        Self::from_setting(std::env::var(Self::ENV).ok().as_deref())
+    }
+
+    /// [`Self::from_env`] on an explicit value, testable without touching the
+    /// process environment.
+    pub fn from_setting(value: Option<&str>) -> Self {
+        let Some(v) = value.map(|v| v.trim().to_ascii_lowercase()) else { return Self::ZeroFill };
+        match v.as_str() {
+            "" | "0" | "off" | "false" | "no" => Self::ZeroFill,
+            "on" | "true" | "yes" => Self::Randomized { seed: 1 },
+            other => match other.parse::<u32>() {
+                Ok(0) => Self::ZeroFill,
+                Ok(seed) => Self::Randomized { seed },
+                Err(_) => Self::Randomized { seed: 1 },
+            },
+        }
+    }
+
+    /// Verilator arguments at build time. Part of the model-cache key.
+    pub fn build_args(&self) -> &'static [&'static str] {
+        match self {
+            Self::ZeroFill => &[],
+            Self::Randomized { .. } => &["--x-initial", "unique", "--x-assign", "unique"],
+        }
+    }
+
+    /// Plusargs for the built executable (`Verilated::commandArgs` reads them).
+    /// `rand+reset+2` is "randomize", and the seed makes the run reproducible;
+    /// without it Verilator seeds from the clock.
+    pub fn run_args(&self) -> Vec<String> {
+        match self {
+            Self::ZeroFill => Vec::new(),
+            Self::Randomized { seed } => {
+                vec!["+verilator+rand+reset+2".to_string(), format!("+verilator+seed+{seed}")]
+            }
+        }
+    }
+}
+
 /// What the built-model cache did for one invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CacheOutcome {
@@ -842,7 +913,12 @@ pub fn verify_with_verilator_report(
     // Two copies of the list: the real one, and the one that goes into the cache key
     // with the three per-invocation paths replaced by placeholders (their *content*
     // is keyed separately). Every flag that shapes the executable is in both.
-    let fixed_args: Vec<&str> = vec![
+    //
+    // The power-on policy's flags (`--x-initial unique`, see [`VerilatorPowerOn`])
+    // are in this list too, so a randomized build and a zero-fill build of the
+    // same SV are two cache entries, never one.
+    let power_on = VerilatorPowerOn::from_env();
+    let mut fixed_args: Vec<&str> = vec![
         "--cc", "--exe", "--build",
         "--top-module", module_name,
         "-Wall", "-Wno-DECLFILENAME",
@@ -850,6 +926,10 @@ pub fn verify_with_verilator_report(
         "-MAKEFLAGS", "OPT_FAST=-O0",
         "-MAKEFLAGS", "OPT_GLOBAL=-O0",
     ];
+    fixed_args.extend_from_slice(power_on.build_args());
+    if let VerilatorPowerOn::Randomized { seed } = power_on {
+        println!("Verilator power-on: randomized ({}={seed}, --x-initial unique, +verilator+rand+reset+2)", VerilatorPowerOn::ENV);
+    }
     let mut verilator_args: Vec<&str> = fixed_args.clone();
     verilator_args.push("--Mdir");
     verilator_args.push(&obj_dir);
@@ -956,6 +1036,9 @@ pub fn verify_with_verilator_report(
     if let Some(vcd_path) = vcd_output_path {
         sim_cmd.arg(vcd_path);
     }
+    // After the VCD path: the testbench reads `argv[1]` positionally when tracing,
+    // and `Verilated::commandArgs` finds plusargs anywhere.
+    sim_cmd.args(power_on.run_args());
     let sim_output = sim_cmd
         .output()
         .map_err(|e| format!("Failed to run simulation {}: {}", sim_exe.display(), e))?;
@@ -1222,5 +1305,44 @@ mod verilator_classification_tests {
                 "verilator_status failed for a reason other than absence: {e}"
             );
         }
+    }
+
+    /// The power-on switch: unset and the "off" spellings are zero-fill, `1`/`on`
+    /// randomize with seed 1, a number is the seed.
+    #[test]
+    fn power_on_policy_parses_the_switch() {
+        use VerilatorPowerOn::*;
+        assert_eq!(VerilatorPowerOn::from_setting(None), ZeroFill);
+        for off in ["", "0", "off", "false", "no", " OFF "] {
+            assert_eq!(VerilatorPowerOn::from_setting(Some(off)), ZeroFill, "{off:?}");
+        }
+        for on in ["1", "on", "true", "yes", "random"] {
+            assert_eq!(VerilatorPowerOn::from_setting(Some(on)), Randomized { seed: 1 }, "{on:?}");
+        }
+        assert_eq!(VerilatorPowerOn::from_setting(Some("42")), Randomized { seed: 42 });
+        assert_eq!(ZeroFill.build_args(), &[] as &[&str]);
+        assert!(ZeroFill.run_args().is_empty());
+        assert_eq!(
+            Randomized { seed: 7 }.build_args(),
+            &["--x-initial", "unique", "--x-assign", "unique"]
+        );
+        assert_eq!(
+            Randomized { seed: 7 }.run_args(),
+            vec!["+verilator+rand+reset+2".to_string(), "+verilator+seed+7".to_string()]
+        );
+    }
+
+    /// A randomized build must never be served from a zero-fill entry: its flags
+    /// are Verilator arguments, and every argument is in the manifest.
+    #[test]
+    fn power_on_flags_move_the_cache_key() {
+        let mut zero: Vec<String> = vec!["--cc".into()];
+        let mut rand = zero.clone();
+        rand.extend(VerilatorPowerOn::Randomized { seed: 1 }.build_args().iter().map(|s| s.to_string()));
+        zero.extend(VerilatorPowerOn::ZeroFill.build_args().iter().map(|s| s.to_string()));
+        let key = |args: &[String]| {
+            sha256_hex(cache_manifest("Verilator 5.0", "m", &[], false, args, "module m; endmodule", &[], "tb").as_bytes())
+        };
+        assert_ne!(key(&zero), key(&rand));
     }
 }

@@ -980,6 +980,17 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             if let Err(err) = copper_analysis::check_awaits(&input_fn) {
                 return err.to_compile_error().into();
             }
+            // A pre-loop register must start from a constant or from `Bits::x()`
+            // (2026-10-29): its initializer is the flip-flop's power-on value, which
+            // the transpiler states as an `initial` assignment — and a value it
+            // cannot state it used to drop silently (`lfsr`'s `Bits::from_u32(1)`,
+            // found by the multi-sequence sweep). Same rule, same message, in
+            // `transpile_target`; no opt-out in either front-end.
+            if let Err(err) = cfg.as_ref().map_or(Ok(()), |c| {
+                copper_analysis::check_register_initializers_with(&input_fn, &c.registers())
+            }) {
+                return err.to_compile_error().into();
+            }
             // The memory-port staging rules and the plain-`Out`-from-a-read-result
             // rule — transpiler-only until 2026-10-23, now enforced here too (front-end
             // parity): one access per bus per cycle, a read result observed only after

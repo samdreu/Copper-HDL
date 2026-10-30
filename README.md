@@ -414,6 +414,16 @@ counterexample rather than lowered to something plausible:
   refused by design; it is not, and no rule targets it. The read-first,
   delay-last spelling in `examples/uart/rx.rs` is the one anchored against an
   independent reference, not the only one that works.
+- **A register's power-on value must be stateable.** A pre-loop `let mut` the
+  liveness inference calls a register must be initialized from a constant (a
+  literal, `Bits::zero()`, `Bits::from_u32(k)`, `Bits::from_lit::<K>()`, an enum
+  variant, an array of those) or from `Bits::x()`. The constant reaches the emitted
+  SystemVerilog as the register's `initial` value, so the simulator and the hardware
+  start together without a reset; `Bits::x()` states nothing and says the design
+  needs a reset; anything else — an input read, a local, a free function — is
+  refused by both front-ends (`check_register_initializers`, 2026-10-29), because
+  the hardware has no power-on value for it. `initial` is honored by simulators and
+  FPGA tools and ignored by most ASIC flows.
 - **The pre-tick alignment family**: four compile-time rules refuse plain-`Out`
   drive shapes whose phase would silently differ between the simulator and the
   synthesized FSM: before the first tick, a port with *mixed anchors* (an input

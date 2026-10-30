@@ -31,10 +31,29 @@ use std::collections::BTreeSet;
 use syn::ItemFn;
 
 mod cfg;
+mod init;
 mod shape;
 
 pub use cfg::{classify_reads, classify_reads_with, Cfg, DerivationFacts, EdgeKind, PhaseFacts, ReadTiming};
+pub use init::{
+    check_register_initializers as check_register_initializers_with, is_constant_expr,
+    non_constant_register_initializers, register_init_message,
+};
 pub use shape::{check_awaits, check_nested_loop_shape};
+
+/// The register power-on rule (`init`, 2026-10-29): every pre-loop `let mut` the
+/// liveness inference calls a register must be initialized from a constant
+/// ([`is_constant_expr`]) or from `Bits::x()`. The initializer is the flip-flop's
+/// power-on value, which the transpiler states as an `initial` assignment; a value
+/// it cannot state used to be dropped silently. `Ok` for a module with no top-level
+/// loop. [`check_register_initializers_with`] takes an already-inferred register
+/// set, for a caller holding a built [`Cfg`].
+pub fn check_register_initializers(f: &ItemFn) -> Result<(), syn::Error> {
+    match Cfg::build(f) {
+        Some(cfg) => init::check_register_initializers(f, &cfg.registers()),
+        None => Ok(()),
+    }
+}
 
 /// Plain combinational `Out` ports written **between a leading `In` read and the
 /// update of a register the write reads** — the read's pre-edge barrier drags the

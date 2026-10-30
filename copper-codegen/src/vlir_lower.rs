@@ -331,6 +331,9 @@ fn lower_seq(
     reg_decls.extend(mem_pipeline_regs(&s.memories, &mem_use, leg));
 
     let mut comb_phases = Vec::new();
+    // Output ports driven from `always_ff` (see `VLIRSeqBody::port_inits`), in
+    // first-seen order across the phases.
+    let mut port_inits: Vec<(String, Width)> = Vec::new();
     let mut output_assigns = Vec::new();
     let mut ff_stmts = Vec::new();
 
@@ -422,6 +425,16 @@ fn lower_seq(
         if !cond_outs.is_empty() {
             let (cleaned, out_ff) = split_output_regs(&stmts, &cond_outs);
             stmts = cleaned;
+            // Every port registered here is a flop with no Rust initializer; its
+            // power-on value is the wire's zero (2026-10-29, the `_hold` convention).
+            let mut registered: Vec<&String> = cond_outs.iter().collect();
+            registered.sort();
+            for port in registered {
+                if !port_inits.iter().any(|(p, _)| p == port) {
+                    let width = out_widths.get(port).cloned().unwrap_or(Width::Concrete(1));
+                    port_inits.push((port.clone(), width));
+                }
+            }
             if multi_phase {
                 ff_stmts.push(VLIRFFStmt::If {
                     condition: phase_eq(phase.phase_idx, &phase_r_width),
@@ -528,6 +541,7 @@ fn lower_seq(
         comb_phases,
         always_ff,
         output_assigns,
+        port_inits,
     })
 }
 
@@ -2793,7 +2807,10 @@ fn mem_pipeline_regs(
                     out.push(VLIRRegDecl {
                         name: leg.get(&read_stage(&m.name, port, stage, is_data)),
                         width: width.clone(),
-                        init: None,
+                        // The simulator's read pipeline starts empty (`None` at
+                        // every stage, read back as zero); the stage register
+                        // states the same (2026-10-29).
+                        init: Some(VLIRExpr::Lit { width: width.clone(), value: 0 }),
                     });
                 }
             }
@@ -2810,8 +2827,10 @@ fn mem_pipeline_regs(
                 ] {
                     out.push(VLIRRegDecl {
                         name: leg.get(&write_stage(&m.name, port, stage, suffix)),
-                        width,
-                        init: None,
+                        width: width.clone(),
+                        // The write pipeline starts empty too: no valid, zero address
+                        // and data (2026-10-29).
+                        init: Some(VLIRExpr::Lit { width, value: 0 }),
                     });
                 }
             }
@@ -3601,7 +3620,10 @@ endmodule
     }
 
     /// Bit-indexing (`d[7]`) + `Logic::One` constant + conditional register
-    /// update lower end-to-end to a bit-select, comparison, and ternary.
+    /// update lower end-to-end to a bit-select, comparison, and ternary. Re-blessed
+    /// 2026-10-29: `r`'s `Bits::from_u8(0)` initializer now reaches the SV as its
+    /// `initial` value (and the `initial` block brings the MULTIDRIVEN pragma that
+    /// `lint_multidriven` adds for any initialized register); nothing else moved.
     #[test]
     fn bit_index_golden_output() {
         let src = r#"
@@ -3625,9 +3647,15 @@ module m (
 
     logic [7:0] r;
 
+    initial begin
+        r = 8'd0;
+    end
+
+    /* verilator lint_off MULTIDRIVEN */
     always_ff @(posedge clk) begin
         r <= ((d[7] == 1'b1) ? d : r);
     end
+    /* verilator lint_on MULTIDRIVEN */
 
     assign o = r;
 
@@ -3665,9 +3693,15 @@ module m (
 
     logic [7:0] r;
 
+    initial begin
+        r = 8'd0;
+    end
+
+    /* verilator lint_off MULTIDRIVEN */
     always_ff @(posedge clk) begin
         r <= (sel ? ((d >> 8'd1) ^ r) : (d >> 8'd1));
     end
+    /* verilator lint_on MULTIDRIVEN */
 
     assign o = r;
 
@@ -3818,7 +3852,21 @@ endmodule
         // The output is a registered non-blocking assign in always_ff, and is NOT
         // driven combinationally (no `out = ` blocking assign).
         assert!(sv.contains("out <="), "expected a registered output: {sv}");
-        assert!(!sv.contains("out ="), "output must not be a combinational drive: {sv}");
+        // Outside the `initial` block, that is: the registered port's power-on
+        // value (`out = 8'd0;`, stated since 2026-10-29) is elaboration-time state,
+        // not a drive.
+        let mut in_initial = false;
+        for line in sv.lines() {
+            let t = line.trim();
+            if t == "initial begin" {
+                in_initial = true;
+            } else if in_initial && t == "end" {
+                in_initial = false;
+            } else if !in_initial {
+                assert!(!t.contains("out ="), "output must not be a combinational drive: {sv}");
+            }
+        }
+        assert!(sv.contains("initial begin\n        stage = 2'd0;\n        acc = 8'd0;\n        out = 8'd0;\n    end"), "{sv}");
     }
 
     /// ...but a `case` whose arms cover every value of the selector is complete,

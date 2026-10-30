@@ -240,23 +240,20 @@ const REFERENCE: &[(&str, &str)] = &[
 
 const RESET: &[(&str, &str, bool)] = &[
     ("shift_register", "rstn", true),
-    // Both found by the multi-sequence stimulus policy on 2026-10-28, on its first
-    // run: the single seed each had before happened to assert `reset_i` on cycle 0,
-    // so the pre-reset state was never observed. `simple_counter` starts from
+    // Found by the multi-sequence stimulus policy on 2026-10-28, on its first run:
+    // the single seed it had before happened to assert `reset_i` on cycle 0, so the
+    // pre-reset state was never observed. `simple_counter` starts from
     // `Bits::<8>::x()` — the shift_register case exactly (sim X, read back as 255,
     // against Verilator's 0: `count_o expected 255 got 0` on every sequence whose
-    // first cycle had `reset_i == 0`). `lfsr` (both copies, same source) starts from
-    // a RUST initial value, `let mut state = Bits::from_u32(1)`, which the emitted
-    // SystemVerilog does not carry — its flop has no initializer and no reset value
-    // outside the `reset_i` branch, so the Verilated model starts at 0 and, being an
-    // LFSR, stays there until reset: measured `o expected 1 got 0` with
-    // `reset_i == 0, yumi_i == 0` first, and `o expected 2785017856 got 0` (one shift
-    // of 1 under the taps) with `yumi_i == 1` first — pinned in
-    // tests/lfsr_equivalence.rs. A pre-reset flop is X in hardware, so the row
-    // records the measured difference and starts the comparison at the reset, as
-    // the table has always done; the Rust initializer's reach into the SV is a
-    // transpiler question recorded here, not resolved here.
-    ("lfsr", "reset_i", false),
+    // first cycle had `reset_i == 0`). Its sibling finding, `lfsr`, had a row here
+    // from 2026-10-28 to 2026-10-29: its Rust initial value `Bits::from_u32(1)` was
+    // not carried into the SV. It is now — a constant register initializer reaches
+    // the emitted SystemVerilog as the register's `initial` value and a
+    // non-constant one is refused (`copper_analysis::check_register_initializers`),
+    // so the sweep observes `lfsr` from its first cycle again, and
+    // tests/lfsr_equivalence.rs pins the pre-reset agreement. A row here is for a
+    // design whose state is genuinely X until reset (`Bits::x()`, or a memory the
+    // reset must define), which an `initial` block cannot state.
     ("simple_counter", "reset_i", false),
     // Held low the core is idle and its boot port owns the memory's write bus, so the
     // sweep's random stimulus reaches a defined state instead of X. This is the first

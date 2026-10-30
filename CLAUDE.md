@@ -359,9 +359,13 @@ receive/clone one.
   macro's sequential arm and `transpile_target` run the same list from
   `copper-analysis`: the two source-shape rules (`check_nested_loop_shape` — a nested
   loop must end at a clock boundary; `check_awaits` — only `clk.tick().await` may be
-  awaited), reachability, the pre-tick alignment family (opt-out honoured in both),
-  the memory rules and `multi_write_collapse` (no opt-out in either). A module that
-  compiles therefore transpiles, or is refused by both. The standing audit is
+  awaited), reachability, the register power-on rule (`check_register_initializers`,
+  2026-10-29 — a pre-loop register's initializer must be a constant, which reaches the
+  SV as its `initial` value, or `Bits::x()`; no opt-out; `COPPER_VERILATOR_X_INITIAL=1`
+  randomizes Verilator's power-on values to measure what is left unstated), the
+  pre-tick alignment family (opt-out honoured in both), the memory rules and
+  `multi_write_collapse` (no opt-out in either). A module that compiles therefore
+  transpiles, or is refused by both. The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one

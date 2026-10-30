@@ -1,0 +1,19 @@
+error: register `acc` is initialized from a call through a single-segment path (a free function), which is not a constant, so the hardware has no power-on value for it: the simulator would start `acc` at whatever the expression evaluates to, and the emitted SystemVerilog cannot state that value. Initialize `acc` with a constant — an integer literal, `Bits::from_u32(k)`, `Bits::<N>::from_u8(k)`, `Bits::from_lit::<K>()`, `Bits::zero()`, an enum variant — or with `Bits::x()` to say it starts undefined and must be reset before it is read
+  --> tests/ui/fail/register_init_not_constant.rs:20:19
+   |
+20 |     let mut acc = seed();
+   |                   ^^^^
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/register_init_not_constant.rs:1:25
+  |
+1 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Clock`
+ --> tests/ui/fail/register_init_not_constant.rs:2:25
+  |
+2 | use copper_core::{Bits, Clock, ClockDomain};
+  |                         ^^^^^
