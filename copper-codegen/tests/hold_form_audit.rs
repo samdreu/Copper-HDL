@@ -21,6 +21,18 @@
 //! register-free body makes both of its writes opening in the simulator, so the
 //! form does not make it agree (`multi_phase_out_write` clause 3 refuses it, and
 //! its probe stays an `assert_ne!`); it is listed because the emission reaches it.
+//!
+//! Grew by nine on 2026-10-30, when both mixed-anchor rules were narrowed
+//! (`CYCLE_DATAFLOW_SEMANTICS.md` §10.4–10.5) and the probes that witness the
+//! admitted class were added — `d5a`–`d5f` (`d2a` with a register in place of
+//! either constant, single-tick and extraction route), `e4r`, `e4f` (`e4` with a
+//! register-valued or forwarded opening drive) — plus `e11`, which is in the set
+//! on the CODEGEN side only like `e4i`: its first drive is path-dependent (a read
+//! on one path to it, none on the other), codegen counts it closing, and the form
+//! realizes its opening constant while that drive stays one late on its read-free
+//! path (`multi_phase_out_write` clause 4 refuses it). `e11b`, the same with a
+//! closing second drive, has no opening drive and is edge-sampled, so it is not
+//! here. Declared from the derivation before the audit ran; the audit matched.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -94,8 +106,17 @@ fn the_mixed_anchor_hold_form_set_is_exactly_the_declared_one() {
         "tests/fixtures/control_extraction_dut.rs::branch_merge_explicit::tail_o (1/1)",
         "tests/sequential_forwarding_divergence.rs::branch_merge::tail_o (1/1)",
         "tests/sequential_forwarding_divergence.rs::d2a_mixed_two_drives_hold::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::d5a_const_opening_reg_closing::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::d5b_reg_opening_const_closing::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::d5c_reg_opening_reg_closing::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::d5d_const_opening_reg_closing_extracted::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::d5e_reg_opening_const_closing_extracted::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::d5f_reg_opening_reg_closing_extracted::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::e11_path_dependent_write_in_a_middle_phase::o (1/1)",
         "tests/sequential_forwarding_divergence.rs::e4_closing_then_opening::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::e4f_closing_then_forwarded_opening::o (1/1)",
         "tests/sequential_forwarding_divergence.rs::e4i_register_free_passthrough_then_opening::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::e4r_closing_then_register_opening::o (1/1)",
         "tests/sequential_forwarding_divergence.rs::e6_closing_via_wire_then_opening::o (1/1)",
     ]
     .into_iter()

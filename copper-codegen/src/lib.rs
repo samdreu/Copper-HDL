@@ -385,11 +385,13 @@ fn vlir_for_target(
             return Err(format!(
                 "output port '{port}' is driven in more than one clock phase (across \
                  clk.tick().await boundaries) in a shape whose emitted form shows one of the \
-                 writes a cycle after the simulator (an input read before some write of it \
-                 in that write's phase, a wait loop's read before it, a register-free body, \
-                 or the linear multi-tick path). Declare it as RegOut<…>, drive it in exactly \
-                 one phase, or put every write of it behind an input read that a \
-                 clk.tick().await follows"
+                 writes a cycle after the simulator: a write preceded by an input read in its \
+                 phase that the simulator nonetheless runs at the cycle's opening (the read \
+                 has no clk.tick().await after it, the body has no register, or a control \
+                 path skips the read), a wait loop's read before an opening write, or the \
+                 linear multi-tick path. Declare it as RegOut<…>, drive it in exactly one \
+                 phase, or make each write's anchor uniform (behind an input read that a \
+                 clk.tick().await follows on every path to it, or behind none)"
             ));
         }
         // A plain `Out` FIRST DRIVEN LATE — every write a constant, none before the
@@ -424,12 +426,14 @@ fn vlir_for_target(
     if !opts_out_of_pretick_alignment(target) {
         if let Some(port) = copper_analysis::unprotected_pretick_out_write(target).first() {
             return Err(format!(
-                "output port '{port}' is driven before the first clk.tick().await with mixed \
-                 anchors (an input read reaches some write of it while some write has a \
-                 read-free path from the loop head) or a forwarded guard (a write no read \
-                 reaches sits under a test of a register assigned earlier in the segment), so \
-                 no single emission matches the simulator. Make the anchor uniform, test only \
-                 committed state, or declare it as RegOut<…>"
+                "output port '{port}' is driven before the first clk.tick().await by a write \
+                 an input read reaches on one control path and not on another, or on every \
+                 path with an input read before some write and not another (the every-path \
+                 mux has no hold register), or under a test of a register assigned earlier in \
+                 the segment (a forwarded guard), so the emitted form shows it one observation \
+                 off from the simulator. Make each write's anchor uniform (an input read before \
+                 it on every path, or on none), test only committed state, or declare it as \
+                 RegOut<…>"
             ));
         }
         if let Some(port) = copper_analysis::pretick_out_write_before_update(target).first() {

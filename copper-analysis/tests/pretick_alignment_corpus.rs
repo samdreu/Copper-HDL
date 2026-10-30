@@ -88,28 +88,31 @@ fn clocked_hardware_fns(items: &[Item], out: &mut Vec<ItemFn>) {
 /// silences the *error*, not the *detection*, so an opted-out module cannot
 /// quietly disappear from the corpus view.
 ///
-/// The set today (re-derived 2026-10-28 against the arm-granular opening walk —
-/// `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10; every entry is a probe whose
-/// sim and SV traces are pinned in `tests/sequential_forwarding_divergence.rs`):
+/// The set today (re-derived 2026-10-28 against the arm-granular opening walk,
+/// narrowed 2026-10-30 to what the drive-level mux + hold form leaves —
+/// `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10, §10.4–10.5; every entry is a
+/// probe whose sim and SV traces are pinned in
+/// `tests/sequential_forwarding_divergence.rs`):
 ///
-/// * clause (A), **mixed anchors** — a read reaches some drive of the port while
-///   some drive has a read-free path from the loop head: `w4_mixed_alignment`
-///   (the continuous assign forwarding a register the read-free arm assigns),
-///   `d1f` / `d3c` (held, path-dependent), `d2a` (two drives, held), `d1g` / `d2b`
-///   (two drives on every path), `branch_merge_explicit` (`tail_o`, written
-///   behind the `sel` read and in the `pc == 1` arm).
+/// * clause (A), **a drive whose anchors differ between the sides** — mixed
+///   anchors where one drive is path-dependent (a read reaches it on one path and
+///   not on another: `w4_mixed_alignment`, the continuous assign forwarding a
+///   register the read-free arm assigns; `d1f` / `d3c`, held; `d1g`, every path)
+///   or the port is written on every path (`d2b`: the every-path comb mux has no
+///   hold register, so it shows the closing drive at the opening observation).
 /// * clause (B), **forwarded guard** — an opening drive under a branch that tests
 ///   a register assigned earlier on the path: `d4a` (held), `d4c` (every path).
 ///
-/// Left the set 2026-10-28, measured AGREEING and compiling without an opt-out:
-/// `probe_fsm`, `pc_arm_write`, `pc_arm_toggle` (the arm-granular walk of
-/// 2026-10-26 made their drives opening on both sides). `add_then_write`,
-/// `fast_counter` and `ram_prewrite` left on 2026-08-26 (forwarded emission).
+/// Left the set 2026-10-30, measured AGREEING under the drive-level form and
+/// compiling without an opt-out: `d2a` and `branch_merge_explicit` (`tail_o`) —
+/// held mixed-anchor ports whose drives each have a uniform anchor — with the six
+/// new `d5*` probes beside them. Left 2026-10-28: `probe_fsm`, `pc_arm_write`,
+/// `pc_arm_toggle` (the arm-granular walk of 2026-10-26 made their drives opening
+/// on both sides). `add_then_write`, `fast_counter` and `ram_prewrite` left on
+/// 2026-08-26 (forwarded emission).
 const EXPECTED_FLAGGED: &[&str] = &[
-    "tests/fixtures/control_extraction_dut.rs::branch_merge_explicit",
     "tests/sequential_forwarding_divergence.rs::d1f_const_path_dependent_hold",
     "tests/sequential_forwarding_divergence.rs::d1g_const_path_dependent_all_paths",
-    "tests/sequential_forwarding_divergence.rs::d2a_mixed_two_drives_hold",
     "tests/sequential_forwarding_divergence.rs::d2b_mixed_two_drives_all_paths",
     "tests/sequential_forwarding_divergence.rs::d3c_w4_hold",
     "tests/sequential_forwarding_divergence.rs::d4a_forwarded_guard_hold",
@@ -176,7 +179,8 @@ fn pretick_alignment_hazard_flags_exactly_the_known_divergent_modules() {
 
 /// Plain combinational `Out` ports driven in **more than one clock phase** whose
 /// emitted form cannot show the simulator's trace
-/// (`copper_analysis::multi_phase_out_write`, narrowed 2026-10-23, phase E).
+/// (`copper_analysis::multi_phase_out_write`, narrowed 2026-10-23, phase E, and
+/// again 2026-10-30 — clause 4 is per drive, `CYCLE_DATAFLOW_SEMANTICS.md` §10.4).
 ///
 /// The sibling of the rule above, and the one that covers the case it cannot see:
 /// `unprotected_pretick_out_write` examines only head → first tick, and widening
@@ -184,11 +188,14 @@ fn pretick_alignment_hazard_flags_exactly_the_known_divergent_modules() {
 /// modules, ~30 with passing equivalence tests). Writing a plain `Out` after a
 /// tick is the ordinary multi-phase pattern; writing it in *two* phases is what
 /// this rule keys on — and since phase E it refuses only the measured divergent
-/// classes (mixed anchors, register-free passthrough reads, the linear route,
-/// plus the unmeasured wait-loop shape by construction), admitting the extracted
-/// class whose writes no input read reaches (`pulse_plain`, `e2`, `e3`, and since
-/// 2026-10-26 `e2x`, whose read sits in another state) and the all-closing class
-/// (`e5d`) that phase C's emission shows exactly. Each listed
+/// classes (a drive whose anchors differ between the sides — an immediate read or
+/// a path-dependent read before it — register-free passthrough reads, the linear
+/// route, plus the unmeasured wait-loop shape by construction), admitting the
+/// extracted class whose writes no input read reaches (`pulse_plain`, `e2`, `e3`,
+/// and since 2026-10-26 `e2x`, whose read sits in another state), the all-closing
+/// class (`e5d`), and since 2026-10-30 the mixed class whose drives each have a
+/// uniform anchor (`e4`, `e6`, `e4r`, `e4f`), which the drive-level mux + hold
+/// form shows exactly. Each listed
 /// module is one row of the verdict table in
 /// `tests/sequential_forwarding_divergence.rs` (the `e*` tests pin its traces).
 ///
@@ -206,10 +213,14 @@ const EXPECTED_MULTI_PHASE: &[&str] = &[
     // (e2x_two_registers_plus_unrelated_read left this set 2026-10-26: codegen's
     // opening walk is arm-granular, so a read in another state demotes nothing
     // and the port takes the mux + hold form — measured agreeing)
-    // mixed anchors: one closing drive, one opening (clause ii)
-    "tests/sequential_forwarding_divergence.rs::e4_closing_then_opening",
+    // (e4_closing_then_opening and e6_closing_via_wire_then_opening left this set
+    // 2026-10-30: each drive's anchor is uniform on both sides and the drive-level
+    // mux + hold form realizes the port — measured agreeing since 2026-10-29)
+    // a drive whose anchors differ between the sides (clause 4): the trailing
+    // immediate read (e5), the path-dependent read in a middle phase (e11, e11b)
     "tests/sequential_forwarding_divergence.rs::e5_two_closing",
-    "tests/sequential_forwarding_divergence.rs::e6_closing_via_wire_then_opening",
+    "tests/sequential_forwarding_divergence.rs::e11_path_dependent_write_in_a_middle_phase",
+    "tests/sequential_forwarding_divergence.rs::e11b_path_dependent_write_then_closing",
     // register-free: the reads feeding the writes are immediate passthroughs
     "tests/sequential_forwarding_divergence.rs::e4i_register_free_passthrough_then_opening",
     "tests/sequential_forwarding_divergence.rs::e5f_two_closing_register_free",

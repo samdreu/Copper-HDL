@@ -6,28 +6,29 @@ use copper_macros::hardware;
 struct MainClk;
 impl ClockDomain for MainClk {}
 
-// Should fail: MIXED anchors through two drives of a held port. The first write
-// has no read before it (the simulator runs it at the cycle's opening, on
-// committed state); the second sits behind the input read (closing). Codegen
-// edge-samples the whole port, so the opening write lands one observation late —
-// and the simulator never shows the closing write at all, because the next
-// iteration's opening write overwrites it before the observation. Measured as
-// `d2a_mixed_two_drives_hold` in tests/sequential_forwarding_divergence.rs
-// (sim `[0, 5, 5, 5, …]`, SV `[0, 9, 5, 9, 5, …]`). Clause (A) of the re-derived
-// rule (2026-10-28); note that every register assignment here sits behind the
-// read, which the pre-2026-10-28 rule took as protection.
+// Should fail: MIXED anchors on a port written on EVERY path. One arm writes
+// behind its input read (closing on both sides), the other with no read before it
+// (opening on both sides) — each drive's anchor is uniform, but an every-path port
+// is emitted as a comb mux on the committed `phase` with no hold register, so the
+// SV shows the closing `1` whenever `phase == 0` is committed, at the opening
+// observation, where the simulator has not run that write yet (and never shows
+// it: the next iteration's opening write overwrites it first). Measured as
+// `d2b_mixed_two_drives_all_paths` in tests/sequential_forwarding_divergence.rs
+// (sim `[2, 2, 2, …]`, SV `[2, 1, 2, 1, …]`). Clause (A2) of the rule as narrowed
+// 2026-10-30. The same two drives on a HELD port (`d2a`, the former content of
+// this file) are realized by the drive-level mux + hold form and accepted —
+// `mixed_anchors_held` in ui/pass/pretick_alignment_ok.rs.
 #[hardware(sequential)]
-async fn mixed_anchors(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
-    let mut pc: u8 = 0;
+async fn mixed_anchors_every_path(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut phase: u8 = 0;
     loop {
-        if pc == 1 {
-            o.write(Bits::from_lit::<5>());
-        }
-        if x.read()[0] == Logic::One {
-            o.write(Bits::from_lit::<9>());
-            pc = 1;
+        if phase == 0 {
+            let _ = x.read();
+            o.write(Bits::from_lit::<1>());
+            phase = 1;
         } else {
-            pc = 0;
+            o.write(Bits::from_lit::<2>());
+            phase = 0;
         }
         clk.tick().await;
     }

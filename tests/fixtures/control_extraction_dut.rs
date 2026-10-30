@@ -94,32 +94,31 @@ async fn branch_merge(
     }
 }
 
-// `allow_pretick_alignment` since 2026-08-25: this hand-written FSM is a
-// DEMONSTRATION of the pre-tick hazard as well as of the extracted shape. Its
-// `tail_o` is written both behind the deferred `sel` read (closing) and in the
-// `pc == 1` arm with no read before it (opening) — MIXED anchors, clause (A) of the
-// re-derived D1 rule (2026-10-28; the minimal pair is
-// sequential_forwarding_divergence.rs::d2a), which still refuses it. Until
-// 2026-10-29 the port was edge-sampled (phase C's decision was port-wide, and the
-// closing drive dragged the opening one with it), and the `pc == 1` write led its
-// emitted SystemVerilog by one cycle when the first cycle took the `sel == 1`
-// path (measured 2026-10-26; until 2026-10-28 the sweep's single seed took
-// `sel == 0` first, which masked it in BOTH twins; the multi-sequence stimulus
-// then exposed it in both, and each twin had a build.rs SKIP row). Since
-// 2026-10-29 the DRIVE-LEVEL form (`vlir_lower::opening_hold_outputs`) muxes the
-// opening drive in the comb copy and loads `tail_o_hold` from both drives, the
-// twins agree with the simulator on every sequence, and both sweep with no row.
-// `head_o` (written before the read) takes the all-opening mux + hold form and
-// `mid_o` (only behind the read) is edge-sampled; both always agreed. The flag
-// silences the error, not the detection — the module stays visible to every
-// corpus scan and in `EXPECTED_FLAGGED` (the rule is unchanged; whether clause (A)
-// is narrowed on this evidence is the user's decision) — and its twin
-// `branch_merge` is deliberately left unflagged so the structural comparison
-// still pairs the same port styles (no D1 clause reaches the async spelling; its
-// agreement is pinned by
+// A DEMONSTRATION of the extracted shape — and, from 2026-08-25 to 2026-10-30, of
+// the pre-tick hazard: it carried `allow_pretick_alignment` for that whole period.
+// Its `tail_o` is written both behind the deferred `sel` read (closing) and in the
+// `pc == 1` arm with no read before it (opening) — MIXED anchors, each drive's
+// anchor uniform on both sides (the minimal pair is
+// sequential_forwarding_divergence.rs::d2a). Until 2026-10-29 the port was
+// edge-sampled (phase C's decision was port-wide, and the closing drive dragged
+// the opening one with it), and the `pc == 1` write led its emitted SystemVerilog
+// by one cycle when the first cycle took the `sel == 1` path (measured 2026-10-26;
+// until 2026-10-28 the sweep's single seed took `sel == 0` first, which masked it
+// in BOTH twins; the multi-sequence stimulus then exposed it in both, and each
+// twin had a build.rs SKIP row). Since 2026-10-29 the DRIVE-LEVEL form
+// (`vlir_lower::opening_hold_outputs`) muxes the opening drive in the comb copy
+// and loads `tail_o_hold` from both drives, the twins agree with the simulator on
+// every sequence, and both sweep with no row. On 2026-10-30 clause (A) of
+// `unprotected_pretick_out_write` was narrowed to what still diverges (a
+// path-dependent drive, or an every-path port — `CYCLE_DATAFLOW_SEMANTICS.md`
+// §10.4), so this module compiles WITHOUT an opt-out and sweeps exactly like its
+// twin. `head_o` (written before the read) takes the all-opening mux + hold form
+// and `mid_o` (only behind the read) is edge-sampled; both always agreed. The
+// structural comparison still pairs the same port styles
+// (tests/control_extraction_structural.rs), and the agreement is pinned by
 // sequential_forwarding_divergence.rs::branch_merge_agrees_when_the_first_cycle_takes_sel_one
-// and the m3 hand model beside it).
-#[hardware(sequential, allow_pretick_alignment)]
+// and the m3 hand model beside it.
+#[hardware(sequential)]
 async fn branch_merge_explicit(
     clk: Clock<MainClk>,
     sel: In<Logic, MainClk>,
