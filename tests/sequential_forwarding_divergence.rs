@@ -1603,6 +1603,11 @@ module branch_merge_model (
     assign head_o = (pc == 8'd0) ? 1'b1 : head_o_hold;
     assign tail_o = (pc == 8'd1) ? 1'b1 : tail_o_hold;
 
+    // `mid_o` is written by the `initial` above and by this process; recent
+    // simulators (5.05x) report that as MULTIDRIVEN and fail the build, so the
+    // model carries the same pragma pair the transpiler emits around its own
+    // `always_ff`.
+    /* verilator lint_off MULTIDRIVEN */
     always_ff @(posedge clk) begin
         case (pc)
             8'd0: begin
@@ -1622,6 +1627,7 @@ module branch_merge_model (
             default: pc <= pc;
         endcase
     end
+    /* verilator lint_on MULTIDRIVEN */
 endmodule
 "#;
 
