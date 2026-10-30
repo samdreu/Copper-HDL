@@ -2989,8 +2989,10 @@ fn e8p_extracted_passthrough_diverges_refused() {
 //     is arm-granular but carries a read from any arm past the branch);
 //   * port form: driven on every path → `always_comb` (a continuous assign, or a
 //     mux whose guards are the COMMITTED registers); driven on some paths → mux +
-//     hold when every drive is opening, else an edge-sampled register whose
-//     guards take the edge (forwarded) form.
+//     hold when some drive is opening (the comb copy muxing the opening drives,
+//     the hold register loaded by every drive — drive-level since 2026-10-29;
+//     "when every drive is opening" when this battery was measured), else an
+//     edge-sampled register whose guards take the edge (forwarded) form.
 // Two hazards fall out. (A) MIXED ANCHORS: a read reaches some drive of the
 // port while some drive has a read-free path — the opening write lands one
 // observation late in the SV (or, for a continuous assign, shows the committed

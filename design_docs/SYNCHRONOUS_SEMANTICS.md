@@ -371,7 +371,8 @@ about its region is what separates them.
   drive is *closing* on a path where an input read precedes it and *opening* on a path where none
   does, while codegen decides per drive (closing iff a read comb-reaches it on any path) and emits
   per port (a continuous assign or committed-guard mux on every path; a forwarded mux + hold when
-  every drive is opening; an edge-sampled register with edge-form guards otherwise). Exactly two
+  some drive is opening — every drive until 2026-10-29 — with the hold register loaded by every
+  drive; an edge-sampled register with edge-form guards otherwise). Exactly two
   hazards follow, and the rule refuses exactly those: **(A) mixed anchors** — a read reaches some
   drive of the port while some drive has a read-free path from the head (the opening write lands
   one observation late in the SV; the simulator never even shows the closing write, since the next
