@@ -111,8 +111,9 @@ the findings are the argument for the sweep.
   stated too — port flops, memory stage registers and hoisted input-read locals at
   zero, `Memory::new` arrays as a zero fill — after which the switch passes every
   transpiled leg (162 of 163 cases, `RESET`-row modules included); the one failure
-  left is `ram_read_first`'s hand-written reference, whose array is deliberately
-  uninitialized (§3.3).
+  left was `ram_read_first`'s hand-written reference, whose array was deliberately
+  uninitialized, until 2026-10-30 when it gained the same `initial` block and the
+  switch passes all 163 (§3.3).
 * **After the log:** the `SKIP` table gained `<wrapper>::<module>` keys because the
   *example* copy of `ripple_carry_adder` refused (cause J-b) while the fixture copy
   swept; J-b closed 2026-08-27 and both copies sweep, but the key form stays. On
@@ -367,12 +368,13 @@ registers and hoisted locals) and every `Memory::new` array a zero fill (the
 simulator starts a memory at `T::default()`); Appendix A keeps the measured set.
 After that the randomized sweep passes 162 of its 163 cases, the three `RESET`-row
 modules included (their reset is asserted on cycle 0 and the comparison starts
-there). The one failure is not a transpiled leg at all: `ram_read_first`'s
+there). The one failure was not a transpiled leg at all: `ram_read_first`'s
 **independent reference** (`tests/fixtures/reference_sv/ram_read_first.sv`, a
-`REFERENCE` row) leaves its array deliberately uninitialized, so under randomized
-power-on the hand-written RAM reads random words where the simulator and the
-transpiled SV — which agree with each other — read zero; the hand-written file is
-the author's and is left as written. The hand-rolled callers
+`REFERENCE` row) left its array deliberately uninitialized, so under randomized
+power-on the hand-written RAM read random words where the simulator and the
+transpiled SV — which agree with each other — read zero. On 2026-10-30 the
+reference gained an `initial` block stating the same zero power-on state for its
+array and its output register, and the switch passes all 163 cases. The hand-rolled callers
 of `tests/common::verilator_command` are outside the switch, as they are outside
 the model cache. It is a switch, not the default: the default sweep keeps the
 zero-fill comparison the `RESET` table was written against.

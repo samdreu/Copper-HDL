@@ -15,9 +15,13 @@
 // arrives at the behaviour from the language's own semantics rather than from the
 // transpiler's enable/address nets.
 //
-// `mem` is deliberately left uninitialised. Verilator zero-fills by default
-// (`--x-initial 0`) and the transpiler emits no `initial` block either, so the two
-// start from the same state; a preloaded memory is a separate fixture.
+// POWER-ON STATE is stated, not assumed. Copper's simulator starts an unpreloaded
+// `Memory` at `T::default()` (zero) and a registered port at the wire's zero, and
+// since 2026-10-30 the transpiler states both in an `initial` block. This file does
+// the same so the two agree under randomized power-on as well as under Verilator's
+// default zero-fill (`COPPER_VERILATOR_X_INITIAL=1` randomizes it; without the
+// blocks below the reference read random words while the simulator and the
+// transpiled SV agreed on zero). A preloaded memory is a separate fixture.
 
 module ram_read_first (
     input  logic       clk,
@@ -29,6 +33,13 @@ module ram_read_first (
 );
 
     logic [7:0] mem [0:15];
+
+    initial begin
+        data = 8'd0;
+        for (int i = 0; i < 16; i++) begin
+            mem[i] = 8'd0;
+        end
+    end
 
     always_ff @(posedge clk) begin
         data <= mem[raddr];
