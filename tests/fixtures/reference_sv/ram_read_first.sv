@@ -41,11 +41,18 @@ module ram_read_first (
         end
     end
 
+    // The `initial` block above and this process both write `data` and `mem`,
+    // which recent simulators (5.05x) report as MULTIDRIVEN and fail the build
+    // on, so the pragma pair the transpiler emits around its own `always_ff` is
+    // used here too. (A comment must not begin with the tool's name: that is
+    // parsed as a pragma.)
+    /* verilator lint_off MULTIDRIVEN */
     always_ff @(posedge clk) begin
         data <= mem[raddr];
         if (we) begin
             mem[waddr] <= wdata;
         end
     end
+    /* verilator lint_on MULTIDRIVEN */
 
 endmodule
