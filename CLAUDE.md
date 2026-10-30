@@ -369,7 +369,16 @@ receive/clone one.
   and diverges; its uniform controls `e12a` / `e12b` agree); on the linear route the
   same shape (`e13`) AND its every-path control (`e13a`) diverge because the route
   emits a continuous assign whatever reads precede the write — a missing closing
-  form, pinned as unguarded gaps and recorded with the derived clause, not refused. The doc also records **five** rejected fixes with
+  form. **Closed the same day (§10.7)** by a rule of its own,
+  **`linear_out_write_anchor_mismatch`**: on the linear multi-tick route the form is
+  chosen by the operand's kind (a same-segment `let` wire → the phase-guarded flop,
+  a register/input/constant → a continuous assign), so a wire written with no
+  deferred read on some path, or a register/input/constant written behind one when
+  the assign can change at another edge (another segment's update — the trailing
+  statements included — an update after the write, an input, a constant outside the
+  head segment) is refused; fourteen probes, every verdict predicted first, zero
+  live modules. It also closes V8's unexamined middle segment (`e14j`) and
+  `out_first_driven_late`'s closing-constant blind spot (`e14d`). The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in

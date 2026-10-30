@@ -331,3 +331,49 @@ async fn single_phase_no_read(clk: Clock<MainClk>, _x: In<Bits<8>, MainClk>, o: 
         for _ in 0..2 { clk.tick().await; }
     }
 }
+
+// `e14g_middle_closing_in_phase`: on the linear multi-tick path, a register
+// written behind an input read agrees when it is updated in the same segment
+// before the write — the forwarded value is the one the closing edge commits and
+// the continuous assign cannot change at the other edge (`CYCLE_DATAFLOW_SEMANTICS.md`
+// §10.7). The update moved across the tick is the refused ui/fail/linear_anchor_mismatch.rs.
+#[hardware(sequential)]
+async fn linear_closing_in_segment(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        let _ = x.read();
+        cnt = cnt + Bits::from_lit::<1>();
+        o.write(cnt);
+        clk.tick().await;
+    }
+}
+
+// `e13b_read_on_no_path_linear`: the same register written with no read before
+// it — opening on both sides, the continuous assign shows it at the opening.
+#[hardware(sequential)]
+async fn linear_opening_register(clk: Clock<MainClk>, _x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(cnt);
+        clk.tick().await;
+    }
+}
+
+// `e14b_wire_behind_read_middle`: a wire-valued write behind an input read on
+// every path — the phase-guarded flop samples at the closing edge, where the
+// simulator wrote. The same wire with no read is refused (§10.7, `e14a`).
+#[hardware(sequential)]
+async fn linear_wire_behind_read(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let _ = x.read();
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+        clk.tick().await;
+    }
+}

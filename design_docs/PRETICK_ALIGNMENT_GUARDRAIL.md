@@ -63,9 +63,23 @@
 > non-head phase there; zero live modules, sv-baseline delta the probes only.
 > On the linear route the every-path control (`e13a`) diverges with no branch
 > at all — the route emits `assign o = cnt` whatever reads precede the write,
-> a missing closing form, not a mismatched anchor — so `e13` / `e13a` are
-> pinned as unguarded gaps and the clause the model derives is recorded, not
-> landed.
+> a missing closing form, not a mismatched anchor — so `e13` / `e13a` were
+> pinned as unguarded gaps and the clause the model derives recorded.
+>
+> **2026-10-30 — the linear-route gap closed (`CYCLE_DATAFLOW_SEMANTICS.md`
+> §10.7).** Fourteen more probes, every verdict predicted from the operand-kind
+> statement of the route's forms and matched first run: a wire-valued drive is
+> the phase-guarded flop (closing) and a register, input or constant the
+> continuous assign (opening), whatever reads precede the write, in the head,
+> a middle and the trailing segment alike. New rule
+> `Cfg::linear_out_write_anchor_mismatch`, both front-ends, same opt-out: a
+> wire with no deferred read on some path, or a register/input/constant behind
+> one when the assign can change at another edge (an input; a register
+> assigned in another segment — the trailing statements count — or after the
+> write; a constant outside the head segment). Zero live modules; sv-baseline
+> delta the probes only; `e13` / `e13a` refused. It also closes V8's
+> unexamined middle segment (`e14j`) and `out_first_driven_late`'s
+> closing-constant blind spot (`e14d`).
 >
 > **The rules.** All four live in `copper-analysis/src/cfg.rs` as methods on `Cfg`
 > (re-exported as free functions from `copper_analysis`). The corpus-cost column is
@@ -79,7 +93,8 @@
 > | ~~…its **constant-write** clause~~ (§5.5; **retired 2026-10-28**) | refused a constant written on *some* paths in a segment with an unprotected register assignment. Its witnesses agree under the arm-granular opening walk; the agreeing shapes it refused (`d1b`, `d1c`, `d3a`, `d4b`) and the diverging ones it missed (`d1g`, `d2a`, `d2b`, `d4c`) are in §5.8 | 3 modules when it landed, all measured divergences then (commit `348ddd0`) |
 > | ~~`unprotected_trailing_out_write`~~ (§5.4; narrowed 2026-08-27; **RETIRED 2026-10-23**) | refused the same hazard past the *last* tick on the extraction route, which emitted a trailing plain-`Out` drive one cycle late. Phase C fixed the emission (`vlir_lower::opening_hold_outputs`), both witnesses agree, and the rule is deleted | 1 real module when it landed (`rv32i_cpu_pipelined`'s `program_counter`, → `RegOut`; commit `56233ce`) |
 > | `multi_phase_out_write` (**narrowed 2026-10-23**, phase E — `CYCLE_DATAFLOW_SEMANTICS.md` §9; **clause 4 narrowed again 2026-10-30**, §10.4–10.5, **and extended to a single non-head phase the same day**, §10.6) | a plain `Out` driven in more than one clock phase on the linear route, or in a register-free body with reads, or with a write **whose anchors differ between the sides** (an input read reaches it in its phase while the simulator runs it at the opening on some path — every reaching read immediate, `e5`, or the read on one path to it and not on another, `e11`/`e11b`; the path-dependent half also for a port written ONCE, in a non-head phase, on the extraction route — `e12`), or after a wait loop's read (unmeasured, by construction); accepted: an extracted port none of whose writes an input read reaches (whatever the body reads elsewhere — the "input read anywhere" clause was retired 2026-10-26 with the arm-granular opening walk), the all-closing class, and since 2026-10-30 the mixed class with uniform per-drive anchors (`e4`, `e6`, `e4r`, `e4f`) | 9 modules when it landed as "any two phases", six of them its own witnesses, three real (`rv32i_cpu` — since replaced by `rv32i_cpu_transpilable` — and `uart_tx`/`uart_rx`, → `RegOut`; commit `99290da`); 0 live modules at the narrowing |
-> | `pretick_out_write_before_update` (§5.6, 2026-08-26; trailing clause 2026-08-27) | a plain `Out` written before the update of a register it reads — behind a leading read in the pre-tick segment, or anywhere in the trailing segment (whose updates commit at the opening edge) | 0 real modules at landing (caught a compile-only UI fixture; commit `7abfd98`); the trailing clause then caught THREE real sim-only-tested modules (`tests/module_composition_hybrid.rs`'s stages, measured divergent as `v8t_stage_publish_then_load`, migrated to the canonical write/read/tick/update spelling; commit `b439894`) |
+> | `linear_out_write_anchor_mismatch` (**landed 2026-10-30**, `CYCLE_DATAFLOW_SEMANTICS.md` §10.7) | a plain `Out` on the linear multi-tick route (every tick a bare statement, more than one edge per iteration, a body with registers) driven by a write whose anchor its form cannot show — the form is chosen by the operand's kind: a same-segment `let` wire is the phase-guarded flop (closing), a register, input or constant the continuous assign (opening); refused: a wire with no deferred read on some path (`e14a`, `e14h`, `e14k`, `e14m`, `e7w`), or a register/input/constant behind a deferred read when the assign can change at another edge — an input (`e14c`), a register assigned in another segment (`e13`, `e13a`, `e14e`; trailing, `e14n`) or after the write (`e14j`), a constant outside the head segment (`e14d`); admitted: a wire behind a read on every path (`e14b`, `e14l`, `sipo_block`'s `w3_dbg`), a register updated in-segment before the write (`e14f`, `e14g`), a head constant behind a read (`e14i`), everything with no deferred read before it (`e13b`, `linear_trailing`) | 0 live modules at landing (twelve probes) |
+| `pretick_out_write_before_update` (§5.6, 2026-08-26; trailing clause 2026-08-27) | a plain `Out` written before the update of a register it reads — behind a leading read in the pre-tick segment, or anywhere in the trailing segment (whose updates commit at the opening edge) | 0 real modules at landing (caught a compile-only UI fixture; commit `7abfd98`); the trailing clause then caught THREE real sim-only-tested modules (`tests/module_composition_hybrid.rs`'s stages, measured divergent as `v8t_stage_publish_then_load`, migrated to the canonical write/read/tick/update spelling; commit `b439894`) |
 > | `trailing_out_reads_input` (**2026-10-26**, the e8 class — `CYCLE_DATAFLOW_SEMANTICS.md` §9.4) | a plain `Out` written after the last tick from an `In` read directly at an immediate site, in a body that crosses more than one edge: the extraction route edge-samples the drive one observation late (`e8`, `e8p`) and the linear multi-tick route emits a continuous assign the phase does not gate (`e8m`); the single-tick body agrees (`e8l`, `e8lr`) and is exempt, as is a value held in a register or a deferred read | 0 live modules; the witnesses are the opted-out probes (`e8`, `e8m`, `e8p`, and phase E's `e5_two_closing`, whose second write is this shape) |
 >
 > **Where each is enforced, and the opt-out.** Every rule is a spanned compile
@@ -1018,8 +1033,14 @@ so does its every-path control `e13a`, with no branch: the route emits
 `assign o = cnt` whatever reads precede the write, so a closing register-valued
 drive has no form there — the `e7w` class, a missing emission, and the model
 says it reaches the head segment of a multi-tick linear body as well. Recorded
-with the clause the model derives (not landed, no boundary witness yet); `e13`
-and `e13a` are pinned as `*_unguarded_gap` tests.
+with the clause the model derives, and then — the same day, §10.7 — measured
+on fourteen boundary probes (every verdict predicted first) and landed as
+`Cfg::linear_out_write_anchor_mismatch` in both front-ends, zero live modules,
+`e13` and `e13a` refused. The route's forms are chosen by operand kind, so the
+rule asks per drive whether the simulator's anchor on every path is the
+form's: a wire wants a deferred read on every path, a register, input or
+constant wants none unless the assign cannot change at another edge (an
+in-segment update before the write, or a head-segment constant).
 
 ---
 

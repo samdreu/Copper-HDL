@@ -1196,6 +1196,49 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
+            // A plain `Out` on the LINEAR multi-tick route whose write's anchor the
+            // emitted form cannot show (§10.7, 2026-10-30): the form is chosen by
+            // the operand's kind (a same-segment wire → the phase-guarded flop, a
+            // register/input/constant → a continuous assign), never by the reads
+            // before the write, while the simulator anchors each execution by the
+            // deferred read that precedes it (`Cfg::linear_out_write_anchor_mismatch`).
+            let linear_anchor = if allow_pretick_alignment {
+                Vec::new()
+            } else {
+                cfg.as_ref().map(|c| c.linear_out_write_anchor_mismatch()).unwrap_or_default()
+            };
+            if let Some(port) = linear_anchor.first() {
+                let span = port_param_span(&input_fn.sig, port)
+                    .unwrap_or_else(|| input_fn.sig.ident.span());
+                return Error::new(
+                    span,
+                    format!(
+                        "output port `{port}` is driven, in a body whose every `clk.tick().await` \
+                         is a bare statement and that crosses more than one clock edge per \
+                         iteration, by a write whose timing the synthesized form cannot show. \
+                         On that path the form is chosen by the write's operand, not by the \
+                         reads before it: a value through a same-segment `let` wire is sampled \
+                         at the segment's closing clock edge, while a register, an input or a \
+                         constant is a continuous assign that shows the committed value at every \
+                         observation. The simulator runs the write at the closing edge when an \
+                         input read with a `clk.tick().await` after it precedes the write on the \
+                         path, and at the segment's opening otherwise — so a wire written with no \
+                         such read on some path shows one observation LATE in the hardware, and a \
+                         register, input or constant written behind such a read shows one \
+                         observation EARLY whenever its value can change at another edge (an \
+                         input; a register assigned in another segment, or after the write; a \
+                         constant in a segment after the first). Measured (2026-10-30, §10.7). \
+                         Make the timing match the form: for a wire, read an input before every \
+                         write of `{port}` in its segment; for a register, update it in the same \
+                         segment before the write, or move the read past the `clk.tick().await`; \
+                         or declare `{port}` as `RegOut<…>` (a registered output, immune because \
+                         it commits at the clock edge). If this module exists to DEMONSTRATE the \
+                         divergence, opt out explicitly with `#[hardware(sequential, {ALLOW_PRETICK})]`."
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
             // A plain `Out` driven in more than one clock phase, in a class whose
             // emitted form cannot show the simulator's trace (narrowed 2026-10-23,
             // phase E, and 2026-10-30: a write whose anchors differ between the

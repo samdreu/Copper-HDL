@@ -397,6 +397,25 @@ fn vlir_for_target(
                  it, or behind none)"
             ));
         }
+        // A plain `Out` on the linear multi-tick route whose write's anchor the
+        // emitted form cannot show: the form is chosen by the operand's kind (a
+        // same-segment wire → the phase-guarded flop, a register/input/constant →
+        // a continuous assign) and the simulator by the deferred read before the
+        // write (`Cfg::linear_out_write_anchor_mismatch`, §10.7, 2026-10-30). Same
+        // rule, same opt-out, as the macro.
+        if let Some(port) = copper_analysis::linear_out_write_anchor_mismatch(target).first() {
+            return Err(format!(
+                "output port '{port}' is driven on the linear multi-tick path by a write whose \
+                 timing the emitted form cannot show: a same-segment wire is sampled at the \
+                 segment's closing edge while a register, input or constant is a continuous \
+                 assign, whatever reads precede the write, so a wire written with no deferred \
+                 input read on some path lands one observation late, and a register, input or \
+                 constant written behind one lands one observation early whenever it can change \
+                 at another edge. Read an input before every write of a wire-valued port in its \
+                 segment, update a register in the same segment before writing it (or read the \
+                 input after the tick), or declare it as RegOut<…>"
+            ));
+        }
         // A plain `Out` FIRST DRIVEN LATE — every write a constant, none before the
         // second clock edge of a multi-tick body. The emitted `assign` drives the
         // constant from time 0 while the simulator shows the initial value at the

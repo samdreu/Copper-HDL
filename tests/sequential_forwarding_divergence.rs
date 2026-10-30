@@ -86,9 +86,13 @@
 //! no opt-out before). On the linear route `e13` diverges too — but so does its
 //! every-path control `e13a`, with no branch at all: the route emits
 //! `assign o = cnt` whatever reads precede the write, so a closing register-valued
-//! drive has no form there. That is a different mechanism; both are pinned as
-//! `*_unguarded_gap` tests, no rule flags them, and §10.6 records the clause
-//! that would.
+//! drive has no form there. That is a different mechanism — and §10.7, the same
+//! day, measured it on fourteen more probes (`e14a`–`e14n`, every verdict
+//! predicted first): the route picks a drive's form by its operand's kind (a
+//! same-segment wire → the phase-guarded flop, a register/input/constant → a
+//! continuous assign) and never by the reads before it. The rule is
+//! `Cfg::linear_out_write_anchor_mismatch`, both front-ends; `e13` / `e13a` are
+//! refused, their agreeing twins compile clean, zero live modules.
 //!
 //! # Divergence 1 — a pre-tick register update is forwarded to a same-segment read
 //!
@@ -2601,7 +2605,8 @@ fn phase_e_the_narrowed_rule_flags_exactly_the_diverging_probes() {
     // (e8, trailing_out_reads_input's), a read in another phase (e9), the
     // middle-phase write-before-update (e10), the two uniform controls (e12a,
     // e12b, e13b), and the linear route (e13, e13a — diverging by the linear
-    // route's missing closing form, §10.6, not by this clause's mechanism)
+    // route's missing closing form, §10.6, refused by §10.7's rule, not by this
+    // clause's mechanism)
     assert!(flagged(E8_SRC).is_empty());
     assert!(flagged(E9_SRC).is_empty());
     assert!(flagged(E10_SRC).is_empty());
@@ -4288,7 +4293,7 @@ async fn e12b_read_on_no_path_extracted(clk: Clock<C>, x: In<Bits<8>, C>, o: Out
 /// the write — the opening form on every path — so the odd-`cnt` (closing)
 /// executions are predicted one late in the SIMULATOR. Predicted DIVERGE.
 const E13_SRC: &str = r#"
-#[hardware(sequential)]
+#[hardware(sequential, allow_pretick_alignment)]
 async fn e13_path_dependent_single_phase_linear(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut cnt: Bits<8> = Bits::zero();
     loop {
@@ -4300,7 +4305,7 @@ async fn e13_path_dependent_single_phase_linear(clk: Clock<C>, x: In<Bits<8>, C>
     }
 }
 "#;
-#[hardware(sequential)]
+#[hardware(sequential, allow_pretick_alignment)]
 async fn e13_path_dependent_single_phase_linear(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut cnt: Bits<8> = Bits::zero();
     loop {
@@ -4317,7 +4322,7 @@ async fn e13_path_dependent_single_phase_linear(clk: Clock<C>, x: In<Bits<8>, C>
 /// the linear route has no closing form for a register-valued drive, so every
 /// execution is one late in the simulator. Not the path-dependent mechanism.
 const E13A_SRC: &str = r#"
-#[hardware(sequential)]
+#[hardware(sequential, allow_pretick_alignment)]
 async fn e13a_read_on_every_path_linear(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut cnt: Bits<8> = Bits::zero();
     loop {
@@ -4329,7 +4334,7 @@ async fn e13a_read_on_every_path_linear(clk: Clock<C>, x: In<Bits<8>, C>, o: Out
     }
 }
 "#;
-#[hardware(sequential)]
+#[hardware(sequential, allow_pretick_alignment)]
 async fn e13a_read_on_every_path_linear(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut cnt: Bits<8> = Bits::zero();
     loop {
@@ -4405,23 +4410,24 @@ fn e12b_read_on_no_path_extracted_agrees() {
     assert_eq!(sim, sv, "sim and SV diverge for e12b_read_on_no_path_extracted — the opening single-phase drive's mux + hold form regressed");
 }
 
-/// DIVERGE (predicted §10.6, matched on the first run 2026-10-30) — an UNGUARDED
-/// gap, by a mechanism that is NOT the path-dependent one: the linear route emits
+/// DIVERGE (predicted §10.6, matched on the first run 2026-10-30) — by a
+/// mechanism that is NOT the path-dependent one: the linear route emits
 /// `assign o = cnt` whatever reads precede the write, so the odd-`cnt` (closing)
 /// executions land one observation late in the SIMULATOR (indices 0, 4, 8, 12).
-/// `e13a` below diverges the same way with the read on every path, which is why
-/// no branch-keyed clause refuses this; recorded in §10.6, no rule flags it, no
-/// opt-out. See `E13_SRC`.
+/// An unguarded gap on the day it was measured; refused since §10.7 by
+/// `linear_out_write_anchor_mismatch` (a register committed at another edge,
+/// behind a deferred read on some path). See `E13_SRC`.
 #[test]
-fn e13_path_dependent_single_phase_linear_diverges_unguarded_gap() {
+fn e13_path_dependent_single_phase_linear_diverges_refused() {
     let sim = sim_e_in(e13_path_dependent_single_phase_linear);
     assert_eq!(sim, vec![0, 1, 2, 2, 2, 3, 4, 4, 4, 5, 6, 6, 6], "simulator behaviour changed");
     let f: syn::ItemFn = syn::parse_str(E13_SRC).unwrap();
     assert!(copper_analysis::multi_phase_out_write(&f).is_empty(), "the linear route is outside clause 4's single-phase extension by design (§10.6)");
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.7's rule must refuse e13");
     if !verilator_available() { return; }
     let sv = transpile_and_run_driven(E13_SRC, "e13_path_dependent_single_phase_linear");
     assert_eq!(sv, vec![1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7], "transpiled SV behaviour changed");
-    assert_ne!(sim, sv, "sim and SV now AGREE for e13_path_dependent_single_phase_linear — the linear route realizes a closing register-valued drive; record it in CYCLE_DATAFLOW_SEMANTICS.md §10.6");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e13_path_dependent_single_phase_linear — the linear route realizes a closing register-valued drive; re-derive linear_out_write_anchor_mismatch (§10.7)");
 }
 
 /// DIVERGE (predicted §10.6, matched on the first run 2026-10-30) — the
@@ -4429,28 +4435,18 @@ fn e13_path_dependent_single_phase_linear_diverges_unguarded_gap() {
 /// every execution is closing in the simulator (one late, indices 0, 2, 4, …)
 /// while `assign o = cnt` shows the committed register from the phase's opening
 /// observation. The linear route has no closing form for a register-valued
-/// drive — a missing emitted form, the class of `e7w`, not a mismatched anchor.
-/// UNGUARDED: no rule flags it, no opt-out; §10.6 records the derived clause
-/// that would. See `E13A_SRC`.
+/// drive. Refused since §10.7 by `linear_out_write_anchor_mismatch`; the ui/fail
+/// witness `linear_anchor_mismatch.rs` is this shape. See `E13A_SRC`.
 #[test]
-fn e13a_read_on_every_path_linear_diverges_unguarded_gap() {
+fn e13a_read_on_every_path_linear_diverges_refused() {
     let sim = sim_e_in(e13a_read_on_every_path_linear);
     assert_eq!(sim, vec![0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6], "simulator behaviour changed");
     let f: syn::ItemFn = syn::parse_str(E13A_SRC).unwrap();
-    for (rule, hits) in [
-        ("multi_phase_out_write", copper_analysis::multi_phase_out_write(&f)),
-        ("unprotected_pretick_out_write", copper_analysis::unprotected_pretick_out_write(&f)),
-        ("pretick_out_write_before_update", copper_analysis::pretick_out_write_before_update(&f)),
-        ("trailing_out_reads_input", copper_analysis::trailing_out_reads_input(&f)),
-        ("out_first_driven_late", copper_analysis::out_first_driven_late(&f)),
-        ("multi_write_collapse", copper_analysis::multi_write_collapse(&f)),
-    ] {
-        assert!(hits.is_empty(), "{rule} now flags e13a — a rule for the linear route's closing drive landed; retire this gap test and record it in §10.6");
-    }
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.7's rule must refuse e13a");
     if !verilator_available() { return; }
     let sv = transpile_and_run_driven(E13A_SRC, "e13a_read_on_every_path_linear");
     assert_eq!(sv, vec![1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7], "transpiled SV behaviour changed");
-    assert_ne!(sim, sv, "sim and SV now AGREE for e13a_read_on_every_path_linear — the linear route realizes a closing register-valued drive; record it in CYCLE_DATAFLOW_SEMANTICS.md §10.6");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e13a_read_on_every_path_linear — the linear route realizes a closing register-valued drive; re-derive linear_out_write_anchor_mismatch (§10.7)");
 }
 
 /// AGREE (predicted §10.6, measured 2026-10-30). The uniform-opening control on
@@ -4463,4 +4459,611 @@ fn e13b_read_on_no_path_linear_agrees() {
     if !verilator_available() { return; }
     let sv = transpile_and_run_driven(E13B_SRC, "e13b_read_on_no_path_linear");
     assert_eq!(sim, sv, "sim and SV diverge for e13b_read_on_no_path_linear — the linear route's continuous assign of a committed register regressed");
+}
+
+// ── §10.7 (2026-10-30): the linear route — the form is chosen by operand kind ──
+//
+// Twelve probes on the two-tick linear body: the four cells §10.6 left
+// unmeasured, each paired with the twin the derived clause admits, plus the
+// head and trailing variants the derivation raised. Every verdict in
+// `CYCLE_DATAFLOW_SEMANTICS.md` §10.7 was written before the run.
+
+/// (e14a, cell 1) A WIRE-valued drive with no read, middle segment: the flop samples at the closing edge, the simulator wrote at the opening. Predicted DIVERGE.
+const E14A_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14a_wire_no_read_middle(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14a_wire_no_read_middle(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+        clk.tick().await;
+    }
+}
+
+/// (e14b, twin of e14a) The same wire behind a read on every path: closing on both sides. Predicted AGREE — the `sipo_block` `w3_dbg` cell.
+const E14B_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e14b_wire_behind_read_middle(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let _ = x.read();
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e14b_wire_behind_read_middle(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let _ = x.read();
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+        clk.tick().await;
+    }
+}
+
+/// (e14c, cell 2) A direct INPUT operand, middle segment: `assign o = x` tracks the input every cycle, the simulator publishes it at the closing edge and holds. Predicted DIVERGE.
+const E14C_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14c_input_operand_middle(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(x.read());
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14c_input_operand_middle(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(x.read());
+        clk.tick().await;
+    }
+}
+
+/// (e14d, cell 3) A CONSTANT behind a deferred read, middle segment: the write lands at the second edge, the assign drives 7 from time 0. Predicted DIVERGE at the first observation only.
+const E14D_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14d_constant_behind_read_middle(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let _ = x.read();
+        o.write(Bits::from_lit::<7>());
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14d_constant_behind_read_middle(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let _ = x.read();
+        o.write(Bits::from_lit::<7>());
+        clk.tick().await;
+    }
+}
+
+/// (e14e, cell 4) The HEAD segment: a closing write of a register committed at the OTHER edge. `assign o = cnt` changes at that edge, the simulator one later. Predicted DIVERGE; neither D1 (not mixed) nor V8 (update past a tick) reaches it.
+const E14E_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14e_head_closing_other_edge(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(cnt);
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14e_head_closing_other_edge(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(cnt);
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+/// (e14f, twin of e14e) The head closing write forwarding an in-phase update before it: forwarded ≡ committing, nothing changes at the other edge. Predicted AGREE.
+const E14F_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e14f_head_closing_in_phase(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        cnt = cnt + Bits::from_lit::<1>();
+        o.write(cnt);
+        clk.tick().await;
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e14f_head_closing_in_phase(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        cnt = cnt + Bits::from_lit::<1>();
+        o.write(cnt);
+        clk.tick().await;
+        clk.tick().await;
+    }
+}
+
+/// (e14g, twin of e13a) The middle-segment closing write forwarding an in-phase update before it. Predicted AGREE.
+const E14G_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e14g_middle_closing_in_phase(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        let _ = x.read();
+        cnt = cnt + Bits::from_lit::<1>();
+        o.write(cnt);
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e14g_middle_closing_in_phase(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        let _ = x.read();
+        cnt = cnt + Bits::from_lit::<1>();
+        o.write(cnt);
+        clk.tick().await;
+    }
+}
+
+/// (e14h) A wire-valued drive with no read in the HEAD segment of a two-tick body: the flop again. Predicted DIVERGE (e7w's mechanism, single-phase).
+const E14H_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14h_head_wire_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14h_head_wire_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+/// (e14i) A constant behind a read in the HEAD segment: its closing edge is edge 0, so there is no transient. Predicted AGREE.
+const E14I_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e14i_head_constant_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(Bits::from_lit::<7>());
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e14i_head_constant_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(Bits::from_lit::<7>());
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+/// (e14j) Write-before-update behind a read in a MIDDLE segment (V8a off the head): the write forwards the pre-update value, the assign shows the committed one. Predicted DIVERGE; `pretick_out_write_before_update` stops at the head and trailing regions.
+const E14J_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14j_middle_write_before_update(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        let s = x.read();
+        o.write(r);
+        r = r + s;
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14j_middle_write_before_update(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut r: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        let s = x.read();
+        o.write(r);
+        r = r + s;
+        clk.tick().await;
+    }
+}
+
+/// (e14k) A wire-valued drive in the TRAILING region, no read: hoisted into the head's phase and sampled at its edge, while the simulator wrote at the opening. Predicted DIVERGE (`linear_trailing`, register-valued, agrees).
+const E14K_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14k_trailing_wire_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        clk.tick().await;
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14k_trailing_wire_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        clk.tick().await;
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// (e14l, twin of e14h) The head wire behind a read on every path. Predicted AGREE.
+const E14L_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e14l_head_wire_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e14l_head_wire_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+/// (e14m) A wire-valued drive in the TRAILING region written AFTER the register's
+/// update, so `pretick_out_write_before_update` has nothing to claim: the flop
+/// samples at the head's edge, the simulator wrote at the opening. Predicted DIVERGE.
+const E14M_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14m_trailing_wire_after_update(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14m_trailing_wire_after_update(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        let t = cnt + Bits::from_lit::<2>();
+        o.write(t);
+    }
+}
+
+/// (e14n) The HEAD closing write of a register updated in the TRAILING region:
+/// the trailing update commits at the last tick's edge, the other edge from the
+/// head write's closing one, so `assign o = cnt` changes an observation before
+/// the simulator's write lands. Predicted DIVERGE (as `e14e`).
+const E14N_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14n_head_closing_trailing_update(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(cnt);
+        clk.tick().await;
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e14n_head_closing_trailing_update(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(cnt);
+        clk.tick().await;
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// DIVERGE (predicted §10.7, matched on the first run 2026-10-30) — refused by
+/// `linear_out_write_anchor_mismatch`: a wire written at the opening, sampled by the flop at the closing edge — SV one late. See `E14A_SRC`.
+#[test]
+fn e14a_wire_no_read_middle_diverges_refused() {
+    let sim = sim_e_in(e14a_wire_no_read_middle);
+    assert_eq!(sim, vec![3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14A_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.7's rule must refuse e14a");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14A_SRC, "e14a_wire_no_read_middle");
+    assert_eq!(sv, vec![0, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e14a_wire_no_read_middle — the linear route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// AGREE (predicted §10.7, measured 2026-10-30): a wire behind a deferred read on every path — closing on both sides. Compiles clean. See `E14B_SRC`.
+#[test]
+fn e14b_wire_behind_read_middle_agrees() {
+    let sim = sim_e_in(e14b_wire_behind_read_middle);
+    assert_eq!(sim, vec![0, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14B_SRC).unwrap();
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e14b is admitted by §10.7's rule");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14B_SRC, "e14b_wire_behind_read_middle");
+    assert_eq!(sim, sv, "sim and SV diverge for e14b_wire_behind_read_middle — an admitted linear-route cell no longer agrees; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// DIVERGE (predicted §10.7, matched on the first run 2026-10-30) — refused by
+/// `linear_out_write_anchor_mismatch`: `assign o = x` tracks the input every cycle; the simulator publishes it at the closing edge and holds. See `E14C_SRC`.
+#[test]
+fn e14c_input_operand_middle_diverges_refused() {
+    let sim = sim_e_in(e14c_input_operand_middle);
+    assert_eq!(sim, vec![0, 11, 11, 13, 13, 15, 15, 17, 17, 19, 19, 21, 21], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14C_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.7's rule must refuse e14c");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14C_SRC, "e14c_input_operand_middle");
+    assert_eq!(sv, vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e14c_input_operand_middle — the linear route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// DIVERGE (predicted §10.7, matched on the first run 2026-10-30) — refused by
+/// `linear_out_write_anchor_mismatch`: the closing constant write lands at the second edge; the assign drives 7 from time 0 — a startup transient. See `E14D_SRC`.
+#[test]
+fn e14d_constant_behind_read_middle_diverges_refused() {
+    let sim = sim_e_in(e14d_constant_behind_read_middle);
+    assert_eq!(sim, vec![0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14D_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.7's rule must refuse e14d");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14D_SRC, "e14d_constant_behind_read_middle");
+    assert_eq!(sv, vec![7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e14d_constant_behind_read_middle — the linear route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// DIVERGE (predicted §10.7, matched on the first run 2026-10-30) — refused by
+/// `linear_out_write_anchor_mismatch`: the head closing write of a register committed at the other edge — the assign changes an observation before the write lands; neither D1 (not mixed) nor V8 (update past a tick) reaches it. See `E14E_SRC`.
+#[test]
+fn e14e_head_closing_other_edge_diverges_refused() {
+    let sim = sim_e_in(e14e_head_closing_other_edge);
+    assert_eq!(sim, vec![0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14E_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.7's rule must refuse e14e");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14E_SRC, "e14e_head_closing_other_edge");
+    assert_eq!(sv, vec![0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e14e_head_closing_other_edge — the linear route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// AGREE (predicted §10.7, measured 2026-10-30): the head closing write forwarding an in-segment update before it — forwarded ≡ committing, nothing changes at the other edge. Compiles clean. See `E14F_SRC`.
+#[test]
+fn e14f_head_closing_in_phase_agrees() {
+    let sim = sim_e_in(e14f_head_closing_in_phase);
+    assert_eq!(sim, vec![1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14F_SRC).unwrap();
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e14f is admitted by §10.7's rule");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14F_SRC, "e14f_head_closing_in_phase");
+    assert_eq!(sim, sv, "sim and SV diverge for e14f_head_closing_in_phase — an admitted linear-route cell no longer agrees; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// AGREE (predicted §10.7, measured 2026-10-30): the middle closing write forwarding an in-segment update before it (the twin of e13a). Compiles clean. See `E14G_SRC`.
+#[test]
+fn e14g_middle_closing_in_phase_agrees() {
+    let sim = sim_e_in(e14g_middle_closing_in_phase);
+    assert_eq!(sim, vec![0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14G_SRC).unwrap();
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e14g is admitted by §10.7's rule");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14G_SRC, "e14g_middle_closing_in_phase");
+    assert_eq!(sim, sv, "sim and SV diverge for e14g_middle_closing_in_phase — an admitted linear-route cell no longer agrees; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// DIVERGE (predicted §10.7, matched on the first run 2026-10-30) — refused by
+/// `linear_out_write_anchor_mismatch`: a head wire with no read — the flop again, e7w's mechanism in one phase. See `E14H_SRC`.
+#[test]
+fn e14h_head_wire_no_read_diverges_refused() {
+    let sim = sim_e_in(e14h_head_wire_no_read);
+    assert_eq!(sim, vec![2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14H_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.7's rule must refuse e14h");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14H_SRC, "e14h_head_wire_no_read");
+    assert_eq!(sv, vec![2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e14h_head_wire_no_read — the linear route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// AGREE (predicted §10.7, measured 2026-10-30): a constant behind a read in the head segment — its closing edge is edge 0, so there is no transient. Compiles clean. See `E14I_SRC`.
+#[test]
+fn e14i_head_constant_behind_read_agrees() {
+    let sim = sim_e_in(e14i_head_constant_behind_read);
+    assert_eq!(sim, vec![7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14I_SRC).unwrap();
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e14i is admitted by §10.7's rule");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14I_SRC, "e14i_head_constant_behind_read");
+    assert_eq!(sim, sv, "sim and SV diverge for e14i_head_constant_behind_read — an admitted linear-route cell no longer agrees; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// DIVERGE (predicted §10.7, matched on the first run 2026-10-30) — refused by
+/// `linear_out_write_anchor_mismatch`: write-before-update behind a read in a middle segment (V8a off the head) — the write forwards the pre-update value, the assign shows the committed one; `pretick_out_write_before_update` stops at the head and trailing regions. See `E14J_SRC`.
+#[test]
+fn e14j_middle_write_before_update_diverges_refused() {
+    let sim = sim_e_in(e14j_middle_write_before_update);
+    assert_eq!(sim, vec![0, 0, 0, 11, 11, 24, 24, 39, 39, 56, 56, 75, 75], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14J_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.7's rule must refuse e14j");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14J_SRC, "e14j_middle_write_before_update");
+    assert_eq!(sv, vec![0, 11, 11, 24, 24, 39, 39, 56, 56, 75, 75, 96, 96], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e14j_middle_write_before_update — the linear route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// DIVERGE (predicted §10.7, matched on the first run 2026-10-30) — refused by
+/// `linear_out_write_anchor_mismatch`: a trailing wire, hoisted into the head's phase and sampled at its edge, written at the opening by the simulator; also claimed by V8's trailing clause (the wire reads `cnt` before its update). See `E14K_SRC`.
+#[test]
+fn e14k_trailing_wire_no_read_diverges_refused() {
+    let sim = sim_e_in(e14k_trailing_wire_no_read);
+    assert_eq!(sim, vec![0, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14K_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.7's rule must refuse e14k");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14K_SRC, "e14k_trailing_wire_no_read");
+    assert_eq!(sv, vec![2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e14k_trailing_wire_no_read — the linear route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// AGREE (predicted §10.7, measured 2026-10-30): the head wire behind a read on every path — uniform. Compiles clean. See `E14L_SRC`.
+#[test]
+fn e14l_head_wire_behind_read_agrees() {
+    let sim = sim_e_in(e14l_head_wire_behind_read);
+    assert_eq!(sim, vec![2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14L_SRC).unwrap();
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e14l is admitted by §10.7's rule");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14L_SRC, "e14l_head_wire_behind_read");
+    assert_eq!(sim, sv, "sim and SV diverge for e14l_head_wire_behind_read — an admitted linear-route cell no longer agrees; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// DIVERGE (predicted §10.7, matched on the first run 2026-10-30) — refused by
+/// `linear_out_write_anchor_mismatch`: the trailing wire with the update before it, so V8 has no claim: the verdict was predicted, the SV trace was first written one value low — the shared map forwards the trailing update into the hoisted wire, so the SV shows `cnt + 1 + 2` from the first observation. See `E14M_SRC`.
+#[test]
+fn e14m_trailing_wire_after_update_diverges_refused() {
+    let sim = sim_e_in(e14m_trailing_wire_after_update);
+    assert_eq!(sim, vec![0, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14M_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.7's rule must refuse e14m");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14M_SRC, "e14m_trailing_wire_after_update");
+    assert_eq!(sv, vec![3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e14m_trailing_wire_after_update — the linear route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// DIVERGE (predicted §10.7, matched on the first run 2026-10-30) — refused by
+/// `linear_out_write_anchor_mismatch`: the head closing write of a register updated in the trailing region — the update commits at the last tick's edge, the other edge from the write's closing one (as e14e). See `E14N_SRC`.
+#[test]
+fn e14n_head_closing_trailing_update_diverges_refused() {
+    let sim = sim_e_in(e14n_head_closing_trailing_update);
+    assert_eq!(sim, vec![0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E14N_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.7's rule must refuse e14n");
+    if !verilator_available() { return; }
+    let sv = transpile_and_run_driven(E14N_SRC, "e14n_head_closing_trailing_update");
+    assert_eq!(sv, vec![0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "sim and SV now AGREE for e14n_head_closing_trailing_update — the linear route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.7)");
+}
+
+/// The §10.7 verdict table as a test: which probe sources the linear-route rule
+/// flags. Every DIVERGE row is flagged and every AGREE row is clean; the
+/// extraction-route probes, the single-tick linear probes and the trailing
+/// immediate-read probes are outside it whatever their verdict. `e7w` (phase E's
+/// linear wire probe) is flagged by this rule too, as the derivation says.
+#[test]
+fn linear_the_rule_flags_exactly_the_diverging_probes() {
+    let flagged = |src: &str| {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        copper_analysis::linear_out_write_anchor_mismatch(&f)
+    };
+    let o = vec!["o".to_string()];
+    // DIVERGE — flagged
+    for (name, src) in [("e13", E13_SRC), ("e13a", E13A_SRC), ("e14a", E14A_SRC), ("e14c", E14C_SRC), ("e14d", E14D_SRC),
+                        ("e14e", E14E_SRC), ("e14h", E14H_SRC), ("e14j", E14J_SRC), ("e14k", E14K_SRC), ("e14m", E14M_SRC),
+                        ("e14n", E14N_SRC), ("e7w", E7W_SRC)] {
+        assert_eq!(flagged(src), o, "{name}: measured diverging on the linear route");
+    }
+    // AGREE — admitted
+    for (name, src) in [("e13b", E13B_SRC), ("e14b", E14B_SRC), ("e14f", E14F_SRC), ("e14g", E14G_SRC), ("e14i", E14I_SRC),
+                        ("e14l", E14L_SRC), ("e7", E7_SRC), ("e8m", E8M_SRC), ("e8l", E8L_SRC), ("e8lr", E8LR_SRC)] {
+        assert!(flagged(src).is_empty(), "{name}: measured agreeing, or another rule's (e7, e8m)");
+    }
+    // Outside the route: the extraction-route probes of §10.6
+    for src in [E12_SRC, E12A_SRC, E12B_SRC, E11_SRC, E11B_SRC] {
+        assert!(flagged(src).is_empty());
+    }
+    // No other pre-tick rule owns the admitted cells, so they compile without an
+    // opt-out; the refused ones are refused by THIS rule, two of them (e14k, e7w)
+    // also by another.
+    for src in [E13B_SRC, E14B_SRC, E14F_SRC, E14G_SRC, E14I_SRC, E14L_SRC] {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        assert!(copper_analysis::unprotected_pretick_out_write(&f).is_empty());
+        assert!(copper_analysis::pretick_out_write_before_update(&f).is_empty());
+        assert!(copper_analysis::trailing_out_reads_input(&f).is_empty());
+        assert!(copper_analysis::multi_phase_out_write(&f).is_empty());
+        assert!(copper_analysis::out_first_driven_late(&f).is_empty());
+        assert!(copper_analysis::multi_write_collapse(&f).is_empty());
+    }
+    let f: syn::ItemFn = syn::parse_str(E14K_SRC).expect("parses");
+    assert_eq!(copper_analysis::pretick_out_write_before_update(&f), o, "e14k is also V8's trailing clause's");
 }

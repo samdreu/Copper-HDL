@@ -186,6 +186,22 @@ pub fn out_first_driven_late(f: &ItemFn) -> Vec<String> {
     Cfg::build(f).map(|c| c.out_first_driven_late()).unwrap_or_default()
 }
 
+/// Plain combinational `Out` ports driven on the **linear multi-tick route** by a
+/// write whose anchor the emitted form cannot show (§10.7, 2026-10-30): on that
+/// route the form is chosen by the operand's kind — a same-segment `let` wire is
+/// the phase-guarded flop (closing), a register, input or constant a continuous
+/// assign (opening) — while the simulator anchors each execution by whether a
+/// deferred input read precedes it. A wire written with no such read on some
+/// path, or a register, input or constant written behind one when the assign can
+/// change at another edge, diverges by one observation. Returns the offending
+/// ports, sorted; empty on the extraction route, in a single-tick body, in a
+/// register-free body, or for `RegOut`. See
+/// [`Cfg::linear_out_write_anchor_mismatch`] for the derivation and the fourteen
+/// measured cells.
+pub fn linear_out_write_anchor_mismatch(f: &ItemFn) -> Vec<String> {
+    Cfg::build(f).map(|c| c.linear_out_write_anchor_mismatch()).unwrap_or_default()
+}
+
 /// How many **clock phases** `f`'s top-level loop occupies — the number of distinct
 /// cycles one iteration runs in. `None` for a module with no loop.
 ///
