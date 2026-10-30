@@ -1110,16 +1110,24 @@ fn sv_branch_merge(sel: &[u8]) -> Vec<(u8, u8, u8)> {
         &copper_codegen::EmitConfig::default(),
     )
     .expect("transpile");
+    run_branch_merge_shaped_sv(&sv, "branch_merge", sel)
+}
+
+/// Verilate `sv` — a module with `branch_merge`'s ports (`clk`, `sel`, `head_o`,
+/// `mid_o`, `tail_o`) named `top` — driving `sel` per cycle, and collect
+/// `(head_o, mid_o, tail_o)` at every observation. Shared by the transpiled
+/// module and the hand-written m3 model below.
+fn run_branch_merge_shaped_sv(sv: &str, top: &str, sel: &[u8]) -> Vec<(u8, u8, u8)> {
     let n = TMP_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let work = std::env::temp_dir()
-        .join(format!("copper_fwd_branch_merge_{}_{n}", std::process::id()));
+        .join(format!("copper_fwd_{top}_{}_{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).unwrap();
-    std::fs::write(work.join("branch_merge.sv"), &sv).unwrap();
-    let mut tb = String::from(
-        "#include \"Vbranch_merge.h\"\n#include \"verilated.h\"\n#include <iostream>\n\
-         int main(int c, char** v) { Verilated::commandArgs(c, v);\n\
-         Vbranch_merge* t = new Vbranch_merge(); t->clk = 0; t->sel = 0; t->eval();\n",
+    std::fs::write(work.join(format!("{top}.sv")), sv).unwrap();
+    let mut tb = format!(
+        "#include \"V{top}.h\"\n#include \"verilated.h\"\n#include <iostream>\n\
+         int main(int c, char** v) {{ Verilated::commandArgs(c, v);\n\
+         V{top}* t = new V{top}(); t->clk = 0; t->sel = 0; t->eval();\n"
     );
     for &s in sel {
         tb.push_str(&format!(
@@ -1132,14 +1140,15 @@ fn sv_branch_merge(sel: &[u8]) -> Vec<(u8, u8, u8)> {
     let out = verilator_command()
         .current_dir(&work)
         .args([
-            "--cc", "--exe", "--build", "--top-module", "branch_merge",
+            "--cc", "--exe", "--build", "--top-module", top,
             "-Wno-DECLFILENAME", "-Wno-WIDTHEXPAND", "-CFLAGS", "-std=c++14",
-            "branch_merge.sv", "tb.cpp",
         ])
+        .arg(format!("{top}.sv"))
+        .arg("tb.cpp")
         .output()
         .unwrap();
     assert!(out.status.success(), "verilator build failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    let run = std::process::Command::new(work.join("obj_dir/Vbranch_merge")).output().unwrap();
+    let run = std::process::Command::new(work.join(format!("obj_dir/V{top}"))).output().unwrap();
     let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
     let _ = std::fs::remove_dir_all(&work);
     stdout
@@ -1509,6 +1518,109 @@ fn m2_model_forwarded_lowering_matches_the_simulator_for_trailing_update() {
         "today's transpiled SV no longer matches the hand-lowered model — phase C's \
          emission form (`vlir_lower::opening_hold_outputs`) regressed; before it \
          landed the SV lagged the model by one cycle"
+    );
+}
+
+// ── m3 — the drive-level form for a MIXED-anchor port, hand-written ───────────
+//
+// `branch_merge`'s `tail_o` has one CLOSING drive (the `pc == 0` else-arm, behind
+// the deferred `sel` read) and one OPENING drive (the `pc == 1` arm, no read
+// before it). Phase C's decision is port-wide, so the closing drive drags the
+// whole port into the edge-sampled form and the opening drive lands one
+// observation late (the probe above). The denotation (CYCLE_DATAFLOW_SEMANTICS.md
+// §9.1, the per-write verdict table) calls for a DRIVE-LEVEL form: the comb copy
+// carries only the opening drives, and the hold register is loaded by EVERY
+// drive at the edge — the closing drive takes effect at the next edge through
+// the hold register (edge-sampled, as today), the opening drive is visible at
+// the observation right after the edge that enters its arm (forwarded, as
+// `head_o` already is). Hand-written, with `tail_o` the only port whose form
+// differs from today's emission:
+//
+//   assign head_o = (pc == 8'd0) ? 1'b1 : head_o_hold;   // unchanged (all opening)
+//   assign tail_o = (pc == 8'd1) ? 1'b1 : tail_o_hold;   // opening drive only
+//   always_ff @(posedge clk) begin
+//     case (pc)
+//       8'd0: begin head_o_hold <= 1'b1;
+//               if (sel) pc <= 1; else begin mid_o <= 1'b1; tail_o_hold <= 1'b1; pc <= 0; end end
+//       8'd1: begin tail_o_hold <= 1'b1; pc <= 0; end
+//     endcase
+//   end
+//
+// Prediction (written before the run): under `sel = 1` first the model shows
+// `tail_o = 1` at cycle 0 (pc is 1 after edge 0, the comb arm fires), matching
+// the simulator's `(1, 0, 1)`; under `sel = 0` first the hold register loads 1
+// at edge 0 and the model shows `(1, 1, 1)` from cycle 0 on, as both sides
+// already do. So sim ≡ model on both stimuli — and once codegen emits this form
+// (2026-10-29, `vlir_lower::opening_hold_outputs` drive-level), sim ≡ model ≡ SV.
+
+const BRANCH_MERGE_MODEL_SV: &str = r#"
+module branch_merge_model (
+    input  logic clk,
+    input  logic sel,
+    output logic head_o,
+    output logic mid_o,
+    output logic tail_o
+);
+    logic [7:0] pc = 8'd0;
+    logic head_o_hold = 1'b0;
+    logic tail_o_hold = 1'b0;
+    initial mid_o = 1'b0;
+
+    assign head_o = (pc == 8'd0) ? 1'b1 : head_o_hold;
+    assign tail_o = (pc == 8'd1) ? 1'b1 : tail_o_hold;
+
+    always_ff @(posedge clk) begin
+        case (pc)
+            8'd0: begin
+                head_o_hold <= 1'b1;
+                if (sel == 1'b1) begin
+                    pc <= 8'd1;
+                end else begin
+                    mid_o <= 1'b1;
+                    tail_o_hold <= 1'b1;
+                    pc <= 8'd0;
+                end
+            end
+            8'd1: begin
+                tail_o_hold <= 1'b1;
+                pc <= 8'd0;
+            end
+            default: pc <= pc;
+        endcase
+    end
+endmodule
+"#;
+
+#[test]
+fn m3_drive_level_model_matches_the_simulator_for_branch_merge_on_both_first_cycles() {
+    // `sel = 1` first: the stimulus under which the port-wide form lagged.
+    let mut sel_one_first = vec![0u8; CYCLES];
+    sel_one_first[0] = 1;
+    let sim_one = sim_branch_merge(&sel_one_first);
+    let mut expected_sim = vec![(1u8, 1u8, 1u8); CYCLES];
+    expected_sim[0] = (1, 0, 1);
+    expected_sim[1] = (1, 0, 1);
+    assert_eq!(sim_one, expected_sim, "simulator behaviour changed");
+    // `sel = 0` first: the stimulus every form already agreed on.
+    let mut sel_zero_first = vec![0u8; CYCLES];
+    sel_zero_first[1] = 1;
+    sel_zero_first[4] = 1;
+    let sim_zero = sim_branch_merge(&sel_zero_first);
+    assert_eq!(sim_zero, vec![(1, 1, 1); CYCLES], "simulator behaviour changed");
+
+    if !verilator_available() {
+        return;
+    }
+    let model_one = run_branch_merge_shaped_sv(BRANCH_MERGE_MODEL_SV, "branch_merge_model", &sel_one_first);
+    assert_eq!(
+        sim_one, model_one,
+        "the hand-written DRIVE-LEVEL model does not match the simulator under sel == 1 first — \
+         the §9.1 per-write verdict table is wrong for a mixed-anchor port, not codegen"
+    );
+    let model_zero = run_branch_merge_shaped_sv(BRANCH_MERGE_MODEL_SV, "branch_merge_model", &sel_zero_first);
+    assert_eq!(
+        sim_zero, model_zero,
+        "the drive-level model diverges under sel == 0 first — a NEW divergence the port-wide form did not have"
     );
 }
 
