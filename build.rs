@@ -136,41 +136,6 @@ const SKIP: &[(&str, &str)] = &[
          would restore this module to the sweep and is the alternative recorded, not taken: it \
          would turn every X the simulator ever emits into a silent pass",
     ),
-    (
-        "branch_merge_explicit",
-        "a demonstration of the pre-tick hazard since 2026-08-25: its conditionally-written \
-         constant `tail_o` leads the identical emitted SV by one cycle when the FIRST cycle takes \
-         the `sel == 1` path (measured 2026-10-26: sim tail_o = 1 at cycle 0, SV = 0). `tail_o` is \
-         written both behind the deferred `sel` read (closing) and in the `pc == 1` arm (opening), \
-         a mixed-anchor port that stays edge-sampled, so the arm-granular opening walk of \
-         2026-10-26 — which fixed the minimal pair \
-         sequential_forwarding_divergence.rs::a_write_in_a_state_arm_agrees_under_arm_granular_opening \
-         and this module's `head_o` — does not reach it. Until 2026-10-28 the sweep's single seed \
-         took `sel == 0` first, under which the lag is invisible; under the multi-sequence stimulus \
-         policy the sweep exposes it directly (the `first sel=1` sequence fails, exactly as it does \
-         for the live twin `branch_merge` — its own row below), so this row is the record of a \
-         measured divergence, not a guess. The re-derived D1 rule (2026-10-28, clause A: mixed \
-         anchors) REJECTS `tail_o`; the module keeps `allow_pretick_alignment` because it exists \
-         to demonstrate it",
-    ),
-    (
-        "branch_merge",
-        "ONE-CYCLE DIVERGENCE, MEASURED BY THIS SWEEP 2026-10-28 under the multi-sequence stimulus \
-         policy (design doc §3.2): the live, UNFLAGGED async twin of `branch_merge_explicit` \
-         (byte-identical SystemVerilog). Its `tail_o` leads the SV by one cycle, once, whenever \
-         the FIRST cycle takes `sel == 1` — sim `tail_o = 1` at that cycle, SV `0`, agreement from \
-         the next cycle on; `head_o` and `mid_o` agree throughout. Exposed by the first-cycle \
-         sequence `first sel=1` (sequence 5 of 6 — the historical seed, sequence 0, drives \
-         `sel == 0` first and had masked it since 2026-08-25, guardrail §5.5) and by two of the \
-         four seeds (1 and 2, which also open with `sel == 1`): \
-         `FAIL: Cycle 832 tail_o expected 1 got 0 (sequence 5 \"first sel=1\", cycle 0)`. Pinned \
-         with its vectors in \
-         sequential_forwarding_divergence.rs::branch_merge_tail_leads_its_sv_when_the_first_cycle_takes_sel_one. \
-         No D1 clause reaches the async spelling (its one `tail_o` write sits after the branch \
-         merge, behind a read on every path), so the module compiles without an opt-out; the \
-         mechanism is the explicit twin's mixed-anchor `tail_o` under control extraction's \
-         duplication. A FINDING, not a fix: no rule and no emission changed for it",
-    ),
 ];
 
 /// The monomorphization to sweep a **generic** module at, in signature order.
