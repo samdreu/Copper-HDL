@@ -232,3 +232,73 @@ async fn two_phase_closing_mux(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: 
         clk.tick().await;
     }
 }
+
+// ── Admitted 2026-10-30 (CYCLE_DATAFLOW_SEMANTICS.md §10.4): the drive-level mux +
+// hold form realizes a held mixed-anchor port drive by drive, so the two
+// mixed-anchor clauses were narrowed to the drives whose anchors differ between
+// the sides (and the every-path mux). Each shape below is measured agreeing. ──
+
+// `d2a`: an opening constant under committed state beside a closing constant
+// behind the input read, on a HELD port. Neither drive is path-dependent; the comb
+// copy muxes the `5`, the hold register is loaded by both drives. Refused by
+// clause (A) from 2026-10-28 to 2026-10-30; the every-path spelling is still
+// refused — ui/fail/pretick_mixed_anchors.rs.
+#[hardware(sequential)]
+async fn mixed_anchors_held(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut pc: u8 = 0;
+    loop {
+        if pc == 1 {
+            o.write(Bits::from_lit::<5>());
+        }
+        if x.read()[0] == Logic::One {
+            o.write(Bits::from_lit::<9>());
+            pc = 1;
+        } else {
+            pc = 0;
+        }
+        clk.tick().await;
+    }
+}
+
+// `d5b`: the same with the opening drive register-valued and FORWARDING its own
+// update (the comb arm shows `cnt + 1`), and the state keyed off another bit so
+// the closing value reaches the output through the hold register. Measured
+// agreeing on this route and on the extraction route (`d5e`).
+#[hardware(sequential)]
+async fn mixed_anchors_held_register_opening(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut st: u8 = 0;
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        if st == 1 {
+            o.write(cnt);
+        }
+        let xv = x.read();
+        if xv[0] == Logic::One {
+            o.write(Bits::from_lit::<9>());
+        }
+        if xv[1] == Logic::One {
+            st = 1;
+        } else {
+            st = 0;
+        }
+        clk.tick().await;
+    }
+}
+
+// `e4_closing_then_opening`: a two-phase port with a deferred read before one
+// write and no read before the other. Each drive's anchor is uniform on both
+// sides, so the drive-level mux + hold form shows both at the simulator's instant.
+// Refused by `multi_phase_out_write` clause 4 from 2026-10-23 to 2026-10-30; the
+// path-dependent spelling is still refused — ui/fail/multi_phase_out_write.rs.
+#[hardware(sequential)]
+async fn two_phase_mixed_anchors(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+        o.write(x.read());
+        for _ in 0..2 { clk.tick().await; }
+        o.write(Bits::zero());
+    }
+}

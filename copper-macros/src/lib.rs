@@ -1041,17 +1041,21 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             }
-            // Pre-tick alignment hazard (D1, re-derived 2026-10-28): before the
-            // first tick a plain `Out` has MIXED anchors — an `In` read reaches some
-            // write of it (that write runs in the pre-edge settle, behind the read's
-            // barrier) while some write has a read-free path from the loop head (it
-            // runs in the post-edge settle, at the cycle's opening) — and codegen,
-            // which emits one form per port, lands the opening write one observation
-            // late; or a write no read reaches sits under a test of a register the
-            // segment just assigned, which the emitted comb copy tests in its
-            // committed form. Reject it, pointing at `RegOut` (immune: it commits at
-            // the edge). See `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10 for the
-            // derivation and `PRETICK_ALIGNMENT_GUARDRAIL.md` §5.8 for the record.
+            // Pre-tick alignment hazard (D1, re-derived 2026-10-28, narrowed
+            // 2026-10-30): before the first tick a plain `Out` has a write whose
+            // anchors differ between the two sides — an `In` read reaches it on one
+            // path (codegen holds it to the edge) while another path reaches it
+            // read-free (the simulator runs it at the cycle's opening), or the port
+            // is written on every path with an input read before some write and not
+            // another (the every-path mux has no hold register, so the SV shows the
+            // read-preceded write one observation early); or a write no read reaches
+            // sits under a test of a register the segment just assigned, which the
+            // emitted comb copy tests in its committed form. A held port whose every
+            // write is uniformly behind a read or uniformly not is realized by the
+            // drive-level mux + hold form and accepted. Reject the rest, pointing at
+            // `RegOut` (immune: it commits at the edge). See
+            // `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10 for the derivation and
+            // `PRETICK_ALIGNMENT_GUARDRAIL.md` §5.8 for the record.
             // (The trailing-segment companion rule, `unprotected_trailing_out_write`,
             // was retired 2026-10-23 when phase C landed: the extraction route's
             // trailing plain-`Out` drive is now emitted as a forwarded combinational
@@ -1069,20 +1073,23 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 return Error::new(
                     span,
                     format!(
-                        "output port `{port}` is driven before the first `clk.tick().await` with \
-                         MIXED anchors or a FORWARDED guard: either an input read reaches some write \
-                         of the port while some write of it has a read-free path from the loop head \
-                         (the simulator runs that write at the cycle's opening; the emitted \
-                         SystemVerilog edge-samples the port, or muxes it on the committed state, one \
-                         observation late), or a write no input read reaches sits under an `if`/`match` \
-                         whose test reads a register assigned earlier in the same segment (the \
-                         simulator tests the forwarded value, the hardware the committed one). Make \
-                         the anchor uniform (read the input before every write of the port, or before \
-                         none), test only committed state (update the register after the test), \
-                         declare `{port}` as `RegOut<…>` (registered, immune because it commits at the \
-                         clock edge), or move the writes after the `clk.tick().await`. If this module \
-                         exists to DEMONSTRATE the divergence, opt out explicitly with \
-                         `#[hardware(sequential, {ALLOW_PRETICK})]`."
+                        "output port `{port}` is driven before the first `clk.tick().await` in a shape \
+                         the emitted SystemVerilog shows one observation off from the simulator: a \
+                         write of it is reached by an input read on one control path and not on \
+                         another (the simulator runs it at the cycle's opening on the read-free path; \
+                         the hardware holds it to the clock edge), or the port is written on every \
+                         path with an input read before some write and not before another (the \
+                         every-path mux shows the read-preceded write at the opening observation, \
+                         where the simulator has not run it yet), or a write no input read reaches sits \
+                         under an `if`/`match` whose test reads a register assigned earlier in the same \
+                         segment (the simulator tests the forwarded value, the hardware the committed \
+                         one). A port written on SOME paths whose every write is either behind an \
+                         input read on every path to it or behind none is accepted. Make each write's \
+                         anchor uniform (read the input before it on every path, or on none), test only \
+                         committed state (update the register after the test), declare `{port}` as \
+                         `RegOut<…>` (registered, immune because it commits at the clock edge), or move \
+                         the writes after the `clk.tick().await`. If this module exists to DEMONSTRATE \
+                         the divergence, opt out explicitly with `#[hardware(sequential, {ALLOW_PRETICK})]`."
                     ),
                 )
                 .to_compile_error()
@@ -1191,10 +1198,13 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             // A plain `Out` driven in more than one clock phase, in a class whose
             // emitted form cannot show the simulator's trace (narrowed 2026-10-23,
-            // phase E: mixed anchors, a register-free passthrough read, or the
-            // linear route). Control extraction hides the phases by rewriting the
-            // body into a single-tick `match pc` FSM, so it is caught here, on the
-            // source, where the ticks are still visible.
+            // phase E, and 2026-10-30: a write whose anchors differ between the
+            // sides — an immediate or path-dependent read before it — a
+            // register-free passthrough read, or the linear route; a mixed port
+            // whose every write is uniformly anchored is realized drive by drive).
+            // Control extraction hides the phases by rewriting the body into a
+            // single-tick `match pc` FSM, so it is caught here, on the source,
+            // where the ticks are still visible.
             let multi_phase = if allow_pretick_alignment {
                 Vec::new()
             } else {
@@ -1208,20 +1218,22 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                     format!(
                         "output port `{port}` is driven in more than one clock phase (on both \
                          sides of a `clk.tick().await`) in a shape whose synthesized form \
-                         shows one of the writes a cycle after the simulator does. A write \
-                         with no input read before it in its own phase runs at its cycle's \
-                         opening; once an input read precedes some write of `{port}` (its own \
-                         operand, a branch condition, a wait loop's exit test), or on the \
-                         linear multi-tick path, the port is emitted as an edge-sampled \
-                         register and that write lands one observation late (measured, phase \
-                         E). Accepted shapes: no write of `{port}` preceded by an input read \
-                         in its phase (a read in another phase is fine), or every write of it \
-                         following an input read with a `clk.tick().await` after it (all \
-                         writes then land at the edge on both sides). Otherwise declare `{port}` as \
-                         `RegOut<…>` (a registered output, immune because it commits at the \
-                         clock edge), or drive it in exactly one phase. If this module exists \
-                         to DEMONSTRATE the divergence, opt out explicitly with \
-                         `#[hardware(sequential, {ALLOW_PRETICK})]`."
+                         shows one of the writes a cycle after the simulator does. The \
+                         hardware holds a write to the clock edge once an input read precedes \
+                         it in its phase (its own operand, a branch condition, a wait loop's \
+                         exit test); the simulator runs it at its cycle's opening when that \
+                         read has no `clk.tick().await` after it in the iteration, when the \
+                         body has no register (the read is an immediate passthrough), or on a \
+                         control path that skips the read — so such a write lands one \
+                         observation late in the hardware (measured, phase E and 2026-10-30). \
+                         The linear multi-tick path has no mux form at all. Accepted shapes: \
+                         every write of `{port}` either preceded by no input read in its phase \
+                         (a read in another phase is fine) or by an input read on every path \
+                         to it with a `clk.tick().await` after it, in a body with a register — \
+                         in any mix. Otherwise declare `{port}` as `RegOut<…>` (a registered \
+                         output, immune because it commits at the clock edge), or drive it in \
+                         exactly one phase. If this module exists to DEMONSTRATE the \
+                         divergence, opt out explicitly with `#[hardware(sequential, {ALLOW_PRETICK})]`."
                     ),
                 )
                 .to_compile_error()

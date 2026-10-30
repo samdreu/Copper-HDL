@@ -263,8 +263,9 @@ drives only while every drive, closing ones included, loads the hold register at
 the edge — so a mixed-anchor port realizes both anchors (`branch_merge`'s
 `tail_o`, the sweep's last measured divergence, agrees on every stimulus
 sequence; `d2a`, `e4`, `e6` agree; sv-baseline delta the seven mixed-anchor
-hold-form ports, pinned by `copper-codegen/tests/hold_form_audit.rs`). The rules
-that refuse those shapes are unchanged pending a decision (§9.4). The same battery found a second single-phase
+hold-form ports, pinned by `copper-codegen/tests/hold_form_audit.rs`). The two
+rules that refused those shapes were narrowed 2026-10-30 to what still diverges
+(§10.4–10.5). The same battery found a second single-phase
 shape, `e8_single_phase_trailing_immediate_read` — a plain `Out` written in the
 trailing region from an input read in that same statement, immediate here and a
 closing drive in the emitted SystemVerilog — which is refused since 2026-10-26 by
@@ -367,30 +368,38 @@ about its region is what separates them.
 
 - **`unprotected_pretick_out_write`** — the head segment (loop head → first tick). **RE-DERIVED
   2026-10-28** (`CYCLE_DATAFLOW_SEMANTICS.md` §10, guardrail §5.8) against the arm-granular opening
-  walk, from the two-anchor model, one drive at a time: in a body with registers a head-segment
+  walk, from the two-anchor model, one drive at a time, and **NARROWED 2026-10-30** (§10.4–10.5) to
+  what the drive-level mux + hold form leaves: in a body with registers a head-segment
   drive is *closing* on a path where an input read precedes it and *opening* on a path where none
   does, while codegen decides per drive (closing iff a read comb-reaches it on any path) and emits
   per port (a continuous assign or committed-guard mux on every path; a forwarded mux + hold when
   some drive is opening — every drive until 2026-10-29 — with the hold register loaded by every
   drive; an edge-sampled register with edge-form guards otherwise). Exactly two
-  hazards follow, and the rule refuses exactly those: **(A) mixed anchors** — a read reaches some
-  drive of the port while some drive has a read-free path from the head (the opening write lands
-  one observation late in the SV; the simulator never even shows the closing write, since the next
-  iteration's opening write overwrites it before the observation), unobservable only for a single
-  every-path drive that forwards no register it reads; and **(B) a forwarded guard** — a drive no
+  hazards follow, and the rule refuses exactly those: **(A) a drive whose anchors differ between
+  the sides** — mixed anchors (a read reaches some drive of the port while some drive has a
+  read-free path from the head) where one drive is *path-dependent* (reached by a read on one path
+  and not on another: closing in codegen, opening in the simulator on the read-free path, so the
+  SV shows it one observation late or publishes the committed register where the simulator
+  forwarded one) or the port is written on *every path* (the every-path comb mux has no hold
+  register, so it shows the closing drive at the opening observation, where the simulator never
+  shows it — the next iteration's opening write overwrites it first), unobservable only for a
+  single every-path drive that forwards no register it reads; a held port whose drives each have
+  a uniform anchor is realized by the drive-level form and admitted; and **(B) a forwarded guard** — a drive no
   read reaches, nested under an `if`/`match` that tests a register assigned earlier on the path (the
   comb copy tests the committed value). The earlier clauses — "a register-reading, read-preceded
   write or a conditional write in a segment with an unprotected register assignment" — were a
   proxy: measured on the sixteen-probe `d*` battery they had four false positives (`d1b`, `d1c`,
   `d3a`, `d4b`, plus the re-blessed witnesses `pc_arm_write`, `pc_arm_toggle`, `probe_fsm`, which
   compile without an opt-out now) and four false negatives (`d1g`, `d2a`, `d2b`, `d4c`, refused
-  now). `w4_mixed_alignment` and `branch_merge_explicit` (`tail_o`) stay refused — the latter and
-  `d2a` **agree with their SV since 2026-10-29** under the drive-level mux + hold form, with the
-  rule unchanged pending a decision (`CYCLE_DATAFLOW_SEMANTICS.md` §9.4, §10.3). `RegOut` remains
+  then). `w4_mixed_alignment` stays refused; `branch_merge_explicit` (`tail_o`) and `d2a` **agree
+  with their SV since 2026-10-29** under the drive-level mux + hold form and are **admitted since
+  2026-10-30**, with six register-valued variants (`d5a`–`d5f`, both routes) measured agreeing
+  beside them (`CYCLE_DATAFLOW_SEMANTICS.md` §10.4–10.5). `RegOut` remains
   immune. Pins: `pretick_alignment_corpus.rs::pretick_alignment_hazard_flags_exactly_the_known_divergent_modules`
-  (`EXPECTED_FLAGGED`: `w4_mixed_alignment`, `branch_merge_explicit`, and the seven refused `d*`
-  probes), one flipping unit-test pair per clause in `cfg.rs`, `copper-macros/tests/ui/fail/pretick_alignment.rs`,
-  `ui/fail/pretick_mixed_anchors.rs`, `ui/fail/pretick_forwarded_guard.rs`, and the admitted shapes in
+  (`EXPECTED_FLAGGED`: `w4_mixed_alignment` and the six refused `d*` probes `d1f`, `d1g`, `d2b`,
+  `d3c`, `d4a`, `d4c`), one flipping unit-test pair per clause in `cfg.rs`, `copper-macros/tests/ui/fail/pretick_alignment.rs`,
+  `ui/fail/pretick_mixed_anchors.rs` (the every-path `d2b`), `ui/fail/pretick_path_dependent_drive.rs`
+  (`d1f`), `ui/fail/pretick_forwarded_guard.rs`, and the admitted shapes in
   `ui/pass/pretick_alignment_ok.rs`.
 - **`unprotected_trailing_out_write`** — the trailing hazard, now precisely classified as an
   **extraction lowering limitation** rather than a semantics rule. Two gates, each with a measured
@@ -407,7 +416,8 @@ about its region is what separates them.
   counts were measured once (`PRETICK_ALIGNMENT_GUARDRAIL.md` §5.4) and are not a regression gate.
 - **`multi_phase_out_write`** — a plain `Out` driven in **more than one clock phase** (a phase being
   a Comb-connected component of the CFG), **narrowed 2026-10-23 (cycle-dataflow phase E,
-  `CYCLE_DATAFLOW_SEMANTICS.md` §9) to the measured divergent class.** Such a port is a mux over FSM
+  `CYCLE_DATAFLOW_SEMANTICS.md` §9) to the measured divergent class, and again 2026-10-30
+  (§10.4–10.5), per drive.** Such a port is a mux over FSM
   state, and it agrees iff every write has the same anchor on both sides. The simulator anchors a
   write by whether a *deferred* `In` read parks the task before it; the transpiler anchors it by
   whether an input read precedes it in the walk of its own arm (arm-granular since 2026-10-26;
@@ -420,9 +430,12 @@ about its region is what separates them.
   `e5d_two_closing_deferred`). Refused, each with a flipping witness one edit away: the **linear**
   route (no mux form; `vlir_lower` refuses it as multiply driven or edge-samples the hold path —
   `e7`, `e7w`), a **register-free** body with reads (immediate passthroughs — `e4i`, `e5f`),
-  **mixed anchors** (`e4`, `e5`, `e6` — `e4` and `e6` agree since 2026-10-29 under the
-  drive-level mux + hold form, which realizes a deferred-read closing drive beside an opening one;
-  the clause is unchanged pending a decision, `CYCLE_DATAFLOW_SEMANTICS.md` §9.3), and —
+  a write **whose anchors differ between the sides** — an input read reaches it in its phase while
+  the simulator runs it at the opening on some path: an immediate read (`e5`) or a read on one path
+  to it and not on another (`e11`, `e11b`; the latter a divergent shape the 2026-10-23 clause had
+  admitted). `e4` and `e6`, the clause's former witnesses, agree since 2026-10-29 under the
+  drive-level mux + hold form and are admitted since 2026-10-30 with `e4r` and `e4f` (a mixed port
+  whose drives each have a uniform anchor is realized drive by drive); and —
   unmeasured, refused by construction — a **wait loop's
   read before an opening write** (the extracted form duplicates the write into the exit arm behind
   the read). History: the rule landed 2026-08-25 (commit `99290da`) as "any port in two
@@ -431,9 +444,10 @@ about its region is what separates them.
   diverged by one cycle until phase C's emission form; the three real modules it flagged then
   (`uart_tx`, `uart_rx`, the CPU's program counter) were migrated to `RegOut`, which remains the
   universal remedy. Pins: `pretick_alignment_corpus.rs::multi_phase_out_write_flags_exactly_the_demonstration_modules`
-  (`EXPECTED_MULTI_PHASE`: the eight refused probes in `tests/sequential_forwarding_divergence.rs`),
-  the `mphase_*` unit tests in `cfg.rs`, `ui/fail/multi_phase_out_write.rs`, and the two accepted
-  shapes in `ui/pass/pretick_alignment_ok.rs`.
+  (`EXPECTED_MULTI_PHASE`: the seven refused probes `e7`, `e7w`, `e5`, `e11`, `e11b`, `e4i`, `e5f` in
+  `tests/sequential_forwarding_divergence.rs`), the `mphase_*` unit tests in `cfg.rs`,
+  `ui/fail/multi_phase_out_write.rs` (the `e11` shape), and the accepted shapes in
+  `ui/pass/pretick_alignment_ok.rs`.
 
 **The constant-write clause — found 2026-08-25, retired 2026-10-28.** The sweep found
 `branch_merge_explicit` leading its own emitted SystemVerilog by one cycle, and the minimal pairs
@@ -447,8 +461,9 @@ the deferred `sel` read and in the `pc == 1` arm with no read before it — mixe
 `d2a` isolates — and led by one when the first cycle took `sel == 1` (measured 2026-10-26; the
 seeded sweep took `sel == 0` first, which masked it, in the live unflagged twin `branch_merge`
 too, a blind spot the multi-sequence stimulus exposed 2026-10-28 and the drive-level mux + hold
-form **fixed 2026-10-29** — both twins agree on every sequence and sweep with no row; the rule
-still refuses the explicit twin, pending a decision). Conditionality and constant-ness play no
+form **fixed 2026-10-29** — both twins agree on every sequence and sweep with no row; since
+2026-10-30 the narrowed rule admits the explicit twin, which compiles without an opt-out).
+Conditionality and constant-ness play no
 part in the rule any more: an every-path mux with mixed anchors diverges (`d1g`, `d2b`) and a
 held constant behind its own read agrees (`d1b`).
 

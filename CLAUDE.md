@@ -290,19 +290,23 @@ receive/clone one.
   corpus pin in `copper-analysis/tests/pretick_alignment_corpus.rs` and enforced in
   both front-ends. A former fifth, `unprotected_trailing_out_write`, was retired
   2026-10-23 when phase C landed (see below). **D1** is **guarded** (rule
-  2026-08-21, narrowed 2026-08-26, **re-derived 2026-10-28** —
-  `CYCLE_DATAFLOW_SEMANTICS.md` §10, guardrail §5.8): before the first tick, a plain
-  `Out` is a compile error when its drives have **mixed anchors** — an `In` read
-  comb-reaches some write of the port while some write has a read-free path from the
-  loop head (the simulator runs that write at the opening, the SV edge-samples the
-  port or muxes it on committed state one observation late), unobservable only for a
-  single every-path drive that forwards no register it reads (`d3a`) — or when a
-  write no read reaches sits under an `if`/`match` that tests a register assigned
-  earlier in the segment (a **forwarded guard**: the comb copy tests the committed
-  value; `d4a`). Witnesses `w4_mixed_alignment`, `branch_merge_explicit`, and the
-  seven refused `d*` probes; `pc_arm_*` and `probe_fsm` (a read in a sibling arm
-  reaches nothing) are admitted and compile clean, as is a constant behind its own
-  read. The former constant-write clause and its "unprotected register assignment"
+  2026-08-21, narrowed 2026-08-26, **re-derived 2026-10-28**, **narrowed 2026-10-30**
+  — `CYCLE_DATAFLOW_SEMANTICS.md` §10, §10.4–10.5, guardrail §5.8): before the first
+  tick, a plain `Out` is a compile error when its drives have **mixed anchors** — an
+  `In` read comb-reaches some write of the port while some write has a read-free
+  path from the loop head — **and** either one write is **path-dependent** (reached
+  by the read on one path and not on another: codegen holds it to the edge, the
+  simulator runs it at the opening on the read-free path) or the port is written on
+  **every path** (the every-path comb mux has no hold register and shows the closing
+  write one observation early), unobservable only for a single every-path drive that
+  forwards no register it reads (`d3a`) — or when a write no read reaches sits under
+  an `if`/`match` that tests a register assigned earlier in the segment (a
+  **forwarded guard**: the comb copy tests the committed value; `d4a`). A held port
+  whose drives each have a uniform anchor is realized by the drive-level mux + hold
+  form and admitted (`d2a`, `branch_merge_explicit`, the `d5*` probes). Witnesses
+  `w4_mixed_alignment` and the six refused `d*` probes (`d1f`, `d1g`, `d2b`, `d3c`,
+  `d4a`, `d4c`); `pc_arm_*` and `probe_fsm` (a read in a sibling arm reaches nothing)
+  are admitted and compile clean, as is a constant behind its own read. The former constant-write clause and its "unprotected register assignment"
   conjunct are gone. A register-reading write that no `In` read reaches is an
   opening-prefix drive and is **legal** — forwarded continuous-assign emission gives
   it the meaning the simulator always had. Fix a real hit with `RegOut`, make the
@@ -316,13 +320,17 @@ receive/clone one.
   instead of lagging it.
   The other rules: **`multi_phase_out_write`** (a plain `Out` driven in more than one
   clock phase, **narrowed 2026-10-23 by cycle-dataflow phase E** to the measured
-  divergent class — the linear route, a register-free body with reads, mixed anchors
-  (an input read reaching some write of the port while another write is opening), or
-  a wait loop's read before an opening write (unmeasured, refused by construction);
-  an extracted body none of whose writes of the port an input read reaches (whatever
-  it reads elsewhere) and one whose every write follows a deferred read are accepted
-  and measured agreeing — the "input read anywhere" clause was retired 2026-10-26 —
-  `CYCLE_DATAFLOW_SEMANTICS.md` §9, the `e*` battery in
+  divergent class and **again 2026-10-30, per drive** — the linear route, a
+  register-free body with reads, a write **whose anchors differ between the sides**
+  (an input read reaches it in its phase while the simulator runs it at the opening
+  on some path: an immediate read, `e5`, or a read on one path to it and not on
+  another, `e11`/`e11b` — the latter a divergent shape the 2026-10-23 clause had
+  admitted), or a wait loop's read before an opening write (unmeasured, refused by
+  construction); an extracted body none of whose writes an input read reaches
+  (whatever it reads elsewhere), one whose every write follows a deferred read, and
+  since 2026-10-30 any mix of the two (`e4`, `e6`, `e4r`, `e4f`) are accepted and
+  measured agreeing — the "input read anywhere" clause was retired 2026-10-26 —
+  `CYCLE_DATAFLOW_SEMANTICS.md` §9, §10.4–10.5, the `e*` battery in
   `tests/sequential_forwarding_divergence.rs`; enforced in both front-ends);
   **`pretick_out_write_before_update`** (a
   plain `Out` written from a register before that register's update in the same
@@ -347,9 +355,13 @@ receive/clone one.
   both anchors: `branch_merge`'s `tail_o` (the sweep's last measured divergence,
   both twins' `SKIP` rows gone), `d2a`, `e4` and `e6` agree; sv-baseline delta
   exactly the seven mixed-anchor hold-form ports, pinned as an exact set by
-  `copper-codegen/tests/hold_form_audit.rs` through `copper_codegen::hold_form_ports`;
-  no rule changed — D1 clause A and `multi_phase_out_write` clause 4 still refuse
-  shapes the emission realizes, pending the user's decision. `e8`, the battery's other single-phase divergence, is refused
+  `copper-codegen/tests/hold_form_audit.rs` through `copper_codegen::hold_form_ports`
+  (sixteen since 2026-10-30, the nine new probe ports added). **Both mixed-anchor
+  clauses were narrowed 2026-10-30** (`CYCLE_DATAFLOW_SEMANTICS.md` §10.4–10.5) to
+  the residue the form leaves — a drive whose anchors differ between the sides, or
+  the every-path mux — so `d2a`, `branch_merge_explicit`, `e4`, `e6` compile without
+  an opt-out; eleven probes were predicted and matched on the first run, and `e11b`,
+  a divergent shape clause 4 had admitted, is refused. `e8`, the battery's other single-phase divergence, is refused
   by `trailing_out_reads_input` since the same day (`CYCLE_DATAFLOW_SEMANTICS.md`
   §9.4), so both gaps phase E found are closed. The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.

@@ -281,8 +281,10 @@ single-tick body measured agreeing and exempt).
   `branch_merge_explicit` is refused as a mixed-anchor port; V8a/V8d unchanged.
   2026-10-29: the drive-level mux + hold form — phase C deciding per drive —
   makes `branch_merge_explicit`, its live twin, `d2a`, `e4` and `e6` agree,
-  sv-baseline delta the seven mixed-anchor hold-form ports; the rules are
-  unchanged pending a decision, `CYCLE_DATAFLOW_SEMANTICS.md` §9.4.)
+  sv-baseline delta the seven mixed-anchor hold-form ports. 2026-10-30: both
+  mixed-anchor clauses narrowed to the residue — a drive whose anchors differ
+  between the sides, or the every-path mux — and those four compile without an
+  opt-out, `CYCLE_DATAFLOW_SEMANTICS.md` §10.4–10.5.)
 
 ## 5. Effort shape
 
