@@ -2664,7 +2664,7 @@ fn e2x_an_unrelated_read_in_another_state_agrees() {
     assert_eq!(sim, sv, "sim and SV diverge for e2x — the arm-granular opening walk or phase C's mux + hold form regressed (before 2026-10-26 the SV lagged by one cycle); if the lag is back, the retired clause of multi_phase_out_write must come back with it");
 }
 
-/// AGREE (since 2026-10-29) — still flagged. A deferred read feeds the first
+/// AGREE (since 2026-10-29) — admitted (since 2026-10-30). A deferred read feeds the first
 /// write (closing, agrees at its own observation) and a constant the second
 /// (opening): the mixed class. Under the port-wide decision the closing drive
 /// dragged the whole port into the edge-sampled form and the constant showed one
