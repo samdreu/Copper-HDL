@@ -363,7 +363,22 @@ receive/clone one.
   an opt-out; eleven probes were predicted and matched on the first run, and `e11b`,
   a divergent shape clause 4 had admitted, is refused. `e8`, the battery's other single-phase divergence, is refused
   by `trailing_out_reads_input` since the same day (`CYCLE_DATAFLOW_SEMANTICS.md`
-  §9.4), so both gaps phase E found are closed. The doc also records **five** rejected fixes with
+  §9.4), so both gaps phase E found are closed. **The §10.5 gap closed the same day
+  (§10.6):** clause 4's path-dependent half also reaches a plain `Out` written ONCE,
+  in a non-head phase, on the extraction route (`e12` — it compiled with no opt-out
+  and diverges; its uniform controls `e12a` / `e12b` agree); on the linear route the
+  same shape (`e13`) AND its every-path control (`e13a`) diverge because the route
+  emits a continuous assign whatever reads precede the write — a missing closing
+  form. **Closed the same day (§10.7)** by a rule of its own,
+  **`linear_out_write_anchor_mismatch`**: on the linear multi-tick route the form is
+  chosen by the operand's kind (a same-segment `let` wire → the phase-guarded flop,
+  a register/input/constant → a continuous assign), so a wire written with no
+  deferred read on some path, or a register/input/constant written behind one when
+  the assign can change at another edge (another segment's update — the trailing
+  statements included — an update after the write, an input, a constant outside the
+  head segment) is refused; fourteen probes, every verdict predicted first, zero
+  live modules. It also closes V8's unexamined middle segment (`e14j`) and
+  `out_first_driven_late`'s closing-constant blind spot (`e14d`). The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in

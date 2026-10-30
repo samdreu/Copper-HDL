@@ -531,7 +531,12 @@ opt-out). A port written in more than one phase is refused iff any of:
    or the read sits on one path to the write and not on another
    (**path-dependent**, D1's clause (A1) in a middle phase: witnesses `e11`,
    `e11b` — the latter a shape the pre-narrowing clause admitted and that
-   diverges). A port mixing a drive every path to which carries a deferred read
+   diverges). **Since 2026-10-30 (§10.6) the path-dependent half also applies
+   to a port written in a single non-head phase** on the extraction route, in
+   a body with registers — witness `e12`, the `e11` shape with its constant
+   write removed, which compiled with no opt-out and diverges; uniform
+   controls `e12a` (the read on every path) and `e12b` (on none) agree and are
+   admitted. A port mixing a drive every path to which carries a deferred read
    with a drive no read reaches is realized drive by drive by the mux + hold form
    and **admitted**: `e4`, `e6` (the clause's former witnesses, agreeing since
    2026-10-29), `e4r`, `e4f`; flipping pairs `e5d` (one tick added after `e5`'s
@@ -560,10 +565,14 @@ Pins: `copper-analysis/src/cfg.rs` unit tests `mphase_*` (one per clause;
 `mphase_path_dependent_middle_phase_write_flagged`,
 `mphase_path_dependent_write_then_closing_flagged` since 2026-10-30);
 `pretick_alignment_corpus.rs::EXPECTED_MULTI_PHASE` (`e7`, `e7w`, `e5`, `e11`,
-`e11b`, `e4i`, `e5f` — `e4` and `e6` left it 2026-10-30, `e2x` 2026-10-26);
+`e11b`, `e12`, `e4i`, `e5f` — `e4` and `e6` left it 2026-10-30, `e2x` 2026-10-26,
+`e12` joined 2026-10-30 by §10.6);
 `copper-macros/tests/ui/fail/multi_phase_out_write.rs` (the `e11` shape; `e4`'s
-until 2026-10-30) and the accepted shapes in `ui/pass/pretick_alignment_ok.rs`
-(`two_phase_mixed_anchors`, the `e4` shape, since 2026-10-30); the `e*` tests and
+until 2026-10-30), `ui/fail/path_dependent_single_phase.rs` (the `e12` shape) and
+the accepted shapes in `ui/pass/pretick_alignment_ok.rs`
+(`two_phase_mixed_anchors`, the `e4` shape, since 2026-10-30;
+`single_phase_read_on_every_path` and `single_phase_no_read`, the `e12a` / `e12b`
+shapes); the `e*` tests and
 `phase_e_the_narrowed_rule_flags_exactly_the_diverging_probes` in
 `tests/sequential_forwarding_divergence.rs`. `sv-baseline`: the only emission
 delta is the new probe modules (no existing module's SV changed — the change is
@@ -1001,9 +1010,336 @@ is the `d2b` shape (it was `d2a`'s), `fail/pretick_path_dependent_drive.rs` (new
 and `phase_e_the_narrowed_rule_flags_exactly_the_diverging_probes` assert both
 halves and that no other rule claims any admitted probe.
 
-**Found and not changed.** The path-dependent mechanism in a *single-phase*
-port of a non-head segment (the `e11` shape with its constant write removed) is
-outside both rules: `unprotected_pretick_out_write` examines the head segment
-only (widening it to every segment was measured and rejected, §5.4 of the
-guardrail doc), and `multi_phase_out_write` keys on two phases. The model
-predicts the same one-late lag; no probe measured it here.
+**Found and not changed (here; closed in §10.6).** The path-dependent mechanism
+in a *single-phase* port of a non-head segment (the `e11` shape with its
+constant write removed) was outside both rules when this section was written:
+`unprotected_pretick_out_write` examines the head segment only (widening it to
+every segment was measured and rejected, §5.4 of the guardrail doc), and
+`multi_phase_out_write` keyed on two phases. The model predicted the same
+one-late lag; §10.6 measured it on both routes and clause 4 now reaches a
+single non-head phase on the extraction route.
+
+### 10.6 Closing the §10.5 gap — the path-dependent drive in a single non-head phase (derived 2026-10-30, then measured)
+
+§10.5 left one shape of the path-dependent mechanism unmeasured: a plain `Out`
+written **once**, in **one non-head phase**, by a drive an `In` read comb-reaches
+on one path and that has a read-free path from the phase's entry on another —
+`e11` with its constant write removed. Neither rule reaches it: clause (A) of
+`unprotected_pretick_out_write` examines the head segment only (by the measured
+decision of guardrail §5.4), and clause 4 of `multi_phase_out_write` is gated on
+the port being written in two or more phases. Such a module compiles with no
+opt-out, and its sweep verdict is decided by stimulus. This section measures it
+on both lowering routes, each with its two uniform-anchor controls (the read on
+every path, and on none). Method as in §9.2, §10.2 and §10.4: the emitted forms
+were read off the transpiler first, every row was written before anything ran,
+and the probes were run once.
+
+**The forms, as the lowering emits them (confirmed by transpiling the six shapes
+before writing the rows).** `cnt` is a register incremented in the head segment;
+the write's phase is entered by a tick and left by a tick.
+
+- **Extraction route** (`for _ in 0..2 { clk.tick().await; }` on either side of
+  the write, so the write's phase is the `pc == 2` arm of the synthesized FSM;
+  the port is held in every other arm). With the read in a branch of the arm,
+  or on every path of it, the walk carries a read to the drive and it is
+  **edge-sampled**: `always_ff … case (pc) 8'd2: o <= cnt;`. With no read it is
+  phase C's **mux + hold**: `always_comb o = o_hold; case (pc) 8'd2: o = cnt;`.
+  These are exactly `e11`'s first drive and `e12b`'s single drive, the forms
+  §10.4 derived for the multi-phase port, with the constant arm gone.
+- **Linear route** (`clk.tick().await` bare on either side of the write, so the
+  write sits in the middle segment of a two-tick body, `phase_r == 1`). All three
+  shapes — the read in a branch, on every path, on none — emit the same thing:
+  `assign o = cnt;`, a **continuous assign of the committed register**, outside
+  any phase guard. The linear route has no anchor at all for a register-valued
+  drive: a `let` wire would go through the phase-guarded hold register (`e7w`),
+  and a register goes through the continuous assign, whatever reads precede the
+  write. So on the linear route the drive's codegen anchor is *opening* on every
+  path, however it is spelled.
+
+**The simulator side** is the same on both routes (`classify_reads` works on the
+source): the read has a tick after it and the body has a register, so it is
+deferred, and a write it reaches on a path is closing on that path — it runs in
+the pre-edge settle of the phase's closing edge and is seen at the observation
+after it. A write on a read-free path is opening: it runs in the post-edge settle
+of the edge that opened the phase and is seen at that edge's observation.
+
+**Predicted, then measured.** Period four on the extraction route (two folded
+edges on either side of the write), two on the linear route; `x` is driven
+`10 + k` and read for its barrier only.
+
+| probe | route | drive: sim anchor per path / codegen anchor | emitted form | predicted | mechanism |
+|---|---|---|---|---|---|
+| `e12_path_dependent_single_phase_extracted` (NEW) | extraction | opening on even `cnt`, closing on odd / closing | edge-sampled | DIVERGE: the even-`cnt` write one observation late in the SV, the odd one agreeing — `e11`'s first drive with the constant gone. sim `[0, 0, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3]`, SV `[0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3]` | 1 (path-dependent), in a single non-head phase — the §10.5 gap |
+| `e12a_read_on_every_path_extracted` (NEW) | extraction | closing / closing | edge-sampled | **AGREE**: both `[0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3]` | none — uniform |
+| `e12b_read_on_no_path_extracted` (NEW) | extraction | opening / opening | mux + hold | **AGREE**: both `[0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]` | none — uniform (`e9` without its read) |
+| `e13_path_dependent_single_phase_linear` (NEW) | linear | opening on even `cnt`, closing on odd / opening (the continuous assign) | `assign o = cnt` | DIVERGE: the odd-`cnt` (closing) executions show one observation late in the **simulator** — the other direction from `e12`, because the linear form is the opening one. sim `[0, 1, 2, 2, 2, 3, 4, 4, 4, 5, 6, 6, 6]`, SV `[1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7]` | 1 on the simulator side; but see the next row |
+| `e13a_read_on_every_path_linear` (NEW) | linear | closing / opening | `assign o = cnt` | DIVERGE: every execution one observation late in the simulator — sim `[0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]`, SV as `e13`. A **uniform** closing drive, and the model still says it diverges: the linear route has no closing form for a register-valued drive, so the drive's anchors differ between the sides on *every* path, not because of a branch | a fourth way the anchors differ: **the route has no form for the simulator's anchor** — not the path-dependent mechanism |
+| `e13b_read_on_no_path_linear` (NEW) | linear | opening / opening | `assign o = cnt` | **AGREE**: both `[1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7]` | none — uniform |
+
+Two consequences the table commits to before the run. First, on the extraction
+route the gap is exactly the path-dependent mechanism and nothing else: both
+uniform controls agree, and the rule that closes it is clause 4's criterion with
+the two-phase precondition dropped. Second, on the linear route the
+path-dependent probe diverges for a **different** reason — the route realizes
+every register-valued drive at the opening, so a deferred read before the write
+is unrealizable on any path, branch or no branch — and the honest control for
+that mechanism is `e13a`, which the model predicts diverges with no branch in
+it. If `e13a` agrees, the model is wrong about the linear route's form and the
+rules stay as they are until it is repaired. If it diverges as predicted, the
+linear finding is outside the §10.5 gap (a missing emitted form, the class of
+`e7w`, not a mismatched anchor the source could avoid by restructuring a branch)
+and is recorded, with the rule decision for it taken separately below.
+
+**Measured 2026-10-30 — every prediction matched on the first run, trace for
+trace.** `e12` sim `[0, 0, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3]` vs SV `[0, 0, 1, 1,
+1, 1, 2, 2, 2, 2, 3, 3, 3]` (the even-`cnt` write at index 5 against 6, the odd
+ones agreeing); `e12a` both `[0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3]`; `e12b`
+both `[0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]`; `e13` sim `[0, 1, 2, 2, 2, 3, 4,
+4, 4, 5, 6, 6, 6]` vs SV `[1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7]` (indices 0, 4,
+8, 12 — the odd-`cnt` executions — one late in the simulator); `e13a` sim `[0,
+1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]` vs the same SV (every even index one late
+in the simulator, no branch involved); `e13b` both `[1, 1, 2, 2, 3, 3, 4, 4, 5,
+5, 6, 6, 7]`. Before any rule changed, all six compiled with no opt-out and no
+rule flagged any of them — the gap as §10.5 described it, on both routes.
+
+**The decision — the extraction route is refused, the linear route is
+recorded.**
+
+*Extraction route.* Clause 4 of `multi_phase_out_write` now reaches a port
+written in **one** phase: when that phase is not the head's (the component the
+loop head's successors and the trailing segment share), the body takes the
+extraction route (`has_nested_tick`) and has a register, the port is refused
+iff some write of it is comb-reached by an `In` read and has a read-free path
+from its phase's entry (`Cfg::read_free_path_from_phase_entry`) — the
+path-dependent half of clause 4, with the two-phase precondition dropped. The
+immediate-read half stays gated on two phases (a single-phase immediate read is
+a trailing read, `trailing_out_reads_input`'s `e8`), and clauses 1, 3 and 5 are
+unchanged. The head phase stays D1's (`d1f` is its witness there, and the
+`mphase_single_phase_head_segment_not_flagged` pin asserts the two rules do not
+overlap on it). The function's name is now one phase too narrow and its
+documentation says so; both front-ends' diagnostics name the single-phase
+case, the mechanism (a write an input read reaches on one control path and not
+on another) and the remedies (read the input before every write of the port in
+its phase or before none, `RegOut`, or a phase no read reaches).
+`EXPECTED_MULTI_PHASE` = `e7`, `e7w`, `e5`, `e11`, `e11b`, `e12`, `e4i`, `e5f`.
+**Corpus cost: zero live modules** — the exact-set pin passed with `e12` as the
+only addition, and the parity audit is unchanged in code and exact in result.
+Pins: `cfg.rs` `mphase_single_phase_path_dependent_non_head_flagged` /
+`mphase_single_phase_read_on_every_path_not_flagged` /
+`mphase_single_phase_no_read_not_flagged` (one `else { let _ = x.read(); }` or
+one deleted branch flips the verdict), `mphase_single_phase_head_segment_not_flagged`
+(the D1 boundary), `mphase_single_phase_linear_route_not_flagged` (the route
+boundary); ui `fail/path_dependent_single_phase.rs` (the `e12` shape) and
+`pass/pretick_alignment_ok.rs::single_phase_read_on_every_path` /
+`single_phase_no_read`; the six `e12*` / `e13*` tests and
+`phase_e_the_narrowed_rule_flags_exactly_the_diverging_probes` in the battery.
+The sv-baseline delta is the six new probe modules and no existing module (a
+rule change, not an emission change); the mixed-anchor hold-form set is
+unchanged (`e12b` is an all-opening hold-form port, `e12` and `e12a` are
+edge-sampled, the `e13*` are continuous assigns).
+
+*Linear route — found here, closed in §10.7.* `e13` diverges, but its every-path
+control `e13a` diverges the same way with no branch in it, so a clause keyed on
+the branch would refuse a proxy and admit the mechanism. The mechanism is a
+**missing emitted form**: the linear route realizes a register-valued (or
+input-valued) plain-`Out` drive as a continuous assign outside any phase guard,
+which is the *opening* form on every path, so a drive the simulator runs at the
+closing — behind a deferred read — lands one observation late at its phase's
+opening observation whenever the assign's value changes at that phase's
+opening edge. That is the class of `e7w` (the route's other anchor-blind form,
+the phase-guarded hold register for a wire), not the mismatched-anchor class
+the source can repair by restructuring a branch. The model says the same thing
+about the **head segment of a multi-tick linear body**: `loop { let _ =
+x.read(); o.write(cnt); clk.tick().await; cnt = cnt + 1; clk.tick().await; }`
+is a closing head write of a register committed at the *other* edge, which
+`assign o = cnt` shows one observation before the simulator does (on paper: sim
+`[0, 0, 1, 1, 2, 2, …]`, SV `[0, 1, 1, 2, 2, 3, …]`); D1's clause (A) does not
+reach it (every drive closing, so not mixed) and `pretick_out_write_before_update`
+does not either (the update is in another segment, past a tick). In a
+single-tick body the same spelling is the `fast_counter_corrected` idiom and
+agrees, because the trailing update is forwarded into the next head segment and
+there is one observation per iteration — so the discriminator is again how many
+edges the body crosses, as in guardrail §5.4. The clause the model derives, for
+the linear route (`!has_nested_tick`) crossing more than one tick in a body
+with registers: *a plain-`Out` write that a deferred `In` read comb-reaches on
+some path diverges unless every register it reads is assigned only within the
+write's own phase and it reads no input* — the exemption being the case where
+the assign's value cannot change at any edge but the write's closing one (the
+`d3b` principle across segments). Constants are not exempt: a constant behind a
+deferred read in the segment the first tick enters is a one-observation startup
+transient (the class `out_first_driven_late` refuses). None of the clause's
+boundaries has a measured witness yet, and **it is not landed**: the probes for
+its exemption (a segment-local register), its input-operand case and the
+head-segment case above are the first step, and its corpus cost over the
+linear-route modules is the second (see the measurement below). `e13` and
+`e13a` stayed in the battery as `*_unguarded_gap` tests with no opt-out until
+§10.7 landed the rule the same day; they are `*_diverges_refused` now.
+
+**The linear clause's corpus cost, measured by prototype 2026-10-30 (not
+landed).** The clause as first written above — *a deferred read reaches the
+drive, and its value reads an input or a register assigned outside its phase*
+— was run as a scratch `Cfg` method over the 236 clocked modules of
+`examples/`, `src/` and `tests/`. It flagged `e13`, `e13a` and **one live
+module**: `examples/basejump/sipo_block.rs`, port `w3_dbg` — `let w3 =
+data_i.read(); w3_dbg.write(w3);` in the last segment of a four-tick linear
+body, a write behind a deferred read whose value is the input through a
+same-phase `let`. That module is anchored against independent BaseJump Verilog
+and sweeps green on every sequence with `w3_dbg` compared, so the clause was
+over-wide, and the transpiled SV says why: `w3` is a phase-local **wire**
+(`always_comb … if (phase_r == 2'd3) w3 = data_i;`), and the route emits a
+wire-valued drive through the **phase-guarded flop** (`if (phase_r == 2'd3)
+w3_dbg <= w3;`) — the *closing* form, which a closing write agrees with. So the
+linear route's form is decided by the **operand's kind**, not by any read: a
+register-valued (or constant) drive is a continuous assign — the opening form
+— and a wire-valued drive is the phase-guarded flop — the closing form — and
+a drive agrees iff the simulator's anchor on every path equals the form its
+operand kind selects. `sipo_block`'s `w3_dbg` is the measured witness of the
+wire-plus-closing cell (agreeing); `e13b` of register-plus-opening (agreeing);
+`e13a` of register-plus-closing (diverging); `e13` of register-plus-mixed
+(diverging). Refined with the wire exemption — *the drive's value reads a
+same-phase local that is neither a register nor an input* — the clause flags
+exactly `e13` and `e13a`: **zero live modules**. The cells it predicts and no
+probe has measured are the wire-valued drive **without** a deferred read on
+some path (an opening write through the closing form, one late in the SV —
+`e7w`'s mechanism in a single phase), a direct input operand (`o.write(x.read())`,
+whose form was not read off), and a constant behind a deferred read (a
+startup transient). The clause is not landed: each unmeasured cell wants its
+probe first, under the family's standing rule, and the refusal belongs in a
+rule of its own (the mechanism is the route's, not clause 4's). The prototype
+and its scan were deleted after the measurement; the numbers above are the
+record.
+
+### 10.7 Closing the linear-route gap — the form is chosen by operand kind (derived 2026-10-30, then measured)
+
+§10.6 found that the linear multi-tick route realizes a plain-`Out` drive by
+its **operand's kind** and not by any read: a register-valued, input-valued or
+constant drive is a continuous assign outside every phase guard (the opening
+form on every path) and a wire-valued drive — one whose value goes through a
+same-phase `let` — is the phase-guarded flop (the closing form). The simulator
+anchors each execution by whether a deferred read precedes it on the path. So
+on this route a drive agrees iff the simulator's anchor on every path that
+reaches it equals the anchor its form has, with one refinement for the
+continuous assign: a *closing* register-valued write still agrees when the
+assign cannot change at any edge but the write's own closing one and the value
+the write forwards is the value that edge commits (§10.1's `d3b` principle
+across segments). This section measures every cell of that statement before
+any rule is written. Forms read off the transpiler first (twelve shapes, all
+confirmed as stated above: `assign o = …` for `cnt`, `x`, `8'd7`; `if (phase_r
+== …) o <= t;` for a `let t`, in the head, a middle and the trailing segment).
+
+**The model's cells.** Two-tick linear body; `cnt` a register; `x` driven
+`10 + k`; period two. "Head" is the segment before the first tick (its closing
+edge is edge 0 and every even edge), "middle" the segment between the ticks
+(closing edge odd), "trailing" the statements after the second tick (the
+head's phase, run at the opening of the head's cycle).
+
+| probe | segment | operand kind → form | sim anchor | predicted | mechanism |
+|---|---|---|---|---|---|
+| `e14a_wire_no_read_middle` (cell 1) | middle | wire → flop | opening | DIVERGE: SV one late. sim `[3, 3, 4, 4, …, 9]`, SV `[0, 3, 3, 4, 4, …, 8]` | opening write through the closing form (`e7w`'s, single-phase) |
+| `e14b_wire_behind_read_middle` (twin) | middle | wire → flop | closing | **AGREE**: both `[0, 3, 3, 4, 4, …, 8]` | uniform — the `sipo_block` `w3_dbg` cell |
+| `e14c_input_operand_middle` (cell 2) | middle | input → `assign o = x` | closing | DIVERGE: sim `[0, 11, 11, 13, 13, …, 21]`, SV `[10, 11, 12, …, 22]` | closing write through the opening form |
+| `e14d_constant_behind_read_middle` (cell 3) | middle | constant → `assign o = 7` | closing | DIVERGE at the first observation only: sim `[0, 7, 7, …]`, SV `[7, …]` | the closing write lands at the second edge; a startup transient (`out_first_driven_late`'s class, which clears the segment the first tick enters on the assumption the write is opening there) |
+| `e14e_head_closing_other_edge` (cell 4) | head | register committed at the other edge → `assign o = cnt` | closing | DIVERGE: sim `[0, 0, 1, 1, 2, 2, …, 6]`, SV `[0, 1, 1, 2, 2, …, 6, 6]` | the assign changes at an edge that is not the write's closing one |
+| `e14f_head_closing_in_phase` (twin) | head | register updated in-phase before the write → `assign o = cnt` | closing | **AGREE**: both `[1, 1, 2, 2, …, 7]` | the forwarded value is the committing one; nothing changes at the other edge |
+| `e14g_middle_closing_in_phase` (twin of `e13a`) | middle | as `e14f` | closing | **AGREE**: both `[0, 1, 1, 2, 2, …, 6]` | same |
+| `e14h_head_wire_no_read` | head | wire → flop | opening | DIVERGE: sim `[2, 3, 3, 4, 4, …, 8]`, SV `[2, 2, 3, 3, …, 8]` | as `e14a`, in the head |
+| `e14i_head_constant_behind_read` | head | constant → `assign o = 7` | closing | **AGREE**: both all `7` | the head's closing edge is edge 0, so the transient does not exist |
+| `e14j_middle_write_before_update` | middle | register updated in-phase AFTER the write → `assign o = r` | closing | DIVERGE: sim `[0, 0, 0, 11, 11, 24, 24, 39, 39, 56, 56, 75, 75]`, SV `[0, 11, 11, 24, 24, …, 96, 96]` | the write forwards the pre-update value, the assign shows the committed one (V8a's generation hazard, off the head where `pretick_out_write_before_update` stops) |
+| `e14k_trailing_wire_no_read` | trailing | wire → flop (hoisted into the head's phase, sampled at its edge) | opening | DIVERGE: sim `[0, 2, 2, 3, 3, …, 7]`, SV `[2, 2, 3, 3, …, 8]` | as `e14a`, in the trailing region (`linear_trailing`, register-valued, agrees) |
+| `e14l_head_wire_behind_read` (twin of `e14h`) | head | wire → flop | closing | **AGREE**: both `[2, 2, 3, 3, …, 8]` | uniform |
+| `e14m_trailing_wire_after_update` | trailing | wire → flop, the register updated before the wire | opening | DIVERGE: sim `[0, 3, 3, 4, 4, …, 8]`, SV written as `[2, 2, 3, 3, …, 8]` — measured `[3, 3, 4, 4, …, 9]`: the verdict held, the row's SV arithmetic missed that the shared map forwards the trailing update into the hoisted wire (`t = cnt + 1 + 2` in phase 0), so the SV runs one value higher and still one observation ahead | as `e14k`, with no write-before-update for V8 to claim |
+| `e14n_head_closing_trailing_update` | head | register updated in the TRAILING region → `assign o = cnt` | closing | DIVERGE: sim `[0, 0, 1, 1, 2, 2, …, 6]`, SV `[0, 1, 1, 2, 2, …, 6, 6]` (as `e14e`) | the trailing update is committed at the last tick's edge (the shared-map form), the other edge from the head write's closing one — so "in-phase" means the write's own SEGMENT, not the Comb-component that merges the trailing statements into the head's |
+
+The clause these rows commit to, for the linear route (`!has_nested_tick`)
+crossing more than one tick, in a body with registers, per plain-`Out` drive
+`w`:
+
+- **wire-valued** `w` (its value reads a same-phase local that is neither a
+  register nor an input): refused iff some path from its phase's entry reaches
+  it with no deferred read — the flop samples at the closing edge, the
+  simulator wrote at the opening (`e14a`, `e14h`, `e14k`; `e14b`, `e14l`
+  admitted);
+- **otherwise** (register, input or constant operands, the continuous assign):
+  refused iff a deferred read comb-reaches `w` on some path **and** the
+  assign can show a value the write did not publish: `w` reads an input
+  (`e14c`), or a register some assignment of which lies outside `w`'s phase
+  (`e13`, `e13a`, `e14e`; a trailing update counts as outside the head
+  segment, since it commits at the last tick's edge — `e14n`) or is
+  comb-reachable from `w` (`e14j`), or `w`'s segment is not the head's and its
+  value is a constant (`e14d`; `e14i` admitted). Admitted: every operand
+  register assigned only in `w`'s own segment and only before it (`e14f`,
+  `e14g`). "Segment" here is the Comb-component with the loop head cut out,
+  so the head segment and the trailing statements are distinct even though
+  they run in one cycle.
+
+If any row misses, the model is wrong and nothing lands.
+
+**Measured 2026-10-30 — every verdict matched on the first run** (fourteen
+probes; the traces are pinned in the battery and quoted in the rows above). The
+one correction is to `e14m`'s SV row, an arithmetic slip about the shared-map
+form and not a verdict. Before any rule changed, every one of the fourteen
+compiled with no opt-out; the only rule that touched any of them was
+`pretick_out_write_before_update`'s trailing clause on `e14k` (the wire reads
+`cnt` through `t` before its update — V8's shape through a temporary, which is
+why `e14m` puts the update first).
+
+**The decision — a rule of its own, `Cfg::linear_out_write_anchor_mismatch`,
+enforced in both front-ends.** The clause is the one derived above, verbatim:
+on the linear route (`!has_nested_tick`) crossing more than one tick, in a body
+with registers, a plain-`Out` drive is refused iff it is wire-valued and some
+path from its segment's entry reaches it with no deferred read, or it is
+register-, input- or constant-valued and a deferred read reaches it on some
+path while the assign can show a value the write did not publish (an input
+operand; a register assigned outside the drive's segment or after the drive; a
+constant outside the head segment). "Segment" is the Comb-component with the
+loop head cut out, so the trailing statements are a segment of their own
+(`e14n`). Neither of the two existing rules could host it: clause 4's premise
+(codegen holds a read-preceded drive to the edge) is false on this route, and
+D1 is head-only by §5.4's measured decision — and the mechanism is the route's,
+not a phase's. The function stays outside clause 4's path-dependent
+criterion by construction: the extraction route, the single-tick body
+(`d3b`'s shape, one observation per iteration), a register-free body and
+`RegOut` return nothing. Where it overlaps another rule it is on a shape that
+diverges and that both refuse (`e14k` with V8's trailing clause, `e7w` with
+clause 1), which both front-ends handle by running every rule.
+
+**Corpus cost: zero live modules.** `EXPECTED_LINEAR_ANCHOR` = `e13`, `e13a`,
+`e14a`, `e14c`, `e14d`, `e14e`, `e14h`, `e14j`, `e14k`, `e14m`, `e14n`, `e7w` —
+twelve probes and nothing else among the clocked modules of `examples/`,
+`src/` and `tests/`; `sipo_block`'s `w3_dbg`, the first prototype's one live
+hit, is the wire-plus-closing cell the clause admits (`e14b`'s), and sweeps
+green as before. The parity audit gained the rule as its seventh entry and is
+exact. The sv-baseline delta is the fourteen new probe modules and no existing
+module (a rule, not an emission); the hold-form set is unchanged (nothing on
+the linear route takes the mux + hold form). `e13` and `e13a` retired their
+`*_unguarded_gap` tests for `*_diverges_refused` and carry the opt-out;
+`e14b`, `e14f`, `e14g`, `e14i`, `e14l` compile clean. Both front-ends'
+diagnostics name the two forms, the two directions of the lag (a wire late in
+the hardware, a register early) and the remedies (for a wire, read an input
+before every write of the port in its segment; for a register, update it in
+the same segment before the write or read the input past the tick; `RegOut`).
+Pins: `cfg.rs` `linear_*` (eleven, every boundary a flagged / not-flagged pair
+one edit apart); `pretick_alignment_corpus.rs::linear_out_write_anchor_mismatch_flags_exactly_the_demonstration_modules`;
+ui `fail/linear_anchor_mismatch.rs` (the `e13a` shape) and
+`pass/pretick_alignment_ok.rs::linear_closing_in_segment` (`e14g`),
+`linear_opening_register` (`e13b`), `linear_wire_behind_read` (`e14b`); the
+`e13*` / `e14*` tests and `linear_the_rule_flags_exactly_the_diverging_probes`
+in the battery.
+
+**Two older scopes this closes.** `pretick_out_write_before_update` declared
+the middle segment of a multi-tick loop unexamined (its R6 note): on the
+extraction route it agrees (`e10`, edge-sampled), and on the linear route it
+is `e14j`, refused by this rule as the "register assigned after the drive"
+case. `out_first_driven_late` clears a constant written in the segment the
+first tick enters on the assumption that the write is opening there
+(`late_constant_one_edge`); behind a deferred read it is closing and lands at
+the second edge (`e14d`), which this rule refuses as the "constant outside the
+head segment" case — both doc comments now say so.
+
+**Unmeasured, by construction on the refusing side or outside the rule.** A
+register-free linear multi-tick body (the rule returns nothing; the
+passthrough classification makes a direct `o.write(x.read())` immediate there,
+and any other shape is unmeasured — clause 3's territory). A drive whose
+operand mixes a wire and a register (`o.write(t + cnt)`) is treated as
+wire-valued, which is what the lowering does with any expression over a
+phase-local wire; no probe measured the mixed operand on its own.

@@ -221,6 +221,11 @@ const EXPECTED_MULTI_PHASE: &[&str] = &[
     "tests/sequential_forwarding_divergence.rs::e5_two_closing",
     "tests/sequential_forwarding_divergence.rs::e11_path_dependent_write_in_a_middle_phase",
     "tests/sequential_forwarding_divergence.rs::e11b_path_dependent_write_then_closing",
+    // the same drive as a port's ONLY write, in one non-head phase on the
+    // extraction route (§10.6, 2026-10-30 — the §10.5 gap: it compiled with no
+    // opt-out and diverges; its linear-route twin e13 is a different mechanism,
+    // recorded and not refused)
+    "tests/sequential_forwarding_divergence.rs::e12_path_dependent_single_phase_extracted",
     // register-free: the reads feeding the writes are immediate passthroughs
     "tests/sequential_forwarding_divergence.rs::e4i_register_free_passthrough_then_opening",
     "tests/sequential_forwarding_divergence.rs::e5f_two_closing_register_free",
@@ -464,6 +469,78 @@ fn trailing_out_reads_input_flags_exactly_the_demonstration_modules() {
     assert!(missing.is_empty(), "no longer flagged — the module changed: {missing:?}");
 }
 
+// ── The linear-route anchor rule (§10.7, 2026-10-30) ─────────────────────────
+
+/// Plain `Out` ports on the linear multi-tick route whose write's anchor the
+/// emitted form cannot show (`copper_analysis::linear_out_write_anchor_mismatch`):
+/// the form is chosen by the operand's kind — a same-segment wire is the
+/// phase-guarded flop, a register, input or constant the continuous assign —
+/// while the simulator anchors each execution by the deferred read before it.
+/// Every witness is a measured probe in `tests/sequential_forwarding_divergence.rs`
+/// (all opted out), derived and matched on the first run; `e7w` is also
+/// `multi_phase_out_write`'s and `e14k` also `pretick_out_write_before_update`'s.
+/// Zero live modules when the rule landed. A module joining this set is either a
+/// real divergence to measure or a rule regression to fix.
+const EXPECTED_LINEAR_ANCHOR: &[&str] = &[
+    // a register committed at another edge, behind a deferred read: on one path
+    // (e13), on every path (e13a), in the head (e14e), updated in the trailing
+    // region (e14n), or updated in-segment AFTER the write (e14j)
+    "tests/sequential_forwarding_divergence.rs::e13_path_dependent_single_phase_linear",
+    "tests/sequential_forwarding_divergence.rs::e13a_read_on_every_path_linear",
+    "tests/sequential_forwarding_divergence.rs::e14e_head_closing_other_edge",
+    "tests/sequential_forwarding_divergence.rs::e14n_head_closing_trailing_update",
+    "tests/sequential_forwarding_divergence.rs::e14j_middle_write_before_update",
+    // an input operand, and a constant in a segment after the first, behind a read
+    "tests/sequential_forwarding_divergence.rs::e14c_input_operand_middle",
+    "tests/sequential_forwarding_divergence.rs::e14d_constant_behind_read_middle",
+    // a wire with no deferred read on some path: middle, head, trailing
+    "tests/sequential_forwarding_divergence.rs::e14a_wire_no_read_middle",
+    "tests/sequential_forwarding_divergence.rs::e14h_head_wire_no_read",
+    "tests/sequential_forwarding_divergence.rs::e14k_trailing_wire_no_read",
+    "tests/sequential_forwarding_divergence.rs::e14m_trailing_wire_after_update",
+    "tests/sequential_forwarding_divergence.rs::e7w_linear_phase_local_wires",
+];
+
+#[test]
+fn linear_out_write_anchor_mismatch_flags_exactly_the_demonstration_modules() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    for dir in ["examples", "src", "tests"] {
+        rs_files(&root.join(dir), &mut files);
+    }
+    files.sort();
+
+    let mut scanned = 0usize;
+    let mut flagged: BTreeSet<String> = BTreeSet::new();
+    for path in &files {
+        let Ok(src) = fs::read_to_string(path) else { continue };
+        let Ok(file) = syn::parse_file(&src) else { continue };
+        let mut fns = Vec::new();
+        clocked_hardware_fns(&file.items, &mut fns);
+        for f in &fns {
+            scanned += 1;
+            if !copper_analysis::linear_out_write_anchor_mismatch(f).is_empty() {
+                let rel = path.strip_prefix(&root).unwrap_or(path).display();
+                flagged.insert(format!("{rel}::{}", f.sig.ident));
+            }
+        }
+    }
+
+    assert!(scanned >= 40, "expected to scan the corpus, only saw {scanned} clocked modules");
+
+    let expected: BTreeSet<String> = EXPECTED_LINEAR_ANCHOR.iter().map(|s| s.to_string()).collect();
+    let unexpected: Vec<_> = flagged.difference(&expected).cloned().collect();
+    let missing: Vec<_> = expected.difference(&flagged).cloned().collect();
+    assert!(
+        unexpected.is_empty(),
+        "newly flagged by the linear-route anchor rule. Either the module HAS the \
+         divergence — check it against its transpiled SV; the remedies are a read before \
+         every write of a wire-valued port, an in-segment update before a register-valued \
+         write, or RegOut — or the rule has regressed into a false positive: {unexpected:?}"
+    );
+    assert!(missing.is_empty(), "no longer flagged — the module changed: {missing:?}");
+}
+
 // ── The write-between-read-and-update rule (V8, m1) ──────────────────────────
 
 /// Plain `Out` ports written between a leading `In` read and the update of a
@@ -496,6 +573,12 @@ const EXPECTED_WRITE_BEFORE_UPDATE: &[&str] = &[
     // minimal stage shape.
     "tests/fixtures/out_phase_dut.rs::out_from_reg_before_commit",
     "tests/sequential_forwarding_divergence.rs::v8t_stage_publish_then_load",
+    // §10.7's trailing wire probe (2026-10-30): `let t = cnt + 2; o.write(t);
+    // cnt = cnt + 1` after the last tick reads `cnt` through `t` before its
+    // update — the trailing clause's shape through a temporary, measured
+    // diverging; also `linear_out_write_anchor_mismatch`'s (its twin `e14m`,
+    // with the update first, is that rule's alone)
+    "tests/sequential_forwarding_divergence.rs::e14k_trailing_wire_no_read",
     // Seen THROUGH a `let` temporary (2026-10-20): a Mealy `ready = !full ||
     // drain` computed into `can_take` and written, with `full` updated later in
     // the same segment. V8a with one rename — the rule's syntactic `uses ∩
