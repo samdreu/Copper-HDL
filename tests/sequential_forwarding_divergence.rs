@@ -47,6 +47,26 @@
 //! `w4_mixed_alignment` stays refused, and four measured divergences the old rule
 //! missed (`d1g`, `d2a`, `d2b`, `d4c`) are refused now.
 //!
+//! **2026-10-29, the DRIVE-LEVEL mux + hold form (`CYCLE_DATAFLOW_SEMANTICS.md`
+//! §9.4).** `vlir_lower::opening_hold_outputs` decides per drive instead of per
+//! port: a conditionally driven plain `Out` with at least one opening drive takes
+//! the mux + hold form, its comb copy muxing the opening drives only while EVERY
+//! drive — closing ones included — loads the hold register at the edge. Derived
+//! on paper, hand-written as the m3 model and measured against the simulator
+//! first; then the sv-baseline delta was exactly the seven mixed-anchor hold-form
+//! ports the audit (`copper-codegen/tests/hold_form_audit.rs`) enumerates, no
+//! referenced module among them. Four pinned lags flipped to agreement on the
+//! first run and are re-blessed below: `branch_merge` (the live twin's `tail_o`,
+//! the sweep's SKIP row gone), `d2a`, `e4` and `e6`. `e4i` changed trace and still
+//! diverges (its first drive is a register-free passthrough, immediate in the
+//! simulator). `w4_mixed_alignment`, `d1f`, `d1g`, `d2b`, `d3c` and `e5` are not
+//! hold-form ports (every-path assigns, or every drive closing on the codegen
+//! side) and are unchanged. **No rule changed**: clause (A) of
+//! `unprotected_pretick_out_write` still refuses `d2a` and `branch_merge_explicit`,
+//! and `multi_phase_out_write` clause 4 still refuses `e4` and `e6`, although the
+//! emission now realizes them — retiring or narrowing a rule is the user's
+//! decision, and the exact-set corpus pins are unchanged until it is made.
+//!
 //! # Divergence 1 — a pre-tick register update is forwarded to a same-segment read
 //!
 //! ```text
@@ -1005,7 +1025,7 @@ fn the_state_arm_toggle_agrees_on_every_cycle() {
     );
 }
 
-// ── branch_merge — the live twin's seed-masked `tail_o` lag ────────────────────
+// ── branch_merge — the live twin's seed-masked `tail_o` lag, FIXED 2026-10-29 ──
 //
 // `tests/fixtures/control_extraction_dut.rs::branch_merge` is the ASYNC twin of
 // `branch_merge_explicit`: byte-identical SystemVerilog (asserted by
@@ -1033,8 +1053,15 @@ fn the_state_arm_toggle_agrees_on_every_cycle() {
 // This is what the sweep's multi-sequence stimulus policy (2026-10-28,
 // `design_docs/CORPUS_DIFFERENTIAL_SWEEP.md` §3.2) exists to catch: the module's
 // input is one bit wide, so the sweep now starts one sequence from EACH initial
-// input vector, and the `sel = 1` sequence fails. The fixture's `build.rs` SKIP
-// row records that verdict; this test pins the trace behind it.
+// input vector, and the `sel = 1` sequence failed; the fixture had a `build.rs`
+// SKIP row recording that verdict, and this test pinned the trace behind it.
+//
+// FIXED 2026-10-29 by the drive-level mux + hold form (the m3 hand model below,
+// `vlir_lower::opening_hold_outputs`): `tail_o`'s comb copy carries its opening
+// `pc == 1` drive and its hold register is loaded by both drives, so the SV
+// shows `(1, 0, 1)` at cycle 0 exactly as the simulator does. The SKIP row is
+// gone and `branch_merge` sweeps on all six of its sequences; this test now pins
+// the AGREEMENT under `sel = 1` first, with the same vectors.
 
 const BRANCH_MERGE_SRC: &str = r#"
 #[hardware(sequential)]
@@ -1110,16 +1137,24 @@ fn sv_branch_merge(sel: &[u8]) -> Vec<(u8, u8, u8)> {
         &copper_codegen::EmitConfig::default(),
     )
     .expect("transpile");
+    run_branch_merge_shaped_sv(&sv, "branch_merge", sel)
+}
+
+/// Verilate `sv` — a module with `branch_merge`'s ports (`clk`, `sel`, `head_o`,
+/// `mid_o`, `tail_o`) named `top` — driving `sel` per cycle, and collect
+/// `(head_o, mid_o, tail_o)` at every observation. Shared by the transpiled
+/// module and the hand-written m3 model below.
+fn run_branch_merge_shaped_sv(sv: &str, top: &str, sel: &[u8]) -> Vec<(u8, u8, u8)> {
     let n = TMP_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let work = std::env::temp_dir()
-        .join(format!("copper_fwd_branch_merge_{}_{n}", std::process::id()));
+        .join(format!("copper_fwd_{top}_{}_{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).unwrap();
-    std::fs::write(work.join("branch_merge.sv"), &sv).unwrap();
-    let mut tb = String::from(
-        "#include \"Vbranch_merge.h\"\n#include \"verilated.h\"\n#include <iostream>\n\
-         int main(int c, char** v) { Verilated::commandArgs(c, v);\n\
-         Vbranch_merge* t = new Vbranch_merge(); t->clk = 0; t->sel = 0; t->eval();\n",
+    std::fs::write(work.join(format!("{top}.sv")), sv).unwrap();
+    let mut tb = format!(
+        "#include \"V{top}.h\"\n#include \"verilated.h\"\n#include <iostream>\n\
+         int main(int c, char** v) {{ Verilated::commandArgs(c, v);\n\
+         V{top}* t = new V{top}(); t->clk = 0; t->sel = 0; t->eval();\n"
     );
     for &s in sel {
         tb.push_str(&format!(
@@ -1132,14 +1167,15 @@ fn sv_branch_merge(sel: &[u8]) -> Vec<(u8, u8, u8)> {
     let out = verilator_command()
         .current_dir(&work)
         .args([
-            "--cc", "--exe", "--build", "--top-module", "branch_merge",
+            "--cc", "--exe", "--build", "--top-module", top,
             "-Wno-DECLFILENAME", "-Wno-WIDTHEXPAND", "-CFLAGS", "-std=c++14",
-            "branch_merge.sv", "tb.cpp",
         ])
+        .arg(format!("{top}.sv"))
+        .arg("tb.cpp")
         .output()
         .unwrap();
     assert!(out.status.success(), "verilator build failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    let run = std::process::Command::new(work.join("obj_dir/Vbranch_merge")).output().unwrap();
+    let run = std::process::Command::new(work.join(format!("obj_dir/V{top}"))).output().unwrap();
     let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
     let _ = std::fs::remove_dir_all(&work);
     stdout
@@ -1151,11 +1187,13 @@ fn sv_branch_merge(sel: &[u8]) -> Vec<(u8, u8, u8)> {
         .collect()
 }
 
-/// `sel == 1` on the first cycle: the live twin leads its own SV by one cycle on
-/// `tail_o`, once. The seed-masked blind spot of guardrail §5.5, measured on the
-/// unflagged module itself.
+/// `sel == 1` on the first cycle: the live twin AGREES with its own SV on every
+/// port and every cycle (since 2026-10-29). Until then `tail_o` led the SV by one
+/// cycle, once — the seed-masked blind spot of guardrail §5.5, measured on the
+/// unflagged module itself: SV `(1, 0, 0)` at cycle 0 against the simulator's
+/// `(1, 0, 1)`.
 #[test]
-fn branch_merge_tail_leads_its_sv_when_the_first_cycle_takes_sel_one() {
+fn branch_merge_agrees_when_the_first_cycle_takes_sel_one() {
     let mut sel = vec![0u8; CYCLES];
     sel[0] = 1;
     let sim = sim_branch_merge(&sel);
@@ -1170,17 +1208,12 @@ fn branch_merge_tail_leads_its_sv_when_the_first_cycle_takes_sel_one() {
         return;
     }
     let sv = sv_branch_merge(&sel);
-    let mut expected_sv = expected_sim.clone();
-    expected_sv[0] = (1, 0, 0); // tail_o one cycle late — the only difference
     assert_eq!(
-        sv, expected_sv,
-        "the emitted SV's trace changed — re-measure the sweep's SKIP row for branch_merge"
-    );
-    assert_ne!(sim, sv, "sim and SV now AGREE under sel == 1 first: the branch_merge SKIP row in build.rs is stale");
-    assert_eq!(
-        sim.iter().map(|c| c.2).collect::<Vec<_>>()[1..],
-        sv.iter().map(|c| c.2).collect::<Vec<_>>()[1..],
-        "the lag is no longer confined to cycle 0"
+        sim, sv,
+        "sim and SV diverge under sel == 1 first — the drive-level mux + hold form of \
+         `vlir_lower::opening_hold_outputs` regressed to the port-wide decision (before \
+         2026-10-29 the SV showed tail_o = 0 at cycle 0, the simulator 1); if so the \
+         branch_merge SKIP row in build.rs must come back"
     );
 }
 
@@ -1510,6 +1543,121 @@ fn m2_model_forwarded_lowering_matches_the_simulator_for_trailing_update() {
          emission form (`vlir_lower::opening_hold_outputs`) regressed; before it \
          landed the SV lagged the model by one cycle"
     );
+}
+
+// ── m3 — the drive-level form for a MIXED-anchor port, hand-written ───────────
+//
+// `branch_merge`'s `tail_o` has one CLOSING drive (the `pc == 0` else-arm, behind
+// the deferred `sel` read) and one OPENING drive (the `pc == 1` arm, no read
+// before it). Phase C's decision is port-wide, so the closing drive drags the
+// whole port into the edge-sampled form and the opening drive lands one
+// observation late (the probe above). The denotation (CYCLE_DATAFLOW_SEMANTICS.md
+// §9.1, the per-write verdict table) calls for a DRIVE-LEVEL form: the comb copy
+// carries only the opening drives, and the hold register is loaded by EVERY
+// drive at the edge — the closing drive takes effect at the next edge through
+// the hold register (edge-sampled, as today), the opening drive is visible at
+// the observation right after the edge that enters its arm (forwarded, as
+// `head_o` already is). Hand-written, with `tail_o` the only port whose form
+// differs from today's emission:
+//
+//   assign head_o = (pc == 8'd0) ? 1'b1 : head_o_hold;   // unchanged (all opening)
+//   assign tail_o = (pc == 8'd1) ? 1'b1 : tail_o_hold;   // opening drive only
+//   always_ff @(posedge clk) begin
+//     case (pc)
+//       8'd0: begin head_o_hold <= 1'b1;
+//               if (sel) pc <= 1; else begin mid_o <= 1'b1; tail_o_hold <= 1'b1; pc <= 0; end end
+//       8'd1: begin tail_o_hold <= 1'b1; pc <= 0; end
+//     endcase
+//   end
+//
+// Prediction (written before the run): under `sel = 1` first the model shows
+// `tail_o = 1` at cycle 0 (pc is 1 after edge 0, the comb arm fires), matching
+// the simulator's `(1, 0, 1)`; under `sel = 0` first the hold register loads 1
+// at edge 0 and the model shows `(1, 1, 1)` from cycle 0 on, as both sides
+// already do. So sim ≡ model on both stimuli — and once codegen emits this form
+// (2026-10-29, `vlir_lower::opening_hold_outputs` drive-level), sim ≡ model ≡ SV.
+
+const BRANCH_MERGE_MODEL_SV: &str = r#"
+module branch_merge_model (
+    input  logic clk,
+    input  logic sel,
+    output logic head_o,
+    output logic mid_o,
+    output logic tail_o
+);
+    logic [7:0] pc = 8'd0;
+    logic head_o_hold = 1'b0;
+    logic tail_o_hold = 1'b0;
+    initial mid_o = 1'b0;
+
+    assign head_o = (pc == 8'd0) ? 1'b1 : head_o_hold;
+    assign tail_o = (pc == 8'd1) ? 1'b1 : tail_o_hold;
+
+    always_ff @(posedge clk) begin
+        case (pc)
+            8'd0: begin
+                head_o_hold <= 1'b1;
+                if (sel == 1'b1) begin
+                    pc <= 8'd1;
+                end else begin
+                    mid_o <= 1'b1;
+                    tail_o_hold <= 1'b1;
+                    pc <= 8'd0;
+                end
+            end
+            8'd1: begin
+                tail_o_hold <= 1'b1;
+                pc <= 8'd0;
+            end
+            default: pc <= pc;
+        endcase
+    end
+endmodule
+"#;
+
+#[test]
+fn m3_drive_level_model_matches_the_simulator_for_branch_merge_on_both_first_cycles() {
+    // `sel = 1` first: the stimulus under which the port-wide form lagged.
+    let mut sel_one_first = vec![0u8; CYCLES];
+    sel_one_first[0] = 1;
+    let sim_one = sim_branch_merge(&sel_one_first);
+    let mut expected_sim = vec![(1u8, 1u8, 1u8); CYCLES];
+    expected_sim[0] = (1, 0, 1);
+    expected_sim[1] = (1, 0, 1);
+    assert_eq!(sim_one, expected_sim, "simulator behaviour changed");
+    // `sel = 0` first: the stimulus every form already agreed on.
+    let mut sel_zero_first = vec![0u8; CYCLES];
+    sel_zero_first[1] = 1;
+    sel_zero_first[4] = 1;
+    let sim_zero = sim_branch_merge(&sel_zero_first);
+    assert_eq!(sim_zero, vec![(1, 1, 1); CYCLES], "simulator behaviour changed");
+
+    if !verilator_available() {
+        return;
+    }
+    let model_one = run_branch_merge_shaped_sv(BRANCH_MERGE_MODEL_SV, "branch_merge_model", &sel_one_first);
+    assert_eq!(
+        sim_one, model_one,
+        "the hand-written DRIVE-LEVEL model does not match the simulator under sel == 1 first — \
+         the §9.1 per-write verdict table is wrong for a mixed-anchor port, not codegen"
+    );
+    let model_zero = run_branch_merge_shaped_sv(BRANCH_MERGE_MODEL_SV, "branch_merge_model", &sel_zero_first);
+    assert_eq!(
+        sim_zero, model_zero,
+        "the drive-level model diverges under sel == 0 first — a NEW divergence the port-wide form did not have"
+    );
+
+    // And since the drive-level form landed (2026-10-29) codegen agrees with
+    // both: sim ≡ model ≡ SV on each stimulus.
+    let sv_one = sv_branch_merge(&sel_one_first);
+    assert_eq!(
+        model_one, sv_one,
+        "the transpiled SV no longer matches the drive-level model under sel == 1 first — \
+         `vlir_lower::opening_hold_outputs` has gone back to the port-wide decision \
+         (before 2026-10-29 the SV showed tail_o = 0 at cycle 0)"
+    );
+    let sv_zero = sv_branch_merge(&sel_zero_first);
+    assert_eq!(model_zero, sv_zero, "the transpiled SV no longer matches the drive-level model under sel == 0 first");
 }
 
 // ── The V-battery re-measured under forwarded emission (phase D evidence) ─────
@@ -2393,6 +2541,11 @@ fn transpile_and_run_driven(src: &str, top: &str) -> Vec<u8> {
 /// verdict. `pulse_plain`, the rule's original witness, is clean now — it is
 /// still opted out because `out_first_driven_late` flags it (its writes are
 /// constants past a folded tick-bearing loop), not because of this rule.
+///
+/// Since 2026-10-29 two flagged rows AGREE: `e4` and `e6`, clause 4's mixed-anchor
+/// witnesses, realized by the drive-level mux + hold form. The rule is unchanged
+/// and still flags them — whether clause 4 is narrowed is the user's decision —
+/// so this test keeps pinning the rule's verdicts, not the measured ones.
 #[test]
 fn phase_e_the_narrowed_rule_flags_exactly_the_diverging_probes() {
     let flagged = |src: &str| {
@@ -2483,34 +2636,38 @@ fn e2x_an_unrelated_read_in_another_state_agrees() {
     assert_eq!(sim, sv, "sim and SV diverge for e2x — the arm-granular opening walk or phase C's mux + hold form regressed (before 2026-10-26 the SV lagged by one cycle); if the lag is back, the retired clause of multi_phase_out_write must come back with it");
 }
 
-/// DIVERGE — flagged. A deferred read feeds the first write (closing, agrees at
-/// its own observation) and a constant the second (opening): the closing drive
-/// drags the whole port into the edge-sampled form and the constant shows one
-/// cycle late. The mixed class.
+/// AGREE (since 2026-10-29) — still flagged. A deferred read feeds the first
+/// write (closing, agrees at its own observation) and a constant the second
+/// (opening): the mixed class. Under the port-wide decision the closing drive
+/// dragged the whole port into the edge-sampled form and the constant showed one
+/// cycle late (SV `[0, 0, 12, 12, 0, 0, 16, 16, …]`); the drive-level form keeps
+/// the constant in the comb copy under its `pc` arm and loads the hold register
+/// from both drives, and the SV equals the simulator. `multi_phase_out_write`
+/// clause 4 still refuses the shape — retiring it is the user's decision, not
+/// this test's.
 #[test]
-fn e4_closing_then_opening_write_diverges_known_gap() {
+fn e4_closing_then_opening_write_agrees_under_the_drive_level_form() {
     let sim = sim_e_in(e4_closing_then_opening);
     assert_eq!(sim, vec![0, 0, 12, 0, 0, 0, 16, 0, 0, 0, 20, 0, 0], "simulator behaviour changed");
     if !verilator_available() {
         return;
     }
     let sv = transpile_and_run_driven(E4_SRC, "e4_closing_then_opening");
-    assert_eq!(sv, vec![0, 0, 12, 12, 0, 0, 16, 16, 0, 0, 20, 20, 0], "transpiled SV behaviour changed");
-    assert_ne!(sim, sv, "sim and SV now AGREE for the mixed class — re-derive multi_phase_out_write and re-bless EXPECTED_MULTI_PHASE");
+    assert_eq!(sim, sv, "sim and SV diverge for e4 — the drive-level mux + hold form regressed (before 2026-10-29 the constant showed one cycle late)");
 }
 
-/// DIVERGE — flagged. `e4` with the read routed through a same-segment wire
-/// (`let r = x.read(); o.write(r)`): the wire changes nothing, as in V8d.
+/// AGREE (since 2026-10-29) — still flagged. `e4` with the read routed through
+/// a same-segment wire (`let r = x.read(); o.write(r)`): the wire changes
+/// nothing, as in V8d — it diverged with `e4` and flipped with it.
 #[test]
-fn e6_closing_via_wire_then_opening_write_diverges_known_gap() {
+fn e6_closing_via_wire_then_opening_write_agrees_under_the_drive_level_form() {
     let sim = sim_e_in(e6_closing_via_wire_then_opening);
     assert_eq!(sim, vec![0, 0, 12, 0, 0, 0, 16, 0, 0, 0, 20, 0, 0], "simulator behaviour changed");
     if !verilator_available() {
         return;
     }
     let sv = transpile_and_run_driven(E6_SRC, "e6_closing_via_wire_then_opening");
-    assert_eq!(sv, vec![0, 0, 12, 12, 0, 0, 16, 16, 0, 0, 20, 20, 0], "transpiled SV behaviour changed");
-    assert_ne!(sim, sv, "sim and SV now AGREE for e6 — see e4");
+    assert_eq!(sim, sv, "sim and SV diverge for e6 — see e4");
 }
 
 /// DIVERGE — flagged. `e5d` without its trailing tick: the second read has no
@@ -2533,7 +2690,12 @@ fn e5_trailing_immediate_read_makes_the_second_write_opening_diverges_known_gap(
 /// DIVERGE — flagged. A register-free module: a read feeding a plain `Out` is a
 /// passthrough-immediate read (the D2 rule in `classify_reads`), so the simulator
 /// writes `x_N` at the opening while codegen edge-samples `x_{N+1}`. The
-/// register-free clause's witness alongside `e5f`.
+/// register-free clause's witness alongside `e5f`. On the CODEGEN side the port
+/// is mixed (first drive behind the read, second not), so since 2026-10-29 it
+/// takes the drive-level mux + hold form: the second write (the constant) now
+/// agrees, and the SV changed from `[0, 0, 12, 12, 0, 0, 16, 16, …]` to the
+/// vector below; the first write is still one observation late with the next
+/// edge's `x`, which no hold form can show — the divergence this clause refuses.
 #[test]
 fn e4i_register_free_passthrough_then_opening_write_diverges_known_gap() {
     let sim = sim_e_in(e4i_register_free_passthrough_then_opening);
@@ -2542,7 +2704,7 @@ fn e4i_register_free_passthrough_then_opening_write_diverges_known_gap() {
         return;
     }
     let sv = transpile_and_run_driven(E4I_SRC, "e4i_register_free_passthrough_then_opening");
-    assert_eq!(sv, vec![0, 0, 12, 12, 0, 0, 16, 16, 0, 0, 20, 20, 0], "transpiled SV behaviour changed");
+    assert_eq!(sv, vec![0, 0, 12, 0, 0, 0, 16, 0, 0, 0, 20, 0, 0], "transpiled SV behaviour changed");
     assert_ne!(sim, sv, "sim and SV now AGREE for e4i — the passthrough-immediate class is realized; re-derive the register-free clause");
 }
 
@@ -2827,8 +2989,10 @@ fn e8p_extracted_passthrough_diverges_refused() {
 //     is arm-granular but carries a read from any arm past the branch);
 //   * port form: driven on every path → `always_comb` (a continuous assign, or a
 //     mux whose guards are the COMMITTED registers); driven on some paths → mux +
-//     hold when every drive is opening, else an edge-sampled register whose
-//     guards take the edge (forwarded) form.
+//     hold when some drive is opening (the comb copy muxing the opening drives,
+//     the hold register loaded by every drive — drive-level since 2026-10-29;
+//     "when every drive is opening" when this battery was measured), else an
+//     edge-sampled register whose guards take the edge (forwarded) form.
 // Two hazards fall out. (A) MIXED ANCHORS: a read reaches some drive of the
 // port while some drive has a read-free path — the opening write lands one
 // observation late in the SV (or, for a continuous assign, shows the committed
@@ -3245,6 +3409,12 @@ async fn d4d_forwarded_guard_closing(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bi
 /// flags. Every DIVERGE row is flagged and every AGREE row is clean, and no
 /// other pre-tick rule claims any `d*` probe (so an admitted shape is admitted
 /// outright, and a refused one is refused by this rule alone).
+///
+/// Since 2026-10-29 one flagged row AGREES: `d2a`, clause (A)'s two-drive held
+/// witness, realized by the drive-level mux + hold form (`branch_merge_explicit`'s
+/// `tail_o`, the corpus instance of the same shape, agrees with it). The rule is
+/// unchanged and still flags it — narrowing clause (A) is the user's decision —
+/// so this test keeps pinning the rule's verdicts, not the measured ones.
 #[test]
 fn d_the_rederived_rule_flags_exactly_the_diverging_probes() {
     let d1 = |src: &str| {
@@ -3351,20 +3521,25 @@ fn d1g_path_dependent_constant_mux_diverges_refused() {
     assert_ne!(sim, sv, "sim and SV now AGREE for d1g — re-derive clause A of unprotected_pretick_out_write");
 }
 
-/// DIVERGE — REFUSED (clause A). Mixed anchors through two drives of a held
-/// port, with every register assignment behind the read: the closing drive
-/// edge-samples the port, and the opening drive (on committed state) lands one
-/// observation late. The simulator's closing write is never observed (the next
-/// iteration's opening write overwrites it); the SV shows both. Not refused by
-/// the pre-2026-10-28 rule.
+/// AGREE (since 2026-10-29) — still REFUSED (clause A). Mixed anchors through
+/// two drives of a held port, with every register assignment behind the read.
+/// Under the port-wide decision the closing drive edge-sampled the port and the
+/// opening drive (on committed state) landed one observation late: the
+/// simulator's closing write is never observed (the next iteration's opening
+/// write overwrites it) while the SV showed both, `[0, 9, 5, 9, 5, …]`. The
+/// drive-level form muxes the opening `5` under `pc == 1` in the comb copy and
+/// loads the hold register from both drives, so the closing `9` reaches the
+/// hold register at the edge that also sets `pc`, and the comb arm covers it at
+/// the very observation the simulator overwrote it — the SV equals the
+/// simulator. Not refused by the pre-2026-10-28 rule; refused by the re-derived
+/// one, which is unchanged here — retiring clause (A) is the user's decision.
 #[test]
-fn d2a_mixed_two_drives_held_diverges_refused() {
+fn d2a_mixed_two_drives_held_agrees_under_the_drive_level_form() {
     let sim = sim_e_in(d2a_mixed_two_drives_hold);
     assert_eq!(sim, vec![0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5], "simulator behaviour changed");
     if !verilator_available() { return; }
     let sv = transpile_and_run_driven(D2A_SRC, "d2a_mixed_two_drives_hold");
-    assert_eq!(sv, vec![0, 9, 5, 9, 5, 9, 5, 9, 5, 9, 5, 9, 5], "transpiled SV behaviour changed");
-    assert_ne!(sim, sv, "sim and SV now AGREE for d2a — re-derive clause A of unprotected_pretick_out_write");
+    assert_eq!(sim, sv, "sim and SV diverge for d2a — the drive-level mux + hold form regressed (before 2026-10-29 the SV alternated 9 / 5)");
 }
 
 /// DIVERGE — REFUSED (clause A). Mixed anchors through two drives on every

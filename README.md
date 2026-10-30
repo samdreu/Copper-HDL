@@ -214,7 +214,8 @@ restarted from its initial state at each boundary, so the cost stays one
 Verilator build per module. A failure names the sequence it fell in, and
 `COPPER_SWEEP_SEQUENCE=<index>` re-runs that sequence alone. Until then a
 module's verdict rested on one seed — `branch_merge` passed for two months while
-its `tail_o` led the SV by a cycle whenever the first cycle took `sel == 1`.
+its `tail_o` led the SV by a cycle whenever the first cycle took `sel == 1` (the
+lag itself was fixed the next day by the drive-level mux + hold form, below).
 
 A module the sweep cannot run gets an `#[ignore]` with its reason, never an
 omission, and G-D fails if the generator quietly stops covering something. Widths
@@ -489,16 +490,24 @@ counterexample rather than lowered to something plausible:
 
 **Pinned divergences** — shapes the simulator and the transpiler still disagree
 on by one cycle, kept as `#[ignore]`d sweep cases with the reason attached
-rather than papered over (`SKIP` in `build.rs`):
+rather than papered over (`SKIP` in `build.rs`): **none as of 2026-10-29.**
 
-- `branch_merge_explicit`'s `tail_o`, a mixed-anchor port (written behind an
-  input read and, in another state, with no read before it) that leads its SV by
-  one cycle when the first cycle takes the `sel == 1` path — and the same port
-  of its live, unflagged async twin `branch_merge`, which transpiles to the
-  byte-identical SV and which no rule reaches. The single-seed sweep never
-  produced that first cycle for either; the multi-sequence stimulus (above) does,
-  and both rows record the measured trace. (`probe_fsm`, listed here until
-  2026-10-26, agrees and sweeps.)
+- The last one, `branch_merge_explicit`'s `tail_o` — a mixed-anchor port
+  (written behind an input read and, in another state, with no read before it)
+  that led its SV by one cycle when the first cycle took the `sel == 1` path, and
+  the same port of its live, unflagged async twin `branch_merge`, which
+  transpiles to the byte-identical SV and which no rule reaches — was fixed
+  2026-10-29 by the **drive-level mux + hold form**: a conditionally driven
+  plain `Out` with at least one opening drive is a forwarded mux over its
+  opening drives with a `<port>_hold` register every drive loads, so the closing
+  drive keeps its edge-sampled timing and the opening drive is visible at the
+  opening observation (`vlir_lower::opening_hold_outputs`,
+  `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §9.4; the form was hand-written and
+  measured against the simulator before codegen changed). Both twins sweep on
+  every stimulus sequence. The single-seed sweep had never produced that first
+  cycle for either; the multi-sequence stimulus (above) exposed it the day
+  before. (`probe_fsm`, listed here until 2026-10-26, agrees and sweeps.) The
+  rules that refuse the explicit twin's shape are unchanged pending a decision.
 
 The phase-E probe battery (2026-10-23) found two single-phase shapes that
 disagreed by one cycle and that no rule guarded; both are closed as of

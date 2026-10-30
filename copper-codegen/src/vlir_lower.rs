@@ -17,7 +17,7 @@ use copper_core::shir::{
 };
 use copper_core::vlir::{
     VLIRAlwaysFF, VLIRBinOp, VLIRCaseArm, VLIRBody, VLIRCombBody, VLIRCombPhase, VLIRContinuousAssign, VLIRExpr,
-    VLIRFFCaseArm, VLIRFFStmt, VLIRMemDecl, VLIRMemInit, VLIRMemReadNet, VLIRModule, VLIRPort, VLIRPortDir, VLIRPortKind, VLIRRegDecl, VLIRSeqBody, VLIRStmt,
+    VLIRFFCaseArm, VLIRFFStmt, VLIRHoldFormPort, VLIRMemDecl, VLIRMemInit, VLIRMemReadNet, VLIRModule, VLIRPort, VLIRPortDir, VLIRPortKind, VLIRRegDecl, VLIRSeqBody, VLIRStmt,
     VLIRStructuralBody, VLIRSubmoduleInst, VLIRUnOp,
 };
 
@@ -305,6 +305,7 @@ fn lower_seq(
         .unwrap_or(Width::Concrete(1));
 
     let multi_phase = s.phases.len() > 1;
+    let mut hold_form_ports: Vec<VLIRHoldFormPort> = Vec::new();
 
     // Outputs that must behave as implicit-hold registers rather than wires:
     // explicitly-declared `RegOut` ports, plus plain `Out` ports written in some
@@ -377,25 +378,44 @@ fn lower_seq(
         cond_outs.extend(hold_outs.iter().cloned());
 
         // Phase C (cycle-dataflow, `design_docs/PAIRED_IMPLEMENTATION_SCOPE.md`):
-        // a conditionally-driven plain `Out` whose every drive in this phase is an
-        // OPENING drive (`PortAssign::opening` — no `In` read precedes it, so the
-        // simulator runs it at the cycle's opening instant) is visible from the
-        // observation right after the edge that opened the cycle. Registering it
-        // at the edge, as the split below does, publishes it one cycle late — the
-        // measured lag of the control-extracted trailing state (`trailing_update`,
-        // `branch_trailing`, the m2 hand model in
-        // tests/sequential_forwarding_divergence.rs). Such a port keeps its drives
-        // combinational under their guards, defaults to a hold register at the
-        // top of the block (so it holds between writes and infers no latch), and
-        // the hold register is loaded in `always_ff` under the same guards. A
-        // closing drive (behind a read's barrier) keeps the edge-sampled form.
+        // an OPENING drive of a conditionally-driven plain `Out`
+        // (`PortAssign::opening` — no `In` read precedes it, so the simulator runs
+        // it at the cycle's opening instant) is visible from the observation right
+        // after the edge that opened the cycle. Registering it at the edge, as the
+        // split below does, publishes it one cycle late — the measured lag of the
+        // control-extracted trailing state (`trailing_update`, `branch_trailing`,
+        // the m2 hand model in tests/sequential_forwarding_divergence.rs). A port
+        // with at least one opening drive therefore takes the mux + hold form: it
+        // defaults to a hold register at the top of the block (so it holds between
+        // writes and infers no latch), its opening drives stay combinational under
+        // their guards, and the hold register is loaded in `always_ff` by EVERY
+        // drive under the same guards. The decision is per DRIVE (2026-10-29,
+        // `CYCLE_DATAFLOW_SEMANTICS.md` §9.4, the m3 hand model): a CLOSING drive
+        // (behind a read's barrier) of such a port is removed from the comb copy
+        // and takes effect through the hold register at the next edge — the
+        // edge-sampled timing it always had — so a MIXED-anchor port (`branch_merge`'s
+        // `tail_o`: one drive behind the `sel` read, one in the `pc == 1` arm)
+        // realizes both anchors instead of dragging the opening drive one
+        // observation late. Until then the decision was port-wide: one closing
+        // drive edge-sampled every drive of the port. A port whose drives are all
+        // closing keeps the edge-sampled form below, unchanged.
         let opening_outs = opening_hold_outputs(&stmts, &cond_outs, &hold_outs);
         if !opening_outs.is_empty() {
             let mut hold_ff = Vec::new();
-            for port in &opening_outs {
+            for (port, mix) in &opening_outs {
                 cond_outs.remove(port);
                 let hold = hold_register_name(port, &reg_decls, out_widths);
+                // Every drive loads the hold register — shadowed BEFORE the closing
+                // drives leave the comb copy.
                 hold_ff.extend(shadow_hold_ff(&stmts, port, &hold));
+                if mix.closing > 0 {
+                    stmts = strip_closing_drives(&stmts, port);
+                }
+                hold_form_ports.push(VLIRHoldFormPort {
+                    port: port.clone(),
+                    opening: mix.opening,
+                    closing: mix.closing,
+                });
                 let width = out_widths.get(port).cloned().unwrap_or(Width::Concrete(1));
                 reg_decls.push(VLIRRegDecl {
                     name: hold.clone(),
@@ -542,6 +562,7 @@ fn lower_seq(
         always_ff,
         output_assigns,
         port_inits,
+        hold_form_ports,
     })
 }
 
@@ -1456,61 +1477,124 @@ fn phase_scoped_output_ports(phases: &[SHIRPhase]) -> HashSet<String> {
     hold
 }
 
-/// The conditionally-driven plain `Out` ports of one phase whose drives are ALL
-/// opening drives (see `VLIRStmt::PortAssign::opening`), in a deterministic
-/// order. `RegOut` and phase-scoped hold ports are excluded: a `RegOut` write
-/// takes effect at the first edge after it executes, and a port written in only
-/// some phases needs the phase-guarded register. A port with any drive inside a
-/// `for` loop is excluded too — `shadow_hold_ff` does not descend into loops, so
-/// such a port keeps the edge-sampled form rather than silently losing a drive.
+/// The conditionally-driven plain `Out` ports of one phase with AT LEAST ONE
+/// opening drive (see `VLIRStmt::PortAssign::opening`), each with its drive mix,
+/// in a deterministic order. These take the mux + hold form; a port whose drives
+/// are all closing does not (it is edge-sampled). Until 2026-10-29 the predicate
+/// was "all opening" — the port-wide decision that left a mixed-anchor port
+/// edge-sampled. `RegOut` and phase-scoped hold ports are excluded: a `RegOut`
+/// write takes effect at the first edge after it executes, and a port written in
+/// only some phases needs the phase-guarded register. A port with any drive
+/// inside a `for` loop is excluded too — `shadow_hold_ff` does not descend into
+/// loops, so such a port keeps the edge-sampled form rather than silently losing
+/// a drive.
 fn opening_hold_outputs(
     stmts: &[VLIRStmt],
     cond_outs: &HashSet<String>,
     hold_outs: &HashSet<String>,
-) -> Vec<String> {
-    let mut ports: Vec<String> = cond_outs
+) -> Vec<(String, DriveMix)> {
+    let mut ports: Vec<(String, DriveMix)> = cond_outs
         .iter()
         .filter(|p| !hold_outs.contains(*p))
-        .filter(|p| {
-            let mut all_opening = true;
-            let mut any = false;
-            port_drive_flags(stmts, p, false, &mut any, &mut all_opening);
-            any && all_opening
+        .filter_map(|p| {
+            let mut mix = DriveMix::default();
+            port_drive_mix(stmts, p, false, &mut mix);
+            (mix.opening > 0 && !mix.in_loop).then(|| (p.clone(), mix))
         })
-        .cloned()
         .collect();
-    ports.sort();
+    ports.sort_by(|a, b| a.0.cmp(&b.0));
     ports
 }
 
-/// Visit every drive of `port` under `stmts`: records that one exists and
-/// whether every one is an opening drive outside a `for` loop.
-fn port_drive_flags(stmts: &[VLIRStmt], port: &str, in_loop: bool, any: &mut bool, all_opening: &mut bool) {
+/// The drives of one port under one phase's statements: how many are opening,
+/// how many closing, and whether any sits inside a `for` loop.
+#[derive(Default, Debug)]
+struct DriveMix {
+    opening: usize,
+    closing: usize,
+    in_loop: bool,
+}
+
+/// Visit every drive of `port` under `stmts` and tally it into `mix`.
+fn port_drive_mix(stmts: &[VLIRStmt], port: &str, in_loop: bool, mix: &mut DriveMix) {
     for s in stmts {
         match s {
             VLIRStmt::PortAssign { port_name, opening, .. } if port_name == port => {
-                *any = true;
-                if !*opening || in_loop {
-                    *all_opening = false;
+                if *opening {
+                    mix.opening += 1;
+                } else {
+                    mix.closing += 1;
+                }
+                if in_loop {
+                    mix.in_loop = true;
                 }
             }
             VLIRStmt::If { then_stmts, else_stmts, .. } => {
-                port_drive_flags(then_stmts, port, in_loop, any, all_opening);
+                port_drive_mix(then_stmts, port, in_loop, mix);
                 if let Some(e) = else_stmts {
-                    port_drive_flags(e, port, in_loop, any, all_opening);
+                    port_drive_mix(e, port, in_loop, mix);
                 }
             }
             VLIRStmt::Case { arms, default, .. } => {
                 for a in arms {
-                    port_drive_flags(&a.stmts, port, in_loop, any, all_opening);
+                    port_drive_mix(&a.stmts, port, in_loop, mix);
                 }
                 if let Some(d) = default {
-                    port_drive_flags(d, port, in_loop, any, all_opening);
+                    port_drive_mix(d, port, in_loop, mix);
                 }
             }
-            VLIRStmt::ForLoop { body, .. } => port_drive_flags(body, port, true, any, all_opening),
+            VLIRStmt::ForLoop { body, .. } => port_drive_mix(body, port, true, mix),
             _ => {}
         }
+    }
+}
+
+/// The comb half of the DRIVE-LEVEL mux + hold form: `stmts` with every CLOSING
+/// drive of `port` removed, a branch or arm that held nothing else dropped with
+/// it. The opening drives stay where they are; the removed drives survive in the
+/// hold register's `always_ff` load, which `shadow_hold_ff` took from the
+/// complete statement list first. The structural mirror of `split_output_reg`
+/// restricted to one port and one anchor.
+fn strip_closing_drives(stmts: &[VLIRStmt], port: &str) -> Vec<VLIRStmt> {
+    stmts.iter().filter_map(|s| strip_closing_drive(s, port)).collect()
+}
+
+fn strip_closing_drive(s: &VLIRStmt, port: &str) -> Option<VLIRStmt> {
+    match s {
+        VLIRStmt::PortAssign { port_name, opening: false, .. } if port_name == port => None,
+        VLIRStmt::If { condition, edge_condition, then_stmts, else_stmts } => {
+            let tc = strip_closing_drives(then_stmts, port);
+            let ec = else_stmts.as_ref().map(|e| strip_closing_drives(e, port));
+            if tc.is_empty() && ec.as_ref().map_or(true, |c| c.is_empty()) {
+                return None;
+            }
+            Some(VLIRStmt::If {
+                condition: condition.clone(),
+                edge_condition: edge_condition.clone(),
+                then_stmts: tc,
+                else_stmts: ec,
+            })
+        }
+        VLIRStmt::Case { selector, edge_selector, arms, default } => {
+            let arms: Vec<VLIRCaseArm> = arms
+                .iter()
+                .filter_map(|a| {
+                    let st = strip_closing_drives(&a.stmts, port);
+                    (!st.is_empty()).then(|| VLIRCaseArm { selector_value: a.selector_value.clone(), stmts: st })
+                })
+                .collect();
+            let default = default.as_ref().map(|d| strip_closing_drives(d, port)).filter(|d| !d.is_empty());
+            if arms.is_empty() && default.is_none() {
+                return None;
+            }
+            Some(VLIRStmt::Case {
+                selector: selector.clone(),
+                edge_selector: edge_selector.clone(),
+                arms,
+                default,
+            })
+        }
+        other => Some(clone_comb_stmt(other)),
     }
 }
 
@@ -1526,9 +1610,10 @@ fn hold_register_name(port: &str, reg_decls: &[VLIRRegDecl], out_widths: &HashMa
 }
 
 /// The `always_ff` half of phase-C emission: every drive of `port` under `stmts`
-/// becomes `<hold> <= <edge_value>` under the same guard structure, with the
-/// tests in their pre-edge form exactly as `split_output_reg` chooses them. The
-/// combinational copy is left untouched by the caller.
+/// — opening and closing alike — becomes `<hold> <= <edge_value>` under the same
+/// guard structure, with the tests in their pre-edge form exactly as
+/// `split_output_reg` chooses them. The caller keeps the opening drives in the
+/// combinational copy and strips the closing ones (`strip_closing_drives`).
 fn shadow_hold_ff(stmts: &[VLIRStmt], port: &str, hold: &str) -> Vec<VLIRFFStmt> {
     let mut ff = Vec::new();
     for s in stmts {

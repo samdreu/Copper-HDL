@@ -19,7 +19,13 @@ that no rule guards (§9.4; both closed 2026-10-26). **D1 was re-derived 2026-10
 (§10)** against the arm-granular opening walk: the rule now refuses exactly the two
 head-segment hazards the model derives (mixed anchors, a forwarded guard), its
 constant-write clause and "unprotected assignment" conjunct are gone, and four
-measured divergences it had missed are refused. The executor was **not** changed — scoping showed it already implements
+measured divergences it had missed are refused. **The drive-level mux + hold form
+landed 2026-10-29 (§9.4):** phase C's decision is per drive instead of per port,
+so a MIXED-anchor plain `Out` realizes both anchors — `branch_merge`'s `tail_o`
+(the sweep's last measured divergence, its `SKIP` row gone), `d2a`, `e4` and `e6`
+agree, at an sv-baseline cost of exactly the seven mixed-anchor hold-form ports
+and no rule change: clause (A) of D1 and clause 4 of `multi_phase_out_write` still
+refuse shapes the emission now realizes, pending a decision. The executor was **not** changed — scoping showed it already implements
 the model (`PAIRED_IMPLEMENTATION_SCOPE.md` §0). The normative statement of the
 model now lives in `SYNCHRONOUS_SEMANTICS.md` (rebased 2026-08-27, commit c1bf21f);
 this document is the derivation record. Decided 2026-08-26 as:
@@ -419,9 +425,16 @@ on each side, and the two sides decide it differently:
   module made every drive closing). The anchor is control-flow, not dataflow: the
   drive's own operand, an enclosing condition, and the exit test of a wait loop
   the write is duplicated into all count, deferred or immediate. A
-  conditionally driven port whose drives are all opening is emitted as a forwarded
-  combinational mux with a `<port>_hold` register (phase C); any other
-  conditionally driven port is an edge-sampled register under `pc` guards. On the
+  conditionally driven port with **at least one** opening drive is emitted as a
+  forwarded combinational mux with a `<port>_hold` register (phase C): the comb
+  copy muxes its opening drives only, and the hold register is loaded by every
+  drive at the edge, so a closing drive of such a port takes effect through the
+  hold register at the next edge — the edge-sampled timing — while its opening
+  drives are visible at the opening observation (**drive-level since
+  2026-10-29**, §9.4; until then the decision was port-wide, "all drives
+  opening", and a port with one closing drive was edge-sampled as a whole). A
+  conditionally driven port with no opening drive is an edge-sampled register
+  under `pc` guards. On the
   linear multi-tick route there is no mux form at all: two continuous assigns to
   one port are refused as multiply driven, and a port whose value is a phase-local
   wire goes through the phase-guarded hold register.
@@ -436,16 +449,22 @@ Write-window arithmetic (§1) then gives the verdict per write:
 | closing | comb mux | cannot occur: a read before the drive makes it closing on the codegen side too | — |
 
 So a multi-phase port agrees iff **every one of its writes has the same anchor on
-both sides**, and since codegen's emission is port-wide, that means: either no
-write is closing on the codegen side (no input read reaches any write of the port
-— whatever the module reads in other states) or every write is closing on the
-simulator side (each is reached by a deferred read, in a module with registers).
-A port with one opening write and one closing write is
-**mixed**: the closing write drags the port into the edge-sampled form and the
-opening write lands one observation late. That is the "mixed generation" of §4 in
-its multi-phase form — not a mixed-generation *value* but a mixed-anchor *mux* —
-and it is a limitation of the emission's granularity (the drive-level form that
-would realize it is described in §9.4), not of the denotation.
+both sides** — and since 2026-10-29 that criterion is **drive-level**: each
+write is realized by the row of the table its own anchors select, independently
+of the port's other writes. A port with one opening write and one closing write
+(**mixed** anchors) is a forwarded mux over its opening drives with a hold
+register every drive loads, and both writes agree (`branch_merge`'s `tail_o`,
+`d2a`, `e4`, `e6`, measured §9.4). Until then codegen's emission was port-wide
+("all drives opening"), so the closing write dragged the port into the
+edge-sampled form and the opening write landed one observation late — the "mixed
+generation" of §4 in its multi-phase form, not a mixed-generation *value* but a
+mixed-anchor *mux*, and a limitation of the emission's granularity, not of the
+denotation. What still diverges is a write whose anchors differ *between the two
+sides* — an immediate read the codegen walk counts as closing (`e5`, `e4i`,
+`e5f`: the register-free passthrough and trailing-read classes, §9.3 clauses 3
+and 4's second half) — or a drive whose anchor is path-dependent on a single
+write node (W4, `d1f`, `d1g`, `d2b`, `d3c`, §10), which no per-drive form
+reaches.
 
 ### 9.2 Predicted, then measured
 
@@ -462,10 +481,10 @@ tick added) is the shape the row meant.
 | `e3_forwarded_then_committed` | `r = r+1; o.write(r)` / `o.write(r)`, no input | opening / opening | mux + hold (`r + 1` / `r`) | **AGREE** |
 | `e5d_two_closing_deferred` | `x.read()` / `x.read() + cnt`, both followed by a tick | closing / closing | edge-sampled | **AGREE** |
 | `e2x_two_registers_plus_unrelated_read` | `e2` plus `a = x.read()` in the head | opening / opening | edge-sampled (a read anywhere) until 2026-10-26; mux + hold since (arm-granular) | DIVERGE: SV = sim shifted one cycle → **AGREE** since 2026-10-26 |
-| `e4_closing_then_opening` | `x.read()` / `Bits::zero()` | closing / opening | edge-sampled | DIVERGE: the constant one cycle late |
-| `e6_closing_via_wire_then_opening` | `let r = x.read(); o.write(r)` / `Bits::zero()` | closing / opening | edge-sampled | DIVERGE: as `e4` |
+| `e4_closing_then_opening` | `x.read()` / `Bits::zero()` | closing / opening | edge-sampled until 2026-10-29; drive-level mux + hold since | DIVERGE: the constant one cycle late → **AGREE** since 2026-10-29 |
+| `e6_closing_via_wire_then_opening` | `let r = x.read(); o.write(r)` / `Bits::zero()` | closing / opening | as `e4` | DIVERGE: as `e4` → **AGREE** since 2026-10-29 |
 | `e5_two_closing` | `x.read()` / trailing `x.read() + cnt` (no tick after) | closing / **opening** (immediate read) | edge-sampled | DIVERGE: second write one cycle late |
-| `e4i_register_free_passthrough_then_opening` | `x.read()` / `Bits::zero()`, no register | opening (passthrough) / opening | edge-sampled | DIVERGE: both one cycle late |
+| `e4i_register_free_passthrough_then_opening` | `x.read()` / `Bits::zero()`, no register | opening (passthrough) / opening | edge-sampled until 2026-10-29; mixed on the codegen side, so drive-level mux + hold since | DIVERGE: both one cycle late; since 2026-10-29 the constant agrees and the passthrough is still one late with the next edge's `x` |
 | `e5f_two_closing_register_free` | `e5d` without its register | opening / opening (passthrough) | edge-sampled | DIVERGE: both one cycle late |
 | `e7_linear_two_registers` | committed `a` / committed `b`, every tick top-level | opening / opening | **refused**: multiply driven (`vlir_lower`) | refused one IR late |
 | `e7w_linear_phase_local_wires` | `a + 2` / `a + 5` via `let` wires, linear | opening / opening | phase-guarded hold register | DIVERGE: SV = sim shifted one cycle |
@@ -498,7 +517,13 @@ opt-out). A port written in more than one phase is refused iff any of:
    (witness `e4`, `e6`; flipping pair `e5d`, one tick added after `e5`'s trailing
    write), or a trailing *immediate* read reaching this write (witness `e5`; the
    `e8` mechanism inside a multi-phase port — derived for the all-opening case,
-   `mphase_opening_write_then_trailing_immediate_read_flagged`).
+   `mphase_opening_write_then_trailing_immediate_read_flagged`). **Since
+   2026-10-29 the first half's witnesses `e4` and `e6` AGREE** under the
+   drive-level form (§9.4) — the clause's "edge-samples the whole port" premise
+   no longer holds for them; `e5` still diverges (its second write's read is
+   immediate in the simulator and closing in codegen, a cross-side mismatch the
+   form does not touch). The clause is **unchanged**: narrowing it on this
+   evidence is a decision of its own, and `EXPECTED_MULTI_PHASE` is as it was.
 5. **a wait loop's read before an opening write** — a folded tick-bearing loop
    that reads an input is no Comb predecessor of the write after it, so the
    simulator side counts the write as opening, while control extraction
@@ -550,15 +575,59 @@ different mechanism and remains pinned as an `*_unguarded_gap` test:
   pinned one-cycle lag among them flipped to agreement on the first run** —
   including the D1 constant-write clause's own witnesses (`pc_arm_*`) and the W4
   witness `probe_fsm` (its `#[ignore]`d sim-vs-Verilog test passes and it sweeps).
-  `branch_merge_explicit`'s own lag is not among them: its `tail_o` is also
-  written behind the deferred `sel` read — a mixed-anchor port, edge-sampled —
-  and it still leads by one when the first cycle takes the `sel == 1` path
-  (measured 2026-10-26), which the seeded sweep never does: the live twin
-  `branch_merge` passes the sweep for that reason alone, a pre-existing blind
-  spot recorded here and in `PRETICK_ALIGNMENT_GUARDRAIL.md` §5.5, not fixed.
-  No referenced module (BaseJump, the pipelined CPU lane, the golden fixtures,
-  `pattern_detector_010`, the CDC reference) changed. The D1 rules were untouched
-  by that change; their re-derivation on this evidence is §10 (2026-10-28).
+  `branch_merge_explicit`'s own lag was not among them: its `tail_o` is also
+  written behind the deferred `sel` read — a mixed-anchor port, edge-sampled
+  under the port-wide decision — and it still led by one when the first cycle
+  took the `sel == 1` path (measured 2026-10-26), which the seeded sweep never
+  did: the live twin `branch_merge` passed the sweep for that reason alone, a
+  blind spot recorded here and in `PRETICK_ALIGNMENT_GUARDRAIL.md` §5.5, exposed
+  by the multi-sequence stimulus 2026-10-28, and **fixed 2026-10-29 by the
+  drive-level form below**. No referenced module (BaseJump, the pipelined CPU
+  lane, the golden fixtures, `pattern_detector_010`, the CDC reference) changed
+  in either landing. The D1 rules were untouched by the arm-granular change;
+  their re-derivation on that evidence is §10 (2026-10-28).
+- **The drive-level mux + hold form — LANDED 2026-10-29**
+  (`vlir_lower::opening_hold_outputs`, the m3 hand model in
+  `tests/sequential_forwarding_divergence.rs`). Phase C's decision was port-wide:
+  a conditionally driven plain `Out` took the forwarded mux + `<port>_hold` form
+  only when *every* drive was opening, so one closing drive edge-sampled every
+  drive of the port and its opening drives landed one observation late — the
+  mixed-anchor limitation of §9.1. Derived first from the per-write verdict
+  table: a mixed port's comb copy should carry only its opening drives
+  (`assign tail_o = (pc == 1) ? 1 : tail_o_hold;`) and its hold register should
+  be loaded by **every** drive — the closing drive then takes effect through the
+  hold register at the next edge (the edge-sampled timing, the table's third
+  row) and the opening drive at the opening observation (the first row).
+  Hand-written for `branch_merge` and measured against the simulator before any
+  codegen change (`m3_drive_level_model_matches_the_simulator_for_branch_merge_on_both_first_cycles`:
+  under `sel = 1` first both show `(1, 0, 1)` at cycle 0, under `sel = 0` first
+  both show `(1, 1, 1)` throughout — matched on the first run); then codegen was
+  changed to emit exactly that: a port with at least one opening drive takes
+  the form, `strip_closing_drives` removes its closing drives from the comb
+  copy, and `shadow_hold_ff` loads the hold register from the complete drive
+  list. The all-opening case emits byte-for-byte what it did; the all-closing
+  case stays edge-sampled. **sv-baseline delta: seven modules, every one a
+  mixed-anchor hold-form port, no referenced module** — declared from the SHIR
+  anchor tags before the diff (`copper-codegen/tests/hold_form_audit.rs` pins
+  the exact set through `copper_codegen::hold_form_ports`): the `branch_merge`
+  twins' `tail_o` (and the probe file's verbatim copy), `d2a`, `e4`, `e6`, and
+  `e4i`, which the declared list had missed — its register-free body is mixed on
+  the codegen side only. **Measured flips, every one on the first run:**
+  `branch_merge` sim ≡ model ≡ SV on both first cycles and the sweep passes all
+  six of its sequences (both twins' `SKIP` rows deleted; the explicit twin keeps
+  its opt-out as a D1 witness); `d2a` SV `[0, 9, 5, 9, 5, …]` → `[0, 5, 5, …]`
+  = sim; `e4` and `e6` SV `[0, 0, 12, 12, 0, 0, 16, 16, …]` → `[0, 0, 12, 0, 0,
+  0, 16, 0, …]` = sim. `e4i` changed trace and still diverges (its constant
+  agrees now, its passthrough drive is still one late with the next edge's
+  `x`). Unchanged and still divergent, as the model says: `w4_mixed_alignment`,
+  `d1f`, `d1g`, `d2b`, `d3c` (a single write node whose anchor is
+  path-dependent, or an every-path mux — no per-drive form reaches them) and
+  `e5` (a cross-side anchor mismatch). **No rule changed.** D1's clause (A)
+  still refuses `d2a` and `branch_merge_explicit`'s `tail_o`, and
+  `multi_phase_out_write` clause 4 still refuses `e4` and `e6`, although the
+  emission now realizes them: the exact-set corpus pins, the parity audit and the
+  rule-verdict tests are untouched, and retiring or narrowing either clause on
+  this evidence is a decision of its own.
 - **`e8_single_phase_trailing_immediate_read`** — `for{tick}; o.write(x.read()
   + cnt)`. A trailing read is immediate in the simulator (it shows `x_N + cnt` at
   the opening observation) and a closing drive in codegen (`x_{N+1} + cnt` one
@@ -618,8 +687,10 @@ for a drive `W` of a plain `Out` port `o`:
   `always_comb` continuous assign (forwarded if opening, committed if closing) or
   mux, whose **guards take the committed form** (`emit.rs`: `always_comb` uses
   `condition`, the edge form is taken only by the `always_ff` split); driven on
-  **some** paths it is phase C's forwarded mux + hold register when every drive is
-  opening, else an edge-sampled register with edge-form guards.
+  **some** paths it is phase C's forwarded mux + hold register when some drive is
+  opening — the comb copy muxing the opening drives, the hold register loaded by
+  every drive (drive-level since 2026-10-29; "when every drive is opening" until
+  then) — else an edge-sampled register with edge-form guards.
 - **One more simulator fact the probes exposed.** A closing write followed by the
   next iteration's opening write of the same port is **never observed**: the
   opening write runs in the post-edge settle of the same edge, before the
@@ -667,7 +738,7 @@ Constant-operand drives (`x` is the `Bits<8>` input driven `10 + k`; `pc`/`phase
 | `d1e_const_all_paths_no_read` | `if pc == 0 { o.write(7); pc = 1 } else { o.write(3); pc = 0 }` | opening / opening | comb mux on committed `pc` | **AGREE** |
 | `d1f_const_path_dependent_hold` | read on one arm; `if phase == 0 { o.write(7) }` after the merge | opening on the read-free path (closing path never writes) | edge-sampled (read carried past the branch) | DIVERGE: SV `[0, 7, …]` vs sim `[7, 7, …]` |
 | `d1g_const_path_dependent_all_paths` | `d1f` with an `else { o.write(3) }` | closing / opening | comb mux on committed `phase` | DIVERGE: sim holds 7, SV alternates |
-| `d2a_mixed_two_drives_hold` | `if pc == 1 { o.write(5) }; if x.read()[0] { o.write(9); pc = 1 } else { pc = 0 }` — no unprotected assignment | opening / closing | edge-sampled | DIVERGE: sim `[0, 5, 5, …]`, SV `[0, 9, 5, 9, 5, …]` |
+| `d2a_mixed_two_drives_hold` | `if pc == 1 { o.write(5) }; if x.read()[0] { o.write(9); pc = 1 } else { pc = 0 }` — no unprotected assignment | opening / closing | edge-sampled until 2026-10-29; drive-level mux + hold since | DIVERGE: sim `[0, 5, 5, …]`, SV `[0, 9, 5, 9, 5, …]` → **AGREE** since 2026-10-29 (the hold register loads 9 at the edge that sets `pc`, and the comb arm covers it at the very observation the simulator overwrote it) |
 | `d2b_mixed_two_drives_all_paths` | `if phase == 0 { x.read(); o.write(1); … } else { o.write(2); … }` | closing / opening | comb mux | DIVERGE: sim `[2, 2, …]`, SV `[2, 1, 2, 1, …]` |
 | `d2c_two_closing_drives_hold` | `d2a` with the first drive moved behind the read | closing / closing | edge-sampled | **AGREE** |
 
@@ -735,7 +806,12 @@ Pins: `cfg.rs` unit tests `d1f_…_flagged` / `d1b_…_not_flagged`,
 
 **Not done, recorded.** Hazard (B) is an emission limitation — the comb copy of a
 branch guarding an opening drive could take the edge form, as the `always_ff`
-copy already does (`TODO` cause N is the mirror image) — and (A)'s two-drive
-and path-dependent forms would need the drive-level emission §9.4 names. Both
-are codegen changes with their own sv-baseline decision; the rule refuses the
-shapes until then.
+copy already does (`TODO` cause N is the mirror image). **(A)'s two-drive held
+form landed 2026-10-29** as the drive-level emission of §9.4: `d2a` and
+`branch_merge_explicit`'s `tail_o` agree with their SV now. (A)'s
+path-dependent forms do not and cannot by that route — `w4_mixed_alignment`,
+`d1f`, `d1g`, `d2b`, `d3c` are one write node whose anchor differs per path, or
+an every-path mux, and still diverge. **The rule is unchanged**: it refuses
+`d2a` and `branch_merge_explicit` as before, `EXPECTED_FLAGGED` is as it was,
+and whether clause (A) is narrowed to the path-dependent residue is a decision
+of its own, taken on the measured evidence of §9.4.

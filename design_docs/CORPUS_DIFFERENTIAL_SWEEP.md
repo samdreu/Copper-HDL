@@ -14,10 +14,10 @@ every full run. The current counts are in the build and regression printouts abo
 143 modules, and on 2026-10-28 146 running, 9 ignored-with-reason, out of 155. Every
 ignored one is a row in `build.rs`'s `SKIP` table — a recorded
 transpiler refusal, a structural module with no simulatable body, a deliberate
-divergence witness, a measured divergence (`branch_merge`, §0), a stimulus
-precondition the sweep will not keep (`mod8`, §0), or the pipelined CPU, whose
-`Memory` parameter the harness cannot supply. **None is "the generator cannot do
-this."**
+divergence witness, a stimulus precondition the sweep will not keep (`mod8`, §0),
+or the pipelined CPU, whose `Memory` parameter the harness cannot supply (the
+one measured divergence of the lowering, `branch_merge`, was fixed 2026-10-29 and
+sweeps, §0). **None is "the generator cannot do this."**
 
 ## 0. What the sweep found — the 2026-08-25 log, compressed
 
@@ -75,7 +75,7 @@ the findings are the argument for the sweep.
   landed and the sweep's `sel == 1` first-cycle sequence failed the case on the first
   run (`FAIL: Cycle 832 tail_o expected 1 got 0 (sequence 5 "first sel=1", cycle 0)`;
   two of the four seeds open with `sel == 1` too and fail at their cycle 0), which
-  is the `SKIP` row it carries now. **Three other modules changed verdict on the
+  became its `SKIP` row (fixed and deleted 2026-10-29, below). **Three other modules changed verdict on the
   same run, none a divergence of the lowering, each a precondition the single seed
   had satisfied by luck:** `simple_counter` starts from `Bits::<8>::x()` and `lfsr`
   (both copies) from a Rust initial value of 1 that the emitted SV does not carry
@@ -91,6 +91,23 @@ the findings are the argument for the sweep.
   Verilator's 0 — and got a `SKIP` row (the sweep does no stimulus masking, §3.4);
   its operator stays covered by hand-written vectors. Every other case passed its
   four seeds and its first-cycle sequences.
+* **2026-10-29 (the drive-level mux + hold form): the `branch_merge` finding fixed
+  at its source, and the sweep's last measured divergence of the lowering is gone.**
+  `tail_o` is a mixed-anchor port — written behind the deferred `sel` read in the
+  `pc == 0` else-arm and with no read before it in the `pc == 1` arm — and phase
+  C's emission decided per port, so the one closing drive edge-sampled both and
+  the opening one landed one observation late. The form the denotation calls for
+  was hand-written and measured against the simulator first (the m3 model in
+  `tests/sequential_forwarding_divergence.rs`), then codegen landed it: a
+  conditionally driven plain `Out` with at least one opening drive takes the mux
+  + `<port>_hold` form, its comb copy muxing the opening drives only while every
+  drive loads the hold register (`vlir_lower::opening_hold_outputs`,
+  `CYCLE_DATAFLOW_SEMANTICS.md` §9.4). Both twins pass all six sequences on the
+  first run; both `SKIP` rows are deleted. sv-baseline delta: the seven
+  mixed-anchor hold-form ports in the corpus and nothing else (pinned as an exact
+  set by `copper-codegen/tests/hold_form_audit.rs`), no referenced module, no
+  golden re-blessed. The rules that refuse the explicit twin's shape are
+  unchanged, pending a decision.
 * **2026-10-29 (register power-on values): the `lfsr` finding fixed at its source.**
   The transpiler carried a register's initializer into the SV only when it was an
   integer literal or an enum variant; every constructor call — `Bits::zero()`,
@@ -261,8 +278,9 @@ That is this repo's recurring bug class, not a hypothetical.
 per-module seed (64 vectors for a combinational module) — so a module's verdict
 rested on one stimulus, and a divergence that depends on the initial input pattern
 was invisible. The instance that made this a bug rather than a caveat is
-`branch_merge` (§0, 2026-10-28): its seed happened to drive `sel == 0` first, under
-which its `tail_o` lag cannot be seen. The policy below is what replaced it; the
+`branch_merge` (§0, 2026-10-28; the lag itself fixed 2026-10-29): its seed happened
+to drive `sel == 0` first, under which its `tail_o` lag could not be seen. The
+policy below is what replaced it; the
 constants are `build.rs`'s `SEEDS`, `SEED_CYCLES`, `FIRST_CYCLES`,
 `EXHAUSTIVE_BITS`, `COMB_EXHAUSTIVE_BITS`, `COMB_VECTORS`, and the plan itself is
 built at run time by `StimulusPlan` in `tests/common/mod.rs` (the generator cannot

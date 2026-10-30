@@ -34,6 +34,18 @@
 > divergences the old rule missed (`d1g`, `d2a`, `d2b`, `d4c`) are refused.
 > Sixteen probes, every trace pinned, zero live modules flagged.
 >
+> **2026-10-29 — the drive-level mux + hold form (§5.5 closed; `CYCLE_DATAFLOW_SEMANTICS.md`
+> §9.4).** Phase C's emission decides per drive instead of per port, so a
+> mixed-anchor plain `Out` realizes both anchors: `branch_merge`'s `tail_o` —
+> the sweep's last measured divergence — agrees on every stimulus sequence and
+> both twins' `SKIP` rows are gone; clause (A)'s two-drive held witness `d2a`
+> and `multi_phase_out_write`'s `e4` / `e6` agree with it. **The rules are
+> unchanged** and still refuse those shapes (`EXPECTED_FLAGGED`,
+> `EXPECTED_MULTI_PHASE` as they were); whether clause (A) narrows to its
+> path-dependent residue (`w4_mixed_alignment`, `d1f`, `d1g`, `d2b`, `d3c`, all
+> still divergent) and clause 4 to the immediate-read half (`e5`) is a decision
+> of its own, not taken here.
+>
 > **The rules.** All four live in `copper-analysis/src/cfg.rs` as methods on `Cfg`
 > (re-exported as free functions from `copper_analysis`). The corpus-cost column is
 > **history**: each figure was measured once, at the named commit, and is not
@@ -762,7 +774,19 @@ sel=1` sequence at cycle 0 — `FAIL: Cycle 832 tail_o expected 1 got 0 (sequenc
 own with the trace in its sentence and a probe with the pinned vectors
 (`sequential_forwarding_divergence.rs::branch_merge_tail_leads_its_sv_when_the_first_cycle_takes_sel_one`:
 sim `(head, mid, tail)` = `(1, 0, 1)` at cycle 0, SV `(1, 0, 0)`, equal from cycle 1).
-The divergence itself is unchanged — a finding the sweep can now see, not a fix.
+The divergence itself was unchanged then — a finding the sweep could now see, not
+a fix. **FIXED 2026-10-29 by the first remedy, the drive-level form**
+(`vlir_lower::opening_hold_outputs`; `CYCLE_DATAFLOW_SEMANTICS.md` §9.4): the
+form was hand-written for `branch_merge` first — `tail_o`'s comb copy carries its
+opening `pc == 1` drive, `tail_o_hold` is loaded by both drives — and measured
+against the simulator on both first cycles before codegen changed (the m3 hand
+model beside m2 in `sequential_forwarding_divergence.rs`); codegen now emits
+exactly that for any conditionally driven plain `Out` with at least one opening
+drive, and both twins agree with their byte-identical SV on all six sweep
+sequences. Both `SKIP` rows are deleted; the probe is renamed
+`branch_merge_agrees_when_the_first_cycle_takes_sel_one` and pins the agreement
+with the same vectors. `branch_merge_explicit` keeps its opt-out: the rule still
+refuses its `tail_o` (below), and whether it should is a decision of its own.
 **The clause was retired 2026-10-28 (§5.8):** the
 re-derived rule refuses `branch_merge_explicit`'s `tail_o` as a mixed-anchor port
 (its minimal pair is `d2a`), admits `pc_arm_*` (opening on both sides), and no
@@ -919,6 +943,20 @@ the head region, so neither clause reaches it, and the mechanism is the
 multi-phase mixed-anchor one under control extraction's duplication. Since
 2026-10-28 it is no longer seed-masked — the sweep's multi-sequence stimulus
 exposes it and its `SKIP` row records the measured trace.
+
+**2026-10-29 — (A)'s two-drive held form is realized; the rule is not changed.**
+The drive-level form landed (`CYCLE_DATAFLOW_SEMANTICS.md` §9.4): a
+conditionally driven plain `Out` with at least one opening drive takes the mux +
+hold form, its comb copy muxing the opening drives and its hold register loaded
+by every drive. Measured flips on the first run: `d2a` (SV `[0, 9, 5, 9, 5, …]`
+→ `[0, 5, 5, …]` = sim) and `branch_merge_explicit`'s `tail_o` (with the live
+twin `branch_merge`, §5.5 — sweeps on every sequence, no row). Still divergent,
+as the model says: `w4_mixed_alignment`, `d1f`, `d1g`, `d2b`, `d3c` — one write
+node whose anchor differs per path, or an every-path mux, which no per-drive
+form reaches — and both (B) witnesses. **Clause (A) is unchanged** and still
+refuses `d2a` and `branch_merge_explicit`; `EXPECTED_FLAGGED`, the unit pairs,
+the ui cases and the parity audit are as they were. Narrowing the clause to the
+path-dependent residue on this evidence is a decision of its own.
 
 ---
 

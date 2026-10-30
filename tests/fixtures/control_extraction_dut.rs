@@ -99,19 +99,26 @@ async fn branch_merge(
 // `tail_o` is written both behind the deferred `sel` read (closing) and in the
 // `pc == 1` arm with no read before it (opening) — MIXED anchors, clause (A) of the
 // re-derived D1 rule (2026-10-28; the minimal pair is
-// sequential_forwarding_divergence.rs::d2a). The port is held, so it is
-// edge-sampled, and the `pc == 1` write leads its emitted SystemVerilog by one
-// cycle when the first cycle takes the `sel == 1` path (measured 2026-10-26; until
-// 2026-10-28 the sweep's single seed took `sel == 0` first, which masked it in BOTH
-// twins — since then the sweep's multi-sequence stimulus exposes it in both, and
-// each twin has a build.rs SKIP row recording the measured lag). `head_o`
-// (written before the read) takes phase C's mux + hold form and
-// `mid_o` (only behind the read) is edge-sampled; both agree. The flag silences the
-// error, not the detection — the module stays visible to every corpus scan, and
-// its twin `branch_merge` is deliberately left unflagged so the structural
-// comparison still pairs the same port styles (no D1 clause reaches the async
-// spelling; its lag is pinned by
-// sequential_forwarding_divergence.rs::branch_merge_tail_leads_its_sv_when_the_first_cycle_takes_sel_one).
+// sequential_forwarding_divergence.rs::d2a), which still refuses it. Until
+// 2026-10-29 the port was edge-sampled (phase C's decision was port-wide, and the
+// closing drive dragged the opening one with it), and the `pc == 1` write led its
+// emitted SystemVerilog by one cycle when the first cycle took the `sel == 1`
+// path (measured 2026-10-26; until 2026-10-28 the sweep's single seed took
+// `sel == 0` first, which masked it in BOTH twins; the multi-sequence stimulus
+// then exposed it in both, and each twin had a build.rs SKIP row). Since
+// 2026-10-29 the DRIVE-LEVEL form (`vlir_lower::opening_hold_outputs`) muxes the
+// opening drive in the comb copy and loads `tail_o_hold` from both drives, the
+// twins agree with the simulator on every sequence, and both sweep with no row.
+// `head_o` (written before the read) takes the all-opening mux + hold form and
+// `mid_o` (only behind the read) is edge-sampled; both always agreed. The flag
+// silences the error, not the detection — the module stays visible to every
+// corpus scan and in `EXPECTED_FLAGGED` (the rule is unchanged; whether clause (A)
+// is narrowed on this evidence is the user's decision) — and its twin
+// `branch_merge` is deliberately left unflagged so the structural comparison
+// still pairs the same port styles (no D1 clause reaches the async spelling; its
+// agreement is pinned by
+// sequential_forwarding_divergence.rs::branch_merge_agrees_when_the_first_cycle_takes_sel_one
+// and the m3 hand model beside it).
 #[hardware(sequential, allow_pretick_alignment)]
 async fn branch_merge_explicit(
     clk: Clock<MainClk>,
