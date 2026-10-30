@@ -210,8 +210,12 @@ pub struct CHIRMemoryDecl {
     /// Both are at least 1.
     pub read_lat: usize,
     pub write_lat: usize,
-    /// Preloaded contents from `from_fn` / `from_contents`; `None` for `new`
-    /// (which zero-fills, matching an unwritten array).
+    /// Contents at power-on: the preload of `from_fn` / `from_contents`, or — since
+    /// 2026-10-29 — a zero `Fill` for `new`, because the simulator starts a memory
+    /// at `T::default()` (zero) and the emitted array must say so rather than rely
+    /// on Verilator's zero-fill (`COPPER_VERILATOR_X_INITIAL=1` randomizes it).
+    /// `None` only for a received memory (the owner's array) and for an array
+    /// register whose element is `Bits::x()`.
     pub init: Option<CHIRMemInit>,
     /// RECEIVED memory (2026-08-27, the cause-P port ABI): the module is HANDED
     /// its storage as a `Memory<…>` parameter instead of declaring it. The body

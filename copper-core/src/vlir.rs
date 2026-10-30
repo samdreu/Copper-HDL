@@ -121,6 +121,14 @@ pub struct VLIRSeqBody {
     /// Single `always_ff` block — all register updates.
     pub always_ff: VLIRAlwaysFF,
     pub output_assigns: Vec<VLIRContinuousAssign>,
+    /// Output ports the module drives from `always_ff` — a `RegOut` flop, or the
+    /// edge-sampled register of a conditionally driven plain `Out` — with their
+    /// widths. Each gets `<port> = 0` in the module's `initial` block (2026-10-29):
+    /// a port's power-on value is its wire's, which the harness starts at zero and
+    /// which the simulator shows until the first write; the `<port>_hold` register
+    /// of the opening-drive form states the same value through `reg_decls`. Not
+    /// declared here (the port list declares them), so they are not `VLIRRegDecl`s.
+    pub port_inits: Vec<(String, Width)>,
 }
 
 #[derive(Debug)]
@@ -141,10 +149,14 @@ pub struct VLIRRegDecl {
     /// values and exposed 63 corpus modules). A four-state simulator otherwise
     /// keeps X, and a synthesizer may treat a self-driven uninitialized register
     /// as undefined forever and delete it (Yosys removed `sipo_block`'s phase
-    /// counter and every gate that read it, 2026-09-02). `None` for a register
-    /// initialized to `Bits::x()` — undefined, nothing to state, the design needs
-    /// a reset — and for a register born inside the loop, whose value is assigned
-    /// before it is read.
+    /// counter and every gate that read it, 2026-09-02). A register codegen
+    /// synthesizes without a Rust initializer — a port's `<port>_hold`, a memory's
+    /// read/write stage, a hoisted cross-state local born from an input read — is
+    /// `Some(0)`: its simulator-side value is the wire's zero or an empty pipeline
+    /// (decided 2026-10-29; the port flops themselves are `VLIRSeqBody::port_inits`).
+    /// `None` only for a register initialized to `Bits::x()` — undefined, nothing
+    /// to state, the design needs a reset — and for a register born inside the
+    /// loop that stays in its state, whose value is assigned before it is read.
     pub init: Option<VLIRExpr>,
 }
 

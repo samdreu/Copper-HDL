@@ -1875,10 +1875,12 @@ fn lower_seq_body(
                 if fir.registers.iter().any(|r| r == &local.name) || local.init.is_none() {
                     // A local control extraction hoisted out of its state keeps its
                     // init for the type (`HOISTED_CROSS_STATE_ATTR`): the state assigns
-                    // it before any read, so its power-on value is unobservable. A
-                    // constant one is stated anyway (as it always was for a literal);
-                    // a non-constant one — typically an input read — is simply not,
-                    // rather than refused as an author's initializer would be.
+                    // it before any read, so its power-on value is unobservable by the
+                    // program. A constant one is stated as it is; a non-constant one —
+                    // typically an input read — gets zero (2026-10-29: the flop still
+                    // exists, and a registered port can forward it before the state
+                    // assigns it, e.g. `mac_pipeline`'s `product_r`) rather than being
+                    // refused as an author's initializer would be.
                     let hoisted = local
                         .attrs
                         .iter()
@@ -1893,7 +1895,7 @@ fn lower_seq_body(
                             local.span,
                         ) {
                             Ok(init) => init,
-                            Err(_) if hoisted => None,
+                            Err(_) if hoisted => Some(CHIRLit { ty: ty.clone(), value: 0 }),
                             Err(e) => return Err(e),
                         },
                         None => None,
@@ -1911,7 +1913,7 @@ fn lower_seq_body(
             RawStmtKind::Local(local) => {
                 // A `Memory<..>` binding is a hardware submodule (an array plus
                 // per-port buses), not a wire — it has no bit width to infer.
-                if let Some((decl, raw_init)) =
+                if let Some((mut decl, raw_init)) =
                     parse_memory_decl(&local.name, local.init.as_ref(), local.span)?
                 {
                     mem_infos.insert(
@@ -1922,9 +1924,19 @@ fn lower_seq_body(
                             write_ports: decl.write_ports,
                         },
                     );
-                    if let Some(raw) = raw_init {
+                    match raw_init {
                         // Lowered once the context exists, like the pre-loop wires.
-                        pending_mem_inits.push((memories.len(), raw));
+                        Some(raw) => pending_mem_inits.push((memories.len(), raw)),
+                        // `Memory::new`: the simulator starts a memory at
+                        // `T::default()`, zero, so the array states a zero fill —
+                        // the same form a `from_fn` preload takes — rather than
+                        // relying on Verilator's zero-fill (2026-10-29).
+                        None => {
+                            decl.init = Some(CHIRMemInit::Fill {
+                                var: "__copper_init_i".to_string(),
+                                value: CHIRExpr::Lit(CHIRLit { ty: decl.elem_ty.clone(), value: 0 }),
+                            });
+                        }
                     }
                     memories.push(decl);
                     continue;

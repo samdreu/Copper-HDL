@@ -106,6 +106,13 @@ the findings are the argument for the sweep.
   (`sv-baseline diff`), `lfsr`'s `RESET` row is gone and its pin in
   `tests/lfsr_equivalence.rs` asserts the pre-reset agreement; `simple_counter`
   keeps its row — it starts from `Bits::<8>::x()`, which is what the table is for.
+  The randomized sweep's remaining 36 failures were all codegen-synthesized state
+  with no Rust initializer (Appendix A); the user decided the same day that it is
+  stated too — port flops, memory stage registers and hoisted input-read locals at
+  zero, `Memory::new` arrays as a zero fill — after which the switch passes every
+  transpiled leg (162 of 163 cases, `RESET`-row modules included); the one failure
+  left is `ram_read_first`'s hand-written reference, whose array is deliberately
+  uninitialized (§3.3).
 * **After the log:** the `SKIP` table gained `<wrapper>::<module>` keys because the
   *example* copy of `ripple_carry_adder` refused (cause J-b) while the fixture copy
   swept; J-b closed 2026-08-27 and both copies sweep, but the key form stays. On
@@ -352,13 +359,22 @@ edge-sampled register of a conditionally driven plain `Out` (`bsg_dff_en`'s
 (`mac_pipeline`'s `product_r`) — or an unpreloaded `Memory` array (`ram_*`,
 `dual_port_ram`, the `regs` register file). Their simulator-side power-on value is
 the harness wire's zero or `Memory::new`'s `T::default()`, a convention of the
-harness rather than anything the module states; `vlir_lower` already gives a
-`<port>_hold` register `initial = 0` on exactly that convention. Whether the rest
-should be stated the same way is **open** (recorded 2026-10-29, not decided; the
-exact set, per module, register and class, is Appendix A), so the randomized sweep
-is a measurement, not a gate. The hand-rolled callers of
-`tests/common::verilator_command` are outside the switch, as they are outside the
-model cache. It is a switch, not the default: the default sweep keeps the
+harness rather than anything the module states; `vlir_lower` already gave a
+`<port>_hold` register `initial = 0` on exactly that convention. **Decided the same
+day: state them all.** Every such register now gets `= 0` in the module's `initial`
+block (`VLIRSeqBody::port_inits` for the port flops, `init: Some(0)` for the stage
+registers and hoisted locals) and every `Memory::new` array a zero fill (the
+simulator starts a memory at `T::default()`); Appendix A keeps the measured set.
+After that the randomized sweep passes 162 of its 163 cases, the three `RESET`-row
+modules included (their reset is asserted on cycle 0 and the comparison starts
+there). The one failure is not a transpiled leg at all: `ram_read_first`'s
+**independent reference** (`tests/fixtures/reference_sv/ram_read_first.sv`, a
+`REFERENCE` row) leaves its array deliberately uninitialized, so under randomized
+power-on the hand-written RAM reads random words where the simulator and the
+transpiled SV — which agree with each other — read zero; the hand-written file is
+the author's and is left as written. The hand-rolled callers
+of `tests/common::verilator_command` are outside the switch, as they are outside
+the model cache. It is a switch, not the default: the default sweep keeps the
 zero-fill comparison the `RESET` table was written against.
 
 ### 3.4 The tables
@@ -449,12 +465,16 @@ keep the old path rather than debug it afterwards. This *is* that oracle, and it
 
 ---
 
-## Appendix A — the power-on residual, recorded not fixed (2026-10-29)
+## Appendix A — the power-on residual, measured 2026-10-29 (since stated)
 
-The 36 of 163 sweep cases that still fail under `COPPER_VERILATOR_X_INITIAL=1` after
-every Rust register initializer reaches the SV (§3.3). Each row lists the registers
-the module's emitted SystemVerilog leaves without an `initial` value, read off the
-emission itself; none is a register the Rust source initializes. The classes:
+The 36 of 163 sweep cases that still failed under `COPPER_VERILATOR_X_INITIAL=1` once
+every Rust register initializer reached the SV (§3.3), as measured before the
+decision to state them: each row lists the registers the module's emitted
+SystemVerilog then left without an `initial` value, read off the emission itself;
+none is a register the Rust source initializes. **Every class below is now stated
+as zero** (same day, the user's decision; `SYNCHRONOUS_SEMANTICS.md`, *Register
+power-on values*), so the table is the measurement history, kept so the decision
+can be revisited without re-measuring. The classes:
 
 * **B1** — a `RegOut` port's flop. The simulator shows the harness wire's initial
   value (zero) until the first write; the SV flop states nothing.
@@ -472,10 +492,10 @@ emission itself; none is a register the Rust source initializes. The classes:
 * **C** — an unpreloaded `Memory` array (`Memory::new`): the simulator fills it
   with `T::default()` (zero), the SV array states nothing.
 
-Not a `RESET` row's business (the table is for state that is X by design); a
-decision to state these as `initial = 0` — the convention the `_hold` register
-already encodes — would close every row below, and the switch re-measures it
-without this list being re-derived.
+Not a `RESET` row's business (the table is for state that is X by design). Stating
+these as `initial = 0` — the convention the `_hold` register already encoded —
+closed every row below; the switch re-measures it without this list being
+re-derived.
 
 | module | unstated register(s) | class |
 |---|---|---|

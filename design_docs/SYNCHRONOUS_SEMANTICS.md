@@ -138,6 +138,19 @@ because its zero-fill is zero (`COPPER_VERILATOR_X_INITIAL=1` randomizes the pow
 values and measured 63 diverging corpus modules before the fix). A register born *inside*
 the loop is assigned before it is read on every path and has no power-on value to state.
 
+**State the module does not initialize in Rust starts at zero, and the SV says so**
+(decided 2026-10-29, measured first under `COPPER_VERILATOR_X_INITIAL=1`): an output
+port's register — a `RegOut` flop, or the edge-sampled register of a conditionally
+driven plain `Out` (the enabled-register idiom), or the `<port>_hold` register of the
+opening-drive form — holds the port's wire value until the first write, and a wire
+starts at zero (`wire(Bits::zero())` in every harness); a `Memory::new` array starts at
+`T::default()`, zero, and its read and write pipelines start empty; a cross-state local
+that control extraction hoists into a flop starts at zero if its initializer is not a
+constant (its own state assigns it before the program reads it, but a registered port
+can forward the flop before that). Each is emitted as `<reg> = 0` in the module's
+`initial` block, or a zero fill of the array — so under randomized power-on the only
+state that can differ is `Bits::x()`, which is what a `RESET` row is for.
+
 `initial` is honored by simulators and by FPGA tools (the value becomes the flip-flop's
 INIT) and ignored by most ASIC flows, so a design that must work without it needs a
 reset. The value is stated regardless: a four-state simulator otherwise keeps X, and a
