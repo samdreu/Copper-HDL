@@ -301,6 +301,13 @@ const EXPECTED_LATE_CONSTANT: &[&str] = &[
     // admits the input-free class — and the module agrees with its SV under
     // phase C's emission (the folded loop is this rule's conservative direction).
     "tests/sequential_forwarding_divergence.rs::pulse_plain",
+    // §10.8 (2026-11-02): register-free trailing constants on the linear route —
+    // `trailing_constant`'s shape (e15p), and two whose divergence is not only the
+    // transient (e15z, e15aa: an immediate guard read, which the linear rule and
+    // the trailing rule's guard clause refuse as well)
+    "tests/sequential_forwarding_divergence.rs::e15p_trailing_constant",
+    "tests/sequential_forwarding_divergence.rs::e15z_trailing_every_path_constants",
+    "tests/sequential_forwarding_divergence.rs::e15aa_trailing_held_constant",
 ];
 
 #[test]
@@ -426,6 +433,17 @@ const EXPECTED_TRAILING_OUT_INPUT: &[&str] = &[
     "tests/sequential_forwarding_divergence.rs::e8_single_phase_trailing_immediate_read",
     "tests/sequential_forwarding_divergence.rs::e8m_linear_two_ticks",
     "tests/sequential_forwarding_divergence.rs::e8p_extracted_passthrough",
+    // §10.8 (2026-11-02): the register-free trailing cells on the linear route,
+    // and the guard clause — an immediate read in an enclosing `if` (e15aa, e15ab,
+    // e15z on the linear route; e15ai on the extraction route, outside every
+    // rule until then)
+    "tests/sequential_forwarding_divergence.rs::e15n_trailing_input_direct",
+    "tests/sequential_forwarding_divergence.rs::e15o_trailing_wire_from_input",
+    "tests/sequential_forwarding_divergence.rs::e15u_trailing_conditional_input",
+    "tests/sequential_forwarding_divergence.rs::e15z_trailing_every_path_constants",
+    "tests/sequential_forwarding_divergence.rs::e15aa_trailing_held_constant",
+    "tests/sequential_forwarding_divergence.rs::e15ab_trailing_held_wire_from_constant",
+    "tests/sequential_forwarding_divergence.rs::e15ai_extracted_trailing_held_register_guard_read",
 ];
 
 #[test]
@@ -479,8 +497,11 @@ fn trailing_out_reads_input_flags_exactly_the_demonstration_modules() {
 /// Every witness is a measured probe in `tests/sequential_forwarding_divergence.rs`
 /// (all opted out), derived and matched on the first run; `e7w` is also
 /// `multi_phase_out_write`'s and `e14k` also `pretick_out_write_before_update`'s.
-/// Zero live modules when the rule landed. A module joining this set is either a
-/// real divergence to measure or a rule regression to fix.
+/// Zero live modules when the rule landed, and zero again when it was restated
+/// by form and freed of its register requirement (2026-11-02, §10.8: the
+/// register-free class, the phase-gated comb forms, the held conditional drive).
+/// A module joining this set is either a real divergence to measure or a rule
+/// regression to fix.
 const EXPECTED_LINEAR_ANCHOR: &[&str] = &[
     // a register committed at another edge, behind a deferred read: on one path
     // (e13), on every path (e13a), in the head (e14e), updated in the trailing
@@ -499,6 +520,36 @@ const EXPECTED_LINEAR_ANCHOR: &[&str] = &[
     "tests/sequential_forwarding_divergence.rs::e14k_trailing_wire_no_read",
     "tests/sequential_forwarding_divergence.rs::e14m_trailing_wire_after_update",
     "tests/sequential_forwarding_divergence.rs::e7w_linear_phase_local_wires",
+    // §10.8 (2026-11-02): the register-free class and the forms by shape.
+    // clause 3 — an input-valued continuous assign (its read deferred, an
+    // immediate passthrough, or trailing: e8m joins from the trailing rule)
+    "tests/sequential_forwarding_divergence.rs::e15a_head_input_direct",
+    "tests/sequential_forwarding_divergence.rs::e15b_head_input_behind_read",
+    "tests/sequential_forwarding_divergence.rs::e15g_middle_input_direct",
+    "tests/sequential_forwarding_divergence.rs::e15h_middle_input_behind_read",
+    "tests/sequential_forwarding_divergence.rs::e15n_trailing_input_direct",
+    "tests/sequential_forwarding_divergence.rs::e8m_linear_two_ticks",
+    // clause 3 — a register-free constant behind a deferred read outside the head
+    "tests/sequential_forwarding_divergence.rs::e15j_middle_constant_behind_read",
+    // clause 2 — the flop form written at the opening: a constant-valued wire
+    // outside the head (a startup transient), a trailing wire or held drive
+    // whose guard or value reads the input immediately
+    "tests/sequential_forwarding_divergence.rs::e15l_middle_wire_from_constant",
+    "tests/sequential_forwarding_divergence.rs::e15q_trailing_wire_from_constant",
+    "tests/sequential_forwarding_divergence.rs::e15o_trailing_wire_from_input",
+    "tests/sequential_forwarding_divergence.rs::e15u_trailing_conditional_input",
+    "tests/sequential_forwarding_divergence.rs::e15aa_trailing_held_constant",
+    "tests/sequential_forwarding_divergence.rs::e15ab_trailing_held_wire_from_constant",
+    // clause 1 — the phase-gated comb forms (a latch Verilator refuses): every-path
+    // conditional drives, and a held drive no read precedes (e15ac, e15ad agree
+    // with the lint off and are refused for the form)
+    "tests/sequential_forwarding_divergence.rs::e15t_middle_conditional_constant",
+    "tests/sequential_forwarding_divergence.rs::e15w_head_every_path_constants",
+    "tests/sequential_forwarding_divergence.rs::e15x_middle_every_path_inputs",
+    "tests/sequential_forwarding_divergence.rs::e15z_trailing_every_path_constants",
+    "tests/sequential_forwarding_divergence.rs::e15wr_head_every_path_constants_registered",
+    "tests/sequential_forwarding_divergence.rs::e15ac_middle_every_path_register_no_read",
+    "tests/sequential_forwarding_divergence.rs::e15ad_middle_held_register_guard_no_read",
 ];
 
 #[test]

@@ -219,7 +219,8 @@ tracking its inputs for the rest of that cycle.
   A plain `Out` written in `C` from such a read has the same problem in a body
   that crosses more than one edge — the extraction route edge-samples the drive
   one observation late and the linear multi-tick route emits a continuous assign
-  the phase does not gate — and is refused by `Cfg::trailing_out_reads_input`
+  the phase does not gate — and is refused by `Cfg::trailing_out_reads_input` (since
+  2026-11-02 the read may sit in the drive's guard as well as its value: `e15ai`, §10.8)
   (2026-10-26, same remedies; the single-tick body, whose trailing region is the
   whole cycle, agrees and is exempt — the `e8*` probes measure every variant).
 
@@ -472,6 +473,21 @@ about its region is what separates them.
   Zero live modules at landing. Pins: `pretick_alignment_corpus.rs::EXPECTED_LINEAR_ANCHOR`
   (twelve probes), the `linear_*` unit tests in `cfg.rs`, `ui/fail/linear_anchor_mismatch.rs`
   (the `e13a` shape) and the `linear_*` shapes in `ui/pass/pretick_alignment_ok.rs`.
+  **Restated by form 2026-11-02 (`CYCLE_DATAFLOW_SEMANTICS.md` §10.8)**, after the
+  register-free linear class — for which the rule had returned nothing — was measured on
+  thirty-six probes, every verdict predicted first: the body need not have registers; a
+  conditional write on every path of its segment, or preceded by no input read, is a
+  phase-gated `always_comb` with no assignment outside the phase (a latch Verilator refuses;
+  refused for the form — `e15t`, `e15w`, `e15x`, `e15z`, `e15wr`, `e15ac`, `e15ad`); a held
+  conditional write behind a read is the flop and is admitted (`e15r`, `e15s`, `e15v`, and
+  `e15af`, `e15ag`, which the operand-kind reading had refused); an input-valued continuous
+  assign is refused whatever precedes it (the register-free direct `o.write(x.read())` is an
+  immediate passthrough that samples once per iteration — `e15a`, `e15g`; `e8m` joins from
+  the trailing rule); a constant-valued wire's one-late flop is a startup transient, refused
+  outside the head (`e15l`, `e15q`) and admitted in it (`e15f`, `e15fr` — the latter refused
+  before). `EXPECTED_LINEAR_ANCHOR` is thirty-two probes; new ui cases
+  `fail/linear_regfree_every_path.rs`, `fail/linear_regfree_passthrough.rs` and three
+  `linear_regfree_*` / `linear_held_*` pass shapes. Zero live modules.
 
 **The constant-write clause — found 2026-08-25, retired 2026-10-28.** The sweep found
 `branch_merge_explicit` leading its own emitted SystemVerilog by one cycle, and the minimal pairs

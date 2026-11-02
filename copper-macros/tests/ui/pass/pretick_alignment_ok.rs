@@ -377,3 +377,46 @@ async fn linear_wire_behind_read(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o
         clk.tick().await;
     }
 }
+
+// `e15k_middle_wire_from_input` (§10.8, 2026-11-02): a register-free linear
+// two-tick body whose write goes through a same-segment wire behind the wire's
+// own deferred read — the phase-guarded flop samples at the closing edge, where
+// the simulator wrote. The direct `o.write(x.read())` is the refused
+// ui/fail/linear_regfree_passthrough.rs.
+#[hardware(sequential)]
+async fn linear_regfree_wire_behind_read(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    loop {
+        clk.tick().await;
+        let t = x.read() + Bits::from_lit::<1>();
+        o.write(t);
+        clk.tick().await;
+    }
+}
+
+// `e15r_head_conditional_input` (§10.8): a held conditional write behind its
+// guard's deferred read is the edge-sampled flop under the phase and the guard,
+// closing on both sides. With an `else` arm it is the refused
+// ui/fail/linear_regfree_every_path.rs.
+#[hardware(sequential)]
+async fn linear_regfree_held_behind_read(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    loop {
+        if x.read()[1] == Logic::One { o.write(x.read()); }
+        clk.tick().await;
+        clk.tick().await;
+    }
+}
+
+// `e15af_middle_held_constant_behind_read_registered` (§10.8): a held constant
+// behind a read is the flop, not the continuous assign, so there is no startup
+// transient — §10.7's operand-kind reading refused it until 2026-11-02.
+#[hardware(sequential)]
+async fn linear_held_constant_behind_read(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+    }
+}

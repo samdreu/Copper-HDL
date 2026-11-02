@@ -1336,10 +1336,262 @@ first tick enters on the assumption that the write is opening there
 the second edge (`e14d`), which this rule refuses as the "constant outside the
 head segment" case — both doc comments now say so.
 
-**Unmeasured, by construction on the refusing side or outside the rule.** A
-register-free linear multi-tick body (the rule returns nothing; the
-passthrough classification makes a direct `o.write(x.read())` immediate there,
-and any other shape is unmeasured — clause 3's territory). A drive whose
-operand mixes a wire and a register (`o.write(t + cnt)`) is treated as
-wire-valued, which is what the lowering does with any expression over a
-phase-local wire; no probe measured the mixed operand on its own.
+**Measured since 2026-11-02 (§10.8): the register-free linear multi-tick
+body.** The rule returned nothing for it by construction; §10.8 measured the
+class on twenty-seven probes plus nine controls, found the forms the
+operand-kind statement above never met (a conditional drive's form follows its
+shape: a held drive behind a read is the flop, an every-path or read-free
+conditional drive a phase-gated comb copy that is a latch), restated the rule
+by form with no register requirement, and narrowed two of this section's
+clauses (`e15fr`, `e15af`, `e15ag` — agreeing shapes the operand-kind reading
+refused). **Still unmeasured:** a drive whose operand mixes a wire and a
+register (`o.write(t + cnt)`) is treated as wire-valued, which is what the
+lowering does with any expression over a phase-local wire; no probe measured
+the mixed operand on its own.
+
+### 10.8 The register-free linear multi-tick class — the form is chosen by the drive's SHAPE as well (derived 2026-11-02, then measured)
+
+§10.7 left one class of the linear multi-tick route unmeasured: a body with no
+inferred register (every local dead across each tick). Its rule returned
+nothing there by construction, and the only older clause that names the class
+— `multi_phase_out_write` clause 3, "a register-free body with reads" — sits
+behind clause 1 and reaches no single-phase port on this route. This section
+measures the class, and on the way reads two forms off the transpiler that
+§10.7 never met because its fourteen probes wrote the port unconditionally.
+
+**What is different in a register-free body.** The simulator anchor is the
+same two-anchor rule (§9.1) with the one classification the D2 fix added: a
+read that is the *direct* argument of `o.write(…)` in a register-free body is
+**immediate** (`classify_reads`'s passthrough case), so `o.write(x.read())`
+samples the input at the opening of its segment's cycle however many ticks
+follow, while `let t = x.read(); o.write(t)` and a read in an `if` condition
+are deferred as before. Nothing else varies: a register-free body has no value
+that changes between edges except an input, so a wire with no input in it is
+a constant.
+
+**Forms read off the transpiler** (register-free and registered alike — the
+form never looks at the register set; every one confirmed on the probe below
+before the table was written), per plain-`Out` drive on the linear
+multi-tick route:
+
+| drive shape | emitted form |
+|---|---|
+| unconditional, operand a register / input / constant | `assign o = v` — the continuous assign (§10.7) |
+| unconditional, operand a same-segment wire (constant-valued or not) | `if (phase_r == p) o <= t` — the phase-guarded flop (§10.7); a trailing drive is hoisted into phase 0 |
+| conditional, **held** (some path of its segment does not write the port), an input read before it in its arm's walk | `if (phase_r == p) if (g) o <= v` — the edge-sampled flop under the phase and its guards, whatever the operand |
+| conditional, held, **no** read before it | the drive-level mux + `o_hold` form (§9.4) **gated by the phase**: `always_comb if (phase_r == p) begin o = o_hold; if (g) o = v; end` — no assignment outside the phase |
+| conditional, written on **every** path of its segment | `always_comb if (phase_r == p) begin if (g) o = v1; else o = v2; end` — a phase-gated mux with no assignment outside the phase |
+
+The last two forms assign `o` only while `phase_r == p`, so the synthesized
+`o` is a **latch** outside its phase. Verilator under `-Wall` — the sweep's and
+the equivalence harness's flags — reports `LATCH` and exits non-zero (5.044,
+measured on `e15t`'s SV before this table), so every such module is **refused
+one IR late** exactly as `e7`'s multiply-driven port is (§9.3 clause 1); the
+trace below is what the form shows with `-Wno-LATCH`, measured so the clause
+is about a mechanism and not only a lint. The single-tick body emits the same
+comb forms without the phase gate (no latch) and is exempt from everything
+below, as §9.4 measured for the continuous assign.
+
+**The model, per (form, simulator anchor):**
+
+- continuous assign, input operand: the assign shows the input at every
+  observation; the simulator publishes the one value the write sampled, once
+  per iteration (deferred: at its closing edge, §10.7's `e14c`; immediate
+  passthrough: at the segment's opening). On a route whose iteration spans
+  more than one observation the two cannot agree — **an input-valued
+  continuous assign diverges on this route whatever precedes it** (the
+  single-tick body, one observation per iteration, agrees: `e8l`).
+- continuous assign, constant: §10.7's rows (`e14d`, `e14i`) and
+  `out_first_driven_late`.
+- phase-guarded flop (unconditional wire, or held behind a read): closing
+  → agree; opening → the flop loads one observation late. In a register-free
+  body an opening wire is constant-valued, so the lag is a **startup
+  transient** (the first load is the segment's first closing edge) — invisible
+  when that edge is edge 0, the head segment's; visible in any other segment.
+  An opening held drive behind a read exists only in the trailing region (an
+  immediate read in its guard): the hoisted flop samples the guard at phase 0's
+  edge, the simulator tested it at the post-edge settle of the last tick — the
+  `e8` mechanism through the guard, which `trailing_out_reads_input` does not
+  see (it reads the drive's value sources only).
+- phase-gated comb (every-path, or held with no read): refused by Verilator.
+  With the lint off: closing → the comb copy is transparent during its
+  segment and shows the closing value one observation **early**, from the
+  observation the segment opens on; opening over committed registers and
+  constants → agree (nothing it reads changes inside the segment); any
+  immediate input read in it → the transparent copy tracks the input where
+  the simulator sampled once.
+
+**The probes** (`tests/sequential_forwarding_divergence.rs`, the `e15*`
+tests; `x = 10 + k`, thirteen observations, period two; "H/M/T" = head /
+middle / trailing segment; `x[0]` alternates every cycle and `x[1]` every two,
+so a head or middle drive keyed on `x[1]` sees both values and a drive keyed
+on `x[0]` at an even edge sees only `0`). Every row was written before the
+probe ran; "rules today" is what the tree at 444e0bd says about the module.
+
+| probe | segment, shape | form | sim anchor | predicted (sim / SV) | mechanism | rules today |
+|---|---|---|---|---|---|---|
+| `e15a_head_input_direct` | H, `o.write(x.read())` | assign | opening (passthrough) | DIVERGE: `[10, 11, 11, 13, 13, …, 21, 21]` / `[10, 11, …, 22]` | the head's passthrough runs at the loop re-entry (the trailing instant) and samples once per iteration; the assign tracks | none |
+| `e15b_head_input_behind_read` | H, `let _ = x.read(); o.write(x.read())` | assign | closing | DIVERGE: `[10, 10, 12, 12, …, 22]` / `[10, …, 22]` | `e14c`'s: the assign changes at the other edge | none |
+| `e15c_head_constant` | H, `o.write(7)` | assign | opening | AGREE: all `7` | — | none |
+| `e15d_head_constant_behind_read` | H, read then `o.write(7)` | assign | closing | AGREE: all `7` | `e14i`'s: the closing edge is edge 0 | none |
+| `e15e_head_wire_from_input` | H, `let t = x.read() + 1; o.write(t)` | flop, phase 0 | closing | AGREE: `[11, 11, 13, 13, …, 23]` | `e14l`'s: uniform | none |
+| `e15f_head_wire_from_constant` | H, `let t = 7; o.write(t)` | flop, phase 0 | opening | AGREE: all `7` | the lag is unobservable: a constant whose first load is edge 0 | none |
+| `e15g_middle_input_direct` | M, `o.write(x.read())` | assign | opening (passthrough) | DIVERGE: `[10, 10, 12, 12, …, 22]` / `[10, …, 22]` | the passthrough samples at the opening of M's cycle; the assign tracks | none |
+| `e15h_middle_input_behind_read` | M, read then `o.write(x.read())` | assign | closing | DIVERGE: `[0, 11, 11, 13, 13, …, 21, 21]` / `[10, …, 22]` | `e14c` exactly | none |
+| `e15i_middle_constant` | M, `o.write(7)` | assign | opening | AGREE: all `7` | `late_constant_one_edge`'s | none |
+| `e15j_middle_constant_behind_read` | M, read then `o.write(7)` | assign | closing | DIVERGE at the first observation: `[0, 7, 7, …]` / all `7` | `e14d`'s transient | none (`out_first_driven_late` clears the segment the first tick enters) |
+| `e15k_middle_wire_from_input` | M, `let t = x.read() + 1; o.write(t)` | flop, phase 1 | closing | AGREE: `[0, 12, 12, 14, 14, …, 22, 22]` | `e14b`'s | none |
+| `e15l_middle_wire_from_constant` | M, `let t = 7; o.write(t)` | flop, phase 1 | opening | DIVERGE at the first observation: all `7` / `[0, 7, 7, …]` | `e14a`'s lag, visible once: the flop's first load is edge 1 | none |
+| `e15m_middle_wire_from_constant_behind_read` | M, read then `let t = 7; o.write(t)` | flop, phase 1 | closing | AGREE: `[0, 7, 7, …]` | uniform | none |
+| `e15n_trailing_input_direct` | T, `o.write(x.read())` | assign | opening (immediate) | DIVERGE: `[0, 11, 11, 13, 13, …, 21, 21]` / `[10, …, 22]` | `e8m` without its register | `trailing_out_reads_input` |
+| `e15o_trailing_wire_from_input` | T, `let t = x.read() + 1; o.write(t)` | flop hoisted to phase 0 | opening (immediate) | DIVERGE: `[0, 12, 12, 14, 14, …, 22, 22]` / `[11, 11, 13, 13, …, 23]` | `e14k`'s: the hoisted flop samples at phase 0's edge | `trailing_out_reads_input` |
+| `e15p_trailing_constant` | T, `o.write(7)` | assign | opening | DIVERGE at the first observation: `[0, 7, …]` / all `7` | `trailing_constant`'s | `out_first_driven_late` |
+| `e15q_trailing_wire_from_constant` | T, `let t = 7; o.write(t)` | flop hoisted to phase 0 | opening | DIVERGE at the first observation: `[0, 7, …]` / all `7` | `e14k`'s lag reversed by the hoist: the flop loads at edge 0, the simulator writes after edge 1 | none (`out_first_driven_late` sees `t`, not a constant) |
+| `e15r_head_conditional_input` | H, `if x.read()[1] { o.write(x.read()) }` | held flop, phase 0 ∧ `x[1]` | closing | AGREE: `[10, 10, 10, 10, 14, 14, 14, 14, 18, 18, 18, 18, 22]` | uniform: the guard's deferred read parks the passthrough at the edge the flop samples | none |
+| `e15s_middle_conditional_input` | M, the same | held flop, phase 1 ∧ `x[1]` | closing | AGREE: `[0, 11, 11, 11, 11, 15, 15, 15, 15, 19, 19, 19, 19]` | uniform | none |
+| `e15t_middle_conditional_constant` | M, `if x.read()[1] { o.write(7) } else { o.write(3) }` | phase-gated comb (every path) — **LATCH** | closing | DIVERGE: `[0, 7, 7, 3, 3, 7, 7, 3, 3, 7, 7, 3, 3]` / `[7, 7, 3, 3, 7, 7, 3, 3, 7, 7, 3, 3, 7]` | the transparent copy shows each closing value one observation early | none |
+| `e15u_trailing_conditional_input` | T, `if x.read()[1] { o.write(x.read()) }` | held flop hoisted to phase 0 | opening (immediate) | DIVERGE: `[0, 11, 11, 11, 11, 15, 15, 15, 15, 19, 19, 19, 19]` / `[10, 10, 10, 10, 14, 14, 14, 14, 18, 18, 18, 18, 22]` | the hoisted flop samples guard and value at phase 0's edge | `trailing_out_reads_input` (through the value) |
+| `e15v_middle_conditional_wire` | M, `let t = x.read() + 1; if t[1] { o.write(t) }` | held flop, phase 1 ∧ `t[1]` | closing | AGREE: `[0, 0, 0, 14, 14, 14, 14, 18, 18, 18, 18, 22, 22]` | uniform | none |
+| `e15w_head_every_path_constants` | H, `if x.read()[0] { o.write(7) } else { o.write(3) }` | phase-gated comb — **LATCH** | closing | DIVERGE: all `3` / `[3, 7, 3, 7, …]` | the transparent copy shows `x` at every odd observation where the simulator wrote at an even edge | none |
+| `e15x_middle_every_path_inputs` | M, `if x.read()[1] { o.write(x.read()) } else { o.write(x.read() + 1) }` | phase-gated comb — **LATCH** | closing | DIVERGE: `[0, 11, 11, 14, 14, 15, 15, 18, 18, 19, 19, 22, 22]` / `[10, 11, 13, 14, 14, 15, 17, 18, 18, 19, 21, 22, 22]` | the transparent copy tracks the input | none |
+| `e15y_single_tick_every_path_constants` | single tick, `e15w`'s body | comb mux, no gate | closing | AGREE: `[3, 7, 3, 7, …]` | the single-tick exemption | none |
+| `e15z_trailing_every_path_constants` | T, `e15w`'s `if` | phase-gated comb hoisted to phase 0 — **LATCH** | opening (immediate) | DIVERGE: `[0, 7, 7, …]` / `[3, 7, 3, 7, …]` | the transparent copy tracks the input the simulator sampled once | `out_first_driven_late` |
+| `e15aa_trailing_held_constant` | T, `if x.read()[0] { o.write(7) }` | held flop hoisted to phase 0 | opening (immediate) | DIVERGE: `[0, 7, 7, …]` / all `0` | the hoisted flop tests `x` at even edges, where `x[0]` is never set | `out_first_driven_late` |
+| `e15ab_trailing_held_wire_from_constant` | T, `if x.read()[0] { let t = 7; o.write(t) }` | held flop hoisted to phase 0 | opening (immediate) | DIVERGE: `[0, 7, 7, …]` / all `0` | as `e15aa` | none — the guard's immediate read is invisible to `trailing_out_reads_input`, and `t` to `out_first_driven_late` |
+
+Controls with a register (`cnt`, updated in the segment the drive is not in),
+for the clauses the register-free rows commit to, and the single-tick guard
+control:
+
+| probe | shape | form | sim anchor | predicted (sim / SV) | mechanism | rules today |
+|---|---|---|---|---|---|---|
+| `e15wr_head_every_path_constants_registered` | `e15w` plus `cnt` | phase-gated comb — **LATCH** | closing | DIVERGE: all `3` / `[3, 7, 3, 7, …]` | as `e15w` — the form is the same with registers | none (D1: not mixed; §10.7's rule admits a head constant) |
+| `e15ac_middle_every_path_register_no_read` | M, `if cnt[0] { o.write(cnt) } else { o.write(3) }` | phase-gated comb — **LATCH** | opening | AGREE with the lint off: `[1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3, 3, 7]`; refused as emitted | nothing the copy reads changes inside the segment | none |
+| `e15ad_middle_held_register_guard_no_read` | M, `if cnt[0] { o.write(cnt) }` | phase-gated mux + hold — **LATCH** | opening | AGREE with the lint off: `[1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5, 5, 7]`; refused as emitted | the hold form realizes the opening drive | none |
+| `e15fr_head_wire_from_constant_registered` | `e15f` plus `cnt` | flop, phase 0 | opening | AGREE: all `7` | as `e15f` | **§10.7's rule refuses it** (a wire with no deferred read) — a false positive, unmeasured until now |
+| `e15af_middle_held_constant_behind_read_registered` | M, `let _ = x.read(); if cnt[0] { o.write(7) }` | held flop, phase 1 ∧ `cnt[0]` | closing | AGREE: `[0, 7, 7, …]` | uniform — the flop, not the assign, so no transient | **§10.7's rule refuses it** (a constant behind a read outside the head) — a false positive: the clause assumed the assign form |
+| `e15ag_middle_held_register_behind_read_registered` | M, `if x.read()[1] { o.write(cnt) }` | held flop, phase 1 ∧ `x[1]` | closing | AGREE: `[0, 1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5, 5]` | uniform — the flop samples the committed register the write forwarded | **§10.7's rule refuses it** (a register assigned outside the segment) — a false positive for the same reason |
+| `e15ah_single_tick_held_input` | single tick, `tick; if x.read()[0] { o.write(x.read()) }` | held flop, `x[0]`, no gate | opening (immediate) | AGREE: `[0, 11, 11, 13, 13, …, 21, 21]` | the post-edge write and the edge sample see the same `x` | none (exempt) |
+| `e15ai_extracted_trailing_held_register_guard_read` | extraction route, `cnt = cnt + 1; for 2 { tick }; if x.read()[0] { o.write(cnt) }` | edge-sampled in the trailing arm | opening (immediate) | DIVERGE: `[0, 1, 1, 2, 2, …, 6, 6]` / all `0` | `e8`'s mechanism through the guard: the arm samples `x` at the next edge, an even one | none — the guard blind spot on the other route |
+
+**The clause the rows commit to** — `Cfg::linear_out_write_anchor_mismatch`
+restated by *form*, with the register requirement gone. On the linear route
+(`!has_nested_tick`) crossing more than one tick, per plain-`Out` drive `w`,
+with "segment" as in §10.7 and "conditional" = nested under an `if`/`match`:
+
+1. **phase-gated comb copy** — `w` is conditional and either written on every
+   path of its segment or preceded by no input read in its arm's walk: refused
+   (the form is a latch outside its phase; Verilator refuses it, and with the
+   lint off a closing drive shows one observation early). `e15t`, `e15w`,
+   `e15x`, `e15z`, `e15wr`; `e15ac`, `e15ad` (agreeing traces, unbuildable).
+2. **edge-sampled flop** — `w` is wire-valued (its operand reads a local
+   *defined inside the loop* that is neither a register nor an input; a
+   pre-loop binding such as `lfsr`'s `xor_mask` or `mp_rom`'s `Memory` local is
+   a constant or committed state, not a wire — the first cut of the restated
+   rule counted `mp_rom`'s `rom` as one and fired before
+   `memory_result_drives_plain_out`, caught by that rule's own test), or
+   conditional and held behind a read: refused iff some path from its segment's entry reaches it with no
+   deferred read (`e14a`, `e14h`, `e14k`, `e14m`, `e7w`; `e15l`, `e15q`;
+   `e15o`, `e15u`, `e15aa`, `e15ab`), **except** an unconditional
+   constant-valued wire in the head segment, whose lag no observation can show
+   (`e15f`, `e15fr`). Admitted: `e14b`, `e14l`, `e15e`, `e15k`, `e15m`,
+   `e15r`, `e15s`, `e15v`, `e15af`, `e15ag`.
+3. **continuous assign** — unconditional, operand a register, input or
+   constant: refused iff the operand reads an input (`e14c`, `e15a`, `e15b`,
+   `e15g`, `e15h`, `e15n`, `e8m`), or a deferred read reaches `w` and the
+   operand is a register assigned outside `w`'s segment or after `w` (`e13`,
+   `e13a`, `e14e`, `e14j`, `e14n`) or a constant outside the head segment
+   (`e14d`, `e15j`). Admitted: `e13b`, `e14f`, `e14g`, `e14i`, `e15c`,
+   `e15d`, `e15i`, `e15p` (`out_first_driven_late`'s).
+
+Clauses 2 and 3 narrow §10.7's statement in one place each — the head
+constant wire, and the held conditional drive behind a read, which §10.7's
+operand-kind reading put under the assign clauses although its form is the
+flop — and widen it in two: the input operand needs no deferred read (the
+passthrough), and the phase-gated comb forms are refused. The single-phase
+clause of `multi_phase_out_write`, D1 and the trailing rules are unchanged by
+this section; `trailing_out_reads_input` gains the guard's immediate read
+(`e15ai`, and `e15aa`/`e15ab`/`e15u`/`e15z` on this route, which clause 2
+also refuses). If any row misses, the model is wrong and nothing lands.
+
+**Measured 2026-11-02 — every verdict matched on the first run** (thirty-six
+probes; every trace is pinned in the battery and quoted in the rows above, and
+the seven `LATCH` refusals were asserted against Verilator 5.044 under `-Wall`
+before each trace was taken with the lint off). Before any rule changed, the
+tree at 444e0bd refused exactly the "rules today" column: eleven of the
+register-free rows by nothing at all (`e15a`, `e15b`, `e15g`, `e15h`, `e15j`,
+`e15l`, `e15q`, `e15t`, `e15w`, `e15x`, `e15ab`), one registered row by nothing
+(`e15wr`), the extraction-route control by nothing (`e15ai`), and three
+agreeing registered rows by §10.7's rule (`e15fr`, `e15af`, `e15ag`).
+
+**The decision — the rule restated by form, its register requirement gone,
+both front-ends; the trailing rule reads guards.** `Cfg::linear_out_write_anchor_mismatch`
+is the three-clause statement above, verbatim: on the linear route crossing
+more than one tick, per plain-`Out` drive, (1) a conditional drive on every
+path of its segment or preceded by no input read is refused for its form — a
+phase-gated comb copy that is a latch outside its phase, which the sweep's
+Verilator refuses, so the front-ends refuse it as they refuse `e7`'s
+multiply-driven port (`e15ac` and `e15ad` agree with the lint off and are
+refused all the same, recorded here); (2) a wire-valued drive, or a held
+conditional drive behind a read, is refused iff some path from its segment's
+entry reaches it with no deferred read, except an unconditional
+constant-valued wire in the head segment; (3) an unconditional register-,
+input- or constant-valued drive is refused iff its operand reads an input, or
+a deferred read reaches it and the operand is a register assigned outside its
+segment or after it, or a constant outside the head segment. Two of §10.7's
+cells narrow: the head constant wire (`e15fr`) and the held conditional drive
+behind a read (`e15af`, `e15ag`), which the operand-kind reading had put under
+the assign clauses although their form is the flop — all three measured
+agreeing and admitted, their opt-outs dropped. `trailing_out_reads_input`
+counts an immediate read in the drive's guard as it counts one in its value,
+on both routes (`e15ai`; `e15aa`, `e15ab`, `e15u`, `e15z` on this route are
+also clause 2's). `multi_phase_out_write` clause 3 is untouched: it sits
+behind clause 1 and never reached this route's single-phase ports, which is
+why the class was unguarded. D1, V8 and `out_first_driven_late` are unchanged
+(`e15p`, `e15z`, `e15aa` are the last rule's as before, `e15z` and `e15aa`
+now also this rule's and the trailing rule's).
+
+**Corpus cost: zero live modules, for every rule touched.**
+`EXPECTED_LINEAR_ANCHOR` grew by the nineteen refused `e15*` probes and
+`e8m` (an input-valued assign in the trailing region — clause 3's, and the
+trailing rule's as before); `EXPECTED_TRAILING_OUT_INPUT` by `e15n`, `e15o`,
+`e15u`, `e15z`, `e15aa`, `e15ab`, `e15ai`; `EXPECTED_LATE_CONSTANT` by `e15p`,
+`e15z`, `e15aa`; nothing else among the clocked modules of `examples/`, `src/`
+and `tests/`. The parity audit's rule list is unchanged and exact. The
+sv-baseline delta against 444e0bd is the thirty-six probe modules and no
+existing module (the probes were snapshotted before the rule changed, and the
+rule change itself moved no emission). The hold-form audit's exact set is unchanged
+with `e15ad` in the corpus, so the linear route's phase-gated mux + hold form
+is not recorded in `hold_form_ports` (which pins the extraction route's and
+the single-tick route's form) — noted, not changed. Pins: `cfg.rs` `linear_regfree_*`,
+`linear_constant_wire_opening_middle_flagged_head_not`,
+`linear_every_path_conditional_flagged_single_tick_not`,
+`linear_held_conditional_no_read_flagged_behind_read_not`,
+`linear_trailing_held_guard_read_flagged`,
+`trailing_out_guard_immediate_read_flagged_single_tick_not` (every boundary a
+flagged / not-flagged pair); ui `fail/linear_regfree_every_path.rs` (`e15w`),
+`fail/linear_regfree_passthrough.rs` (`e15g`), and
+`pass/pretick_alignment_ok.rs::linear_regfree_wire_behind_read` (`e15k`),
+`linear_regfree_held_behind_read` (`e15r`), `linear_held_constant_behind_read`
+(`e15af`); the `e15*` tests and
+`regfree_linear_the_rule_flags_exactly_the_probes_of_section_10_8` in the
+battery. Both front-ends' diagnostics name the three forms, the three
+directions of the lag (a sampled write late, an input tracked, a register or
+constant early) and the remedies (a read before every write of a sampled port
+in its segment; an in-segment update before a register-valued write, or the
+read past the tick; a conditional value computed into a `let` and written
+unconditionally; `RegOut`).
+
+**Found on the way, not changed.** (a) The linear route emits a **latch** for
+every conditionally driven plain `Out` that is not held behind a read: the
+phase-gated `always_comb` (every-path and mux + hold alike) assigns the port
+only inside its phase. An emission fix would add the hold value as the default
+outside the phase (`o = o_hold` — the extraction route's form has it); until
+one lands the shape is refused, and `e15ac` / `e15ad` are the two agreeing
+traces that would then be admitted. (b) `trailing_regout_reads_input`, the
+`RegOut` sibling of the trailing rule, still reads value sources only; a
+`RegOut` written in a trailing `if` whose test reads the input immediately is
+unmeasured and unrefused. (c) The passthrough classification is the direct
+argument of `o.write(…)` only; `let t = x.read(); o.write(t)` is deferred in a
+register-free body and behaves as the registered class does — which is what
+makes clause 3's input-operand case, and nothing else, register-free-specific.

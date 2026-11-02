@@ -453,10 +453,30 @@ counterexample rather than lowered to something plausible:
   body that crosses more than one clock edge**: the simulator reads the input the
   instant the write executes; the emitted drive samples it one observation later
   (edge-sampled on the extraction route, an ungated continuous assign on the
-  linear multi-tick route). A single-tick body agrees and is not refused. Read
-  the input before the tick, or through a register
-  (`trailing_out_reads_input`; the `e8` probes in
+  linear multi-tick route). The read may be in the write's value or in an
+  enclosing `if`/`match` test (since 2026-11-02). A single-tick body agrees and
+  is not refused. Read the input before the tick, or through a register
+  (`trailing_out_reads_input`; the `e8` and `e15` probes in
   `tests/sequential_forwarding_divergence.rs` measure every variant).
+- **A plain `Out` on the linear multi-tick route** (every `clk.tick().await` a
+  bare statement, more than one edge per iteration, with or without registers)
+  **whose emitted form cannot show the write's timing, or is a latch**: the form
+  follows the write's shape and operand, never the reads before it — a
+  conditional write on every path of its segment, or preceded by no input read,
+  is a phase-gated combinational mux assigned only inside its phase (a latch
+  Verilator refuses); a same-segment `let` wire, or a conditional write behind an
+  input read, is sampled at the segment's closing edge; an unconditional
+  register, input or constant is a continuous assign. The simulator writes at
+  the closing edge behind an input read a tick follows, and at the segment's
+  opening otherwise. Refused: the latch forms; a sampled write with no such read
+  on some path (one late in the hardware); an input through the assign (tracked
+  every cycle where the simulator sampled it once per iteration); a register or
+  constant behind such a read when the assign can change at another edge (one
+  early). Read an input before every write of a sampled port, update a register
+  in the same segment before writing it, compute a conditional value into a
+  `let` and write it unconditionally, or declare the port `RegOut`
+  (`linear_out_write_anchor_mismatch`; `CYCLE_DATAFLOW_SEMANTICS.md` §10.7–10.8,
+  the `e13`–`e15` probes).
 - **A constant-only `Out` first written after the second clock edge** of a
   multi-tick body: the simulator shows the initial value at the first
   observation, the emitted `assign` drives the constant from time 0. Write it in
