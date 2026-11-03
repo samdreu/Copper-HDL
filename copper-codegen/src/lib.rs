@@ -398,30 +398,38 @@ fn vlir_for_target(
             ));
         }
         // A plain `Out` on the linear multi-tick route whose write's anchor the
-        // emitted form cannot show, or whose form is a latch: the form is chosen by
-        // the write's shape and operand (an every-path or read-free conditional
-        // write → a phase-gated comb mux; a same-segment wire or a held write
-        // behind a read → the phase-guarded flop; an unconditional
-        // register/input/constant → a continuous assign) and the simulator by the
-        // deferred read before the write (`Cfg::linear_out_write_anchor_mismatch`,
-        // §10.7, 2026-10-30; §10.8, 2026-11-02). Same rule, same opt-out, as the macro.
+        // emitted form cannot show, or whose form has two drivers: an unconditional
+        // register/input/constant is a continuous assign, an unconditional
+        // same-segment wire the phase-guarded flop, a conditional drive the drive-
+        // level mux + hold form (an opening drive — no input read before it — in
+        // the comb copy, every drive loading the hold register at the edge) or
+        // the flop when no drive is opening; the simulator anchors each execution
+        // by the deferred read before it (`Cfg::linear_out_write_anchor_mismatch`,
+        // §10.7, 2026-10-30; §10.8 and §10.9, 2026-11-02). Same rule, same
+        // opt-out, as the macro.
         if let Some(port) = copper_analysis::linear_out_write_anchor_mismatch(target).first() {
             return Err(format!(
                 "output port '{port}' is driven on the linear multi-tick path by a write whose \
-                 timing the emitted form cannot show, or whose emitted form is a latch: a \
-                 conditional write covering every path of its segment, or preceded by no input \
-                 read, is a phase-gated combinational mux (a latch outside its phase); a \
-                 same-segment wire, or a conditional write behind an input read, is sampled at \
-                 the segment's closing edge; an unconditional register, input or constant is a \
-                 continuous assign — whatever reads precede the write. So a sampled write with \
-                 no deferred input read on some path lands one observation late, an input \
-                 through the assign is tracked where the simulator sampled it once per \
-                 iteration, and a register or constant behind a deferred read lands one \
-                 observation early whenever it can change at another edge. Read an input before \
-                 every write of a sampled port in its segment, update a register in the same \
-                 segment before writing it (or read the input after the tick), compute a \
-                 conditional value into a `let` and write it unconditionally, or declare it as \
-                 RegOut<…>"
+                 timing the emitted form cannot show, or whose emitted form has two drivers. A \
+                 conditional write is realized at the opening when no input read precedes it in \
+                 its arm and at the segment's closing edge otherwise (always at the closing edge \
+                 when a write of the port in the segment goes through a same-segment wire); an unconditional \
+                 same-segment wire is sampled at the closing edge; an unconditional register, \
+                 input or constant is a continuous assign — whatever reads precede the write; a \
+                 conditional write after the last clk.tick().await is sampled at the next edge. \
+                 So a conditional write lands late where the simulator runs it at the opening \
+                 behind an input read that no clk.tick().await follows (its own operand in a \
+                 register-free body, a read on one path to it only, or after the last tick), \
+                 early where its guard tests a register updated earlier in the segment, a \
+                 sampled wire with no deferred input read on some path lands one observation \
+                 late, an input through the assign is tracked where the simulator sampled it \
+                 once per iteration, a register or constant behind a deferred read lands one \
+                 observation early whenever it can change at another edge, and a port written \
+                 both unconditionally and conditionally in one segment has two drivers. Read an \
+                 input before every write of a sampled port in its segment, update a register \
+                 in the same segment before writing it (or read the input after the tick), move \
+                 a conditional write before the last tick, write a port either unconditionally \
+                 or conditionally in a segment, or declare it as RegOut<…>"
             ));
         }
         // A plain `Out` FIRST DRIVEN LATE — every write a constant, none before the

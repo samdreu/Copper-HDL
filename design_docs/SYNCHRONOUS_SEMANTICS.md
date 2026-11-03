@@ -454,59 +454,30 @@ about its region is what separates them.
   `ui/fail/multi_phase_out_write.rs` (the `e11` shape), `ui/fail/path_dependent_single_phase.rs`
   (the `e12` shape), and the accepted shapes in `ui/pass/pretick_alignment_ok.rs`.
 - **`linear_out_write_anchor_mismatch`** — a plain `Out` on the **linear multi-tick route** (every
-  tick a bare statement, more than one edge per iteration, a body with registers) driven by a
-  write whose anchor the emitted form cannot show (**landed 2026-10-30**, `CYCLE_DATAFLOW_SEMANTICS.md`
-  §10.7). On that route the form is chosen by the operand's kind and never by the reads before
-  the write: a same-segment `let` wire is the phase-guarded flop (sampled at the segment's closing
-  edge), a register, input or constant a continuous assign outside every phase guard (the
-  committed value at every observation). The simulator anchors each execution by whether a
-  deferred read precedes it. Refused: a wire with no deferred read on some path (one late in the
-  hardware — `e14a`, `e14h`, `e14k`, `e14m`, `e7w`), or a register, input or constant behind a
-  deferred read when the assign can change at another edge (one EARLY in the hardware — an input,
-  `e14c`; a register assigned in another segment, `e13`, `e13a`, `e14e`, or in the trailing
-  statements, `e14n`, or after the write, `e14j`; a constant outside the head segment, `e14d`).
-  Admitted and measured agreeing: a wire behind a read on every path (`e14b`, `e14l`,
-  `sipo_block`'s `w3_dbg`), a register updated in the same segment before the write (`e14f`,
-  `e14g`), a head constant behind a read (`e14i`), and any write with no deferred read before it
-  (`e13b`, `linear_trailing`). Found through `e13a`: the §10.6 control with the read on every path
-  diverged with no branch, so the route's residue is a missing form, not clause 4's mechanism.
-  Zero live modules at landing. Pins: `pretick_alignment_corpus.rs::EXPECTED_LINEAR_ANCHOR`
-  (twelve probes), the `linear_*` unit tests in `cfg.rs`, `ui/fail/linear_anchor_mismatch.rs`
-  (the `e13a` shape) and the `linear_*` shapes in `ui/pass/pretick_alignment_ok.rs`.
-  **Restated by form 2026-11-02 (`CYCLE_DATAFLOW_SEMANTICS.md` §10.8)**, after the
-  register-free linear class — for which the rule had returned nothing — was measured on
-  thirty-six probes, every verdict predicted first: the body need not have registers; a
-  conditional write on every path of its segment, or preceded by no input read, is a
-  phase-gated `always_comb` with no assignment outside the phase (a latch Verilator refuses;
-  refused for the form — `e15t`, `e15w`, `e15x`, `e15z`, `e15wr`, `e15ac`, `e15ad`); a held
-  conditional write behind a read is the flop and is admitted (`e15r`, `e15s`, `e15v`, and
-  `e15af`, `e15ag`, which the operand-kind reading had refused); an input-valued continuous
-  assign is refused whatever precedes it (the register-free direct `o.write(x.read())` is an
-  immediate passthrough that samples once per iteration — `e15a`, `e15g`; `e8m` joins from
-  the trailing rule); a constant-valued wire's one-late flop is a startup transient, refused
-  outside the head (`e15l`, `e15q`) and admitted in it (`e15f`, `e15fr` — the latter refused
-  before). `EXPECTED_LINEAR_ANCHOR` is thirty-two probes; new ui cases
-  `fail/linear_regfree_every_path.rs`, `fail/linear_regfree_passthrough.rs` and three
-  `linear_regfree_*` / `linear_held_*` pass shapes. Zero live modules.
-
-**The constant-write clause — found 2026-08-25, retired 2026-10-28.** The sweep found
-`branch_merge_explicit` leading its own emitted SystemVerilog by one cycle, and the minimal pairs
-`pc_arm_write` / `pc_arm_toggle` reproduced it; the explanation given then — "a constant is
-idempotent across the phase shift only if it is written on every path" — produced a clause keyed on
-the write's conditionality. The arm-granular opening walk (2026-10-26) flipped `pc_arm_write` and
-`pc_arm_toggle` to agreement (their lead was codegen's statement-granular opening predicate), and
-the re-derivation (above; `CYCLE_DATAFLOW_SEMANTICS.md` §10) showed the clause was a proxy for the
-mixed-anchor hazard: `branch_merge_explicit`'s `tail_o` diverges because it is written both behind
-the deferred `sel` read and in the `pc == 1` arm with no read before it — mixed anchors, the shape
-`d2a` isolates — and led by one when the first cycle took `sel == 1` (measured 2026-10-26; the
-seeded sweep took `sel == 0` first, which masked it, in the live unflagged twin `branch_merge`
-too, a blind spot the multi-sequence stimulus exposed 2026-10-28 and the drive-level mux + hold
-form **fixed 2026-10-29** — both twins agree on every sequence and sweep with no row; since
-2026-10-30 the narrowed rule admits the explicit twin, which compiles without an opt-out).
-Conditionality and constant-ness play no
-part in the rule any more: an every-path mux with mixed anchors diverges (`d1g`, `d2b`) and a
-held constant behind its own read agrees (`d1b`).
-
+  tick a bare statement, more than one edge per iteration, with or without registers) driven by a
+  write whose anchor the emitted form cannot show, or whose form has two drivers (**landed
+  2026-10-30**, `CYCLE_DATAFLOW_SEMANTICS.md` §10.7; **restated by form 2026-11-02**, §10.8; **the
+  latch fixed and the rule narrowed the same day**, §10.9). On that route the form is chosen by the
+  write's shape and operand and never by the reads before it: an unconditional same-segment `let`
+  wire is the phase-guarded flop (sampled at the segment's closing edge), an unconditional register,
+  input or constant a continuous assign outside every phase guard, a conditional write the
+  drive-level mux + hold form (an opening drive — no input read before it in its arm — in the
+  comb copy, every drive loading the hold register at the edge; the default outside the phase
+  guards) or the flop when no drive is opening or the port reads a same-segment wire, and a
+  conditional write after the last tick the hoisted flop. The simulator anchors each execution by
+  whether a deferred read precedes it. Refused: a wire with no deferred read on some path (`e14a`,
+  `e14h`, `e14k`, `e14m`, `e7w`, `e15l`, `e15q`, `e16m`); an input-valued assign (`e14c`, `e15a`,
+  `e15b`, `e15g`, `e15h`, `e15n`); a register or constant behind a deferred read when the assign
+  can change at another edge (`e13`, `e13a`, `e14e`, `e14n`, `e14j`, `e14d`, `e15j`); a
+  conditional write after the last tick (`e16d`, `e16e`, `e15u`, `e15z`, `e15aa`, `e15ab`); a
+  conditional write an input read reaches that the simulator runs at the opening on some path
+  (`e16f`, `e16l`), or under a guard that tests a register updated earlier in its segment (`e16n`,
+  `e16o`); a port written both unconditionally and conditionally in one segment (`e16g`, `e16i`,
+  `e16k`). Admitted and measured agreeing: the §10.7–10.8 rows, and since §10.9 the every-path
+  and no-read conditional writes (`e15t`, `e15w`, `e15x`, `e15wr`, `e15ac`, `e15ad`) and the
+  mixed-anchor ports (`e16a`, `e16b`, `e16h`, `e16q`). Pins: `pretick_alignment_corpus.rs::EXPECTED_LINEAR_ANCHOR`,
+  the `linear_*` unit tests in `cfg.rs`, `ui/fail/linear_anchor_mismatch.rs`,
+  `ui/fail/linear_regfree_passthrough.rs`, `ui/fail/linear_trailing_conditional.rs`.
 - **`pretick_out_write_before_update`** (2026-08-26) — a plain `Out` written **between a leading
   `In` read and the update of a register the write reads**. The read's barrier parks the task at the
   read site, so the write executes in the pre-edge settle with the register's *pre-update* value —

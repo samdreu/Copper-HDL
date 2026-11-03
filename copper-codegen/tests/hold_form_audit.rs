@@ -33,6 +33,13 @@
 //! path (`multi_phase_out_write` clause 4 refuses it). `e11b`, the same with a
 //! closing second drive, has no opening drive and is edge-sampled, so it is not
 //! here. Declared from the derivation before the audit ran; the audit matched.
+//!
+//! Grew by four on 2026-11-02, when the form reached the linear multi-tick route
+//! (`CYCLE_DATAFLOW_SEMANTICS.md` §10.9: its default moved outside the phase
+//! guards, so the phase-gated copy is no longer a latch, and an every-path port
+//! takes the form too) — `e16a`, `e16h`, `e16q` (every-path, one drive behind a
+//! read, one not) and `e16b` (held), all measured agreeing. The all-opening set
+//! gained the route's `e15ac`, `e15ad`, `e16c`, `e16m`, `e16p` the same day.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -113,6 +120,10 @@ fn the_mixed_anchor_hold_form_set_is_exactly_the_declared_one() {
         "tests/sequential_forwarding_divergence.rs::d5e_reg_opening_const_closing_extracted::o (1/1)",
         "tests/sequential_forwarding_divergence.rs::d5f_reg_opening_reg_closing_extracted::o (1/1)",
         "tests/sequential_forwarding_divergence.rs::e11_path_dependent_write_in_a_middle_phase::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::e16a_middle_every_path_mixed::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::e16b_middle_held_mixed::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::e16h_middle_held_read_then_opening_arm::o (1/1)",
+        "tests/sequential_forwarding_divergence.rs::e16q_head_every_path_mixed::o (1/1)",
         "tests/sequential_forwarding_divergence.rs::e4_closing_then_opening::o (1/1)",
         "tests/sequential_forwarding_divergence.rs::e4f_closing_then_forwarded_opening::o (1/1)",
         "tests/sequential_forwarding_divergence.rs::e4i_register_free_passthrough_then_opening::o (1/1)",

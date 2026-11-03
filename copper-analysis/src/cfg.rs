@@ -708,7 +708,12 @@ impl Cfg {
                         self.nodes[d].uses.intersection(&regs).cloned().collect();
                     !used.is_empty() && self.read_free_path_reaches(d, Some(&used))
                 });
-            let mixed = mixed && (path_dependent || all_paths);
+            // On the linear multi-tick route the every-path port takes the hold
+            // form too (2026-11-02, `CYCLE_DATAFLOW_SEMANTICS.md` §10.9 — `e16q`
+            // agrees), so (A2) does not apply there; (A1) is also that route's
+            // rule's clause C, and both refuse it.
+            let linear_multi_tick = !self.has_nested_tick && self.crosses_more_than_one_tick();
+            let mixed = mixed && (path_dependent || (all_paths && !linear_multi_tick));
             // (B) forwarded guard on an opening drive.
             let forwarded_guard = ds.iter().any(|&d| {
                 !self.leading_read_reaches(d)
@@ -1475,16 +1480,16 @@ impl Cfg {
     /// Plain combinational `Out` ports driven on the **linear multi-tick route**
     /// (every tick a bare top-level statement, more than one edge per iteration)
     /// by a write whose anchor the emitted form cannot show, or whose emitted
-    /// form is a latch — the §10.7 rule (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md`,
+    /// form has two drivers — the §10.7 rule (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md`,
     /// derived and measured 2026-10-30), **restated by form and freed of its
-    /// register requirement 2026-11-02 (§10.8)**. Returns the offending ports,
-    /// sorted; empty for a body with a nested tick (the extraction route has its
-    /// own forms and rules), a single-tick body (one observation per iteration,
-    /// measured agreeing in every class — `e8l`, `e15y`, `e15ah`), or all-`RegOut`
-    /// outputs. A register-free body takes the same forms and is examined
-    /// (until 2026-11-02 the rule returned nothing for it, unmeasured).
+    /// register requirement 2026-11-02 (§10.8)**, and **narrowed to the residue
+    /// the same day when the latch §10.8 read off the transpiler was fixed
+    /// (§10.9)**. Returns the offending ports, sorted; empty for a body with a
+    /// nested tick (the extraction route has its own forms and rules), a
+    /// single-tick body (one observation per iteration, measured agreeing in
+    /// every class — `e8l`, `e15y`, `e15ah`), or all-`RegOut` outputs.
     ///
-    /// # The forms (read off the transpiler, §10.7 and §10.8)
+    /// # The forms (read off the transpiler, §10.7–10.9)
     ///
     /// On this route the lowering picks a drive's form by its **shape** and its
     /// **operand's kind**, never by the simulator's anchor:
@@ -1493,38 +1498,53 @@ impl Cfg {
     /// |---|---|
     /// | unconditional, register / input / constant operand | `assign o = v` — the continuous assign, the committed value at every observation |
     /// | unconditional, same-segment wire operand | `if (phase_r == p) o <= t` — the phase-guarded flop, sampled at the segment's closing edge (a trailing drive is hoisted into phase 0) |
-    /// | conditional, held (some path of its segment leaves the port unwritten), an input read before it in its arm's walk | the same flop under the phase and its guards |
-    /// | conditional, held, no read before it | the drive-level mux + hold form (§9.4) **gated by the phase** — assigned only inside it |
-    /// | conditional, written on every path of its segment | a phase-gated `always_comb` mux — assigned only inside its phase |
+    /// | conditional, some drive of the port in its segment reads a same-segment wire | the same flop under the phase and the guards, for EVERY drive of the port (a phase-scoped hold port) |
+    /// | conditional, otherwise, some drive of the port with no input read before it in its arm's walk | the drive-level mux + hold form (§9.4): `o = o_hold` at the top of the block outside every phase guard, the opening drives in the comb copy under the phase, every drive loading `o_hold` at the edge |
+    /// | conditional, otherwise, every drive behind an input read | the flop under the phase and the guards |
+    /// | conditional, after the last tick | hoisted into phase 0's flop, closing — the trailing walk forwards nothing |
+    /// | a port written unconditionally AND conditionally in one segment | the assign beside the conditional form's driver: two drivers |
+    ///
+    /// Until 2026-11-02 the two conditional forms without a wire were a
+    /// phase-gated `always_comb` assigned nowhere outside the phase — a latch
+    /// Verilator refuses — and §10.8 refused every such drive for the form; §10.9
+    /// moved the default outside the guards and gave the every-path port the same
+    /// two forms, so the clause is gone and the residue below is what is left.
     ///
     /// The simulator anchors each execution by its path: closing where a deferred
     /// `In` read parks the task before the write, opening otherwise (§9.1; in a
-    /// register-free body the direct `o.write(x.read())` is an immediate
-    /// passthrough, so it is opening however many ticks follow).
+    /// register-free body the write's own operand reads are the immediate
+    /// passthrough; after the last tick every read is immediate). The comb copy
+    /// of the hold form tests a guard against the COMMITTED register (D1's
+    /// forwarded-guard mechanism).
     ///
-    /// # The clause, per drive `w` (§10.8, every cell measured first)
+    /// # The clauses, per drive `w` (§10.9, every cell measured first)
     ///
-    /// 1. **phase-gated comb copy** — `w` is conditional and either written on
-    ///    every path of its segment or preceded by no input read: refused. The
-    ///    form is a latch outside its phase, which Verilator refuses under the
-    ///    sweep's `-Wall` (`LATCH`), and with the lint off a closing drive shows
-    ///    one observation early (`e15t`, `e15w`, `e15x`, `e15z`, `e15wr`);
-    ///    `e15ac` and `e15ad` agree with the lint off and are refused for the
-    ///    form, exactly as `e7` is for its multiply-driven port.
-    /// 2. **edge-sampled flop** — `w` is wire-valued, or conditional and held
-    ///    behind a read: refused iff some path from its segment's entry reaches
-    ///    it with no deferred read (the flop samples at the closing edge; the
-    ///    simulator wrote at the opening — one late: `e14a`, `e14h`, `e14k`,
-    ///    `e14m`, `e7w`; a startup transient for a constant-valued wire outside
-    ///    the head, `e15l`, `e15q`; the hoisted trailing flop sampling an
-    ///    immediate guard or value at phase 0's edge, `e15o`, `e15u`, `e15aa`,
-    ///    `e15ab`), **except** an unconditional constant-valued wire in the head
-    ///    segment, whose first load is edge 0 and whose value never changes
-    ///    (`e15f`, `e15fr` — agreeing; `e15fr` was refused until 2026-11-02).
-    ///    Admitted: a wire or a held drive behind a deferred read on every path
-    ///    (`e14b`, `e14l`, `e15e`, `e15k`, `e15m`, `e15r`, `e15s`, `e15v`, and
-    ///    `e15af`, `e15ag`, which the operand-kind reading of §10.7 refused as
-    ///    assigns although their form is the flop — agreeing, narrowed).
+    /// A. **two drivers** — the port is written both unconditionally and
+    ///    conditionally in `w`'s segment: refused (`e16g`, `e16i`, `e16k`;
+    ///    Verilator refuses two of the three, the third builds with the drivers
+    ///    fighting).
+    /// B. **trailing conditional** — `w` is conditional and after the last tick:
+    ///    refused; the hoisted flop loads one observation after the trailing
+    ///    instant (`e16d`, `e16e`; through an immediate read `e15u`, `e15z`,
+    ///    `e15aa`, `e15ab`, the trailing rule's as well).
+    /// C. **conditional, pre-tick segment** — with a wire-valued drive on the
+    ///    port, the flop: refused iff some path reaches `w` with no deferred read
+    ///    (`e16m`; admitted `e15v`). Otherwise the hold form or the flop realizes
+    ///    `w` at the anchor the lowering gives it, and `w` is refused iff an input
+    ///    read reaches it while the simulator runs it at the opening on some path
+    ///    — no deferred read on that path (the register-free passthrough under a
+    ///    guard that reads no input, `e16f`, admitted by every rule until §10.9)
+    ///    or a read-free path from the segment's entry (`e16l`) — or no read
+    ///    reaches it and its guard tests a register assigned earlier in the
+    ///    segment (`e16n`, `e16o`). Admitted: `e15t`, `e15w`, `e15x`, `e15wr`,
+    ///    `e15ac`, `e15ad`, `e15r`, `e15s`, `e15af`, `e15ag`, `e16a`, `e16b`,
+    ///    `e16c`, `e16h`, `e16p`, `e16q`.
+    /// 2. **unconditional wire** — the flop: refused iff some path from its
+    ///    segment's entry reaches it with no deferred read (`e14a`, `e14h`,
+    ///    `e14k`, `e14m`, `e7w`; `e15l`, `e15q`), **except** a constant-valued
+    ///    wire in the head segment, whose first load is edge 0 and whose value
+    ///    never changes (`e15f`, `e15fr`). Admitted: `e14b`, `e14l`, `e15e`,
+    ///    `e15k`, `e15m`.
     /// 3. **continuous assign** — unconditional, register / input / constant
     ///    operand: refused iff the operand reads an input (the assign tracks the
     ///    input at every observation, the simulator publishes the one value the
@@ -1544,13 +1564,17 @@ impl Cfg {
     ///
     /// Overlaps: `e14k` is also `pretick_out_write_before_update`'s, `e7w` also
     /// `multi_phase_out_write`'s clause 1, the trailing cells also
-    /// `trailing_out_reads_input`'s or `out_first_driven_late`'s; both front-ends
-    /// run every rule, so a shape two rules refuse is refused once. Exact-set
-    /// pins: `pretick_alignment_corpus.rs::EXPECTED_LINEAR_ANCHOR` (zero live
-    /// modules when it landed and when it was restated), the `linear_*` unit
-    /// tests below, and `linear_the_rule_flags_exactly_the_diverging_probes` /
-    /// `regfree_linear_the_rule_flags_exactly_the_probes_of_section_10_8` in the
-    /// battery.
+    /// `trailing_out_reads_input`'s or `out_first_driven_late`'s; the
+    /// path-dependent and forwarded-guard drives of the HEAD segment are also
+    /// D1's (`unprotected_pretick_out_write`, whose every-path clause does not
+    /// apply on this route since §10.9); both front-ends run every rule, so a
+    /// shape two rules refuse is refused once. Exact-set pins:
+    /// `pretick_alignment_corpus.rs::EXPECTED_LINEAR_ANCHOR` (zero live modules
+    /// when it landed, when it was restated, and when it was narrowed), the
+    /// `linear_*` unit tests below, and the three verdict-table tests in the
+    /// battery (`linear_the_rule_flags_exactly_the_diverging_probes`,
+    /// `regfree_linear_the_rule_flags_exactly_the_probes_of_section_10_8`,
+    /// `latch_fix_the_rule_flags_exactly_the_probes_of_section_10_9`).
     pub fn linear_out_write_anchor_mismatch(&self) -> Vec<String> {
         if self.has_nested_tick || !self.crosses_more_than_one_tick() {
             return Vec::new();
@@ -1615,7 +1639,6 @@ impl Cfg {
                 continue;
             }
             let segment = find(&mut parent, w);
-            let entries = entries_of.get(&segment).cloned().unwrap_or_default();
             let conditional = !node.guards.is_empty();
             // A same-segment wire is a local DEFINED IN THE LOOP that is neither a
             // register nor an input. A pre-loop binding (`lfsr`'s `xor_mask`, a
@@ -1633,32 +1656,96 @@ impl Cfg {
             // and the operand's included, deferred or immediate — is what makes
             // the lowering count the drive closing (§9.1).
             let read_before = self.leading_read_reaches(w);
-            let deferred = self.deferred_read_reaches(w);
+            // A deferred read before the drive on its path. In a register-free
+            // body the drive's OWN operand reads are the immediate passthrough
+            // (`classify_reads`), so they do not count (`e16f`, §10.9).
+            let deferred = (0..n).any(|r| {
+                !self.nodes[r].uses.is_disjoint(&self.inputs)
+                    && !self.nodes[r].folded
+                    && !(regs.is_empty() && r == w)
+                    && self.comb_reaches(r, w)
+                    && self.comb_reaches_tick(r)
+            });
+            // The trailing region: no tick is comb-reachable from the drive, so it
+            // runs at the post-edge instant of the last tick and its reads are
+            // immediate; the lowering hoists it into phase 0 as a CLOSING drive.
+            let trailing = !self.comb_reaches_tick(w);
+            // D1's forwarded-guard clause, on this segment: an opening drive
+            // nested under a test of a register assigned earlier in the segment —
+            // the comb copy of the mux + hold form tests the committed value.
+            let forwarded_guard = node.guards.iter().any(|&b| {
+                let tested: BTreeSet<String> = self.nodes[b].uses.intersection(&regs).cloned().collect();
+                !tested.is_empty()
+                    && (0..n).any(|a| !self.nodes[a].defs.is_disjoint(&tested) && self.comb_reaches(a, b))
+            });
             let (vregs, inputs) = self.value_sources(w, &all, &regs);
             for port in &node.writes {
-                let every_path = conditional && self.written_on_all_paths(port, &entries);
-                let hazard = if conditional && (every_path || !read_before) {
-                    // Clause 1 — the phase-gated comb copy (every-path mux, or
-                    // the held drive's mux + hold form): assigned only inside
-                    // its phase, a latch outside it, which Verilator refuses.
-                    // With the lint off a closing drive shows one observation
-                    // early (`e15t`, `e15w`, `e15x`, `e15z`, `e15wr`); `e15ac`,
-                    // `e15ad` agree and are refused for the form.
+                // A port written both unconditionally and conditionally in one
+                // segment: the unconditional write is a module-level continuous
+                // assign beside the conditional form's driver — two drivers,
+                // which Verilator refuses (`MULTIDRIVEN`): `e16g`, `e16i`, `e16k`.
+                let two_drivers = (0..n).any(|d| {
+                    d != w
+                        && !self.nodes[d].folded
+                        && self.nodes[d].writes.contains(port)
+                        && find(&mut parent, d) == segment
+                        && self.nodes[d].guards.is_empty() == conditional
+                });
+                // A port one of whose drives in this segment reads a same-segment
+                // wire is a phase-scoped hold port in the lowering: every drive of
+                // it is the phase-guarded flop, conditional or not (`e16m`, §10.9 —
+                // the one §10.9 prediction that missed: the hold form does not
+                // reach it).
+                let port_wire_valued = wire_valued
+                    || (0..n).any(|d| {
+                        d != w
+                            && !self.nodes[d].folded
+                            && self.nodes[d].writes.contains(port)
+                            && find(&mut parent, d) == segment
+                            && self.nodes[d].uses.iter().any(|u| {
+                                self.defined_in_loop.contains(u)
+                                    && !regs.contains(u)
+                                    && !self.inputs.contains(u)
+                                    && !self.nodes[d].writes.contains(u)
+                                    && !self.nodes[d].regout_writes.contains(u)
+                            })
+                    });
+                let hazard = if two_drivers {
                     true
-                } else if conditional || wire_valued {
-                    // Clause 2 — the edge-sampled flop: samples at the segment's
-                    // closing edge, so an execution no deferred read precedes
-                    // (written at the opening) lands one observation late
-                    // (`e14a`, `e14h`, `e14k`, `e14m`; `e15l`, `e15q`; `e15o`,
-                    // `e15u`, `e15aa`, `e15ab`). Unobservable for an
-                    // unconditional constant-valued wire in the head segment:
-                    // its first load is edge 0 and its value never changes
+                } else if conditional && trailing {
+                    // Clause B — a conditional trailing drive is hoisted into phase
+                    // 0's edge-sampled flop, one observation after the trailing
+                    // instant the simulator runs it at (`e16d`, `e16e`; through an
+                    // immediate read, `e15u`, `e15z`, `e15aa`, `e15ab`).
+                    true
+                } else if conditional && port_wire_valued {
+                    // Clause C, the flop of a wire-valued port: sampled at the
+                    // segment's closing edge, one observation late for an execution
+                    // no deferred read precedes (`e16m`); admitted behind a
+                    // deferred read on every path (`e15v`).
+                    !deferred || self.read_free_path_from_phase_entry(w)
+                } else if conditional {
+                    // Clause C — the hold form or the flop realizes each drive at
+                    // the anchor the lowering gives it: the opening with no input
+                    // read before it, the edge otherwise. Refused when the
+                    // simulator's anchor differs on some path: an input read
+                    // reaches the drive while no deferred read does (the
+                    // register-free passthrough, `e16f`) or a read-free path
+                    // reaches it (`e16l`); or no read reaches it and its guard is
+                    // forwarded (`e16n`, `e16o`).
+                    (read_before && (!deferred || self.read_free_path_from_phase_entry(w)))
+                        || (!read_before && forwarded_guard)
+                } else if wire_valued {
+                    // Clause 2 — the edge-sampled flop of a wire-valued drive:
+                    // samples at the segment's closing edge, so an execution no
+                    // deferred read precedes (written at the opening) lands one
+                    // observation late (`e14a`, `e14h`, `e14k`, `e14m`; `e15l`,
+                    // `e15q`). Unobservable for a constant-valued wire in the head
+                    // segment: its first load is edge 0 and its value never changes
                     // (`e15f`, `e15fr`).
                     let opening_on_some_path = !deferred || self.read_free_path_from_phase_entry(w);
-                    let constant_head_wire = !conditional
-                        && vregs.is_empty()
-                        && inputs.is_empty()
-                        && head_segment.contains(&segment);
+                    let constant_head_wire =
+                        vregs.is_empty() && inputs.is_empty() && head_segment.contains(&segment);
                     opening_on_some_path && !constant_head_wire
                 } else if !inputs.is_empty() {
                     // Clause 3a — the continuous assign of an input operand
@@ -5721,13 +5808,14 @@ mod tests {
         assert!(lin(head_registered).is_empty());
     }
 
-    /// `e15t` / `e15w` / `e15ac` / `e15y`: a conditional drive written on every
-    /// path of its segment is the phase-gated comb mux — a latch outside its
-    /// phase — in a middle or the head segment, with or without registers, whether
-    /// or not it reads an input (flagged: the form); the single-tick body emits
-    /// the mux with no gate (not flagged).
+    /// `e15t` / `e15w` / `e15ac` / `e15y`: an every-path conditional drive is the
+    /// edge-sampled flop under its phase when every drive is behind a read, and
+    /// the mux + hold form when one is not — both realize it since 2026-11-02
+    /// (§10.9), in a middle or the head segment, with or without registers (not
+    /// flagged); until then the form was a phase-gated comb mux, a latch, and
+    /// every one was refused. The single-tick body never was.
     #[test]
-    fn linear_every_path_conditional_flagged_single_tick_not() {
+    fn linear_every_path_conditional_not_flagged() {
         let middle = r#"
             #[hardware(sequential)]
             async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
@@ -5753,19 +5841,18 @@ mod tests {
                 loop { if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); } clk.tick().await; }
             }
         "#;
-        assert_eq!(lin(middle), vec!["o".to_string()]);
-        assert_eq!(lin(head), vec!["o".to_string()]);
-        assert_eq!(lin(registered_no_read), vec!["o".to_string()]);
-        assert!(lin(single_tick).is_empty());
+        for src in [middle, head, registered_no_read, single_tick] {
+            assert!(lin(src).is_empty());
+        }
     }
 
-    /// `e15ad` / `e15af` / `e15ag` / `e15r`: a held conditional drive with no
-    /// read before it is the phase-gated mux + hold form, a latch (flagged);
+    /// `e15ad` / `e15af` / `e15ag` / `e15r`: a held conditional drive with no read
+    /// before it is the mux + hold form (its default outside the phase guards
+    /// since 2026-11-02, §10.9 — not flagged; refused as a latch until then);
     /// behind a read it is the edge-sampled flop under the phase and its guards,
-    /// closing on both sides (not flagged — `e15af` and `e15ag` were refused by
-    /// the operand-kind reading until 2026-11-02). One `let _ = x.read();` flips it.
+    /// closing on both sides (not flagged).
     #[test]
-    fn linear_held_conditional_no_read_flagged_behind_read_not() {
+    fn linear_held_conditional_not_flagged_with_or_without_read() {
         let no_read = r#"
             #[hardware(sequential)]
             async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
@@ -5793,10 +5880,234 @@ mod tests {
                 loop { if x.read()[1] == Logic::One { o.write(x.read()); } clk.tick().await; clk.tick().await; }
             }
         "#;
+        for src in [no_read, constant_behind_read, register_behind_guard_read, regfree_behind_guard_read] {
+            assert!(lin(src).is_empty());
+        }
+    }
+
+    // ── §10.9 (2026-11-02): the latch fixed, the residue of the conditional forms ──
+
+    /// `e16a` / `e16h` / `e16l`: a mixed-anchor middle-segment port is realized
+    /// drive by drive — a read in the drive's own operand or its own arm parks
+    /// it at the edge, the read-free arm runs at the opening (not flagged) —
+    /// while a read in a PRECEDING branch's arm reaches the drive on one path
+    /// and not on another: the lowering counts it closing, the simulator runs
+    /// it at the opening on the read-free path (flagged, clause C).
+    #[test]
+    fn linear_mixed_anchor_middle_not_flagged_path_dependent_flagged() {
+        let operand_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } else { o.write(x.read()); } clk.tick().await; }
+            }
+        "#;
+        let arm_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { let _ = x.read(); o.write(Bits::from_lit::<7>()); } else { o.write(cnt); } clk.tick().await; }
+            }
+        "#;
+        let path_dependent = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { let _ = x.read(); } if cnt[1] == Logic::One { o.write(cnt); } clk.tick().await; }
+            }
+        "#;
+        assert!(lin(operand_read).is_empty());
+        assert!(lin(arm_read).is_empty());
+        assert_eq!(lin(path_dependent), vec!["o".to_string()]);
+    }
+
+    /// `e16m` / `e15v`: a port with a wire-valued drive is a phase-scoped hold
+    /// port — the phase-guarded flop for every drive, which the hold form does
+    /// not reach — so a held wire-valued drive with no read is one late
+    /// (flagged; the §10.9 prediction that missed) and the same drive behind
+    /// its wire's deferred read agrees (not flagged).
+    #[test]
+    fn linear_held_wire_no_read_flagged_behind_read_not() {
+        let no_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; let t = cnt + Bits::from_lit::<2>(); if cnt[0] == Logic::One { o.write(t); } clk.tick().await; }
+            }
+        "#;
+        let behind_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; let t = x.read() + Bits::from_lit::<1>(); if t[1] == Logic::One { o.write(t); } clk.tick().await; }
+            }
+        "#;
+        let sibling_wire = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; let t = cnt + Bits::from_lit::<2>(); if cnt[0] == Logic::One { o.write(t); } else { o.write(cnt); } clk.tick().await; }
+            }
+        "#;
         assert_eq!(lin(no_read), vec!["o".to_string()]);
-        assert!(lin(constant_behind_read).is_empty());
-        assert!(lin(register_behind_guard_read).is_empty());
-        assert!(lin(regfree_behind_guard_read).is_empty());
+        assert!(lin(behind_read).is_empty());
+        assert_eq!(lin(sibling_wire), vec!["o".to_string()], "the register-valued arm is flopped with its wire-valued sibling");
+    }
+
+    /// `e16d` / `e16e` / `e15ad`: a conditional drive in the TRAILING region is
+    /// hoisted into phase 0's edge-sampled flop, one observation after the
+    /// trailing instant the simulator runs it at (flagged, clause B); the same
+    /// held drive in a middle segment is the hold form (not flagged).
+    #[test]
+    fn linear_trailing_conditional_flagged_middle_not() {
+        let held = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } }
+            }
+        "#;
+        let every_path = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); } }
+            }
+        "#;
+        let middle = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; }
+            }
+        "#;
+        assert_eq!(lin(held), vec!["o".to_string()]);
+        assert_eq!(lin(every_path), vec!["o".to_string()]);
+        assert!(lin(middle).is_empty());
+        assert!(trailing_out(held).is_empty(), "no input read: the trailing rule has no claim");
+    }
+
+    /// `e16f` / `e15r`: in a register-free body the drive's own `x.read()` is the
+    /// immediate passthrough, so a held drive under a guard that reads no input
+    /// runs at the opening while the flop samples at the edge (flagged, clause
+    /// C); the same drive under the guard's deferred read is parked at that edge
+    /// (not flagged). The registered body defers the operand's read (not flagged).
+    #[test]
+    fn linear_regfree_passthrough_under_constant_guard_flagged_deferred_guard_not() {
+        let constant_guard = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; let t: Bits<8> = Bits::from_lit::<7>(); if t[0] == Logic::One { o.write(x.read()); } clk.tick().await; }
+            }
+        "#;
+        let deferred_guard = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; if x.read()[1] == Logic::One { o.write(x.read()); } clk.tick().await; }
+            }
+        "#;
+        let registered = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { o.write(x.read()); } clk.tick().await; }
+            }
+        "#;
+        assert_eq!(lin(constant_guard), vec!["o".to_string()]);
+        assert!(lin(deferred_guard).is_empty());
+        assert!(lin(registered).is_empty());
+    }
+
+    /// `e16n` / `e16o` / `e16p`: an opening drive under a guard that tests a
+    /// register assigned earlier in its segment — the comb copy of the hold form
+    /// tests the committed value, D1's forwarded-guard mechanism in a middle
+    /// segment (flagged, clause C), held or every-path; the forwarded VALUE
+    /// under a committed guard is realized (not flagged).
+    #[test]
+    fn linear_forwarded_guard_middle_flagged_forwarded_value_not() {
+        let held = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; }
+            }
+        "#;
+        let every_path = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); } clk.tick().await; }
+            }
+        "#;
+        let forwarded_value = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                let mut sel: Bits<8> = Bits::zero();
+                loop { sel = sel + Bits::from_lit::<1>(); clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); if sel[0] == Logic::One { o.write(cnt); } clk.tick().await; }
+            }
+        "#;
+        assert_eq!(lin(held), vec!["o".to_string()]);
+        assert_eq!(lin(every_path), vec!["o".to_string()]);
+        assert!(lin(forwarded_value).is_empty());
+    }
+
+    /// `e16g` / `e16i` / `e16k` / `e16j`: a port written unconditionally AND
+    /// conditionally in one segment is a continuous assign beside the
+    /// conditional form's driver — two drivers, which Verilator refuses
+    /// (flagged, whatever reads precede the writes). The single-tick body is
+    /// outside this rule and emits the same two drivers unrefused (§10.9, found).
+    #[test]
+    fn linear_default_then_conditional_write_flagged() {
+        let no_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; o.write(Bits::from_lit::<3>()); if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; }
+            }
+        "#;
+        let head_behind_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { let _ = x.read(); o.write(Bits::from_lit::<3>()); if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; }
+            }
+        "#;
+        let single_tick = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { o.write(Bits::from_lit::<3>()); if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); }
+            }
+        "#;
+        assert_eq!(lin(no_read), vec!["o".to_string()]);
+        assert_eq!(lin(head_behind_read), vec!["o".to_string()]);
+        assert!(lin(single_tick).is_empty());
+    }
+
+    /// `e16q` / `d2b`: D1's every-path clause (A2) on the linear multi-tick
+    /// route — the head's every-path mixed-anchor port takes the hold form
+    /// there since 2026-11-02 and agrees (not flagged by D1); the single-tick
+    /// body keeps the ungated comb mux with no hold register (flagged, as ever).
+    #[test]
+    fn d1_every_path_mixed_not_flagged_on_the_linear_multi_tick_route() {
+        let two_ticks = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { if cnt[0] == Logic::One { o.write(cnt); } else { o.write(x.read()); } clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; }
+            }
+        "#;
+        let single_tick = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { if cnt[0] == Logic::One { o.write(cnt); } else { o.write(x.read()); } clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); }
+            }
+        "#;
+        let d1 = |src: &str| Cfg::build(&parse(src)).unwrap().unprotected_pretick_out_write();
+        assert!(d1(two_ticks).is_empty());
+        assert!(lin(two_ticks).is_empty());
+        assert_eq!(d1(single_tick), vec!["o".to_string()]);
     }
 
     /// `e15ab` / `e15u`: a held trailing drive whose guard reads the input

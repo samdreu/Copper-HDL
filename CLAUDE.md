@@ -382,15 +382,34 @@ receive/clone one.
   form 2026-11-02 (§10.8)** after the register-free linear class — which the rule
   had returned nothing for — was measured on thirty-six probes (every verdict
   predicted first): the form follows the drive's shape as well as its operand —
-  a conditional write on every path of its segment, or preceded by no input read,
-  is a phase-gated `always_comb` with no assignment outside the phase (a latch
-  Verilator refuses; refused for the form, `e15t`/`e15w`/`e15x`/`e15ad`), a held
-  conditional write behind a read is the flop (closing; `e15af`/`e15ag`, refused
-  before, admitted), an input-valued assign is refused whatever precedes it
+  a held conditional write behind a read is the flop (closing; `e15af`/`e15ag`,
+  refused before, admitted), an input-valued assign is refused whatever precedes it
   (the register-free passthrough samples once per iteration, `e15a`/`e15g`), and a
   constant-valued wire's lag is a transient invisible in the head (`e15f`/`e15fr`
   admitted). The register requirement is gone; `trailing_out_reads_input` counts
-  an immediate read in the drive's guard (`e15ai`); zero live modules. The doc also records **five** rejected fixes with
+  an immediate read in the drive's guard (`e15ai`); zero live modules. **The latch
+  §10.8 read off the route was fixed the same day (§10.9):** a conditional drive's
+  phase-gated comb copy had no assignment outside its phase; now the hold form's
+  `o = o_hold` default sits at the top of the `always_comb` outside every phase
+  guard (`VLIRSeqBody::comb_defaults`) and an every-path conditional port takes a
+  held port's two forms, so the six rows refused for the form agree and compile
+  (`e15t`/`e15w`/`e15x`/`e15wr` the flop, `e15ac`/`e15ad` the hold form; sv-baseline
+  delta exactly those seven latch-shaped probes with `e15z`). The rule's residue, per
+  conditional drive: (A) a port written both unconditionally and conditionally in
+  one segment — two drivers (`e16g`/`e16i`/`e16k`); (B) a conditional drive after
+  the last tick — the hoisted flop, one late (`e16d`/`e16e`); (C) in a pre-tick
+  segment, with a wire-valued drive on the port the flop, refused iff opening on
+  some path (`e16m`, the one §10.9 prediction that missed: a port with a wire-valued
+  drive is a phase-scoped hold port and the hold form does not reach it), otherwise
+  refused iff an input read reaches the drive while the simulator runs it at the
+  opening on some path (the register-free passthrough under a read-free guard,
+  `e16f`, admitted by every rule until then; a read-free path, `e16l`) or no read
+  reaches it and its guard tests a register assigned earlier in the segment
+  (`e16n`/`e16o`); mixed-anchor ports agree through the drive-level form
+  (`e16a`/`e16b`/`e16h`/`e16q`, in `hold_form_ports`). D1's every-path clause does
+  not apply on this route since then (`e16q`). Found, not changed: the single-tick
+  route emits two drivers for a default write followed by a conditional override
+  (`e16j`, admitted by every rule, refused by Verilator as `MULTIDRIVEN`). The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in

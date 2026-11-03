@@ -259,7 +259,7 @@ fn lower_comb(c: &SHIRCombBody, leg: &Legalizer) -> LowerResult<VLIRCombBody> {
     let (mut comb_stmts, output_assigns) = lower_flat_stmts(&c.stmts, leg, &HashSet::new(), &MemWidths::default(), &MemBinding::new())?;
     // A combinational module has no registers, so nothing is exempt.
     hoist_branch_local_defaults(&mut comb_stmts, &HashSet::new());
-    check_no_latches(&comb_stmts)?;
+    check_no_latches(&comb_stmts, &HashSet::new())?;
     Ok(VLIRCombBody { submodules, comb_stmts, output_assigns })
 }
 
@@ -306,6 +306,12 @@ fn lower_seq(
 
     let multi_phase = s.phases.len() > 1;
     let mut hold_form_ports: Vec<VLIRHoldFormPort> = Vec::new();
+    // The hold-form ports' `<port> = <port>_hold` defaults, at the top of the
+    // `always_comb` block outside every phase guard (`VLIRSeqBody::comb_defaults`),
+    // and the hold register each port already has — a port is defaulted and
+    // declared once however many phases drive it.
+    let mut comb_defaults: Vec<VLIRStmt> = Vec::new();
+    let mut hold_names: HashMap<String, String> = HashMap::new();
 
     // Outputs that must behave as implicit-hold registers rather than wires:
     // explicitly-declared `RegOut` ports, plus plain `Out` ports written in some
@@ -399,12 +405,68 @@ fn lower_seq(
         // observation late. Until then the decision was port-wide: one closing
         // drive edge-sampled every drive of the port. A port whose drives are all
         // closing keeps the edge-sampled form below, unchanged.
-        let opening_outs = opening_hold_outputs(&stmts, &cond_outs, &hold_outs);
+        // A plain `Out` driven on EVERY path of a MULTI-PHASE body's phase through
+        // an `if`/`match` (so not a module-level continuous assign) was, until
+        // 2026-11-02, left in the comb copy under `if (phase_r == K)` and assigned
+        // nowhere else — a latch outside its phase, which Verilator refuses under
+        // `-Wall` (`CYCLE_DATAFLOW_SEMANTICS.md` §10.9, the `e15t` class; the held
+        // port's hold form had the same latch through its in-phase default). It
+        // takes the two forms of a held port: the mux + hold form with an opening
+        // drive, the edge-sampled flop with none. A single-phase body keeps the
+        // ungated comb mux, measured agreeing (`e15y`).
+        let every_path_outs: HashSet<String> = if multi_phase {
+            ports_driven_all_paths(&stmts)
+                .into_iter()
+                .filter(|p| !registered_outs.contains(p) && !cond_outs.contains(p))
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let mut candidates = cond_outs.clone();
+        candidates.extend(every_path_outs.iter().cloned());
+        let opening_outs = opening_hold_outputs(&stmts, &candidates, &hold_outs);
+        for p in &every_path_outs {
+            if !opening_outs.iter().any(|(q, _)| q == p) {
+                cond_outs.insert(p.clone());
+            }
+        }
         if !opening_outs.is_empty() {
             let mut hold_ff = Vec::new();
             for (port, mix) in &opening_outs {
                 cond_outs.remove(port);
-                let hold = hold_register_name(port, &reg_decls, out_widths);
+                let mut single_phase_default: Option<VLIRStmt> = None;
+                let hold = match hold_names.get(port) {
+                    Some(h) => h.clone(),
+                    None => {
+                        let hold = hold_register_name(port, &reg_decls, out_widths);
+                        hold_names.insert(port.clone(), hold.clone());
+                        let width = out_widths.get(port).cloned().unwrap_or(Width::Concrete(1));
+                        reg_decls.push(VLIRRegDecl {
+                            name: hold.clone(),
+                            width: width.clone(),
+                            // The port's power-on value is the wire's: zero, which is
+                            // also what the harness and Verilator start a plain output at.
+                            init: Some(VLIRExpr::Lit { width, value: 0 }),
+                        });
+                        // The default: at the top of the block OUTSIDE the phase
+                        // guards in a multi-phase body, so the port is assigned on
+                        // every path of every phase (2026-11-02, §10.9); at the head
+                        // of the one unguarded phase otherwise, where it always was
+                        // (the same place, and byte-identical emission).
+                        let default = VLIRStmt::PortAssign {
+                            port_name: port.clone(),
+                            value: VLIRExpr::Var(hold.clone()),
+                            edge_value: VLIRExpr::Var(hold.clone()),
+                            opening: false,
+                        };
+                        if multi_phase {
+                            comb_defaults.push(default);
+                        } else {
+                            single_phase_default = Some(default);
+                        }
+                        hold
+                    }
+                };
                 // Every drive loads the hold register — shadowed BEFORE the closing
                 // drives leave the comb copy.
                 hold_ff.extend(shadow_hold_ff(&stmts, port, &hold));
@@ -416,20 +478,11 @@ fn lower_seq(
                     opening: mix.opening,
                     closing: mix.closing,
                 });
-                let width = out_widths.get(port).cloned().unwrap_or(Width::Concrete(1));
-                reg_decls.push(VLIRRegDecl {
-                    name: hold.clone(),
-                    width: width.clone(),
-                    // The port's power-on value is the wire's: zero, which is also
-                    // what the harness and Verilator start a plain output at.
-                    init: Some(VLIRExpr::Lit { width, value: 0 }),
-                });
-                stmts.insert(0, VLIRStmt::PortAssign {
-                    port_name: port.clone(),
-                    value: VLIRExpr::Var(hold.clone()),
-                    edge_value: VLIRExpr::Var(hold),
-                    opening: false,
-                });
+                // After the shadow and the strip: the default is neither a load of
+                // the hold register nor a closing drive.
+                if let Some(default) = single_phase_default.take() {
+                    stmts.insert(0, default);
+                }
             }
             if multi_phase {
                 ff_stmts.push(VLIRFFStmt::If {
@@ -481,7 +534,8 @@ fn lower_seq(
             .chain(registered_outs.iter().cloned())
             .collect();
         hoist_branch_local_defaults(&mut stmts, &protected);
-        check_no_latches(&stmts)?;
+        let defaulted: HashSet<String> = hold_names.keys().cloned().collect();
+        check_no_latches(&stmts, &defaulted)?;
         comb_phases.push(VLIRCombPhase { phase_guard, stmts });
 
         // Register updates -> always_ff non-blocking assigns, guarded by phase
@@ -551,13 +605,14 @@ fn lower_seq(
             }
         }
     }
-    drop_unread_wires(&mut comb_phases, &always_ff, &output_assigns, &memories, &external_reads);
+    drop_unread_wires(&mut comb_phases, &comb_defaults, &always_ff, &output_assigns, &memories, &external_reads);
 
     Ok(VLIRSeqBody {
         clock: clock.clone(),
         reg_decls,
         memories,
         submodules,
+        comb_defaults,
         comb_phases,
         always_ff,
         output_assigns,
@@ -1809,6 +1864,7 @@ fn first_direct_port_value(arms: &[VLIRCaseArm], port: &str) -> Option<VLIRExpr>
 /// only failure mode that would matter — deleting a wire something still reads.
 fn drop_unread_wires(
     comb_phases: &mut [VLIRCombPhase],
+    comb_defaults: &[VLIRStmt],
     always_ff: &VLIRAlwaysFF,
     output_assigns: &[VLIRContinuousAssign],
     memories: &[VLIRMemDecl],
@@ -1817,6 +1873,9 @@ fn drop_unread_wires(
 ) {
     loop {
         let mut read: HashSet<String> = external_reads.clone();
+        for st in comb_defaults {
+            collect_vlir_reads_stmt(st, &mut read);
+        }
         for phase in comb_phases.iter() {
             if let Some(g) = &phase.phase_guard {
                 collect_vlir_reads(g, &mut read);
@@ -2286,9 +2345,13 @@ fn strip_nested_defaults(
 
 /// on some control paths but not all. Copper's premise is that this class of bug
 /// should be impossible to express, so it is an error, not a silent emission.
-fn check_no_latches(stmts: &[VLIRStmt]) -> LowerResult<()> {
+///
+/// `defaulted` names signals assigned unconditionally at the top of the block
+/// (`VLIRSeqBody::comb_defaults`), outside the statements checked here.
+fn check_no_latches(stmts: &[VLIRStmt], defaulted: &HashSet<String>) -> LowerResult<()> {
     let mut latched: Vec<String> = assigned_on_any_path(stmts)
         .difference(&assigned_on_all_paths(stmts))
+        .filter(|s| !defaulted.contains(*s))
         .cloned()
         .collect();
     if latched.is_empty() {

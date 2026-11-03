@@ -1588,10 +1588,151 @@ phase-gated `always_comb` (every-path and mux + hold alike) assigns the port
 only inside its phase. An emission fix would add the hold value as the default
 outside the phase (`o = o_hold` — the extraction route's form has it); until
 one lands the shape is refused, and `e15ac` / `e15ad` are the two agreeing
-traces that would then be admitted. (b) `trailing_regout_reads_input`, the
+traces that would then be admitted. **Fixed the same day — §10.9.** (b) `trailing_regout_reads_input`, the
 `RegOut` sibling of the trailing rule, still reads value sources only; a
 `RegOut` written in a trailing `if` whose test reads the input immediately is
 unmeasured and unrefused. (c) The passthrough classification is the direct
 argument of `o.write(…)` only; `let t = x.read(); o.write(t)` is deferred in a
 register-free body and behaves as the registered class does — which is what
 makes clause 3's input-operand case, and nothing else, register-free-specific.
+
+### 10.9 The latch fixed — the conditional drives of the linear multi-tick route (derived 2026-11-02, then measured)
+
+§10.8 read two forms off the transpiler that were a latch outside their phase
+and refused every drive that took them. This section fixes the emission and
+narrows the rule to the residue. The fix is the one §10.8 named: the mux + hold
+form's `o = o_hold` default moves to the **top of the `always_comb` block,
+outside every phase guard** (`VLIRSeqBody::comb_defaults`), and an every-path
+conditional port of a multi-phase body takes the same two forms a held port
+has — the drive-level mux + hold form when some drive of it has no input read
+before it in its arm's walk, the edge-sampled flop under the phase otherwise.
+Nothing else moves: the single-phase bodies (the single-tick and extraction
+routes) emit byte-for-byte what they did, the unconditional forms of §10.7 are
+untouched, and the trailing walk still forwards nothing.
+
+**The forms after the fix**, per conditional plain-`Out` drive of a multi-phase
+body (read off the transpiler and confirmed on every probe below before its
+trace was taken):
+
+| drive | form |
+|---|---|
+| some drive of the port in the segment reads a same-segment wire | the phase-guarded flop for **every** drive of the port (the phase-scoped hold port of `phase_scoped_output_ports`) — read off `e16m` AFTER its prediction missed, see below |
+| otherwise, some drive of the port has no input read before it in its arm's walk | the drive-level mux + hold form: `o = o_hold` at the top of the block, the opening drives in the comb copy under `if (phase_r == p)`, every drive loading `o_hold` in `always_ff` under the phase |
+| otherwise (every drive behind an input read) | `if (phase_r == p) if (g) o <= v` — the edge-sampled flop, every-path or held |
+| after the last tick | hoisted into phase 0's flop, closing (unchanged) |
+| a port written unconditionally AND conditionally in one segment | the unconditional write's continuous assign beside the conditional form's driver — two drivers (unchanged; found here) |
+
+**The model, per drive.** The simulator's anchor is §9.1's: opening where no
+deferred read precedes the drive on its path, closing otherwise; a
+register-free body's own-operand reads are immediate (§10.8), and every read
+after the last tick is immediate. The lowering's anchor is the arm walk's:
+opening iff no input read precedes the drive in its arm (the drive's own
+operand counts; a read in a preceding branch's arm counts), never in the
+trailing region. The hold form realizes each drive at the lowering's anchor —
+the comb copy shows an opening drive from the observation after the entering
+edge and the hold register keeps it; a closing drive loads the register at the
+edge — so a drive agrees iff the two anchors agree on every path, with one
+more mechanism: the comb copy tests a guard against the **committed** register
+(D1's forwarded-guard clause, §10.1), so an opening drive under a guard that
+tests a register assigned earlier in the segment diverges. The flop realizes
+every drive at the edge, so it agrees iff the simulator is closing on every
+path. A trailing conditional drive is the flop at phase 0's edge, one
+observation after the trailing instant: it never agrees.
+
+**The probes** (`tests/sequential_forwarding_divergence.rs`; the §10.8
+conventions; `cnt` updated in the head commits at the even edges, so during
+the middle segment after edge 2k it is k+1; updated in the middle it commits at
+the odd edges). Every row was written before the probe ran.
+
+| probe | shape | form | predicted (sim / SV) | measured |
+|---|---|---|---|---|
+| `e15t`, `e15w`, `e15x`, `e15wr` | §10.8's every-path drives behind a deferred read | flop | AGREE (the §10.8 sim traces; `e15t` `[0, 7, 7, 3, 3, …]`) | as predicted |
+| `e15ac`, `e15ad` | §10.8's no-read drives | hold form, default outside the guard | AGREE (the traces §10.8 took with the lint off) | as predicted |
+| `e15z` | trailing every-path constants behind `x[0]` | flop hoisted to phase 0 | DIVERGE: sim `[0, 7, 7, …]` / SV all `3` (`x[0]` never set at an even edge) | as predicted |
+| `e16a_middle_every_path_mixed` | M, `if cnt[0] { o.write(cnt) } else { o.write(x.read()) }` | hold form, mixed (1/1) | AGREE: `[1, 1, 1, 13, 3, 3, 3, 17, 5, 5, 5, 21, 7]` | as predicted |
+| `e16b_middle_held_mixed` | M, `if cnt[0] { o.write(cnt) } else if x.read()[0] { o.write(7) }` | hold form, mixed (1/1) | AGREE: `[1, 1, 1, 7, 3, 3, 3, 7, 5, 5, 5, 7, 7]` | as predicted |
+| `e16c_head_every_path_register_no_read` | H, `e15ac`'s `if`, `cnt` updated in M | hold form, phase 0 | AGREE: `[3, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3, 3]` | as predicted |
+| `e16d_trailing_held_register_guard_no_read` | T, `if cnt[0] { o.write(cnt) }` | flop hoisted to phase 0 | DIVERGE one late: `[0, 1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5, 5]` / `[0, 0, 1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5]` | as predicted |
+| `e16e_trailing_every_path_register_no_read` | T, `e15ac`'s `if` | flop hoisted to phase 0 | DIVERGE: `[0, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3, 3]` / `[3, 3, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3]` | as predicted |
+| `e16f_regfree_constant_guard_passthrough` | register-free M, `let t = 7; if t[0] { o.write(x.read()) }` | flop (the own read counts as before it) | DIVERGE: `[10, 10, 12, 12, …, 22]` / `[0, 11, 11, 13, 13, …, 21, 21]` — the passthrough is immediate, the guard reads nothing | as predicted — **admitted by every rule until this section** (§10.8's deferred-read predicate counted the drive's own read) |
+| `e16g_middle_default_then_held` | M, `o.write(3); if cnt[0] { o.write(cnt) }` | `assign o = 3` beside the hold form | refused as emitted: `MULTIDRIVEN`; sim `[1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3, 3, 7]` | as predicted |
+| `e16h_middle_held_read_then_opening_arm` | M, `if cnt[0] { let _ = x.read(); o.write(7) } else { o.write(cnt) }` | hold form, mixed (1/1) | AGREE: `[0, 7, 2, 2, 2, 7, 4, 4, 4, 7, 6, 6, 6]` | as predicted |
+| `e16i_head_read_default_then_held` | H, `let _ = x.read(); o.write(3); if cnt[0] { o.write(cnt) }` | `assign o = 3` beside the flop | predicted refused as emitted; sim `[3, 3, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3]` | **builds**: the `MULTIDRIVEN` lint-off pair around `always_ff` silences the warning; the two drivers fight and the trace is the scheduler's, `[3, 3, 1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5]`, pinned as measured — DIVERGE |
+| `e16j_single_tick_default_then_held` | single tick, `e16g`'s pair | `assign o = 3` beside the hold form | refused as emitted (`MULTIDRIVEN`), **admitted by every rule** — the single-tick route is outside this rule; sim `[1, 3, 3, 3, 5, 3, 7, 3, 9, 3, 11, 3, 13]` | as predicted (the sim trace was first written one iteration off and corrected before the SV ran — the head's write after edge k is iteration k+1's) |
+| `e16k_middle_default_then_held_behind_read` | M, `let _ = x.read(); o.write(cnt); if x.read()[1] { o.write(7) }` | `assign o = cnt` beside the flop | refused as emitted; sim `[0, 7, 7, 2, 2, 7, 7, 4, 4, 7, 7, 6, 6]` | refused as `BLKANDNBLK` (an error, whatever the flags), not `MULTIDRIVEN` — the same verdict, the other diagnostic |
+| `e16l_middle_path_dependent_read_then_held` | M, `if cnt[0] { let _ = x.read(); } if cnt[1] { o.write(cnt) }` | flop (the branch's read marks the later drive closing) | DIVERGE one late on the read-free path: `[0, 0, 2, 2, 2, 3, 3, 3, 3, 3, 6, 6, 6]` / `[0, 0, 0, 2, 2, 3, 3, 3, 3, 3, 3, 6, 6]` | as predicted |
+| `e16m_middle_held_wire_no_read` | M, `let t = cnt + 2; if cnt[0] { o.write(t) }` | predicted the hold form | predicted AGREE `[3, 3, 3, 3, 5, 5, 5, 5, 7, 7, 7, 7, 9]` | **MISSED**: SV `[0, 3, 3, 3, 3, 5, 5, 5, 5, 7, 7, 7, 7]`, one late — the port reads a same-segment wire, so it is a phase-scoped hold port and every drive of it is the flop; the hold form does not reach it. The first row of the form table and clause C's wire case were written from this measurement |
+| `e16n_middle_forwarded_guard_held` | M, `cnt = cnt + 1; if cnt[0] { o.write(cnt) }` (`cnt` only here) | hold form, committed guard | DIVERGE: `[1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5, 5, 7]` / `[0, 1, 2, 1, 1, 3, 4, 3, 3, 5, 6, 5, 5]` | as predicted |
+| `e16o_middle_forwarded_guard_every_path` | M, `cnt = cnt + 1; if cnt[0] { o.write(cnt) } else { o.write(3) }` | hold form, committed guard | DIVERGE: `[1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3, 3, 7]` / `[3, 1, 2, 3, 3, 3, 4, 3, 3, 5, 6, 3, 3]` | as predicted |
+| `e16p_middle_forwarded_value_committed_guard` | H `sel += 1`; M `cnt = cnt + 1; if sel[0] { o.write(cnt) }` | hold form, forwarded value | AGREE: `[1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5, 5, 7]` | as predicted |
+| `e16q_head_every_path_mixed` | H, `e16a`'s `if`, `cnt` updated in M | hold form, phase 0, mixed (1/1) | AGREE: `[10, 1, 1, 1, 14, 3, 3, 3, 18, 5, 5, 5, 22]` — the shape D1's every-path clause refused | as predicted |
+
+**Measured 2026-11-02.** Twenty-four verdicts; twenty-three as written, and
+one — `e16m` — wrong in the form it assumed, not in the model: the hold form
+does not reach a port with a wire-valued drive. Two rows kept their verdict
+with a different diagnostic (`e16k`'s `BLKANDNBLK`) or a different outcome of
+the build (`e16i` builds, with two drivers fighting; its trace is pinned as
+measured and is not a timing mechanism). Every trace is pinned in the battery,
+every agreeing row asserted not to be a `LATCH` under `-Wall`, and the
+sv-baseline delta of the emission change is exactly the seven modules whose
+form was the latch (`e15t`, `e15w`, `e15x`, `e15wr`, `e15z`, `e15ac`, `e15ad`)
+— no single-phase module, no live module.
+
+**The decision — the emission fixed, the rule narrowed to the residue, D1's
+every-path clause taken off this route.** `Cfg::linear_out_write_anchor_mismatch`
+keeps §10.8's unconditional clauses (2 and 3) and replaces clause 1 with three,
+per conditional plain-`Out` drive on the linear multi-tick route: **A**, a port
+written both unconditionally and conditionally in one segment is refused (two
+drivers — `e16g`, `e16i`, `e16k`); **B**, a conditional drive after the last
+tick is refused (the hoisted flop, one late — `e16d`, `e16e`; `e15u`, `e15z`,
+`e15aa`, `e15ab` also the trailing rule's); **C**, a conditional drive of a
+pre-tick segment — with a wire-valued drive on the port, the flop: refused iff
+some path reaches it with no deferred read (`e16m`; `e15v` admitted);
+otherwise refused iff an input read reaches it while the simulator runs it at
+the opening on some path (no deferred read on that path — the register-free
+passthrough under a guard that reads no input, `e16f`; or a read-free path from
+the segment's entry, `e16l`), or no read reaches it and its guard tests a
+register assigned earlier in the segment (`e16n`, `e16o`). The deferred-read
+predicate no longer counts a register-free body's own-operand read, which is
+what closes `e16f` — a shape every rule admitted before this section, found
+here while enumerating the cells. `unprotected_pretick_out_write` (D1) loses
+its every-path clause (A2) on this route — the every-path port has the hold
+register here (`e16q`) — and keeps its path-dependent and forwarded-guard
+clauses, which clause C also covers on the head segment. Admitted, measured
+agreeing and now compiled with no opt-out: `e15t`, `e15w`, `e15x`, `e15wr`,
+`e15ac`, `e15ad`, `e16a`, `e16b`, `e16c`, `e16h`, `e16p`, `e16q`. Both
+front-ends' diagnostics restated; `ui/fail/linear_regfree_every_path.rs`
+(`e15w`, admitted) became `ui/pass/pretick_alignment_ok.rs::linear_regfree_every_path`
+beside `linear_held_no_read` (`e15ad`), and `ui/fail/linear_trailing_conditional.rs`
+(`e16d`) is the fail case of clause B. The hold-form audit's mixed-anchor set
+grew by `e16a`, `e16b`, `e16h`, `e16q`, declared before it ran.
+
+**Corpus cost: zero live modules.** `EXPECTED_LINEAR_ANCHOR` lost the six
+admitted `e15*` rows and gained ten `e16*` rows (`e16d`, `e16e`, `e16f`,
+`e16g`, `e16i`, `e16k`, `e16l`, `e16m`, `e16n`, `e16o`); `e15z` stays. The
+parity audit's rule list is unchanged. Pins: `cfg.rs`
+`linear_every_path_conditional_not_flagged`,
+`linear_held_conditional_not_flagged_with_or_without_read`,
+`linear_mixed_anchor_middle_not_flagged_path_dependent_flagged`,
+`linear_held_wire_no_read_flagged_behind_read_not`,
+`linear_trailing_conditional_flagged_middle_not`,
+`linear_regfree_passthrough_under_constant_guard_flagged_deferred_guard_not`,
+`linear_forwarded_guard_middle_flagged_forwarded_value_not`,
+`linear_default_then_conditional_write_flagged`,
+`d1_every_path_mixed_not_flagged_on_the_linear_multi_tick_route`; the `e16*`
+tests and `latch_fix_the_rule_flags_exactly_the_probes_of_section_10_9` in the
+battery.
+
+**Found on the way, not changed.** (a) The single-tick route emits the same
+two drivers for a default write followed by a conditional override of a plain
+`Out` (`e16j`: `assign o = 3` beside the hold form, `MULTIDRIVEN`), and no rule
+refuses it — the shape is refused one IR late by the sweep's `-Wall`, and this
+rule is scoped to more than one tick. The remedy is an emission fix (the
+default routed into the comb copy, where the port is then written on every
+path), which touches the single-phase form and is not taken here; the probe
+pins the gap. (b) The `MULTIDRIVEN` lint-off pair around `always_ff` (there for
+`initial` + `always_ff`) also silences a continuous assign driving the same
+port as a non-blocking assignment (`e16i` builds). (c) A port with a
+wire-valued drive is held to the flop for every drive it has in the segment, a
+register-valued sibling arm included — the hold form could be extended to it
+(the wire is a phase-local temp the comb copy already computes), unmeasured.

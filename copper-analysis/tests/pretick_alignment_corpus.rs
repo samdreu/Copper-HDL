@@ -497,9 +497,14 @@ fn trailing_out_reads_input_flags_exactly_the_demonstration_modules() {
 /// Every witness is a measured probe in `tests/sequential_forwarding_divergence.rs`
 /// (all opted out), derived and matched on the first run; `e7w` is also
 /// `multi_phase_out_write`'s and `e14k` also `pretick_out_write_before_update`'s.
-/// Zero live modules when the rule landed, and zero again when it was restated
-/// by form and freed of its register requirement (2026-11-02, §10.8: the
-/// register-free class, the phase-gated comb forms, the held conditional drive).
+/// Zero live modules when the rule landed, zero again when it was restated by
+/// form and freed of its register requirement (2026-11-02, §10.8: the
+/// register-free class, the phase-gated comb forms, the held conditional drive),
+/// and zero again the same day when the latch those forms were was fixed and the
+/// rule narrowed to the residue (§10.9: six `e15*` rows admitted, nine `e16*`
+/// rows refused — the trailing conditional drive, the two-driver shape, the
+/// passthrough under a read-free guard, the path-dependent, wire-valued and
+/// forwarded-guard held drives of a middle segment).
 /// A module joining this set is either a real divergence to measure or a rule
 /// regression to fix.
 const EXPECTED_LINEAR_ANCHOR: &[&str] = &[
@@ -540,16 +545,27 @@ const EXPECTED_LINEAR_ANCHOR: &[&str] = &[
     "tests/sequential_forwarding_divergence.rs::e15u_trailing_conditional_input",
     "tests/sequential_forwarding_divergence.rs::e15aa_trailing_held_constant",
     "tests/sequential_forwarding_divergence.rs::e15ab_trailing_held_wire_from_constant",
-    // clause 1 — the phase-gated comb forms (a latch Verilator refuses): every-path
-    // conditional drives, and a held drive no read precedes (e15ac, e15ad agree
-    // with the lint off and are refused for the form)
-    "tests/sequential_forwarding_divergence.rs::e15t_middle_conditional_constant",
-    "tests/sequential_forwarding_divergence.rs::e15w_head_every_path_constants",
-    "tests/sequential_forwarding_divergence.rs::e15x_middle_every_path_inputs",
+    // §10.9 (2026-11-02, the latch fixed): the trailing conditional drive, hoisted
+    // into phase 0's flop one observation after the trailing instant (clause B —
+    // e15z also the trailing rule's and out_first_driven_late's)
     "tests/sequential_forwarding_divergence.rs::e15z_trailing_every_path_constants",
-    "tests/sequential_forwarding_divergence.rs::e15wr_head_every_path_constants_registered",
-    "tests/sequential_forwarding_divergence.rs::e15ac_middle_every_path_register_no_read",
-    "tests/sequential_forwarding_divergence.rs::e15ad_middle_held_register_guard_no_read",
+    "tests/sequential_forwarding_divergence.rs::e16d_trailing_held_register_guard_no_read",
+    "tests/sequential_forwarding_divergence.rs::e16e_trailing_every_path_register_no_read",
+    // clause C — a conditional drive whose anchor differs between the sides: the
+    // register-free passthrough under a guard that reads no input (admitted
+    // until §10.9), a read-free path to a drive a read reaches, a forwarded guard
+    // on an opening drive in a middle segment, a wire-valued held drive (the
+    // phase-scoped flop) with no read
+    "tests/sequential_forwarding_divergence.rs::e16f_regfree_constant_guard_passthrough",
+    "tests/sequential_forwarding_divergence.rs::e16l_middle_path_dependent_read_then_held",
+    "tests/sequential_forwarding_divergence.rs::e16m_middle_held_wire_no_read",
+    "tests/sequential_forwarding_divergence.rs::e16n_middle_forwarded_guard_held",
+    "tests/sequential_forwarding_divergence.rs::e16o_middle_forwarded_guard_every_path",
+    // clause A — a port written unconditionally and conditionally in one segment:
+    // two drivers, refused as emitted (MULTIDRIVEN)
+    "tests/sequential_forwarding_divergence.rs::e16g_middle_default_then_held",
+    "tests/sequential_forwarding_divergence.rs::e16i_head_read_default_then_held",
+    "tests/sequential_forwarding_divergence.rs::e16k_middle_default_then_held_behind_read",
 ];
 
 #[test]
