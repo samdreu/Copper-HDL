@@ -2549,11 +2549,21 @@ fn lower_local_binding(
 
 /// Retype a port write's default-width literals (`o.write(Bits::zero())`) to
 /// the port's declared width — the same treatment an `Assign`'s RHS gets. Only
-/// AMBIGUOUS default literals are rewritten, so a value with its own width is
-/// untouched.
+/// AMBIGUOUS default literals are rewritten; a bare variable of a different
+/// declared width is width-cast, as a `let` binding's value is (`o = 8'(i)` for
+/// `o.write(Bits::from_usize(i))` in a `for` — a 32-bit loop index, WIDTHTRUNC
+/// under `-Wall` until 2026-11-02, §10.11). Only a variable: `expr_width` reads
+/// an array element (`data_i[0]`) as a one-bit slice, so a wider cast would
+/// wrap correct writes in no-op casts (`mux`).
 fn retype_port_write_value(port: &str, value: CHIRExpr, ctx: &LowerCtx) -> CHIRExpr {
     match ctx.symbols.get(port) {
-        Some(ty) => retype_default_literals_in_values(value, type_width(ty)),
+        Some(ty) => {
+            let tw = type_width(ty);
+            match retype_default_literals_in_values(value, tw.clone()) {
+                v @ CHIRExpr::Var(_) => resize_to_target(v, &tw, ctx),
+                v => v,
+            }
+        }
         None => value,
     }
 }

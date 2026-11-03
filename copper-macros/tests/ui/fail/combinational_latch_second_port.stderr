@@ -1,0 +1,19 @@
+error: would infer a latch: combinational output `p` is assigned on some control paths but not all. Assign `p` on every path (add the missing branch / `_` arm)
+ --> tests/ui/fail/combinational_latch_second_port.rs:8:4
+  |
+8 | fn half_defaulted(c: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>, p: Out<Bits<8>, ()>) {
+  |    ^^^^^^^^^^^^^^
+
+warning: unused imports: `Bits` and `Logic`
+ --> tests/ui/fail/combinational_latch_second_port.rs:1:19
+  |
+1 | use copper_core::{Bits, Logic};
+  |                   ^^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `Out`
+ --> tests/ui/fail/combinational_latch_second_port.rs:2:25
+  |
+2 | use copper_core::port::{In, Out};
+  |                         ^^  ^^^

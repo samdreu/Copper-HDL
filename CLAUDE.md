@@ -417,7 +417,12 @@ receive/clone one.
   ONE-tick loop updates (`e17h`, `e14n`'s single-tick twin) — `pretick_out_write_before_update`
   gained a single-tick trailing-update clause (value or guard, every-path ports only;
   `e17d`/`e17h`/`e17j`), D1 refuses the rest (`e17c`/`e17e`/`e17f`); zero live modules,
-  sv-baseline delta `e16j` plus the new probes. The doc also records **five** rejected fixes with
+  sv-baseline delta `e16j` plus the new probes. **The combinational route got the same
+  routing (§10.11):** `o.write(3); if c { o.write(x) }` was admitted by the macro and
+  refused by the transpiler as a latch — a front-end parity break. The default now stays
+  in `always_comb`, and the transpiler runs the macro's `check_definite_assignment` too
+  (`check_no_latches` stays as defence in depth); a truly partial write is refused by
+  both (`copper-codegen/tests/comb_definite_assignment_parity.rs`). The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in

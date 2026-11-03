@@ -255,8 +255,15 @@ pub fn lower_to_vlir(shir: &SHIRModule) -> LowerResult<VLIRModule> {
 
 fn lower_comb(c: &SHIRCombBody, leg: &Legalizer) -> LowerResult<VLIRCombBody> {
     let submodules = c.submodules.iter().map(|s| lower_submodule(s, leg, &MemBinding::new())).collect::<LowerResult<_>>()?;
-    // A combinational module has no clock, so it has no registered outputs.
-    let (mut comb_stmts, output_assigns) = lower_flat_stmts(&c.stmts, leg, &HashSet::new(), &MemWidths::default(), &MemBinding::new())?;
+    // A combinational module has no clock, so it has no registered outputs. A port
+    // written unconditionally AND inside an `if`/`match`/`for` (a default, then an
+    // override — or the reverse) keeps its unconditional write in `always_comb`, in
+    // program order, so the latch check below sees it on every path. Until
+    // 2026-11-02 that write became a module-level `assign` and the module was
+    // refused as a latch, although the macro's definite-assignment check admitted
+    // it (§10.11) — the routing §10.10 gave single-phase sequential bodies.
+    let in_comb: HashSet<String> = nested_port_drives(&c.stmts).into_iter().map(|p| leg.get(&p)).collect();
+    let (mut comb_stmts, output_assigns) = lower_flat_stmts(&c.stmts, leg, &in_comb, &MemWidths::default(), &MemBinding::new())?;
     // A combinational module has no registers, so nothing is exempt.
     hoist_branch_local_defaults(&mut comb_stmts, &HashSet::new());
     check_no_latches(&comb_stmts, &HashSet::new())?;
