@@ -31,6 +31,12 @@
 //! requirement on 2026-11-02 (`CYCLE_DATAFLOW_SEMANTICS.md` §10.8) and the
 //! trailing-`Out` rule gained a guard clause the same day — both in
 //! `copper-analysis` alone, so the audit's list did not change.
+//!
+//! The audit scans clocked modules. The combinational rule (definite assignment)
+//! became shared on 2026-11-02 (§10.12): the transpiler refused a default-then-
+//! override the macro admitted. Its two-direction pin is
+//! `copper-codegen/tests/comb_definite_assignment_parity.rs`, and the sweep
+//! transpiles every combinational module the macro compiles.
 
 use std::collections::BTreeSet;
 use std::fs;

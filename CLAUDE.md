@@ -424,7 +424,12 @@ receive/clone one.
   guard edition scoped to that port form. The held port and the multi-tick and
   extraction routes are the flop and agree (`e18a`, `e18f`–`e18i`). Zero live modules;
   `d2b` overlaps D1. The value clause over-refuses a held port (`e18j` agrees): that is
-  pinned, not narrowed, and the decision is the user's. The doc also records **five** rejected fixes with
+  pinned, not narrowed, and the decision is the user's. **The combinational route got the same
+  routing (§10.12):** `o.write(3); if c { o.write(x) }` was admitted by the macro and
+  refused by the transpiler as a latch — a front-end parity break. The default now stays
+  in `always_comb`, and the transpiler runs the macro's `check_definite_assignment` too
+  (`check_no_latches` stays as defence in depth); a truly partial write is refused by
+  both (`copper-codegen/tests/comb_definite_assignment_parity.rs`). The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in

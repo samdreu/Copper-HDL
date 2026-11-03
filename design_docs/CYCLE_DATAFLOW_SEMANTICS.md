@@ -1835,7 +1835,8 @@ followed by a conditional override (`o.write(3); if c { o.write(a) }`) as a
 latch before emission, although the port is written on every path — a false
 refusal of a legal shape in the transpiler (`check_no_latches`; whether the
 macro front end admits it was not checked). The same `nested_port_drives`
-routing would likely fix it; unmeasured. (b) The pre-tick
+routing would likely fix it; unmeasured. *Closed by §10.12:* the macro
+admitted it — a front-end parity break — and the routing fixed it. (b) The pre-tick
 V8 clause still reads only the write's value, not its guard; the guard was
 measured here only across the tick (`e17j`) **(closed in §10.11)**. (c) §10.9's (b) — the
 `MULTIDRIVEN` lint-off pair around `always_ff` also hides an assign driving the
@@ -1922,3 +1923,60 @@ older value clause refuses it, because it is not scoped by port form. The same
 holds, by this model, for any held V8a. Narrowing the value clause to the comb
 form would admit those shapes, which is a legality decision, so it is pinned as
 measured and left to the user.
+
+### 10.12 The combinational default-then-override — a front-end parity break, closed (derived 2026-11-02, then measured)
+
+§10.10 (a) found the combinational route refusing `o.write(3); if c { o.write(a) }`
+as a latch. Read off both front ends before any probe: the macro's
+`check_definite_assignment` is a MUST dataflow over the CFG, so it **admits** the
+shape (the port is written on every path); the transpiler's `lower_comb` sent the
+unconditional write to a module-level `assign` and the nested one to
+`always_comb`, so `check_no_latches` over the `always_comb` saw only the nested
+write and **refused** it. A module that compiled and simulated was refused at
+transpile time — the class the parity audit exists to rule out, which it did not
+see because it scans clocked modules only. No timing question arises: a
+combinational module has one instant, the simulator's value is the last write in
+program order, and so is SystemVerilog's blocking `always_comb`.
+
+**The fix.** `lower_comb` keeps the unconditional write of a port also driven
+inside an `if`/`match`/`for` in `always_comb`, in program order — §10.10's
+`nested_port_drives` routing. A port written only unconditionally stays a
+continuous `assign`. The transpiler now also runs the macro's
+`copper_analysis::check_definite_assignment` (in `vlir_for_target`, beside the
+other shared rules), so the two front ends refuse a combinational latch from one
+rule; `check_no_latches` stays as defence in depth (it also sees wires and memory
+nets). The `for` neighbour exposed a second, unrelated gap that the latch refusal
+had hidden: `o.write(Bits::from_usize(i))` emitted `o = i` with a 32-bit loop index,
+which `-Wall` refuses as `WIDTHTRUNC`. A port write of a bare variable of a
+different declared width is now width-cast, as a `let` binding's value already was
+(`o = 8'(i)`). The cast is limited to a variable: `expr_width` reads an array
+element (`data_i[0]`) as a one-bit slice, and a wider cast wrapped `mux`'s correct
+writes in no-op casts (measured, then narrowed).
+
+**The probes** (predicted before the run; admitted rows are the swept fixture
+`tests/fixtures/comb_default_override_dut.rs`, refused rows the ui cases and
+`copper-codegen/tests/comb_definite_assignment_parity.rs`):
+
+| probe | shape | macro | transpiler before | after |
+|---|---|---|---|---|
+| `cdo_default_then_override` | `o=3; if c {o=x}` | admits | latch | AGREE |
+| `cdo_override_then_default` | `if c {o=x}; o=3` | admits | latch | AGREE |
+| `cdo_nested_overrides` | `o=3; if c {o=x; if x[0] {o=y}}` | admits | latch | AGREE |
+| `cdo_match_default_arm` | `o=3; match s {0=>x, 1=>y, _=>{}}` | admits | latch | AGREE |
+| `cdo_for_override` | `o=0; for i in 0..8 { if x[i] {o=i} }` | admits | latch | AGREE (after the width cast) |
+| `cdo_match_every_arm` (control) | every arm writes, no default | admits | transpiles | AGREE, SV unchanged |
+| `combinational_latch` | `if c {o=x}` | refuses | latch | both refuse |
+| `combinational_latch_second_port` | `o=3; if c {o=x; p=x}` | refuses `p` | latch | both refuse `p` |
+| `combinational_latch_two_ifs` | `if c {o=3}; if d {o=x}` | refuses | latch | both refuse |
+
+**Measured 2026-11-02.** The macro admitted every predicted row and the
+transpiler refused the five predicted ones; after the fix all six admitted
+rows agree under the sweep's `-Wall` (truth table, 256 vectors for `for`), and
+the partial rows are refused by both front ends, naming the right port.
+Without the shared rule, `check_no_latches` alone still refuses them.
+
+**sv-baseline delta** (every `#[hardware]` module of `examples/`, `src/`,
+`tests/` through `copper-transpile`, before and after): NEW the five probes
+the transpiler refused; nothing else CHANGED; the refused set lost exactly
+those five. Corpus cost of the shared rule in the transpiler: zero (every
+combinational module in the tree already compiles through the macro).

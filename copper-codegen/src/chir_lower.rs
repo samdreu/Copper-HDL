@@ -2549,11 +2549,20 @@ fn lower_local_binding(
 
 /// Retype a port write's default-width literals (`o.write(Bits::zero())`) to
 /// the port's declared width — the same treatment an `Assign`'s RHS gets. Only
-/// AMBIGUOUS default literals are rewritten, so a value with its own width is
-/// untouched.
+/// AMBIGUOUS default literals are rewritten; a bare variable of a different
+/// declared width is width-cast, as a `let` binding's value is (`o = 8'(i)` for
+/// `o.write(Bits::from_usize(i))` in a `for` — a 32-bit loop index, WIDTHTRUNC
+/// under `-Wall` until 2026-11-02, §10.12). Any value whose width `expr_width`
+/// can read off is cast on a mismatch — an array element (`data_i[sel]`) has
+/// its element width since 2026-11-03, so `mux`'s matching write is untouched;
+/// before then the cast was limited to a bare variable because an element read
+/// as one bit.
 fn retype_port_write_value(port: &str, value: CHIRExpr, ctx: &LowerCtx) -> CHIRExpr {
     match ctx.symbols.get(port) {
-        Some(ty) => retype_default_literals_in_values(value, type_width(ty)),
+        Some(ty) => {
+            let tw = type_width(ty);
+            resize_to_target(retype_default_literals_in_values(value, tw.clone()), &tw, ctx)
+        }
         None => value,
     }
 }
@@ -4387,9 +4396,42 @@ fn type_width(ty: &CHIRType) -> Width {
     }
 }
 
+/// The ARRAY type an expression's value has, when it is one: a reference to an
+/// array-typed signal (`data_i`), or one index into an array of arrays. `None`
+/// for anything scalar — including an element already selected out.
+fn array_valued_type<'a>(e: &CHIRExpr, ctx: &'a LowerCtx) -> Option<&'a CHIRType> {
+    match e {
+        CHIRExpr::Var(name) => ctx.symbols.get(name).filter(|t| matches!(t, CHIRType::Array { .. })),
+        _ => match indexed_array_elem(e, ctx)? {
+            t @ CHIRType::Array { .. } => Some(t),
+            _ => None,
+        },
+    }
+}
+
+/// The ELEMENT type selected by an index into an array-valued base —
+/// `data_i[sel]` (a `DynBit`) or `data_i[0]` (a one-bit `Slice`). `lower_index`
+/// produces the same two shapes for a bit select of a scalar and an element
+/// select of an array, so the base's type is what tells them apart: an element
+/// of `[Bits<W>; N]` is W bits wide, not 1. `None` when the base is not an array.
+fn indexed_array_elem<'a>(e: &CHIRExpr, ctx: &'a LowerCtx) -> Option<&'a CHIRType> {
+    let base = match e {
+        CHIRExpr::DynBit { base, .. } => base,
+        CHIRExpr::Slice { expr, high, low } if high == low => expr,
+        _ => return None,
+    };
+    match array_valued_type(base, ctx)? {
+        CHIRType::Array { elem, .. } => Some(elem),
+        _ => None,
+    }
+}
+
 /// The `Width` of a lowered expression when it can be read off directly (a signal
 /// reference or a literal); `None` for anything whose width needs inference.
 fn expr_width(e: &CHIRExpr, ctx: &LowerCtx) -> Option<Width> {
+    if let Some(elem) = indexed_array_elem(e, ctx) {
+        return Some(type_width(elem));
+    }
     match e {
         CHIRExpr::Var(name) => ctx.symbols.get(name).map(type_width),
         CHIRExpr::Lit(l) => Some(type_width(&l.ty)),
@@ -4456,6 +4498,9 @@ fn retype_default_literals_in_values(e: CHIRExpr, width: Width) -> CHIRExpr {
 /// in-scope signal types. Measuring the *lowered* form matters because pattern
 /// bindings have been substituted by then (`t` → `timer`).
 fn width_of_chir_expr(e: &CHIRExpr, ctx: &LowerCtx) -> Option<usize> {
+    if let Some(elem) = indexed_array_elem(e, ctx) {
+        return width_of_type_concrete(elem);
+    }
     match e {
         CHIRExpr::Var(name) => ctx
             .symbols
@@ -7857,5 +7902,122 @@ mod tests {
         fir.file_structs = capture_structs("struct Wrap { inner: Bits<8> }");
         // Should lower without an ambiguous-width error.
         assert!(lower_to_chir(&fir, &no_hw(), &empty_registry()).is_ok());
+    }
+
+    // ── Array element widths (`expr_width` / `width_of_chir_expr`) ──────────
+    //
+    // `lower_index` gives a bit select of a scalar and an element select of an
+    // array the same shapes (`DynBit`, one-bit `Slice`); only the base's type
+    // tells them apart. Before this, both walks called an element of
+    // `[Bits<W>; N]` 1 bit wide, so a width cast keyed on them would have cast
+    // `data_o = data_i[sel]` (mux.rs) to 1 bit.
+
+    fn uint(w: usize) -> CHIRType { CHIRType::UInt { width: Width::Concrete(w) } }
+    fn arr(elem: CHIRType, n: usize) -> CHIRType {
+        CHIRType::Array { elem: Box::new(elem), len: Width::Concrete(n) }
+    }
+    fn var(n: &str) -> CHIRExpr { CHIRExpr::Var(n.into()) }
+    fn dyn_bit(base: CHIRExpr, idx: CHIRExpr) -> CHIRExpr {
+        CHIRExpr::DynBit { base: Box::new(base), index: Box::new(idx) }
+    }
+    fn bit(base: CHIRExpr, b: usize) -> CHIRExpr {
+        CHIRExpr::Slice { expr: Box::new(base), high: b, low: b }
+    }
+    fn width_ctx<'a>(
+        hw: &'a std::collections::HashSet<String>,
+        reg: &'a ModuleRegistry,
+    ) -> LowerCtx<'a> {
+        let mut ctx = LowerCtx::new(hw, reg);
+        ctx.symbols.insert("data_i".into(), arr(uint(8), 4));
+        ctx.symbols.insert("sel".into(), uint(2));
+        ctx.symbols.insert("word".into(), uint(16));
+        ctx.symbols.insert("grid".into(), arr(arr(uint(5), 3), 2));
+        ctx.symbols.insert(
+            "pdata".into(),
+            CHIRType::Array {
+                elem: Box::new(CHIRType::UInt { width: Width::Param("WIDTH_P".into()) }),
+                len: Width::Param("ELS_P".into()),
+            },
+        );
+        ctx.symbols.insert("o8".into(), uint(8));
+        ctx.symbols.insert("o4".into(), uint(4));
+        ctx
+    }
+
+    #[test]
+    fn array_element_select_has_the_element_width() {
+        let (hw, reg) = (no_hw(), empty_registry());
+        let ctx = width_ctx(&hw, &reg);
+        for e in [dyn_bit(var("data_i"), var("sel")), bit(var("data_i"), 0), bit(var("data_i"), 3)] {
+            assert_eq!(expr_width(&e, &ctx), Some(Width::Concrete(8)), "{e:?}");
+            assert_eq!(width_of_chir_expr(&e, &ctx), Some(8), "{e:?}");
+        }
+        // A parameter-width element keeps its symbolic width; the concrete walk
+        // cannot name it.
+        let p = dyn_bit(var("pdata"), var("sel"));
+        assert_eq!(expr_width(&p, &ctx), Some(Width::Param("WIDTH_P".into())));
+        assert_eq!(width_of_chir_expr(&p, &ctx), None);
+    }
+
+    #[test]
+    fn bit_select_of_a_scalar_or_an_element_is_one_bit() {
+        let (hw, reg) = (no_hw(), empty_registry());
+        let ctx = width_ctx(&hw, &reg);
+        let elem = dyn_bit(var("data_i"), var("sel"));
+        for e in [
+            dyn_bit(var("word"), var("sel")),
+            bit(var("word"), 5),
+            dyn_bit(elem.clone(), var("sel")),
+            bit(elem, 7),
+        ] {
+            assert_eq!(expr_width(&e, &ctx), Some(Width::Concrete(1)), "{e:?}");
+            assert_eq!(width_of_chir_expr(&e, &ctx), Some(1), "{e:?}");
+        }
+        // A multi-bit slice is still a range of bits, whatever its base.
+        let s = CHIRExpr::Slice { expr: Box::new(var("word")), high: 11, low: 4 };
+        assert_eq!(expr_width(&s, &ctx), Some(Width::Concrete(8)));
+    }
+
+    #[test]
+    fn nested_array_index_walks_one_dimension_per_index() {
+        let (hw, reg) = (no_hw(), empty_registry());
+        let ctx = width_ctx(&hw, &reg);
+        let row = bit(var("grid"), 1);
+        let cell = dyn_bit(row.clone(), var("sel"));
+        assert_eq!(expr_width(&row, &ctx), Some(Width::Concrete(5)));
+        assert_eq!(expr_width(&cell, &ctx), Some(Width::Concrete(5)));
+        assert_eq!(expr_width(&bit(cell, 0), &ctx), Some(Width::Concrete(1)));
+    }
+
+    #[test]
+    fn memory_word_read_has_the_element_width() {
+        let (hw, reg) = (no_hw(), empty_registry());
+        let mut ctx = width_ctx(&hw, &reg);
+        ctx.memories.insert(
+            "regs".into(),
+            MemInfo { elem_ty: uint(32), read_ports: 0, write_ports: 1 },
+        );
+        let e = CHIRExpr::MemIndex { mem: "regs".into(), addr: Box::new(var("sel")) };
+        assert_eq!(expr_width(&e, &ctx), Some(Width::Concrete(32)));
+        assert_eq!(width_of_chir_expr(&e, &ctx), Some(32));
+    }
+
+    /// The port-write cast, now on any expression: an element of matching width
+    /// is left alone (mux.rs's `data_o = data_i[sel]`), a mismatched one is cast.
+    #[test]
+    fn port_write_casts_only_a_real_width_mismatch() {
+        let (hw, reg) = (no_hw(), empty_registry());
+        let ctx = width_ctx(&hw, &reg);
+        let elem = dyn_bit(var("data_i"), var("sel"));
+        assert_same!(retype_port_write_value("o8", elem.clone(), &ctx), elem);
+        assert_same!(
+            retype_port_write_value("o4", elem.clone(), &ctx),
+            CHIRExpr::Resize { expr: Box::new(elem), width: Width::Concrete(4) }
+        );
+        let w = var("word");
+        assert_same!(
+            retype_port_write_value("o8", w.clone(), &ctx),
+            CHIRExpr::Resize { expr: Box::new(w), width: Width::Concrete(8) }
+        );
     }
 }

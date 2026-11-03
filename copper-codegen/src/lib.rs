@@ -363,6 +363,12 @@ fn vlir_for_target(
     // keep their own copies as defence in depth, the way `check_reachability` is.
     copper_analysis::check_nested_loop_shape(target).map_err(|e| e.to_string())?;
     copper_analysis::check_awaits(target).map_err(|e| e.to_string())?;
+    // A combinational `Out` written on some paths but not all is a latch — the
+    // macro's rule, from the same analysis (2026-11-02, §10.12). Until then the
+    // transpiler had only `check_no_latches` over its own lowering, which refused
+    // a default-then-override the macro admitted; that check stays as defence in
+    // depth (it also covers the wires and memory nets this rule does not see).
+    copper_analysis::check_definite_assignment(target).map_err(|e| e.to_string())?;
     // A pre-loop register's initializer is its power-on value and must be a
     // constant or `Bits::x()` (2026-10-29, same rule and message as the macro).
     // `chir_lower::lower_register_init` then folds the constant into the
