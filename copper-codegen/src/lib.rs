@@ -398,22 +398,30 @@ fn vlir_for_target(
             ));
         }
         // A plain `Out` on the linear multi-tick route whose write's anchor the
-        // emitted form cannot show: the form is chosen by the operand's kind (a
-        // same-segment wire → the phase-guarded flop, a register/input/constant →
-        // a continuous assign) and the simulator by the deferred read before the
-        // write (`Cfg::linear_out_write_anchor_mismatch`, §10.7, 2026-10-30). Same
-        // rule, same opt-out, as the macro.
+        // emitted form cannot show, or whose form is a latch: the form is chosen by
+        // the write's shape and operand (an every-path or read-free conditional
+        // write → a phase-gated comb mux; a same-segment wire or a held write
+        // behind a read → the phase-guarded flop; an unconditional
+        // register/input/constant → a continuous assign) and the simulator by the
+        // deferred read before the write (`Cfg::linear_out_write_anchor_mismatch`,
+        // §10.7, 2026-10-30; §10.8, 2026-11-02). Same rule, same opt-out, as the macro.
         if let Some(port) = copper_analysis::linear_out_write_anchor_mismatch(target).first() {
             return Err(format!(
                 "output port '{port}' is driven on the linear multi-tick path by a write whose \
-                 timing the emitted form cannot show: a same-segment wire is sampled at the \
-                 segment's closing edge while a register, input or constant is a continuous \
-                 assign, whatever reads precede the write, so a wire written with no deferred \
-                 input read on some path lands one observation late, and a register, input or \
-                 constant written behind one lands one observation early whenever it can change \
-                 at another edge. Read an input before every write of a wire-valued port in its \
-                 segment, update a register in the same segment before writing it (or read the \
-                 input after the tick), or declare it as RegOut<…>"
+                 timing the emitted form cannot show, or whose emitted form is a latch: a \
+                 conditional write covering every path of its segment, or preceded by no input \
+                 read, is a phase-gated combinational mux (a latch outside its phase); a \
+                 same-segment wire, or a conditional write behind an input read, is sampled at \
+                 the segment's closing edge; an unconditional register, input or constant is a \
+                 continuous assign — whatever reads precede the write. So a sampled write with \
+                 no deferred input read on some path lands one observation late, an input \
+                 through the assign is tracked where the simulator sampled it once per \
+                 iteration, and a register or constant behind a deferred read lands one \
+                 observation early whenever it can change at another edge. Read an input before \
+                 every write of a sampled port in its segment, update a register in the same \
+                 segment before writing it (or read the input after the tick), compute a \
+                 conditional value into a `let` and write it unconditionally, or declare it as \
+                 RegOut<…>"
             ));
         }
         // A plain `Out` FIRST DRIVEN LATE — every write a constant, none before the
@@ -489,10 +497,11 @@ fn vlir_for_target(
         if let Some(port) = copper_analysis::trailing_out_reads_input(target).first() {
             return Err(format!(
                 "output port '{port}' is written after the last clk.tick().await from an \
-                 input read in that same region, in a body that crosses more than one clock \
-                 edge — the emitted drive samples the input one observation later than the \
-                 simulator's immediate read. Read the input before the tick, or latch it \
-                 into a register and write the port from the register"
+                 input read in that same region (in its value, or in an enclosing if/match \
+                 test), in a body that crosses more than one clock edge — the emitted drive \
+                 samples the input one observation later than the simulator's immediate \
+                 read. Read the input before the tick, or latch it into a register and write \
+                 the port from the register"
             ));
         }
     }

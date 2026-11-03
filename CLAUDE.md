@@ -378,7 +378,19 @@ receive/clone one.
   statements included — an update after the write, an input, a constant outside the
   head segment) is refused; fourteen probes, every verdict predicted first, zero
   live modules. It also closes V8's unexamined middle segment (`e14j`) and
-  `out_first_driven_late`'s closing-constant blind spot (`e14d`). The doc also records **five** rejected fixes with
+  `out_first_driven_late`'s closing-constant blind spot (`e14d`). **Restated by
+  form 2026-11-02 (§10.8)** after the register-free linear class — which the rule
+  had returned nothing for — was measured on thirty-six probes (every verdict
+  predicted first): the form follows the drive's shape as well as its operand —
+  a conditional write on every path of its segment, or preceded by no input read,
+  is a phase-gated `always_comb` with no assignment outside the phase (a latch
+  Verilator refuses; refused for the form, `e15t`/`e15w`/`e15x`/`e15ad`), a held
+  conditional write behind a read is the flop (closing; `e15af`/`e15ag`, refused
+  before, admitted), an input-valued assign is refused whatever precedes it
+  (the register-free passthrough samples once per iteration, `e15a`/`e15g`), and a
+  constant-valued wire's lag is a transient invisible in the head (`e15f`/`e15fr`
+  admitted). The register requirement is gone; `trailing_out_reads_input` counts
+  an immediate read in the drive's guard (`e15ai`); zero live modules. The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in

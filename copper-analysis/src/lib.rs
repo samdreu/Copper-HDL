@@ -187,16 +187,20 @@ pub fn out_first_driven_late(f: &ItemFn) -> Vec<String> {
 }
 
 /// Plain combinational `Out` ports driven on the **linear multi-tick route** by a
-/// write whose anchor the emitted form cannot show (§10.7, 2026-10-30): on that
-/// route the form is chosen by the operand's kind — a same-segment `let` wire is
-/// the phase-guarded flop (closing), a register, input or constant a continuous
+/// write whose anchor the emitted form cannot show, or whose emitted form is a
+/// latch (§10.7, 2026-10-30; restated by form 2026-11-02, §10.8): on that route
+/// the form follows the write's shape and operand — a conditional write on every
+/// path of its segment, or preceded by no input read, is a phase-gated comb mux
+/// assigned only inside its phase (a latch, refused); a same-segment `let` wire,
+/// or a held conditional write behind a read, is the phase-guarded flop
+/// (closing); an unconditional register, input or constant is a continuous
 /// assign (opening) — while the simulator anchors each execution by whether a
-/// deferred input read precedes it. A wire written with no such read on some
-/// path, or a register, input or constant written behind one when the assign can
-/// change at another edge, diverges by one observation. Returns the offending
-/// ports, sorted; empty on the extraction route, in a single-tick body, in a
-/// register-free body, or for `RegOut`. See
-/// [`Cfg::linear_out_write_anchor_mismatch`] for the derivation and the fourteen
+/// deferred input read precedes it. A sampled write with no such read on some
+/// path, an input through the assign, or a register or constant behind such a
+/// read when the assign can change at another edge, diverges. Returns the
+/// offending ports, sorted; empty on the extraction route, in a single-tick
+/// body, or for `RegOut`; a register-free body is examined. See
+/// [`Cfg::linear_out_write_anchor_mismatch`] for the derivation and the fifty
 /// measured cells.
 pub fn linear_out_write_anchor_mismatch(f: &ItemFn) -> Vec<String> {
     Cfg::build(f).map(|c| c.linear_out_write_anchor_mismatch()).unwrap_or_default()

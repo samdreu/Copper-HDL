@@ -1181,7 +1181,8 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                     span,
                     format!(
                         "output `{port}` is written after the last `clk.tick().await` from an \
-                         input read in that same region, in a body that crosses more than one \
+                         input read in that same region — in its value, or in an enclosing \
+                         `if`/`match` test — in a body that crosses more than one \
                          clock edge. The simulator reads the input the instant the write \
                          executes and shows the result at the next observation; the emitted \
                          drive samples the input one observation later (an edge-sampled \
@@ -1197,11 +1198,13 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 .into();
             }
             // A plain `Out` on the LINEAR multi-tick route whose write's anchor the
-            // emitted form cannot show (§10.7, 2026-10-30): the form is chosen by
-            // the operand's kind (a same-segment wire → the phase-guarded flop, a
-            // register/input/constant → a continuous assign), never by the reads
-            // before the write, while the simulator anchors each execution by the
-            // deferred read that precedes it (`Cfg::linear_out_write_anchor_mismatch`).
+            // emitted form cannot show, or whose form is a latch (§10.7, 2026-10-30;
+            // restated by form 2026-11-02, §10.8): the form is chosen by the write's
+            // shape and operand (an every-path or read-free conditional write → a
+            // phase-gated comb mux; a same-segment wire or a held write behind a
+            // read → the phase-guarded flop; an unconditional register/input/
+            // constant → a continuous assign), never by the simulator's anchor
+            // (`Cfg::linear_out_write_anchor_mismatch`).
             let linear_anchor = if allow_pretick_alignment {
                 Vec::new()
             } else {
@@ -1215,25 +1218,34 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                     format!(
                         "output port `{port}` is driven, in a body whose every `clk.tick().await` \
                          is a bare statement and that crosses more than one clock edge per \
-                         iteration, by a write whose timing the synthesized form cannot show. \
-                         On that path the form is chosen by the write's operand, not by the \
-                         reads before it: a value through a same-segment `let` wire is sampled \
-                         at the segment's closing clock edge, while a register, an input or a \
-                         constant is a continuous assign that shows the committed value at every \
-                         observation. The simulator runs the write at the closing edge when an \
-                         input read with a `clk.tick().await` after it precedes the write on the \
-                         path, and at the segment's opening otherwise — so a wire written with no \
-                         such read on some path shows one observation LATE in the hardware, and a \
-                         register, input or constant written behind such a read shows one \
-                         observation EARLY whenever its value can change at another edge (an \
-                         input; a register assigned in another segment, or after the write; a \
-                         constant in a segment after the first). Measured (2026-10-30, §10.7). \
-                         Make the timing match the form: for a wire, read an input before every \
-                         write of `{port}` in its segment; for a register, update it in the same \
+                         iteration, by a write whose timing the synthesized form cannot show, \
+                         or whose synthesized form is a latch. On that path the form follows \
+                         the write's shape and operand, never the reads before it: a \
+                         conditional write that covers every path of its segment, or that no \
+                         input read precedes, becomes a combinational mux assigned only inside \
+                         its clock phase (a latch outside it, which Verilator refuses); a value \
+                         through a same-segment `let` wire, or a conditional write behind an \
+                         input read, is sampled at the segment's closing clock edge; a \
+                         register, an input or a constant written unconditionally is a \
+                         continuous assign that shows the committed value at every observation. \
+                         The simulator runs the write at the closing edge when an input read \
+                         with a `clk.tick().await` after it precedes the write on the path, and \
+                         at the segment's opening otherwise — so a sampled write with no such \
+                         read on some path shows one observation LATE in the hardware, an input \
+                         through the continuous assign is tracked every cycle where the \
+                         simulator sampled it once per iteration, and a register or constant \
+                         written behind such a read shows one observation EARLY whenever its \
+                         value can change at another edge (a register assigned in another \
+                         segment, or after the write; a constant in a segment after the first). \
+                         Measured (2026-10-30, §10.7; 2026-11-02, §10.8). Make the timing \
+                         match the form: for a sampled write, read an input before every write \
+                         of `{port}` in its segment; for a register, update it in the same \
                          segment before the write, or move the read past the `clk.tick().await`; \
-                         or declare `{port}` as `RegOut<…>` (a registered output, immune because \
-                         it commits at the clock edge). If this module exists to DEMONSTRATE the \
-                         divergence, opt out explicitly with `#[hardware(sequential, {ALLOW_PRETICK})]`."
+                         for a conditional write, compute the value into a `let` and write it \
+                         unconditionally; or declare `{port}` as `RegOut<…>` (a registered \
+                         output, immune because it commits at the clock edge). If this module \
+                         exists to DEMONSTRATE the divergence, opt out explicitly with \
+                         `#[hardware(sequential, {ALLOW_PRETICK})]`."
                     ),
                 )
                 .to_compile_error()

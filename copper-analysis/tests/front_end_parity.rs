@@ -25,6 +25,12 @@
 //! The witnesses for the refused shapes are `copper-macros/tests/ui/fail/` cases
 //! (`tick_first_wait.rs`, `memory_result_drives_plain_out.rs`, `foreign_await.rs`),
 //! not corpus modules: a module both front-ends refuse cannot be a swept module.
+//!
+//! The rule list below is the one both front-ends run; its seventh entry, the
+//! linear-route anchor rule, was restated by form and freed of its register
+//! requirement on 2026-11-02 (`CYCLE_DATAFLOW_SEMANTICS.md` §10.8) and the
+//! trailing-`Out` rule gained a guard clause the same day — both in
+//! `copper-analysis` alone, so the audit's list did not change.
 
 use std::collections::BTreeSet;
 use std::fs;

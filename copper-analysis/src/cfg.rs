@@ -1148,10 +1148,12 @@ impl Cfg {
 
     /// Plain `Out` ports written in the **trailing region** (after the last
     /// top-level tick) whose value reads an `In` port **directly** at an
-    /// *immediate* read site, in a body that crosses **more than one clock edge**
-    /// (`crosses_more_than_one_tick`). Returns the ports, sorted. The e8 class,
-    /// 2026-10-26; the plain-`Out` sibling of
-    /// [`trailing_regout_reads_input`](Self::trailing_regout_reads_input).
+    /// *immediate* read site — or, since 2026-11-02 (§10.8), whose **guard** (an
+    /// enclosing `if`/`match` test) does — in a body that crosses **more than one
+    /// clock edge** (`crosses_more_than_one_tick`). Returns the ports, sorted.
+    /// The e8 class, 2026-10-26; the plain-`Out` sibling of
+    /// [`trailing_regout_reads_input`](Self::trailing_regout_reads_input), which
+    /// does not look at guards (unmeasured there, recorded in §10.8).
     ///
     /// The simulator reads the input the instant the write executes (an immediate
     /// read: no tick is comb-reachable from it) and shows the result at the opening
@@ -1191,7 +1193,15 @@ impl Cfg {
                 continue;
             }
             let (_, input_sites) = self.value_sources(w, &trailing, &regs);
-            if input_sites.iter().any(|(_, at)| !self.comb_reaches_tick(*at)) {
+            // The drive's guards count as well (since 2026-11-02, §10.8): an
+            // immediate read in an enclosing `if` decides WHEN the drive fires,
+            // and the edge-sampled form tests it one edge later than the
+            // simulator did (`e15ai` on the extraction route; `e15aa`, `e15ab`,
+            // `e15u` on the linear route).
+            let guard_reads_now = self.nodes[w].guards.iter().any(|&b| {
+                !self.nodes[b].uses.is_disjoint(&self.inputs) && !self.comb_reaches_tick(b)
+            });
+            if guard_reads_now || input_sites.iter().any(|(_, at)| !self.comb_reaches_tick(*at)) {
                 flagged.extend(self.nodes[w].writes.iter().cloned());
             }
         }
@@ -1464,81 +1474,90 @@ impl Cfg {
 
     /// Plain combinational `Out` ports driven on the **linear multi-tick route**
     /// (every tick a bare top-level statement, more than one edge per iteration)
-    /// by a write whose anchor the emitted form cannot show — the §10.7 rule
-    /// (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md`, derived and measured
-    /// 2026-10-30). Returns the offending ports, sorted; empty for a body with a
-    /// nested tick (the extraction route has its own forms and rules), a
-    /// single-tick body (one observation per iteration, measured agreeing in
-    /// every class), a register-free body (the passthrough class, unmeasured
-    /// here), or all-`RegOut` outputs.
+    /// by a write whose anchor the emitted form cannot show, or whose emitted
+    /// form is a latch — the §10.7 rule (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md`,
+    /// derived and measured 2026-10-30), **restated by form and freed of its
+    /// register requirement 2026-11-02 (§10.8)**. Returns the offending ports,
+    /// sorted; empty for a body with a nested tick (the extraction route has its
+    /// own forms and rules), a single-tick body (one observation per iteration,
+    /// measured agreeing in every class — `e8l`, `e15y`, `e15ah`), or all-`RegOut`
+    /// outputs. A register-free body takes the same forms and is examined
+    /// (until 2026-11-02 the rule returned nothing for it, unmeasured).
     ///
-    /// # The mechanism
+    /// # The forms (read off the transpiler, §10.7 and §10.8)
     ///
-    /// On this route the lowering picks a drive's form by its **operand's kind**
-    /// and never by the reads before it: a value that goes through a same-segment
-    /// `let` wire is the phase-guarded flop, sampled at the segment's closing
-    /// edge (the *closing* form); a register, an input or a constant is a
-    /// continuous assign outside every phase guard, showing the committed value
-    /// at every observation (the *opening* form). The simulator anchors each
-    /// execution by its path: closing where a deferred `In` read parks the task
-    /// before the write, opening otherwise (§9.1). A drive agrees iff the
-    /// simulator's anchor on every path equals its form's — with one refinement
-    /// for the continuous assign, which a closing write still agrees with when
-    /// the assign cannot change at any edge but the write's own closing one and
-    /// the write forwards the value that edge commits (`d3b`'s principle across
-    /// segments). Found through `e13a` (§10.6): the control with the read on
-    /// EVERY path diverged with no branch in it, so the linear route's residue is
-    /// not the path-dependent mechanism of clause 4 but a missing form.
+    /// On this route the lowering picks a drive's form by its **shape** and its
+    /// **operand's kind**, never by the simulator's anchor:
     ///
-    /// Measured on fourteen probes, every verdict predicted first
-    /// (`tests/sequential_forwarding_divergence.rs`, the `e13*` / `e14*` tests):
+    /// | drive | form |
+    /// |---|---|
+    /// | unconditional, register / input / constant operand | `assign o = v` — the continuous assign, the committed value at every observation |
+    /// | unconditional, same-segment wire operand | `if (phase_r == p) o <= t` — the phase-guarded flop, sampled at the segment's closing edge (a trailing drive is hoisted into phase 0) |
+    /// | conditional, held (some path of its segment leaves the port unwritten), an input read before it in its arm's walk | the same flop under the phase and its guards |
+    /// | conditional, held, no read before it | the drive-level mux + hold form (§9.4) **gated by the phase** — assigned only inside it |
+    /// | conditional, written on every path of its segment | a phase-gated `always_comb` mux — assigned only inside its phase |
     ///
-    /// | drive | sim anchor | form | verdict |
-    /// |---|---|---|---|
-    /// | wire, no deferred read on some path (`e14a` middle, `e14h` head, `e14k`/`e14m` trailing, `e13`'s cousin `e7w`) | opening | flop | DIVERGE, SV one late |
-    /// | wire behind a deferred read on every path (`e14b`, `e14l`; `sipo_block`'s `w3_dbg`) | closing | flop | **agree** |
-    /// | register committed at another edge, behind a deferred read (`e13a`, `e14e`; a trailing update, `e14n`; on some path only, `e13`) | closing | `assign` | DIVERGE, sim one late |
-    /// | register updated in the same segment before the write (`e14f` head, `e14g` middle) | closing | `assign` | **agree** |
-    /// | register updated in the same segment AFTER the write (`e14j`) | closing | `assign` | DIVERGE (V8a's generation hazard, off the head) |
-    /// | input operand behind its own deferred read (`e14c`) | closing | `assign o = x` | DIVERGE |
-    /// | constant behind a deferred read, segment after the first (`e14d`) | closing | `assign` | DIVERGE at the first observation (a startup transient) |
-    /// | constant behind a deferred read, head segment (`e14i`) | closing | `assign` | **agree** (its closing edge is edge 0) |
-    /// | register or constant, no deferred read (`e13b`, `linear_trailing`, `late_constant_one_edge`) | opening | `assign` | **agree** |
+    /// The simulator anchors each execution by its path: closing where a deferred
+    /// `In` read parks the task before the write, opening otherwise (§9.1; in a
+    /// register-free body the direct `o.write(x.read())` is an immediate
+    /// passthrough, so it is opening however many ticks follow).
     ///
-    /// # The clause, per drive `w`
+    /// # The clause, per drive `w` (§10.8, every cell measured first)
     ///
-    /// - **wire-valued** (`w` reads a same-segment local that is neither a
-    ///   register nor an input): refused iff some path from its segment's entry
-    ///   reaches it with no deferred read (`!deferred_read_reaches` or
-    ///   `read_free_path_from_phase_entry`).
-    /// - **otherwise**: refused iff a deferred read comb-reaches `w` on some path
-    ///   and the assign can show a value the write did not publish — `w` reads an
-    ///   input, or a register some assignment of which lies outside `w`'s segment
-    ///   or is comb-reachable from `w`, or `w`'s value is a constant and its
-    ///   segment is not the head's.
+    /// 1. **phase-gated comb copy** — `w` is conditional and either written on
+    ///    every path of its segment or preceded by no input read: refused. The
+    ///    form is a latch outside its phase, which Verilator refuses under the
+    ///    sweep's `-Wall` (`LATCH`), and with the lint off a closing drive shows
+    ///    one observation early (`e15t`, `e15w`, `e15x`, `e15z`, `e15wr`);
+    ///    `e15ac` and `e15ad` agree with the lint off and are refused for the
+    ///    form, exactly as `e7` is for its multiply-driven port.
+    /// 2. **edge-sampled flop** — `w` is wire-valued, or conditional and held
+    ///    behind a read: refused iff some path from its segment's entry reaches
+    ///    it with no deferred read (the flop samples at the closing edge; the
+    ///    simulator wrote at the opening — one late: `e14a`, `e14h`, `e14k`,
+    ///    `e14m`, `e7w`; a startup transient for a constant-valued wire outside
+    ///    the head, `e15l`, `e15q`; the hoisted trailing flop sampling an
+    ///    immediate guard or value at phase 0's edge, `e15o`, `e15u`, `e15aa`,
+    ///    `e15ab`), **except** an unconditional constant-valued wire in the head
+    ///    segment, whose first load is edge 0 and whose value never changes
+    ///    (`e15f`, `e15fr` — agreeing; `e15fr` was refused until 2026-11-02).
+    ///    Admitted: a wire or a held drive behind a deferred read on every path
+    ///    (`e14b`, `e14l`, `e15e`, `e15k`, `e15m`, `e15r`, `e15s`, `e15v`, and
+    ///    `e15af`, `e15ag`, which the operand-kind reading of §10.7 refused as
+    ///    assigns although their form is the flop — agreeing, narrowed).
+    /// 3. **continuous assign** — unconditional, register / input / constant
+    ///    operand: refused iff the operand reads an input (the assign tracks the
+    ///    input at every observation, the simulator publishes the one value the
+    ///    write sampled, once per iteration — deferred, `e14c`, `e15b`, `e15h`;
+    ///    immediate passthrough, `e15a`, `e15g`; trailing, `e15n` and `e8m`,
+    ///    which `trailing_out_reads_input` refuses as well), or a deferred read
+    ///    reaches `w` and the operand is a register assigned outside `w`'s
+    ///    segment or after `w` (`e13`, `e13a`, `e14e`, `e14n`, `e14j`) or a
+    ///    constant outside the head segment (`e14d`, `e15j`). Admitted: `e13b`,
+    ///    `e14f`, `e14g`, `e14i`, `e15c`, `e15d`, `e15i`; `e15p` is
+    ///    `out_first_driven_late`'s.
     ///
     /// "Segment" is the Comb-component with the loop head cut out: the head
     /// segment and the trailing statements run in one cycle but commit at
     /// different edges (the trailing update is committed at the last tick's edge
     /// by the shared-map lowering), which `e14n` measures.
     ///
-    /// Overlaps: `e14k` (a trailing wire reading a register before its update) is
-    /// also `pretick_out_write_before_update`'s, and `e7w` is also
-    /// `multi_phase_out_write`'s clause 1; both front-ends run every rule, so a
-    /// shape two rules refuse is refused once. The head-segment D1 rule and this
-    /// one do not overlap on the measured set: D1 needs mixed anchors, this rule
-    /// a closing write on the linear route. Exact-set pins:
-    /// `pretick_alignment_corpus.rs::EXPECTED_LINEAR_ANCHOR` (zero live modules
-    /// when it landed), the `linear_*` unit tests below, and
-    /// `linear_the_rule_flags_exactly_the_diverging_probes` in the battery.
+    /// Overlaps: `e14k` is also `pretick_out_write_before_update`'s, `e7w` also
+    /// `multi_phase_out_write`'s clause 1, the trailing cells also
+    /// `trailing_out_reads_input`'s or `out_first_driven_late`'s; both front-ends
+    /// run every rule, so a shape two rules refuse is refused once. Exact-set
+    /// pins: `pretick_alignment_corpus.rs::EXPECTED_LINEAR_ANCHOR` (zero live
+    /// modules when it landed and when it was restated), the `linear_*` unit
+    /// tests below, and `linear_the_rule_flags_exactly_the_diverging_probes` /
+    /// `regfree_linear_the_rule_flags_exactly_the_probes_of_section_10_8` in the
+    /// battery.
     pub fn linear_out_write_anchor_mismatch(&self) -> Vec<String> {
         if self.has_nested_tick || !self.crosses_more_than_one_tick() {
             return Vec::new();
         }
+        // Since 2026-11-02 (§10.8) the register set is consulted, never required:
+        // a register-free body takes the same forms.
         let regs: BTreeSet<String> = self.registers().into_iter().collect();
-        if regs.is_empty() {
-            return Vec::new();
-        }
         // Segments: Comb-components with the loop head cut out, so the head
         // segment and the trailing statements are distinct.
         let n = self.nodes.len();
@@ -1567,12 +1586,27 @@ impl Cfg {
                 }
             }
         }
-        let head_segment: BTreeSet<usize> = self.nodes[self.head]
+        let head_entries: Vec<usize> = self.nodes[self.head]
             .succs
             .iter()
             .filter(|(_, k)| *k == EdgeKind::Comb)
-            .map(|&(s, _)| find(&mut parent, s))
+            .map(|&(s, _)| s)
             .collect();
+        let head_segment: BTreeSet<usize> =
+            head_entries.iter().map(|&s| find(&mut parent, s)).collect();
+        // The entry nodes of each segment: the head's successors for the head
+        // segment, the target of a `Tick` edge for the segment that edge opens.
+        let mut entries_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for &s in &head_entries {
+            entries_of.entry(find(&mut parent, s)).or_default().push(s);
+        }
+        for i in 0..n {
+            for &(s, k) in &self.nodes[i].succs {
+                if k == EdgeKind::Tick && s != self.head {
+                    entries_of.entry(find(&mut parent, s)).or_default().push(s);
+                }
+            }
+        }
         let all: Vec<usize> = (0..n).collect();
         let mut flagged: BTreeSet<String> = BTreeSet::new();
         for w in 0..n {
@@ -1581,34 +1615,79 @@ impl Cfg {
                 continue;
             }
             let segment = find(&mut parent, w);
+            let entries = entries_of.get(&segment).cloned().unwrap_or_default();
+            let conditional = !node.guards.is_empty();
+            // A same-segment wire is a local DEFINED IN THE LOOP that is neither a
+            // register nor an input. A pre-loop binding (`lfsr`'s `xor_mask`, a
+            // `Memory` local such as `mp_rom`'s `rom`) is not a wire: it is a
+            // constant or committed state, and a drive from a memory read result
+            // is `memory_result_drives_plain_out`'s to refuse.
             let wire_valued = node.uses.iter().any(|u| {
-                !regs.contains(u)
+                self.defined_in_loop.contains(u)
+                    && !regs.contains(u)
                     && !self.inputs.contains(u)
                     && !node.writes.contains(u)
                     && !node.regout_writes.contains(u)
             });
+            // Any input read before the drive in its arm's walk — the guard's
+            // and the operand's included, deferred or immediate — is what makes
+            // the lowering count the drive closing (§9.1).
+            let read_before = self.leading_read_reaches(w);
             let deferred = self.deferred_read_reaches(w);
-            let hazard = if wire_valued {
-                // The flop samples at the closing edge; an execution no deferred
-                // read precedes wrote at the opening.
-                !deferred || self.read_free_path_from_phase_entry(w)
-            } else if !deferred {
-                false
-            } else {
-                let (vregs, inputs) = self.value_sources(w, &all, &regs);
-                let input_operand = !inputs.is_empty();
-                let register_elsewhere = vregs.iter().any(|r| {
-                    (0..n).any(|d| {
-                        !self.nodes[d].folded
-                            && self.nodes[d].defs.contains(r)
-                            && (find(&mut parent, d) != segment || self.comb_reaches(w, d))
-                    })
-                });
-                let late_constant = node.const_write && !head_segment.contains(&segment);
-                input_operand || register_elsewhere || late_constant
-            };
-            if hazard {
-                flagged.extend(node.writes.iter().cloned());
+            let (vregs, inputs) = self.value_sources(w, &all, &regs);
+            for port in &node.writes {
+                let every_path = conditional && self.written_on_all_paths(port, &entries);
+                let hazard = if conditional && (every_path || !read_before) {
+                    // Clause 1 — the phase-gated comb copy (every-path mux, or
+                    // the held drive's mux + hold form): assigned only inside
+                    // its phase, a latch outside it, which Verilator refuses.
+                    // With the lint off a closing drive shows one observation
+                    // early (`e15t`, `e15w`, `e15x`, `e15z`, `e15wr`); `e15ac`,
+                    // `e15ad` agree and are refused for the form.
+                    true
+                } else if conditional || wire_valued {
+                    // Clause 2 — the edge-sampled flop: samples at the segment's
+                    // closing edge, so an execution no deferred read precedes
+                    // (written at the opening) lands one observation late
+                    // (`e14a`, `e14h`, `e14k`, `e14m`; `e15l`, `e15q`; `e15o`,
+                    // `e15u`, `e15aa`, `e15ab`). Unobservable for an
+                    // unconditional constant-valued wire in the head segment:
+                    // its first load is edge 0 and its value never changes
+                    // (`e15f`, `e15fr`).
+                    let opening_on_some_path = !deferred || self.read_free_path_from_phase_entry(w);
+                    let constant_head_wire = !conditional
+                        && vregs.is_empty()
+                        && inputs.is_empty()
+                        && head_segment.contains(&segment);
+                    opening_on_some_path && !constant_head_wire
+                } else if !inputs.is_empty() {
+                    // Clause 3a — the continuous assign of an input operand
+                    // tracks the input at every observation; the simulator
+                    // publishes the one value the write sampled, once per
+                    // iteration, whether its read is deferred (`e14c`, `e15b`,
+                    // `e15h`) or an immediate passthrough (`e15a`, `e15g`;
+                    // `e15n` / `e8m` in the trailing region, which
+                    // `trailing_out_reads_input` refuses as well).
+                    true
+                } else if !deferred {
+                    false
+                } else {
+                    // Clause 3b — the continuous assign of a register or a
+                    // constant behind a deferred read, when the assign can show
+                    // a value the write did not publish (§10.7).
+                    let register_elsewhere = vregs.iter().any(|r| {
+                        (0..n).any(|d| {
+                            !self.nodes[d].folded
+                                && self.nodes[d].defs.contains(r)
+                                && (find(&mut parent, d) != segment || self.comb_reaches(w, d))
+                        })
+                    });
+                    let late_constant = node.const_write && !head_segment.contains(&segment);
+                    register_elsewhere || late_constant
+                };
+                if hazard {
+                    flagged.insert(port.clone());
+                }
             }
         }
         flagged.into_iter().collect()
@@ -5512,8 +5591,8 @@ mod tests {
     }
 
     /// Boundaries by construction: the extraction route (`e12`'s shape, clause 4's),
-    /// a single-tick body (`d3b`'s shape, one observation per iteration), a
-    /// register-free body, and `RegOut` are never this rule's.
+    /// a single-tick body (`d3b`'s shape, one observation per iteration), an
+    /// agreeing register-free body, and `RegOut` are never this rule's.
     #[test]
     fn linear_route_boundaries_not_flagged() {
         let extracted = r#"
@@ -5531,10 +5610,12 @@ mod tests {
                 loop { if phase == 0 { r = x.read(); phase = 1; } else { let _ = x.read(); r = r + Bits::from_lit::<1>(); phase = 0; } o.write(r); clk.tick().await; }
             }
         "#;
+        // (a register-free body is examined since 2026-11-02, §10.8: this one
+        // is `e15k`, a wire behind its own deferred read — admitted)
         let register_free = r#"
             #[hardware(sequential)]
             async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; o.write(x.read()); clk.tick().await; }
+                loop { clk.tick().await; let t = x.read() + Bits::from_lit::<1>(); o.write(t); clk.tick().await; }
             }
         "#;
         let regout = r#"
@@ -5547,6 +5628,260 @@ mod tests {
         for src in [extracted, single_tick, register_free, regout] {
             assert!(lin(src).is_empty());
         }
+    }
+
+
+    // ── §10.8 (2026-11-02): the register-free class, and the forms by SHAPE ──
+
+    /// `e15g` / `e8l`: an input-valued continuous assign in a register-free
+    /// two-tick body — the passthrough is immediate and samples once per
+    /// iteration where the assign tracks (flagged); the single-tick body is one
+    /// observation per iteration (not flagged). One tick flips it.
+    #[test]
+    fn linear_regfree_input_operand_flagged_single_tick_not() {
+        let two_ticks = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; o.write(x.read()); clk.tick().await; }
+            }
+        "#;
+        let behind_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { let _ = x.read(); o.write(x.read()); clk.tick().await; clk.tick().await; }
+            }
+        "#;
+        let single_tick = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; o.write(x.read()); }
+            }
+        "#;
+        assert_eq!(lin(two_ticks), vec!["o".to_string()]);
+        assert_eq!(lin(behind_read), vec!["o".to_string()]);
+        assert!(lin(single_tick).is_empty());
+    }
+
+    /// `e15j` / `e15d`: a register-free constant behind a deferred read is the
+    /// startup transient in a middle segment (flagged) and nothing in the head
+    /// (not flagged) — the registered pair above, without the register.
+    #[test]
+    fn linear_regfree_constant_behind_read_middle_flagged_head_not() {
+        let middle = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; let _ = x.read(); o.write(Bits::from_lit::<7>()); clk.tick().await; }
+            }
+        "#;
+        let head = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { let _ = x.read(); o.write(Bits::from_lit::<7>()); clk.tick().await; clk.tick().await; }
+            }
+        "#;
+        assert_eq!(lin(middle), vec!["o".to_string()]);
+        assert!(lin(head).is_empty());
+    }
+
+    /// `e15l` / `e15f` / `e15fr`: an opening constant-valued wire loads one
+    /// observation late — a transient visible in a middle segment (flagged) and
+    /// unobservable in the head, whose first load is edge 0, with or without a
+    /// register in the body (not flagged; `e15fr` was refused until 2026-11-02).
+    /// `e15q`, the trailing one, is hoisted to phase 0 and flagged.
+    #[test]
+    fn linear_constant_wire_opening_middle_flagged_head_not() {
+        let middle = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; let t: Bits<8> = Bits::from_lit::<7>(); o.write(t); clk.tick().await; }
+            }
+        "#;
+        let trailing = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; clk.tick().await; let t: Bits<8> = Bits::from_lit::<7>(); o.write(t); }
+            }
+        "#;
+        let head = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { let t: Bits<8> = Bits::from_lit::<7>(); o.write(t); clk.tick().await; clk.tick().await; }
+            }
+        "#;
+        let head_registered = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { let t: Bits<8> = Bits::from_lit::<7>(); o.write(t); clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; }
+            }
+        "#;
+        assert_eq!(lin(middle), vec!["o".to_string()]);
+        assert_eq!(lin(trailing), vec!["o".to_string()]);
+        assert!(lin(head).is_empty());
+        assert!(lin(head_registered).is_empty());
+    }
+
+    /// `e15t` / `e15w` / `e15ac` / `e15y`: a conditional drive written on every
+    /// path of its segment is the phase-gated comb mux — a latch outside its
+    /// phase — in a middle or the head segment, with or without registers, whether
+    /// or not it reads an input (flagged: the form); the single-tick body emits
+    /// the mux with no gate (not flagged).
+    #[test]
+    fn linear_every_path_conditional_flagged_single_tick_not() {
+        let middle = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; if x.read()[1] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); } clk.tick().await; }
+            }
+        "#;
+        let head = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); } clk.tick().await; clk.tick().await; }
+            }
+        "#;
+        let registered_no_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); } clk.tick().await; }
+            }
+        "#;
+        let single_tick = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); } clk.tick().await; }
+            }
+        "#;
+        assert_eq!(lin(middle), vec!["o".to_string()]);
+        assert_eq!(lin(head), vec!["o".to_string()]);
+        assert_eq!(lin(registered_no_read), vec!["o".to_string()]);
+        assert!(lin(single_tick).is_empty());
+    }
+
+    /// `e15ad` / `e15af` / `e15ag` / `e15r`: a held conditional drive with no
+    /// read before it is the phase-gated mux + hold form, a latch (flagged);
+    /// behind a read it is the edge-sampled flop under the phase and its guards,
+    /// closing on both sides (not flagged — `e15af` and `e15ag` were refused by
+    /// the operand-kind reading until 2026-11-02). One `let _ = x.read();` flips it.
+    #[test]
+    fn linear_held_conditional_no_read_flagged_behind_read_not() {
+        let no_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; }
+            }
+        "#;
+        let constant_behind_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; let _ = x.read(); if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } clk.tick().await; }
+            }
+        "#;
+        let register_behind_guard_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if x.read()[1] == Logic::One { o.write(cnt); } clk.tick().await; }
+            }
+        "#;
+        let regfree_behind_guard_read = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { if x.read()[1] == Logic::One { o.write(x.read()); } clk.tick().await; clk.tick().await; }
+            }
+        "#;
+        assert_eq!(lin(no_read), vec!["o".to_string()]);
+        assert!(lin(constant_behind_read).is_empty());
+        assert!(lin(register_behind_guard_read).is_empty());
+        assert!(lin(regfree_behind_guard_read).is_empty());
+    }
+
+    /// `e15ab` / `e15u`: a held trailing drive whose guard reads the input
+    /// immediately is hoisted into phase 0's flop, which tests the guard at the
+    /// other edge — flagged here (no deferred read on its path) and by the
+    /// trailing rule's guard clause.
+    #[test]
+    fn linear_trailing_held_guard_read_flagged() {
+        let wire = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; clk.tick().await; if x.read()[0] == Logic::One { let t: Bits<8> = Bits::from_lit::<7>(); o.write(t); } }
+            }
+        "#;
+        let input = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; clk.tick().await; if x.read()[1] == Logic::One { o.write(x.read()); } }
+            }
+        "#;
+        assert_eq!(lin(wire), vec!["o".to_string()]);
+        assert_eq!(lin(input), vec!["o".to_string()]);
+        assert_eq!(trailing_out(wire), vec!["o".to_string()], "the guard clause of trailing_out_reads_input");
+    }
+
+    /// `e15ai` / `e15ah`: `trailing_out_reads_input`'s guard clause on the
+    /// extraction route (flagged — the arm's edge-sampled drive tests the input
+    /// one edge later than the simulator's immediate read) and the single-tick
+    /// exemption, which holds for a guarded drive too (not flagged).
+    #[test]
+    fn trailing_out_guard_immediate_read_flagged_single_tick_not() {
+        let extracted = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut cnt: Bits<8> = Bits::zero();
+                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } if x.read()[0] == Logic::One { o.write(cnt); } }
+            }
+        "#;
+        let single_tick = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; if x.read()[0] == Logic::One { o.write(x.read()); } }
+            }
+        "#;
+        let deferred_guard = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; if x.read()[1] == Logic::One { o.write(x.read()); } clk.tick().await; }
+            }
+        "#;
+        assert_eq!(trailing_out(extracted), vec!["o".to_string()]);
+        assert!(trailing_out(single_tick).is_empty());
+        assert!(trailing_out(deferred_guard).is_empty(), "a guard read with a tick after it is deferred, not trailing");
+    }
+
+    /// A pre-loop binding is not a same-segment wire: `mp_rom`'s `data.write(
+    /// rom.read_port::<0>().data())` reads a `Memory` local defined before the
+    /// loop (committed state, `memory_result_drives_plain_out`'s to refuse) and a
+    /// pre-loop constant local is a constant — neither is this rule's, while the
+    /// same write through a `let` inside the loop is (`e15q`'s shape).
+    #[test]
+    fn linear_pre_loop_binding_is_not_a_wire() {
+        let memory = r#"
+            #[hardware(sequential)]
+            async fn mp_rom(clk: Clock<C>, addr: In<Bits<4>, C>, data: Out<Bits<16>, C>) {
+                let rom = Memory::<Bits<16>, 1, 0, C, 1, 1>::from_fn(clk.clone(), 16, |i| { Bits::from_usize(i * 3 + 7) });
+                loop { rom.read_port::<0>().read(addr.read().as_usize()); clk.tick().await; data.write(rom.read_port::<0>().data()); clk.tick().await; }
+            }
+        "#;
+        let pre_loop_constant = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let k: Bits<8> = Bits::from_lit::<7>();
+                loop { clk.tick().await; o.write(k); clk.tick().await; }
+            }
+        "#;
+        let in_loop_wire = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                loop { clk.tick().await; let k: Bits<8> = Bits::from_lit::<7>(); o.write(k); clk.tick().await; }
+            }
+        "#;
+        assert!(lin(memory).is_empty());
+        assert!(lin(pre_loop_constant).is_empty());
+        assert_eq!(lin(in_loop_wire), vec!["o".to_string()]);
     }
 
     // ── the late-constant startup rule (`out_first_driven_late`, 2026-10-23) ──
