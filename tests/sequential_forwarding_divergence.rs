@@ -6893,6 +6893,14 @@ fn e16f_regfree_constant_guard_passthrough_diverges_refused() {
     assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16f_regfree_constant_guard_passthrough");
 }
 
+/// Two drivers of one port, refused by Verilator as emitted under either name it
+/// uses for the shape. Which one it reports, and whether it refuses at all, has
+/// changed between releases (see `e16i`, `e16k`), so a probe that pins only the
+/// front-end refusal asks this instead of naming one warning.
+fn two_drivers_refused_as_emitted(src: &str, top: &str) -> bool {
+    ["MULTIDRIVEN", "BLKANDNBLK"].iter().any(|w| verilator_refuses_as_emitted(src, top, w))
+}
+
 /// REFUSED as emitted — two drivers (predicted §10.9, 2026-11-02): a default write followed by a held override in one segment: the default is a module-level continuous assign and the override the hold form's driver — two drivers of `o`, which Verilator refuses as `MULTIDRIVEN` under `-Wall`; refused for the form (clause A), as `e7` is for its two phases. See `E16G_MIDDLE_DEFAULT_THEN_HELD_SRC`.
 #[test]
 fn e16g_middle_default_then_held_refused_as_emitted() {
@@ -6926,10 +6934,14 @@ fn e16i_head_read_default_then_held_diverges_refused() {
     let sim = sim_e_in(e16i_head_read_default_then_held);
     assert_eq!(sim, vec![3, 3, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3], "simulator behaviour changed");
     if verilator_available() {
-        assert!(!verilator_refuses_as_emitted(E16I_HEAD_READ_DEFAULT_THEN_HELD_SRC, "e16i_head_read_default_then_held", "MULTIDRIVEN"), "e16i: Verilator now refuses the two drivers — pin the refusal as e16g's");
-        let sv = transpile_and_run_driven(E16I_HEAD_READ_DEFAULT_THEN_HELD_SRC, "e16i_head_read_default_then_held");
-        assert_eq!(sv, vec![3, 3, 1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5], "transpiled SV behaviour changed");
-        assert_ne!(sim, sv, "sim and SV now AGREE for e16i_head_read_default_then_held — the two drivers were reconciled; re-derive linear_out_write_anchor_mismatch (§10.9)");
+        // Two drivers of `o` are not realizable; how Verilator reports them is
+        // version-dependent (measured 2026-11-03: 5.044 builds it and the drivers
+        // fight, giving [3, 3, 1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5]; 5.051 refuses it).
+        // Pinned: refused as emitted, or built and divergent.
+        if !two_drivers_refused_as_emitted(E16I_HEAD_READ_DEFAULT_THEN_HELD_SRC, "e16i_head_read_default_then_held") {
+            let sv = transpile_and_run_driven(E16I_HEAD_READ_DEFAULT_THEN_HELD_SRC, "e16i_head_read_default_then_held");
+            assert_ne!(sim, sv, "sim and SV now AGREE for e16i_head_read_default_then_held — the two drivers were reconciled; re-derive linear_out_write_anchor_mismatch (§10.9)");
+        }
     }
     let f: syn::ItemFn = syn::parse_str(E16I_HEAD_READ_DEFAULT_THEN_HELD_SRC).unwrap();
     assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16i_head_read_default_then_held (clause A, two drivers)");
@@ -6958,7 +6970,13 @@ fn e16k_middle_default_then_held_behind_read_refused_as_emitted() {
     let sim = sim_e_in(e16k_middle_default_then_held_behind_read);
     assert_eq!(sim, vec![0, 7, 7, 2, 2, 7, 7, 4, 4, 7, 7, 6, 6], "simulator behaviour changed");
     if verilator_available() {
-        assert!(verilator_refuses_as_emitted(E16K_MIDDLE_DEFAULT_THEN_HELD_BEHIND_READ_SRC, "e16k_middle_default_then_held_behind_read", "BLKANDNBLK"), "e16k_middle_default_then_held_behind_read: the default's continuous assign beside the flop's non-blocking driver is expected to be refused by Verilator (BLKANDNBLK, an error whatever the lint flags)");
+        // Two drivers of `o` (a continuous assign beside the flop's non-blocking
+        // driver). 5.044 refuses it as BLKANDNBLK; 5.051 does not (measured
+        // 2026-11-03). Pinned: refused as emitted, or built and divergent.
+        if !two_drivers_refused_as_emitted(E16K_MIDDLE_DEFAULT_THEN_HELD_BEHIND_READ_SRC, "e16k_middle_default_then_held_behind_read") {
+            let sv = transpile_and_run_driven(E16K_MIDDLE_DEFAULT_THEN_HELD_BEHIND_READ_SRC, "e16k_middle_default_then_held_behind_read");
+            assert_ne!(sim, sv, "sim and SV now AGREE for e16k_middle_default_then_held_behind_read — the two drivers were reconciled; re-derive linear_out_write_anchor_mismatch (§10.9)");
+        }
     }
     let f: syn::ItemFn = syn::parse_str(E16K_MIDDLE_DEFAULT_THEN_HELD_BEHIND_READ_SRC).unwrap();
     assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16k_middle_default_then_held_behind_read (clause A, two drivers)");
