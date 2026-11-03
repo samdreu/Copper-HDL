@@ -681,6 +681,21 @@ const EXPECTED_WRITE_BEFORE_UPDATE: &[&str] = &[
     "tests/sequential_forwarding_divergence.rs::e17d_head_input_default_register_override",
     "tests/sequential_forwarding_divergence.rs::e17h_head_register_default_behind_read",
     "tests/sequential_forwarding_divergence.rs::e17j_head_input_default_register_guard",
+    // The GUARD edition of the pre-tick clause (§10.11, 2026-11-02): on the
+    // single-tick route, a write behind a leading read whose guard tests a
+    // register updated later in the same segment, of a port written on every
+    // path (the comb mux tests Q, one generation ahead). `e18b` (constant arms),
+    // `e18c` (`e17j` with the update in the head) — measured diverging, admitted
+    // by every rule until then. `d2b` is the one corpus module newly flagged: its
+    // closing drive's guard `phase == 0` reads `phase`, assigned after it — it
+    // diverges and D1 (A2) already refused it, so the cost is zero.
+    "tests/sequential_forwarding_divergence.rs::d2b_mixed_two_drives_all_paths",
+    "tests/sequential_forwarding_divergence.rs::e18b_head_every_path_register_guard_behind_read",
+    "tests/sequential_forwarding_divergence.rs::e18c_head_input_default_register_guard_update_in_head",
+    // The VALUE clause on a held port (§10.11): `e18j` AGREES (the flop samples
+    // the pre-update value) and is refused — an over-refusal of the older clause,
+    // pinned as measured, not narrowed (admitting it is a legality decision).
+    "tests/sequential_forwarding_divergence.rs::e18j_head_held_register_value_and_guard_behind_read",
 ];
 
 #[test]

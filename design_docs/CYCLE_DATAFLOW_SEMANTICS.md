@@ -1837,7 +1837,88 @@ refusal of a legal shape in the transpiler (`check_no_latches`; whether the
 macro front end admits it was not checked). The same `nested_port_drives`
 routing would likely fix it; unmeasured. (b) The pre-tick
 V8 clause still reads only the write's value, not its guard; the guard was
-measured here only across the tick (`e17j`). (c) §10.9's (b) — the
+measured here only across the tick (`e17j`) **(closed in §10.11)**. (c) §10.9's (b) — the
 `MULTIDRIVEN` lint-off pair around `always_ff` also hides an assign driving the
 same port — stands: no single-phase shape reaches it any more, the multi-phase
 ones are refused by clause A.
+
+### 10.11 The pre-tick V8 clause and the guard (derived 2026-11-02, then measured)
+
+§10.10 (b): the pre-tick clause of `Cfg::pretick_out_write_before_update` asks
+what the write's **value** reads. This section asks the same of its **guard**:
+`let _ = x.read(); if cnt[0] { o.write(c) }; cnt = cnt + 1;` with `cnt` in the
+guard only, updated later in the same segment.
+
+**The forms** (read off `copper-transpile` before any trace was taken). The
+single-tick route gives an every-path port one `always_comb` mux whose guard
+tests `cnt`'s Q, and a held port the edge-sampled flop. The linear multi-tick
+route and the control-extraction route give both port kinds the flop, under
+`phase_r == 0` or `pc == 0`. `e18b` and `e18d` emit byte-identical SV, though the
+simulator runs their write before and after the update.
+
+**The model.** The leading read parks the write at the pre-edge settle of edge
+`k`, where the guard tests the local `cnt` (`k` before the update, `k + 1`
+after it). On the single-tick route the head's update commits at edge `k`, so
+from observation `k` on Q is `k + 1`. The comb mux tests Q, so it runs one
+generation ahead of a guard tested before the update. The flop tests Q at the
+edge, which is the pre-update value the simulator tested. On the two other
+routes, iteration `j` spans edges `2j` and `2j + 1`, and the flop at edge `2j`
+samples Q = `j`, the simulator's value. Conventions are §10.10's, with the
+update in the head.
+
+**The probes** (`tests/sequential_forwarding_divergence.rs`; every row
+written before the probe ran, in the session note `v8-pretick-guard-derivation.md`):
+
+| probe | route, port | shape (`c` = `if cnt[0] { o.write(7) } else { o.write(3) }`) | predicted sim / SV | measured | verdict |
+|---|---|---|---|---|---|
+| `e18a_head_held_register_guard_behind_read` | single, held (flop) | `let v = x.read(); if cnt[0] { o.write(v) }; cnt += 1` | `[0, 11, 11, 13, 13, …, 21, 21]` both | as predicted | AGREE |
+| `e18b_head_every_path_register_guard_behind_read` | single, every path (mux) | `let _ = x.read(); c; cnt += 1` | `[3, 7, 3, 7, …]` / `[7, 3, 7, 3, …]` | as predicted | DIVERGE: **admitted by every rule until here** |
+| `e18c_head_input_default_register_guard_update_in_head` | single, every path (mux) | `o.write(x.read()); if cnt[0] { o.write(7) }; cnt += 1` (`e17j`, update in the head) | `[10, 7, 12, 7, …, 22]` / `[7, 11, 7, 13, …, 7]` | as predicted | DIVERGE: **admitted by every rule until here** |
+| `e18d_head_every_path_update_before_guard` | single, every path (mux) | `let _ = x.read(); cnt += 1; c` | `[7, 3, 7, …]` both | as predicted | AGREE (clause 3's flip) |
+| `e18e_head_every_path_register_guard_no_read` | single, every path (mux) | `c; cnt += 1` | `[7, 3, 7, …]` both | as predicted | AGREE (clause 1's flip) |
+| `e18f_linear_every_path_register_guard_behind_read` | linear multi-tick (flop) | `e18b` + a second tick | `[3, 3, 7, 7, 3, 3, …]` both | as predicted | AGREE |
+| `e18g_linear_held_register_guard_behind_read` | linear multi-tick (flop) | `e18a` + a second tick | `[0, 0, 12, 12, 12, 12, 16, …]` both | as predicted | AGREE |
+| `e18h_extracted_every_path_register_guard_behind_read` | extraction (flop) | `e18b`, ticks in `for _ in 0..2` | as `e18f` | as predicted | AGREE |
+| `e18i_extracted_held_register_guard_behind_read` | extraction (flop) | `e18a`, ticks in `for _ in 0..2` | as `e18g` | as predicted | AGREE |
+| `e18j_head_held_register_value_and_guard_behind_read` | single, held (flop) | `let _ = x.read(); if cnt[0] { o.write(cnt) }; cnt += 1` | `[0, 1, 1, 3, 3, …, 11, 11]` both | as predicted | AGREE, **yet refused by the value clause** |
+
+**Measured 2026-11-02.** All ten verdicts and every trace matched the
+predictions on the first run. No probe is refused by Verilator under `-Wall` as
+`MULTIDRIVEN`, `BLKANDNBLK` or `LATCH` (asserted per probe).
+
+**The decision: a guard edition, scoped to the comb mux.**
+`pretick_out_write_before_update` now has a guard edition of its pre-tick
+clause. On the single-tick route (one top-level tick, no nested tick), it
+refuses a drive when three things hold: a leading read reaches the drive, the
+drive's guard reads a register (seen through same-segment temporaries) that a
+node after the guard assigns, and the drive's port is written on every path of
+the head. This refuses `e18b` and `e18c`. It admits the held port (`e18a`), the
+update before the guard (`e18d`), the write with no read (`e18e`), and the
+other two routes (`e18f` to `e18i`). The scope is the same as §10.10's
+trailing-update clause, for the same reason: only the comb mux tests the guard
+against Q after the edge. Both front ends read the same function. Both
+diagnostics are restated (`write_before_update*.stderr` and
+`single_tick_trailing_update.stderr` regenerated), and
+`ui/fail/pretick_guard_update.rs` (`e18b`) is the fail case. Cfg pin:
+`v8_pretick_guard_flagged_every_path_single_tick_only` (adds a guard through a
+temporary and an update inside the arm, both flagged). Battery pin:
+`pretick_guard_refused_set_is_the_diverging_set`.
+
+**Corpus cost: zero live modules.** `EXPECTED_WRITE_BEFORE_UPDATE` gained
+`e18b`, `e18c` and `e18j` (the value clause), and one existing probe:
+`d2b_mixed_two_drives_all_paths`. The guard `phase == 0` on `d2b`'s closing
+drive reads `phase`, which is assigned after it, and the port is the every-path
+comb mux. `d2b` diverges and D1 (A2) already refused it. The D1 battery now
+pins both rules on it. Nothing in `examples/` or `src/` is newly flagged. The
+parity audit's rule list is unchanged. **sv-baseline delta:** the change is
+analysis-only, and every newly flagged module carries `allow_pretick_alignment`,
+which both front ends honor. So no existing module's SV changes. NEW: the ten
+`e18*` probes.
+
+**Found, not changed: the value clause over-refuses a held port.** `e18j` is
+V8a under a guard on a held port. The flop samples `cnt` at the edge, which is
+the pre-update value the simulator's write captured, so the two agree. Yet the
+older value clause refuses it, because it is not scoped by port form. The same
+holds, by this model, for any held V8a. Narrowing the value clause to the comb
+form would admit those shapes, which is a legality decision, so it is pinned as
+measured and left to the user.

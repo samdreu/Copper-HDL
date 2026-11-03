@@ -478,7 +478,8 @@ fn vlir_for_target(
             return Err(format!(
                 "output port '{port}' is written before the update of a register the write \
                  reads (or, written on every path behind an input read in a loop with one \
-                 clk.tick().await, tests or reads a register updated after that tick), so it \
+                 clk.tick().await, tests or reads a register updated after that tick, or tests \
+                 a register updated later in the pre-tick segment), so it \
                  publishes the register's pre-update value, which the emitted \
                  assign never shows — the hardware leads the simulator by one cycle. Move the \
                  write after the update or before the tick/input read, or declare it as RegOut<…>"

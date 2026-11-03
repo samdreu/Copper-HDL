@@ -1117,7 +1117,8 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                          `clk.tick().await`), or, written on every path behind a leading \
                          input read in a loop with ONE `clk.tick().await`, reading (in its \
                          value or its test) a register updated after that tick, which \
-                         commits at the very edge the write lands at. Either way the write \
+                         commits at the very edge the write lands at, or testing in its guard \
+                         a register updated later in the pre-tick segment. Either way the write \
                          publishes the register's PRE-update value, which the synthesized `assign` (the \
                          flip-flop's Q) never shows at any observation instant: the \
                          hardware leads the simulator by one cycle, silently. Move the \

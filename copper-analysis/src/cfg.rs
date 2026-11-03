@@ -943,27 +943,65 @@ impl Cfg {
     /// (`e14j`, `assign o = r` shows the committed value) and is refused by
     /// [`linear_out_write_anchor_mismatch`](Self::linear_out_write_anchor_mismatch)
     /// as a register assigned after the drive (§10.7) — so this rule keeps its
-    /// two regions. Conditional writes carry no extra clause here: only the
-    /// value's generation is at issue, not the write's landing instant, and no
-    /// conditional variant has been measured to diverge.
+    /// two regions. A conditional write's GUARD counts on the single-tick route
+    /// only, for a port written on every path of the head (the comb mux tests the
+    /// guard against Q; §10.11, the guard edition below). The value clause is not
+    /// scoped by port form: a held port under it is the edge-sampled flop and
+    /// agrees (`e18j`) — an over-refusal, measured and recorded, not narrowed.
     pub fn pretick_out_write_before_update(&self) -> Vec<String> {
         let region = self.pre_tick_region();
         let regs: BTreeSet<String> = self.registers().into_iter().collect();
         let mut flagged: BTreeSet<String> = BTreeSet::new();
+        // One top-level tick and no nested one: the single-tick route, whose
+        // every-path port is the comb mux. Both single-tick clauses below are
+        // scoped to it.
+        let single_tick = self.nodes.iter().filter(|n| n.is_tick).count() == 1
+            && !self.has_nested_tick
+            && !self.crosses_more_than_one_tick();
+        let head_entries: Vec<usize> = self.nodes[self.head]
+            .succs
+            .iter()
+            .filter(|(_, k)| *k == EdgeKind::Comb)
+            .map(|&(s, _)| s)
+            .collect();
         for &w in &region {
             let wn = &self.nodes[w];
             if wn.folded || wn.writes.is_empty() {
                 continue;
+            }
+            // (1) barrier-dragged: a leading `In` read comb-reaches the write.
+            if !self.leading_read_reaches(w) {
+                continue;
+            }
+            // The GUARD edition (added 2026-11-02, `CYCLE_DATAFLOW_SEMANTICS.md`
+            // §10.11). On the single-tick route the every-path port is the comb
+            // mux, which tests a guard against the register's Q: a guard that read
+            // a register before its update later in the segment tested the
+            // pre-update value, the mux tests the post-update one from the
+            // observation the write lands at (`e18b`, `e18c`). A held port is the
+            // edge-sampled flop and the multi-tick and extraction routes sample at
+            // the edge as well — all agree (`e18a`, `e18f`–`e18i`). An update
+            // before the guard is the committing value the mux shows (`e18d`).
+            if single_tick {
+                let guard_updated_after = wn.guards.iter().any(|&g| {
+                    let tested = self.value_registers(g, &region, &regs);
+                    region.iter().any(|&a| {
+                        a != g && !self.nodes[a].defs.is_disjoint(&tested) && self.comb_reaches(g, a)
+                    })
+                });
+                if guard_updated_after {
+                    for port in &wn.writes {
+                        if self.written_on_all_paths(port, &head_entries) {
+                            flagged.insert(port.clone());
+                        }
+                    }
+                }
             }
             // (2) the write reads a register — otherwise its value is
             // generation-free and the phase it executes in is unobservable.
             // Seen through same-segment temporaries (reaching definitions).
             let read_regs = self.value_registers(w, &region, &regs);
             if read_regs.is_empty() {
-                continue;
-            }
-            // (1) barrier-dragged: a leading `In` read comb-reaches the write.
-            if !self.leading_read_reaches(w) {
                 continue;
             }
             // (3) the update comes after: some later node in the region assigns a
@@ -1027,19 +1065,12 @@ impl Cfg {
         // load at the edge), which samples the pre-update value as the simulator
         // does (`e17k` agrees). Until §10.10 the single-tick route was outside
         // every rule of this kind on `d3b`'s evidence, whose update is in the head.
-        let ticks = self.nodes.iter().filter(|n| n.is_tick).count();
-        if ticks == 1 && !self.has_nested_tick && !self.crosses_more_than_one_tick() {
+        if single_tick {
             let trailing_defs: BTreeSet<String> = trailing
                 .iter()
                 .flat_map(|&n| self.nodes[n].defs.iter())
                 .filter(|d| regs.contains(*d))
                 .cloned()
-                .collect();
-            let head_entries: Vec<usize> = self.nodes[self.head]
-                .succs
-                .iter()
-                .filter(|(_, k)| *k == EdgeKind::Comb)
-                .map(|&(s, _)| s)
                 .collect();
             for &w in &region {
                 let wn = &self.nodes[w];
@@ -4341,6 +4372,42 @@ mod tests {
         assert!(flagged(&format!("o.write(Bits::from_lit::<3>()); if cnt[0] == Logic::One {{ o.write(cnt); }} {tail}")).is_empty());
         assert!(flagged("cnt = cnt + Bits::from_lit::<1>(); let _ = x.read(); o.write(cnt); clk.tick().await;").is_empty());
         assert!(flagged(&format!("let _ = x.read(); o.write(cnt); clk.tick().await; {tail}")).is_empty());
+    }
+
+    /// The guard edition of the pre-tick clause (§10.11): on the single-tick
+    /// route, an every-path write behind a read under a guard on a register the
+    /// segment updates after the guard — directly (`e18b`), through a temporary,
+    /// or with the update inside the arm. Not flagged: the held port (`e18a`), the
+    /// update before the guard (`e18d`), no read (`e18e`), two ticks (`e18f`), the
+    /// ticks inside a `for` (`e18h`).
+    #[test]
+    fn v8_pretick_guard_flagged_every_path_single_tick_only() {
+        let m = |body: &str| {
+            format!(
+                r#"#[hardware(sequential)]
+                async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {{
+                    let mut cnt: Bits<8> = Bits::zero();
+                    loop {{ {body} }}
+                }}"#
+            )
+        };
+        let flagged = |body: &str| v8(&m(body));
+        let ep = "if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }";
+        let upd = "cnt = cnt + Bits::from_lit::<1>();";
+        assert_eq!(flagged(&format!("let _ = x.read(); {ep} {upd} clk.tick().await;")), ["o"]);
+        assert_eq!(
+            flagged(&format!("let _ = x.read(); let b = cnt[0]; if b == Logic::One {{ o.write(Bits::from_lit::<7>()); }} else {{ o.write(Bits::from_lit::<3>()); }} {upd} clk.tick().await;")),
+            ["o"]
+        );
+        assert_eq!(
+            flagged(&format!("let _ = x.read(); if cnt[0] == Logic::One {{ {upd} o.write(Bits::from_lit::<7>()); }} else {{ o.write(Bits::from_lit::<3>()); }} clk.tick().await;")),
+            ["o"]
+        );
+        assert!(flagged(&format!("let v = x.read(); if cnt[0] == Logic::One {{ o.write(v); }} {upd} clk.tick().await;")).is_empty());
+        assert!(flagged(&format!("let _ = x.read(); {upd} {ep} clk.tick().await;")).is_empty());
+        assert!(flagged(&format!("{ep} {upd} clk.tick().await;")).is_empty());
+        assert!(flagged(&format!("let _ = x.read(); {ep} {upd} clk.tick().await; clk.tick().await;")).is_empty());
+        assert!(flagged(&format!("let _ = x.read(); {ep} {upd} for _ in 0..2 {{ clk.tick().await; }}")).is_empty());
     }
 
     // ── through `let` temporaries (2026-10-20) ──────────────────────────────

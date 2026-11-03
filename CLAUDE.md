@@ -417,7 +417,14 @@ receive/clone one.
   ONE-tick loop updates (`e17h`, `e14n`'s single-tick twin) — `pretick_out_write_before_update`
   gained a single-tick trailing-update clause (value or guard, every-path ports only;
   `e17d`/`e17h`/`e17j`), D1 refuses the rest (`e17c`/`e17e`/`e17f`); zero live modules,
-  sv-baseline delta `e16j` plus the new probes. The doc also records **five** rejected fixes with
+  sv-baseline delta `e16j` plus the new probes. **V8's pre-tick clause now reads the
+  guard (§10.11):** on the single-tick route, an every-path write behind a read under a
+  guard on a register updated later in the same segment diverges, because the comb mux
+  tests Q one generation ahead (`e18b`/`e18c`, admitted until then). It is refused by a
+  guard edition scoped to that port form. The held port and the multi-tick and
+  extraction routes are the flop and agree (`e18a`, `e18f`–`e18i`). Zero live modules;
+  `d2b` overlaps D1. The value clause over-refuses a held port (`e18j` agrees): that is
+  pinned, not narrowed, and the decision is the user's. The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in
