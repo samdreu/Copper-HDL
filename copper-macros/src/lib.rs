@@ -1114,8 +1114,11 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                         "output port `{port}` is written BEFORE the update of a register \
                          the write reads — either behind a leading input read in the \
                          pre-tick segment, or in the trailing segment (after the last \
-                         `clk.tick().await`). Either way the write publishes the \
-                         register's PRE-update value, which the synthesized `assign` (the \
+                         `clk.tick().await`), or, written on every path behind a leading \
+                         input read in a loop with ONE `clk.tick().await`, reading (in its \
+                         value or its test) a register updated after that tick, which \
+                         commits at the very edge the write lands at. Either way the write \
+                         publishes the register's PRE-update value, which the synthesized `assign` (the \
                          flip-flop's Q) never shows at any observation instant: the \
                          hardware leads the simulator by one cycle, silently. Move the \
                          write after the register update (it then publishes the committing \

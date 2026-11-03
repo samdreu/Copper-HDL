@@ -118,6 +118,13 @@ const EXPECTED_FLAGGED: &[&str] = &[
     "tests/sequential_forwarding_divergence.rs::d4a_forwarded_guard_hold",
     "tests/sequential_forwarding_divergence.rs::d4c_forwarded_guard_all_paths",
     "tests/sequential_forwarding_divergence.rs::w4_mixed_alignment",
+    // §10.10 (2026-11-02): the single-tick default-then-override pair, now one comb
+    // mux, with a mixed-anchor pair on every path (`e17c`, `e17e` — clause A2) or
+    // an opening pair under a forwarded guard (`e17f` — clause B). Measured
+    // diverging, every trace predicted first.
+    "tests/sequential_forwarding_divergence.rs::e17c_head_register_default_input_guard",
+    "tests/sequential_forwarding_divergence.rs::e17e_head_constant_default_input_override",
+    "tests/sequential_forwarding_divergence.rs::e17f_head_forwarded_guard_default",
 ];
 
 #[test]
@@ -664,6 +671,16 @@ const EXPECTED_WRITE_BEFORE_UPDATE: &[&str] = &[
     // two probes that motivated it.
     "tests/fixtures/valid_ready_dut.rs::vr_sink_mealy",
     "tests/fixtures/valid_ready_dut.rs::vr_skid",
+    // The SINGLE-TICK TRAILING-UPDATE clause (§10.10, 2026-11-02): a write behind
+    // a leading read of a register the trailing region of a one-tick loop updates
+    // — the update commits at the edge the write lands at, so the every-path comb
+    // form shows the next generation. `e17h` (one write: the control, admitted by
+    // every rule until then — the single-tick twin of `e14n`), `e17d` (the
+    // register in the override's value), `e17j` (in its guard only). Measured
+    // diverging, every trace predicted first; no other corpus module flagged.
+    "tests/sequential_forwarding_divergence.rs::e17d_head_input_default_register_override",
+    "tests/sequential_forwarding_divergence.rs::e17h_head_register_default_behind_read",
+    "tests/sequential_forwarding_divergence.rs::e17j_head_input_default_register_guard",
 ];
 
 #[test]

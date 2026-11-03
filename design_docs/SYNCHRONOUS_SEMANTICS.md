@@ -492,6 +492,12 @@ about its region is what separates them.
   clause** was added 2026-08-27 (the same shape past the last tick publishes the previous generation
   for the whole cycle); its landing-day catch was three real pipeline stages in
   `tests/module_composition_hybrid.rs`, since rewritten to the write/read/tick/update spelling.
+  A **single-tick trailing-update clause** was added 2026-11-02 (`CYCLE_DATAFLOW_SEMANTICS.md`
+  §10.10): in a loop with one tick, the update may sit AFTER the tick — it commits at the very edge
+  the barrier-dragged write lands at — so a port written on every path behind a read, whose value or
+  guard reads such a register, is refused (`e17h`, `e17d`, `e17j`; a held port is the flop and
+  agrees, `e17k`). Zero corpus cost. The same section moved a single-phase body's default write
+  into the comb copy, so a default plus a conditional override is one mux, not two drivers.
   Pins: `pretick_alignment_corpus.rs::write_before_update_flags_exactly_the_demonstration_modules`
   (listed set as of 2026-09-01: `v8a_read_write_update`, `v8d_temp_renamed_update`,
   `out_from_reg_before_commit`, `v8t_stage_publish_then_load`), the `v8*` verdict tests in

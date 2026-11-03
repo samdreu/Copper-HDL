@@ -1012,6 +1012,55 @@ impl Cfg {
             }
         }
 
+        // The SINGLE-TICK TRAILING-UPDATE edition (added 2026-11-02,
+        // `CYCLE_DATAFLOW_SEMANTICS.md` §10.10). In a loop with one top-level tick
+        // the trailing statements run right after the edge that CLOSES the head
+        // segment, so a register they update commits at the very edge a
+        // barrier-dragged head write lands at: the write captured the pre-update
+        // value at the pre-edge settle, the every-path comb form (a continuous
+        // assign or an `always_comb` mux) shows the post-update one from that
+        // observation on — one generation ahead, the pre-tick clause's hazard with
+        // the update across the tick (`e17h`, the single-tick twin of the linear
+        // route's `e14n`). The register may feed the guard as well as the value
+        // (`e17j`). Scoped to a port written on every path of the head: a held
+        // port is the edge-sampled flop (or the hold form, whose closing drives
+        // load at the edge), which samples the pre-update value as the simulator
+        // does (`e17k` agrees). Until §10.10 the single-tick route was outside
+        // every rule of this kind on `d3b`'s evidence, whose update is in the head.
+        let ticks = self.nodes.iter().filter(|n| n.is_tick).count();
+        if ticks == 1 && !self.has_nested_tick && !self.crosses_more_than_one_tick() {
+            let trailing_defs: BTreeSet<String> = trailing
+                .iter()
+                .flat_map(|&n| self.nodes[n].defs.iter())
+                .filter(|d| regs.contains(*d))
+                .cloned()
+                .collect();
+            let head_entries: Vec<usize> = self.nodes[self.head]
+                .succs
+                .iter()
+                .filter(|(_, k)| *k == EdgeKind::Comb)
+                .map(|&(s, _)| s)
+                .collect();
+            for &w in &region {
+                let wn = &self.nodes[w];
+                if trailing_defs.is_empty() || wn.folded || wn.writes.is_empty() || !self.leading_read_reaches(w) {
+                    continue;
+                }
+                let mut read_regs = self.value_registers(w, &region, &regs);
+                for &g in &wn.guards {
+                    read_regs.extend(self.value_registers(g, &region, &regs));
+                }
+                if read_regs.is_disjoint(&trailing_defs) {
+                    continue;
+                }
+                for port in &wn.writes {
+                    if self.written_on_all_paths(port, &head_entries) {
+                        flagged.insert(port.clone());
+                    }
+                }
+            }
+        }
+
         flagged.into_iter().collect()
     }
 
@@ -4237,7 +4286,10 @@ mod tests {
 
     /// The write reads register `a` but only `b` is updated after it — the value
     /// the write captures is `a`'s committed one, which the assign shows too.
-    /// Clause 3 keys on a register THE WRITE READS, not any register.
+    /// Clause 3 keys on a register THE WRITE READS, not any register. (`a` is
+    /// updated BEFORE the read since 2026-11-02: the fixture used to update it
+    /// after the tick, which is the single-tick trailing-update clause's shape —
+    /// `e17h` — and is flagged by that clause, below.)
     #[test]
     fn v8_unrelated_update_after_write_not_flagged() {
         let src = r#"
@@ -4245,10 +4297,50 @@ mod tests {
             async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
                 let mut a: Bits<8> = Bits::zero();
                 let mut b: Bits<8> = Bits::zero();
-                loop { let s = step.read(); o.write(a); b = b + s; clk.tick().await; a = a + b; }
+                loop { a = a + b; let s = step.read(); o.write(a); b = b + s; clk.tick().await; }
             }
         "#;
         assert!(v8(src).is_empty());
+    }
+
+    /// The single-tick trailing-update clause (§10.10): a barrier-dragged write
+    /// of a register the trailing region updates — the update commits at the edge
+    /// the write lands at, so the every-path comb form shows the next generation
+    /// (`e17h` measured: sim `[0, 1, …]`, SV `[1, 2, …]`). The register in the
+    /// guard only counts too (`e17j`). Not flagged: the held port (the
+    /// edge-sampled flop samples the pre-update value — `e17k` agrees), the
+    /// write before the read (opening — `e16j`), the update in the head
+    /// (`d3b`'s shape), and the two-tick body (the linear rule's — `e14n`).
+    #[test]
+    fn v8_single_tick_trailing_update_flagged_held_and_opening_not() {
+        let m = |body: &str| {
+            format!(
+                r#"#[hardware(sequential)]
+                async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {{
+                    let mut cnt: Bits<8> = Bits::zero();
+                    loop {{ {body} }}
+                }}"#
+            )
+        };
+        let flagged = |body: &str| v8(&m(body));
+        let tail = "clk.tick().await; cnt = cnt + Bits::from_lit::<1>();";
+        assert_eq!(flagged(&format!("let _ = x.read(); o.write(cnt); {tail}")), ["o"]);
+        assert_eq!(flagged(&format!("o.write(x.read()); if cnt[0] == Logic::One {{ o.write(cnt); }} {tail}")), ["o"]);
+        assert_eq!(flagged(&format!("o.write(x.read()); if cnt[0] == Logic::One {{ o.write(Bits::from_lit::<7>()); }} {tail}")), ["o"]);
+        // the unrelated-update fixture's original spelling
+        let unrelated = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+                let mut a: Bits<8> = Bits::zero();
+                let mut b: Bits<8> = Bits::zero();
+                loop { let s = step.read(); o.write(a); b = b + s; clk.tick().await; a = a + b; }
+            }
+        "#;
+        assert_eq!(v8(unrelated), ["o"]);
+        assert!(flagged(&format!("let _ = x.read(); if cnt[0] == Logic::One {{ o.write(cnt); }} {tail}")).is_empty());
+        assert!(flagged(&format!("o.write(Bits::from_lit::<3>()); if cnt[0] == Logic::One {{ o.write(cnt); }} {tail}")).is_empty());
+        assert!(flagged("cnt = cnt + Bits::from_lit::<1>(); let _ = x.read(); o.write(cnt); clk.tick().await;").is_empty());
+        assert!(flagged(&format!("let _ = x.read(); o.write(cnt); clk.tick().await; {tail}")).is_empty());
     }
 
     // ── through `let` temporaries (2026-10-20) ──────────────────────────────

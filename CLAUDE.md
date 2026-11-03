@@ -407,9 +407,17 @@ receive/clone one.
   reaches it and its guard tests a register assigned earlier in the segment
   (`e16n`/`e16o`); mixed-anchor ports agree through the drive-level form
   (`e16a`/`e16b`/`e16h`/`e16q`, in `hold_form_ports`). D1's every-path clause does
-  not apply on this route since then (`e16q`). Found, not changed: the single-tick
-  route emits two drivers for a default write followed by a conditional override
-  (`e16j`, admitted by every rule, refused by Verilator as `MULTIDRIVEN`). The doc also records **five** rejected fixes with
+  not apply on this route since then (`e16q`). **The single-tick route's two drivers
+  were fixed the same day (§10.10):** a default write followed (or preceded) by a
+  conditional override of a plain `Out` now stays in the comb copy in program order,
+  one every-path `always_comb` mux instead of an assign beside a second driver (`e16j`
+  agrees; the trailing and register-default spellings had BUILT with the drivers
+  fighting behind the `always_ff` `MULTIDRIVEN` pragma). The neighbours exposed a
+  divergence no rule saw: a closing head write of a register the trailing region of a
+  ONE-tick loop updates (`e17h`, `e14n`'s single-tick twin) — `pretick_out_write_before_update`
+  gained a single-tick trailing-update clause (value or guard, every-path ports only;
+  `e17d`/`e17h`/`e17j`), D1 refuses the rest (`e17c`/`e17e`/`e17f`); zero live modules,
+  sv-baseline delta `e16j` plus the new probes. The doc also records **five** rejected fixes with
   measured evidence so they are not re-tried, and the prior-art survey in §10.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in

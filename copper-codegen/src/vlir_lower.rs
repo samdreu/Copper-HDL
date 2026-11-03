@@ -349,8 +349,22 @@ fn lower_seq(
         // Pre-edge statements run after the capture edge, so a read result they
         // observe is the registered one.
         let pre_bind = mem_binding(&s.memories, &staged_here, false, leg);
+        // A single-phase body's plain `Out` written unconditionally AND inside an
+        // `if`/`match`/`for` of the same statement list (a default, then an
+        // override — or the reverse) keeps its unconditional write in the comb
+        // copy, in program order, so the port is assigned on every path of one
+        // `always_comb` and has one driver. Until 2026-11-02 the unconditional
+        // write became a module-level `assign` beside the conditional form's
+        // driver — two drivers, refused by Verilator or, behind the `always_ff`
+        // `MULTIDRIVEN` pragma, fighting (`e16j`, `e17*`; §10.10). A multi-phase
+        // body keeps the split: `linear_out_write_anchor_mismatch`'s clause A
+        // refuses the shape there.
+        let mut in_comb = hold_outs.clone();
+        if !multi_phase {
+            in_comb.extend(nested_port_drives(&phase.pre_edge).into_iter().map(|p| leg.get(&p)));
+        }
         let (mut stmts, mut outs) =
-            lower_flat_stmts(&phase.pre_edge, leg, &hold_outs, &mem_widths, &pre_bind)?;
+            lower_flat_stmts(&phase.pre_edge, leg, &in_comb, &mem_widths, &pre_bind)?;
 
         // Memory net defaults go first, so a port driven only inside an `if` is
         // still assigned on every path (no latch, and the enable reads as 0).
@@ -1492,6 +1506,18 @@ fn shir_port_drives_with_values<'a>(
             | SHIRStmt::MemWrite { .. } => {}
         }
     }
+}
+
+/// The ports driven inside a top-level `if`/`match`/`for` of `stmts` (any depth
+/// below it) — the drives that lower into `always_comb` whatever the port is.
+fn nested_port_drives(stmts: &[SHIRStmt]) -> HashSet<String> {
+    let mut d = Vec::new();
+    for s in stmts {
+        if matches!(s, SHIRStmt::If { .. } | SHIRStmt::Match { .. } | SHIRStmt::ForLoop { .. }) {
+            shir_port_drives(std::slice::from_ref(s), &mut d);
+        }
+    }
+    d.into_iter().map(|(p, _)| p).collect()
 }
 
 fn phase_scoped_output_ports(phases: &[SHIRPhase]) -> HashSet<String> {

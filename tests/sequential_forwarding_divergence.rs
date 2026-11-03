@@ -6930,19 +6930,21 @@ fn e16i_head_read_default_then_held_diverges_refused() {
     assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16i_head_read_default_then_held (clause A, two drivers)");
 }
 
-/// FOUND, not changed (§10.9, 2026-11-02): the single-tick body emits the same two drivers (`assign o = 3` beside the hold form) and no rule refuses it — found 2026-11-02 (§10.9), recorded as a gap of the single-tick route: the linear rule is scoped to more than one tick, and the remedy is an emission fix (the default routed into the comb copy), not a clause here. See `E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC`.
+/// AGREE since §10.10 (2026-11-02): found by §10.9 as the single-tick body's two drivers (`assign o = 3` beside the hold form, `MULTIDRIVEN`, admitted by every rule). The emission fix keeps the default in the comb copy, in program order, so the port is written on every path of one `always_comb` — `o = 3; if (cnt[0]) o = cnt;`, one driver, no hold register — and the comb mux on the committed register is the simulator's trace (predicted before the fix ran). See `E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC`.
 #[test]
-fn e16j_single_tick_default_then_held_two_drivers_unrefused_on_the_single_tick_route() {
+fn e16j_single_tick_default_then_held_agrees() {
     let sim = sim_e_in(e16j_single_tick_default_then_held);
     assert_eq!(sim, vec![1, 3, 3, 3, 5, 3, 7, 3, 9, 3, 11, 3, 13], "simulator behaviour changed");
-    if verilator_available() {
-        assert!(verilator_refuses_as_emitted(E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC, "e16j_single_tick_default_then_held", "MULTIDRIVEN"), "e16j_single_tick_default_then_held: the single-tick route's default-then-override emission is expected to be refused by Verilator as MULTIDRIVEN under -Wall — if it builds, the emission was fixed: pin its trace against the simulator's and retire this test");
-    }
     let f: syn::ItemFn = syn::parse_str(E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC).unwrap();
-    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "the linear rule is scoped to more than one tick");
-    assert!(copper_analysis::unprotected_pretick_out_write(&f).is_empty());
-    assert!(copper_analysis::multi_write_collapse(&f).is_empty());
-    assert!(copper_analysis::multi_phase_out_write(&f).is_empty());
+    assert!(single_tick_rules_flag(&f).is_empty(), "e16j must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC, "e16j_single_tick_default_then_held", w), "e16j: one driver — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC, "e16j_single_tick_default_then_held");
+    assert_eq!(sim, sv, "e16j no longer agrees");
 }
 
 /// REFUSED as emitted — two drivers (predicted §10.9, 2026-11-02): a register-valued default behind a read beside a held override behind its own: two drivers, the continuous assign beside the flop's non-blocking one, which Verilator refuses as `BLKANDNBLK` (an error, not a lint). See `E16K_MIDDLE_DEFAULT_THEN_HELD_BEHIND_READ_SRC`.
@@ -7070,5 +7072,485 @@ fn latch_fix_the_rule_flags_exactly_the_probes_of_section_10_9() {
         assert!(copper_analysis::multi_phase_out_write(&f).is_empty(), "{name}");
         assert!(copper_analysis::out_first_driven_late(&f).is_empty(), "{name}");
         assert!(copper_analysis::multi_write_collapse(&f).is_empty(), "{name}");
+    }
+}
+
+// ---- §10.10: the single-tick default-then-override (two drivers) and its neighbours ----
+// Every row predicted before its probe ran (`CYCLE_DATAFLOW_SEMANTICS.md` §10.10).
+
+const E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e17a_head_override_then_default(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt[0] == Logic::One { o.write(cnt); }
+        o.write(Bits::from_lit::<3>());
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e17a_head_override_then_default(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt[0] == Logic::One { o.write(cnt); }
+        o.write(Bits::from_lit::<3>());
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// AGREE (predicted §10.10, 2026-11-02): an override, then the default — the default always wins in the simulator, and the comb copy ends on it: `o` is 3 everywhere. Before §10.10 the default was a continuous assign beside the hold form (`MULTIDRIVEN`). See `E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC`.
+#[test]
+fn e17a_head_override_then_default_agrees() {
+    let sim = sim_e_in(e17a_head_override_then_default);
+    assert_eq!(sim, vec![3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC).unwrap();
+    assert!(single_tick_rules_flag(&f).is_empty(), "e17a_head_override_then_default must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC, "e17a_head_override_then_default", w), "e17a_head_override_then_default: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC, "e17a_head_override_then_default");
+    assert_eq!(sim, sv, "e17a_head_override_then_default no longer agrees");
+}
+
+const E17B_TRAILING_DEFAULT_THEN_HELD_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e17b_trailing_default_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e17b_trailing_default_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+    }
+}
+
+/// AGREE (predicted §10.10, 2026-11-02): `e16j`'s pair in the trailing region (`cnt` updated in the head). Before §10.10 the default was a continuous assign beside the edge-sampled flop, and the `always_ff` `MULTIDRIVEN` pragma let it BUILD with the two drivers fighting (`e16i`'s class); the comb mux on the committed register is the simulator's trace. See `E17B_TRAILING_DEFAULT_THEN_HELD_SRC`.
+#[test]
+fn e17b_trailing_default_then_held_agrees() {
+    let sim = sim_e_in(e17b_trailing_default_then_held);
+    assert_eq!(sim, vec![1, 3, 3, 3, 5, 3, 7, 3, 9, 3, 11, 3, 13], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17B_TRAILING_DEFAULT_THEN_HELD_SRC).unwrap();
+    assert!(single_tick_rules_flag(&f).is_empty(), "e17b_trailing_default_then_held must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17B_TRAILING_DEFAULT_THEN_HELD_SRC, "e17b_trailing_default_then_held", w), "e17b_trailing_default_then_held: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17B_TRAILING_DEFAULT_THEN_HELD_SRC, "e17b_trailing_default_then_held");
+    assert_eq!(sim, sv, "e17b_trailing_default_then_held no longer agrees");
+}
+
+const E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17c_head_register_default_input_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(cnt);
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17c_head_register_default_input_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(cnt);
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): an opening register default and a closing override behind an input guard on every path — the simulator never shows the closing write (the next opening write runs before the observation), the comb mux shows it on the odd inputs: D1's every-path clause (A2), which refused the shape before the fix too. See `E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC`.
+#[test]
+fn e17c_head_register_default_input_guard_diverges_refused() {
+    let sim = sim_e_in(e17c_head_register_default_input_guard);
+    assert_eq!(sim, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC).unwrap();
+    assert_eq!(copper_analysis::unprotected_pretick_out_write(&f), vec!["o".to_string()], "e17c_head_register_default_input_guard must be refused by unprotected_pretick_out_write");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC, "e17c_head_register_default_input_guard", w), "e17c_head_register_default_input_guard: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC, "e17c_head_register_default_input_guard");
+    assert_eq!(sv, vec![1, 7, 3, 7, 5, 7, 7, 7, 9, 7, 11, 7, 13], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17c_head_register_default_input_guard now AGREES — re-derive §10.10");
+}
+
+const E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17d_head_input_default_register_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17d_head_input_default_register_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): both drives behind the read (closing), the override reading `cnt`, which the trailing region updates at the very edge the write lands at — the comb mux shows the next generation of `cnt` (as `e17h`). Before §10.10 refused as emitted (`BLKANDNBLK`). See `E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC`.
+#[test]
+fn e17d_head_input_default_register_override_diverges_refused() {
+    let sim = sim_e_in(e17d_head_input_default_register_override);
+    assert_eq!(sim, vec![10, 1, 12, 3, 14, 5, 16, 7, 18, 9, 20, 11, 22], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC).unwrap();
+    assert_eq!(copper_analysis::pretick_out_write_before_update(&f), vec!["o".to_string()], "e17d_head_input_default_register_override must be refused by pretick_out_write_before_update");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC, "e17d_head_input_default_register_override", w), "e17d_head_input_default_register_override: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC, "e17d_head_input_default_register_override");
+    assert_eq!(sv, vec![1, 11, 3, 13, 5, 15, 7, 17, 9, 19, 11, 21, 13], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17d_head_input_default_register_override now AGREES — re-derive §10.10");
+}
+
+const E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17e_head_constant_default_input_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(Bits::from_lit::<3>());
+        if x.read()[0] == Logic::One { o.write(x.read()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17e_head_constant_default_input_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(Bits::from_lit::<3>());
+        if x.read()[0] == Logic::One { o.write(x.read()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): an opening constant default and a closing input override: the simulator shows only the opening writes, the comb mux the override — D1 (A2). See `E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC`.
+#[test]
+fn e17e_head_constant_default_input_override_diverges_refused() {
+    let sim = sim_e_in(e17e_head_constant_default_input_override);
+    assert_eq!(sim, vec![3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC).unwrap();
+    assert_eq!(copper_analysis::unprotected_pretick_out_write(&f), vec!["o".to_string()], "e17e_head_constant_default_input_override must be refused by unprotected_pretick_out_write");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC, "e17e_head_constant_default_input_override", w), "e17e_head_constant_default_input_override: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC, "e17e_head_constant_default_input_override");
+    assert_eq!(sv, vec![3, 11, 3, 13, 3, 15, 3, 17, 3, 19, 3, 21, 3], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17e_head_constant_default_input_override now AGREES — re-derive §10.10");
+}
+
+const E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17f_head_forwarded_guard_default(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17f_head_forwarded_guard_default(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): `e16j`'s pair after a head update of the guard's register: the simulator tests the forwarded `cnt`, the comb mux the committed one — D1's forwarded-guard clause (B). See `E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC`.
+#[test]
+fn e17f_head_forwarded_guard_default_diverges_refused() {
+    let sim = sim_e_in(e17f_head_forwarded_guard_default);
+    assert_eq!(sim, vec![3, 3, 3, 5, 3, 7, 3, 9, 3, 11, 3, 13, 3], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC).unwrap();
+    assert_eq!(copper_analysis::unprotected_pretick_out_write(&f), vec!["o".to_string()], "e17f_head_forwarded_guard_default must be refused by unprotected_pretick_out_write");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC, "e17f_head_forwarded_guard_default", w), "e17f_head_forwarded_guard_default: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC, "e17f_head_forwarded_guard_default");
+    assert_eq!(sv, vec![2, 3, 4, 3, 6, 3, 8, 3, 10, 3, 12, 3, 14], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17f_head_forwarded_guard_default now AGREES — re-derive §10.10");
+}
+
+const E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e17g_trailing_input_default_register_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(cnt); }
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e17g_trailing_input_default_register_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(cnt); }
+    }
+}
+
+/// AGREE (predicted §10.10, 2026-11-02): the trailing region's reads are immediate and its writes opening: the comb mux over `x` and the committed `cnt` is the simulator's trace. Before §10.10 refused as emitted (`BLKANDNBLK`). See `E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC`.
+#[test]
+fn e17g_trailing_input_default_register_override_agrees() {
+    let sim = sim_e_in(e17g_trailing_input_default_register_override);
+    assert_eq!(sim, vec![1, 11, 3, 13, 5, 15, 7, 17, 9, 19, 11, 21, 13], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC).unwrap();
+    assert!(single_tick_rules_flag(&f).is_empty(), "e17g_trailing_input_default_register_override must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC, "e17g_trailing_input_default_register_override", w), "e17g_trailing_input_default_register_override: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC, "e17g_trailing_input_default_register_override");
+    assert_eq!(sim, sv, "e17g_trailing_input_default_register_override no longer agrees");
+}
+
+const E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17h_head_register_default_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(cnt);
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17h_head_register_default_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(cnt);
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): the CONTROL — one write, no override: `o.write(cnt)` behind a read, `cnt` updated after the tick. The write captures `cnt` at the pre-edge settle; the trailing update commits at that same edge, so `assign o = cnt` shows the next generation from the observation on. The single-tick twin of the linear route's `e14n`; admitted by every rule before §10.10 (found here, not a two-driver shape). See `E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC`.
+#[test]
+fn e17h_head_register_default_behind_read_diverges_refused() {
+    let sim = sim_e_in(e17h_head_register_default_behind_read);
+    assert_eq!(sim, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC).unwrap();
+    assert_eq!(copper_analysis::pretick_out_write_before_update(&f), vec!["o".to_string()], "e17h_head_register_default_behind_read must be refused by pretick_out_write_before_update");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC, "e17h_head_register_default_behind_read", w), "e17h_head_register_default_behind_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC, "e17h_head_register_default_behind_read");
+    assert_eq!(sv, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17h_head_register_default_behind_read now AGREES — re-derive §10.10");
+}
+
+const E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e17i_head_default_then_every_path(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<5>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e17i_head_default_then_every_path(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<5>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// AGREE (predicted §10.10, 2026-11-02): a default, then an every-path override: before §10.10 a continuous assign beside the comb mux (`MULTIDRIVEN`); now one comb mux. See `E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC`.
+#[test]
+fn e17i_head_default_then_every_path_agrees() {
+    let sim = sim_e_in(e17i_head_default_then_every_path);
+    assert_eq!(sim, vec![1, 5, 3, 5, 5, 5, 7, 5, 9, 5, 11, 5, 13], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC).unwrap();
+    assert!(single_tick_rules_flag(&f).is_empty(), "e17i_head_default_then_every_path must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC, "e17i_head_default_then_every_path", w), "e17i_head_default_then_every_path: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC, "e17i_head_default_then_every_path");
+    assert_eq!(sim, sv, "e17i_head_default_then_every_path no longer agrees");
+}
+
+const E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17j_head_input_default_register_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17j_head_input_default_register_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): `e17d` with the trailing-updated register in the override's GUARD only: the comb mux tests the next generation of `cnt`. See `E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC`.
+#[test]
+fn e17j_head_input_default_register_guard_diverges_refused() {
+    let sim = sim_e_in(e17j_head_input_default_register_guard);
+    assert_eq!(sim, vec![10, 7, 12, 7, 14, 7, 16, 7, 18, 7, 20, 7, 22], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC).unwrap();
+    assert_eq!(copper_analysis::pretick_out_write_before_update(&f), vec!["o".to_string()], "e17j_head_input_default_register_guard must be refused by pretick_out_write_before_update");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC, "e17j_head_input_default_register_guard", w), "e17j_head_input_default_register_guard: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC, "e17j_head_input_default_register_guard");
+    assert_eq!(sv, vec![7, 11, 7, 13, 7, 15, 7, 17, 7, 19, 7, 21, 7], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17j_head_input_default_register_guard now AGREES — re-derive §10.10");
+}
+
+const E17K_HEAD_HELD_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e17k_head_held_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e17k_head_held_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// AGREE (predicted §10.10, 2026-11-02): the held control of `e17h`: no default, so the port is the edge-sampled flop, which samples `cnt` at the edge the simulator's write lands at — the pre-update value. Agrees; the new clause is scoped to the every-path port. See `E17K_HEAD_HELD_BEHIND_READ_SRC`.
+#[test]
+fn e17k_head_held_behind_read_agrees() {
+    let sim = sim_e_in(e17k_head_held_behind_read);
+    assert_eq!(sim, vec![0, 1, 1, 3, 3, 5, 5, 7, 7, 9, 9, 11, 11], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17K_HEAD_HELD_BEHIND_READ_SRC).unwrap();
+    assert!(single_tick_rules_flag(&f).is_empty(), "e17k_head_held_behind_read must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17K_HEAD_HELD_BEHIND_READ_SRC, "e17k_head_held_behind_read", w), "e17k_head_held_behind_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17K_HEAD_HELD_BEHIND_READ_SRC, "e17k_head_held_behind_read");
+    assert_eq!(sim, sv, "e17k_head_held_behind_read no longer agrees");
+}
+
+/// Every rule that can refuse a single-tick plain-`Out` drive, by name.
+fn single_tick_rules_flag(f: &syn::ItemFn) -> Vec<&'static str> {
+    [
+        ("unprotected_pretick_out_write", copper_analysis::unprotected_pretick_out_write(f)),
+        ("pretick_out_write_before_update", copper_analysis::pretick_out_write_before_update(f)),
+        ("linear_out_write_anchor_mismatch", copper_analysis::linear_out_write_anchor_mismatch(f)),
+        ("trailing_out_reads_input", copper_analysis::trailing_out_reads_input(f)),
+        ("multi_phase_out_write", copper_analysis::multi_phase_out_write(f)),
+        ("out_first_driven_late", copper_analysis::out_first_driven_late(f)),
+        ("multi_write_collapse", copper_analysis::multi_write_collapse(f)),
+    ]
+    .into_iter()
+    .filter(|(_, v)| !v.is_empty())
+    .map(|(n, _)| n)
+    .collect()
+}
+
+/// The verdict table of §10.10, as a test: the refused set is exactly the
+/// diverging set, each probe refused by the one rule its mechanism names.
+#[test]
+fn single_tick_default_override_refused_set_is_the_diverging_set() {
+    for (name, src, rule) in [("e17c_head_register_default_input_guard", E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC, "unprotected_pretick_out_write"), ("e17d_head_input_default_register_override", E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC, "pretick_out_write_before_update"), ("e17e_head_constant_default_input_override", E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC, "unprotected_pretick_out_write"), ("e17f_head_forwarded_guard_default", E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC, "unprotected_pretick_out_write"), ("e17h_head_register_default_behind_read", E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC, "pretick_out_write_before_update"), ("e17j_head_input_default_register_guard", E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC, "pretick_out_write_before_update")] {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        assert_eq!(single_tick_rules_flag(&f), vec![rule], "{name}: refused by exactly {rule}");
+    }
+    for (name, src) in [("e17a_head_override_then_default", E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC), ("e17b_trailing_default_then_held", E17B_TRAILING_DEFAULT_THEN_HELD_SRC), ("e17g_trailing_input_default_register_override", E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC), ("e17i_head_default_then_every_path", E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC), ("e17k_head_held_behind_read", E17K_HEAD_HELD_BEHIND_READ_SRC), ("e16j_single_tick_default_then_held", E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC)] {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        assert!(single_tick_rules_flag(&f).is_empty(), "{name}: admitted");
     }
 }
