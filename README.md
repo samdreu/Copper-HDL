@@ -468,15 +468,18 @@ counterexample rather than lowered to something plausible:
   input read, is sampled at the segment's closing edge; an unconditional
   register, input or constant is a continuous assign. The simulator writes at
   the closing edge behind an input read a tick follows, and at the segment's
-  opening otherwise. Refused: the latch forms; a sampled write with no such read
-  on some path (one late in the hardware); an input through the assign (tracked
-  every cycle where the simulator sampled it once per iteration); a register or
-  constant behind such a read when the assign can change at another edge (one
-  early). Read an input before every write of a sampled port, update a register
-  in the same segment before writing it, compute a conditional value into a
-  `let` and write it unconditionally, or declare the port `RegOut`
-  (`linear_out_write_anchor_mismatch`; `CYCLE_DATAFLOW_SEMANTICS.md` §10.7–10.8,
-  the `e13`–`e15` probes).
+  opening otherwise. Refused: a sampled write with no such read on some path
+  (one late in the hardware); an input through the assign (tracked every cycle
+  where the simulator sampled it once per iteration); a register or constant
+  behind such a read when the assign can change at another edge (one early); a
+  conditional write after the last tick (sampled one edge late); a conditional
+  write whose guard tests a register updated earlier in its segment (the
+  hardware tests the committed value); a port written both unconditionally and
+  conditionally in one segment (two drivers). Read an input before every write
+  of a sampled port, update a register in the same segment before writing it,
+  move a conditional write before the last tick, or declare the port `RegOut`
+  (`linear_out_write_anchor_mismatch`; `CYCLE_DATAFLOW_SEMANTICS.md` §10.7–10.9,
+  the `e13`–`e16` probes).
 - **A constant-only `Out` first written after the second clock edge** of a
   multi-tick body: the simulator shows the initial value at the first
   observation, the emitted `assign` drives the constant from time 0. Write it in

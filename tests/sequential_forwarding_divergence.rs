@@ -3566,8 +3566,13 @@ fn d_the_rederived_rule_flags_exactly_the_diverging_probes() {
     assert_eq!(d1(D3C_SRC), o, "d3c: W4 held");
     assert_eq!(d1(D4A_SRC), o, "d4a: forwarded guard, held");
     assert_eq!(d1(D4C_SRC), o, "d4c: forwarded guard, every path");
+    // `d2b` is also refused by the guard edition of `pretick_out_write_before_update`
+    // (§10.11, 2026-11-02): its closing drive's guard `phase == 0` reads `phase`,
+    // assigned after it in the segment, and the every-path comb mux tests Q.
+    let f: syn::ItemFn = syn::parse_str(D2B_SRC).expect("parses");
+    assert_eq!(copper_analysis::pretick_out_write_before_update(&f), o, "d2b: guard edition (§10.11)");
     // No other pre-tick rule owns any of them.
-    for src in [D1B_SRC, D1C_SRC, D1D_SRC, D1E_SRC, D1F_SRC, D1G_SRC, D2A_SRC, D2B_SRC, D2C_SRC,
+    for src in [D1B_SRC, D1C_SRC, D1D_SRC, D1E_SRC, D1F_SRC, D1G_SRC, D2A_SRC, D2C_SRC,
                 D3A_SRC, D3B_SRC, D3C_SRC, D4A_SRC, D4B_SRC, D4C_SRC, D4D_SRC,
                 D5A_SRC, D5B_SRC, D5C_SRC, D5D_SRC, D5E_SRC, D5F_SRC, BRANCH_MERGE_EXPLICIT_RULE_SRC] {
         let f: syn::ItemFn = syn::parse_str(src).expect("parses");
@@ -5504,7 +5509,7 @@ async fn e15s_middle_conditional_input(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<
 }
 
 const E15T_MIDDLE_CONDITIONAL_CONSTANT_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15t_middle_conditional_constant(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     loop {
         clk.tick().await;
@@ -5513,7 +5518,7 @@ async fn e15t_middle_conditional_constant(clk: Clock<C>, x: In<Bits<8>, C>, o: O
     }
 }
 "#;
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15t_middle_conditional_constant(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     loop {
         clk.tick().await;
@@ -5563,7 +5568,7 @@ async fn e15v_middle_conditional_wire(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<B
 }
 
 const E15W_HEAD_EVERY_PATH_CONSTANTS_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15w_head_every_path_constants(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     loop {
         if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
@@ -5572,7 +5577,7 @@ async fn e15w_head_every_path_constants(clk: Clock<C>, x: In<Bits<8>, C>, o: Out
     }
 }
 "#;
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15w_head_every_path_constants(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     loop {
         if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
@@ -5582,7 +5587,7 @@ async fn e15w_head_every_path_constants(clk: Clock<C>, x: In<Bits<8>, C>, o: Out
 }
 
 const E15X_MIDDLE_EVERY_PATH_INPUTS_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15x_middle_every_path_inputs(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     loop {
         clk.tick().await;
@@ -5591,7 +5596,7 @@ async fn e15x_middle_every_path_inputs(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<
     }
 }
 "#;
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15x_middle_every_path_inputs(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     loop {
         clk.tick().await;
@@ -5675,7 +5680,7 @@ async fn e15ab_trailing_held_wire_from_constant(clk: Clock<C>, x: In<Bits<8>, C>
 }
 
 const E15WR_HEAD_EVERY_PATH_CONSTANTS_REGISTERED_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15wr_head_every_path_constants_registered(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut cnt: Bits<8> = Bits::zero();
     loop {
@@ -5686,7 +5691,7 @@ async fn e15wr_head_every_path_constants_registered(clk: Clock<C>, x: In<Bits<8>
     }
 }
 "#;
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15wr_head_every_path_constants_registered(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut cnt: Bits<8> = Bits::zero();
     loop {
@@ -5698,7 +5703,7 @@ async fn e15wr_head_every_path_constants_registered(clk: Clock<C>, x: In<Bits<8>
 }
 
 const E15AC_MIDDLE_EVERY_PATH_REGISTER_NO_READ_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15ac_middle_every_path_register_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut cnt: Bits<8> = Bits::zero();
     loop {
@@ -5709,7 +5714,7 @@ async fn e15ac_middle_every_path_register_no_read(clk: Clock<C>, x: In<Bits<8>, 
     }
 }
 "#;
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15ac_middle_every_path_register_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut cnt: Bits<8> = Bits::zero();
     loop {
@@ -5721,7 +5726,7 @@ async fn e15ac_middle_every_path_register_no_read(clk: Clock<C>, x: In<Bits<8>, 
 }
 
 const E15AD_MIDDLE_HELD_REGISTER_GUARD_NO_READ_SRC: &str = r#"
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15ad_middle_held_register_guard_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut cnt: Bits<8> = Bits::zero();
     loop {
@@ -5732,7 +5737,7 @@ async fn e15ad_middle_held_register_guard_no_read(clk: Clock<C>, x: In<Bits<8>, 
     }
 }
 "#;
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn e15ad_middle_held_register_guard_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut cnt: Bits<8> = Bits::zero();
     loop {
@@ -6113,19 +6118,18 @@ fn e15s_middle_conditional_input_agrees() {
     assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e15s_middle_conditional_input is admitted by §10.8's rule");
 }
 
-/// DIVERGE — REFUSED (predicted §10.8, 2026-11-02): an every-path conditional drive is a phase-gated `always_comb` with no assignment outside its phase — a latch Verilator refuses under `-Wall`; with the lint off the transparent copy shows each closing value one observation early. See `E15T_MIDDLE_CONDITIONAL_CONSTANT_SRC`.
+/// AGREE (predicted §10.9, 2026-11-02; DIVERGE and refused as a latch under §10.8): an every-path conditional drive behind a deferred read is the edge-sampled flop under its phase, which samples the guard at the closing edge the simulator wrote at. See `E15T_MIDDLE_CONDITIONAL_CONSTANT_SRC`.
 #[test]
-fn e15t_middle_conditional_constant_diverges_refused() {
+fn e15t_middle_conditional_constant_agrees() {
     let sim = sim_e_in(e15t_middle_conditional_constant);
     assert_eq!(sim, vec![0, 7, 7, 3, 3, 7, 7, 3, 3, 7, 7, 3, 3], "simulator behaviour changed");
     if verilator_available() {
-        assert!(verilator_refuses_as_emitted(E15T_MIDDLE_CONDITIONAL_CONSTANT_SRC, "e15t_middle_conditional_constant", "LATCH"), "e15t_middle_conditional_constant: the phase-gated comb form is expected to be refused by Verilator as a latch under -Wall");
-        let sv = transpile_and_run_driven_lint_off(E15T_MIDDLE_CONDITIONAL_CONSTANT_SRC, "e15t_middle_conditional_constant", &["-Wno-LATCH"]);
-        assert_eq!(sv, vec![7, 7, 3, 3, 7, 7, 3, 3, 7, 7, 3, 3, 7], "transpiled SV behaviour changed");
-        assert_ne!(sim, sv, "sim and SV now AGREE for e15t_middle_conditional_constant — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.8)");
+        assert!(!verilator_refuses_as_emitted(E15T_MIDDLE_CONDITIONAL_CONSTANT_SRC, "e15t_middle_conditional_constant", "LATCH"), "e15t_middle_conditional_constant: the form is a latch under -Wall again — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E15T_MIDDLE_CONDITIONAL_CONSTANT_SRC, "e15t_middle_conditional_constant");
+        assert_eq!(sim, sv, "sim and SV diverge for e15t_middle_conditional_constant — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
     }
     let f: syn::ItemFn = syn::parse_str(E15T_MIDDLE_CONDITIONAL_CONSTANT_SRC).unwrap();
-    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.8's rule must refuse e15t_middle_conditional_constant");
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e15t_middle_conditional_constant is admitted by §10.9's rule");
 }
 
 /// DIVERGE — REFUSED (predicted §10.8, 2026-11-02): the held trailing drive is hoisted into phase 0's flop, which samples guard and value at an even edge where the simulator tested and read `x` after the odd one — refused by `trailing_out_reads_input` through the value already. See `E15U_TRAILING_CONDITIONAL_INPUT_SRC`.
@@ -6156,34 +6160,32 @@ fn e15v_middle_conditional_wire_agrees() {
     assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e15v_middle_conditional_wire is admitted by §10.8's rule");
 }
 
-/// DIVERGE — REFUSED (predicted §10.8, 2026-11-02): the every-path latch form in the head: the simulator's closing write at an even edge always sees `x[0] == 0`, the transparent copy shows `x` at every odd observation. See `E15W_HEAD_EVERY_PATH_CONSTANTS_SRC`.
+/// AGREE (predicted §10.9, 2026-11-02; DIVERGE and refused as a latch under §10.8): the same flop in the head's phase, sampling `x[0]` at the even edges where the simulator tested it. See `E15W_HEAD_EVERY_PATH_CONSTANTS_SRC`.
 #[test]
-fn e15w_head_every_path_constants_diverges_refused() {
+fn e15w_head_every_path_constants_agrees() {
     let sim = sim_e_in(e15w_head_every_path_constants);
     assert_eq!(sim, vec![3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3], "simulator behaviour changed");
     if verilator_available() {
-        assert!(verilator_refuses_as_emitted(E15W_HEAD_EVERY_PATH_CONSTANTS_SRC, "e15w_head_every_path_constants", "LATCH"), "e15w_head_every_path_constants: the phase-gated comb form is expected to be refused by Verilator as a latch under -Wall");
-        let sv = transpile_and_run_driven_lint_off(E15W_HEAD_EVERY_PATH_CONSTANTS_SRC, "e15w_head_every_path_constants", &["-Wno-LATCH"]);
-        assert_eq!(sv, vec![3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3], "transpiled SV behaviour changed");
-        assert_ne!(sim, sv, "sim and SV now AGREE for e15w_head_every_path_constants — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.8)");
+        assert!(!verilator_refuses_as_emitted(E15W_HEAD_EVERY_PATH_CONSTANTS_SRC, "e15w_head_every_path_constants", "LATCH"), "e15w_head_every_path_constants: the form is a latch under -Wall again — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E15W_HEAD_EVERY_PATH_CONSTANTS_SRC, "e15w_head_every_path_constants");
+        assert_eq!(sim, sv, "sim and SV diverge for e15w_head_every_path_constants — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
     }
     let f: syn::ItemFn = syn::parse_str(E15W_HEAD_EVERY_PATH_CONSTANTS_SRC).unwrap();
-    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.8's rule must refuse e15w_head_every_path_constants");
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e15w_head_every_path_constants is admitted by §10.9's rule");
 }
 
-/// DIVERGE — REFUSED (predicted §10.8, 2026-11-02): the every-path latch form with input operands: the transparent copy tracks `x` where the simulator sampled once at the closing edge. See `E15X_MIDDLE_EVERY_PATH_INPUTS_SRC`.
+/// AGREE (predicted §10.9, 2026-11-02; DIVERGE and refused as a latch under §10.8): the flop samples guard and both input-valued arms at the odd edge the deferred guard read parks the passthroughs at. See `E15X_MIDDLE_EVERY_PATH_INPUTS_SRC`.
 #[test]
-fn e15x_middle_every_path_inputs_diverges_refused() {
+fn e15x_middle_every_path_inputs_agrees() {
     let sim = sim_e_in(e15x_middle_every_path_inputs);
     assert_eq!(sim, vec![0, 11, 11, 14, 14, 15, 15, 18, 18, 19, 19, 22, 22], "simulator behaviour changed");
     if verilator_available() {
-        assert!(verilator_refuses_as_emitted(E15X_MIDDLE_EVERY_PATH_INPUTS_SRC, "e15x_middle_every_path_inputs", "LATCH"), "e15x_middle_every_path_inputs: the phase-gated comb form is expected to be refused by Verilator as a latch under -Wall");
-        let sv = transpile_and_run_driven_lint_off(E15X_MIDDLE_EVERY_PATH_INPUTS_SRC, "e15x_middle_every_path_inputs", &["-Wno-LATCH"]);
-        assert_eq!(sv, vec![10, 11, 13, 14, 14, 15, 17, 18, 18, 19, 21, 22, 22], "transpiled SV behaviour changed");
-        assert_ne!(sim, sv, "sim and SV now AGREE for e15x_middle_every_path_inputs — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.8)");
+        assert!(!verilator_refuses_as_emitted(E15X_MIDDLE_EVERY_PATH_INPUTS_SRC, "e15x_middle_every_path_inputs", "LATCH"), "e15x_middle_every_path_inputs: the form is a latch under -Wall again — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E15X_MIDDLE_EVERY_PATH_INPUTS_SRC, "e15x_middle_every_path_inputs");
+        assert_eq!(sim, sv, "sim and SV diverge for e15x_middle_every_path_inputs — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
     }
     let f: syn::ItemFn = syn::parse_str(E15X_MIDDLE_EVERY_PATH_INPUTS_SRC).unwrap();
-    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.8's rule must refuse e15x_middle_every_path_inputs");
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e15x_middle_every_path_inputs is admitted by §10.9's rule");
 }
 
 /// AGREE (predicted §10.8, 2026-11-02): the single-tick body: the same every-path mux with no phase gate, no latch, one observation per iteration — exempt. See `E15Y_SINGLE_TICK_EVERY_PATH_CONSTANTS_SRC`.
@@ -6205,15 +6207,13 @@ fn e15z_trailing_every_path_constants_diverges_refused() {
     let sim = sim_e_in(e15z_trailing_every_path_constants);
     assert_eq!(sim, vec![0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7], "simulator behaviour changed");
     if verilator_available() {
-        assert!(verilator_refuses_as_emitted(E15Z_TRAILING_EVERY_PATH_CONSTANTS_SRC, "e15z_trailing_every_path_constants", "LATCH"), "e15z_trailing_every_path_constants: the phase-gated comb form is expected to be refused by Verilator as a latch under -Wall");
-        let sv = transpile_and_run_driven_lint_off(E15Z_TRAILING_EVERY_PATH_CONSTANTS_SRC, "e15z_trailing_every_path_constants", &["-Wno-LATCH"]);
-        assert_eq!(sv, vec![3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3], "transpiled SV behaviour changed");
-        assert_ne!(sim, sv, "sim and SV now AGREE for e15z_trailing_every_path_constants — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.8)");
+        assert!(!verilator_refuses_as_emitted(E15Z_TRAILING_EVERY_PATH_CONSTANTS_SRC, "e15z_trailing_every_path_constants", "LATCH"), "e15z: the hoisted flop is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E15Z_TRAILING_EVERY_PATH_CONSTANTS_SRC, "e15z_trailing_every_path_constants");
+        assert_eq!(sv, vec![3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3], "transpiled SV behaviour changed");
+        assert_ne!(sim, sv, "sim and SV now AGREE for e15z_trailing_every_path_constants — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.9)");
     }
     let f: syn::ItemFn = syn::parse_str(E15Z_TRAILING_EVERY_PATH_CONSTANTS_SRC).unwrap();
-    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.8's rule must refuse e15z_trailing_every_path_constants");
-    assert_eq!(copper_analysis::out_first_driven_late(&f), vec!["o".to_string()], "e15z_trailing_every_path_constants is also out_first_driven_late's");
-    assert_eq!(copper_analysis::trailing_out_reads_input(&f), vec!["o".to_string()], "e15z_trailing_every_path_constants is also trailing_out_reads_input's");
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e15z_trailing_every_path_constants (clause B, the trailing conditional drive)");
 }
 
 /// DIVERGE — REFUSED (predicted §10.8, 2026-11-02): the held trailing drive hoisted into phase 0's flop tests `x[0]` at even edges, where it is never set; the simulator tested it after every odd edge and writes every iteration — `out_first_driven_late` refused it already, for the transient alone. See `E15AA_TRAILING_HELD_CONSTANT_SRC`.
@@ -6247,47 +6247,46 @@ fn e15ab_trailing_held_wire_from_constant_diverges_refused() {
     assert_eq!(copper_analysis::trailing_out_reads_input(&f), vec!["o".to_string()], "e15ab_trailing_held_wire_from_constant is also trailing_out_reads_input's");
 }
 
-/// DIVERGE — REFUSED (predicted §10.8, 2026-11-02): `e15w` with a register: the form and the lag are the same, and no rule of 444e0bd refused it (D1 sees no mixed anchors; §10.7's rule admits a head constant, assuming the assign form). See `E15WR_HEAD_EVERY_PATH_CONSTANTS_REGISTERED_SRC`.
+/// AGREE (predicted §10.9, 2026-11-02; DIVERGE and refused as a latch under §10.8): `e15w` with a register — the same flop. See `E15WR_HEAD_EVERY_PATH_CONSTANTS_REGISTERED_SRC`.
 #[test]
-fn e15wr_head_every_path_constants_registered_diverges_refused() {
+fn e15wr_head_every_path_constants_registered_agrees() {
     let sim = sim_e_in(e15wr_head_every_path_constants_registered);
     assert_eq!(sim, vec![3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3], "simulator behaviour changed");
     if verilator_available() {
-        assert!(verilator_refuses_as_emitted(E15WR_HEAD_EVERY_PATH_CONSTANTS_REGISTERED_SRC, "e15wr_head_every_path_constants_registered", "LATCH"), "e15wr_head_every_path_constants_registered: the phase-gated comb form is expected to be refused by Verilator as a latch under -Wall");
-        let sv = transpile_and_run_driven_lint_off(E15WR_HEAD_EVERY_PATH_CONSTANTS_REGISTERED_SRC, "e15wr_head_every_path_constants_registered", &["-Wno-LATCH"]);
-        assert_eq!(sv, vec![3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3], "transpiled SV behaviour changed");
-        assert_ne!(sim, sv, "sim and SV now AGREE for e15wr_head_every_path_constants_registered — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.8)");
+        assert!(!verilator_refuses_as_emitted(E15WR_HEAD_EVERY_PATH_CONSTANTS_REGISTERED_SRC, "e15wr_head_every_path_constants_registered", "LATCH"), "e15wr_head_every_path_constants_registered: the form is a latch under -Wall again — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E15WR_HEAD_EVERY_PATH_CONSTANTS_REGISTERED_SRC, "e15wr_head_every_path_constants_registered");
+        assert_eq!(sim, sv, "sim and SV diverge for e15wr_head_every_path_constants_registered — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
     }
     let f: syn::ItemFn = syn::parse_str(E15WR_HEAD_EVERY_PATH_CONSTANTS_REGISTERED_SRC).unwrap();
-    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.8's rule must refuse e15wr_head_every_path_constants_registered");
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e15wr_head_every_path_constants_registered is admitted by §10.9's rule");
 }
 
-/// AGREE with `-Wno-LATCH`, REFUSED as emitted (predicted §10.8, 2026-11-02): the every-path latch form over a committed register and a constant, no read: the trace AGREES with the lint off (nothing the copy reads changes inside its phase) and the emission is still refused by Verilator — refused for the form, like `e7`. See `E15AC_MIDDLE_EVERY_PATH_REGISTER_NO_READ_SRC`.
+/// AGREE (predicted §10.9, 2026-11-02; agreeing with the lint off and refused for the latch under §10.8): an every-path drive with no read before it takes the drive-level mux + hold form, its default now outside the phase guard: no latch, and the agreeing trace measured with the lint off under §10.8 is what the buildable form shows. See `E15AC_MIDDLE_EVERY_PATH_REGISTER_NO_READ_SRC`.
 #[test]
-fn e15ac_middle_every_path_register_no_read_agrees_with_the_lint_off_refused_as_emitted() {
+fn e15ac_middle_every_path_register_no_read_agrees() {
     let sim = sim_e_in(e15ac_middle_every_path_register_no_read);
     assert_eq!(sim, vec![1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3, 3, 7], "simulator behaviour changed");
     if verilator_available() {
-        assert!(verilator_refuses_as_emitted(E15AC_MIDDLE_EVERY_PATH_REGISTER_NO_READ_SRC, "e15ac_middle_every_path_register_no_read", "LATCH"), "e15ac_middle_every_path_register_no_read: the phase-gated comb form is expected to be refused by Verilator as a latch under -Wall");
-        let sv = transpile_and_run_driven_lint_off(E15AC_MIDDLE_EVERY_PATH_REGISTER_NO_READ_SRC, "e15ac_middle_every_path_register_no_read", &["-Wno-LATCH"]);
-        assert_eq!(sim, sv, "sim and SV diverge for e15ac_middle_every_path_register_no_read — an agreeing cell of §10.8 no longer agrees; re-derive linear_out_write_anchor_mismatch");
+        assert!(!verilator_refuses_as_emitted(E15AC_MIDDLE_EVERY_PATH_REGISTER_NO_READ_SRC, "e15ac_middle_every_path_register_no_read", "LATCH"), "e15ac_middle_every_path_register_no_read: the hold form is a latch under -Wall again — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E15AC_MIDDLE_EVERY_PATH_REGISTER_NO_READ_SRC, "e15ac_middle_every_path_register_no_read");
+        assert_eq!(sim, sv, "sim and SV diverge for e15ac_middle_every_path_register_no_read — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
     }
     let f: syn::ItemFn = syn::parse_str(E15AC_MIDDLE_EVERY_PATH_REGISTER_NO_READ_SRC).unwrap();
-    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.8's rule must refuse e15ac_middle_every_path_register_no_read");
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e15ac_middle_every_path_register_no_read is admitted by §10.9's rule");
 }
 
-/// AGREE with `-Wno-LATCH`, REFUSED as emitted (predicted §10.8, 2026-11-02): a held drive with no read before it takes the drive-level mux + hold form gated by its phase — a latch outside it — and its trace AGREES with the lint off; refused for the form. See `E15AD_MIDDLE_HELD_REGISTER_GUARD_NO_READ_SRC`.
+/// AGREE (predicted §10.9, 2026-11-02; agreeing with the lint off and refused for the latch under §10.8): the held drive's hold form with its default outside the phase guard — the trace §10.8 measured with the lint off, buildable. See `E15AD_MIDDLE_HELD_REGISTER_GUARD_NO_READ_SRC`.
 #[test]
-fn e15ad_middle_held_register_guard_no_read_agrees_with_the_lint_off_refused_as_emitted() {
+fn e15ad_middle_held_register_guard_no_read_agrees() {
     let sim = sim_e_in(e15ad_middle_held_register_guard_no_read);
     assert_eq!(sim, vec![1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5, 5, 7], "simulator behaviour changed");
     if verilator_available() {
-        assert!(verilator_refuses_as_emitted(E15AD_MIDDLE_HELD_REGISTER_GUARD_NO_READ_SRC, "e15ad_middle_held_register_guard_no_read", "LATCH"), "e15ad_middle_held_register_guard_no_read: the phase-gated comb form is expected to be refused by Verilator as a latch under -Wall");
-        let sv = transpile_and_run_driven_lint_off(E15AD_MIDDLE_HELD_REGISTER_GUARD_NO_READ_SRC, "e15ad_middle_held_register_guard_no_read", &["-Wno-LATCH"]);
-        assert_eq!(sim, sv, "sim and SV diverge for e15ad_middle_held_register_guard_no_read — an agreeing cell of §10.8 no longer agrees; re-derive linear_out_write_anchor_mismatch");
+        assert!(!verilator_refuses_as_emitted(E15AD_MIDDLE_HELD_REGISTER_GUARD_NO_READ_SRC, "e15ad_middle_held_register_guard_no_read", "LATCH"), "e15ad_middle_held_register_guard_no_read: the hold form is a latch under -Wall again — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E15AD_MIDDLE_HELD_REGISTER_GUARD_NO_READ_SRC, "e15ad_middle_held_register_guard_no_read");
+        assert_eq!(sim, sv, "sim and SV diverge for e15ad_middle_held_register_guard_no_read — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
     }
     let f: syn::ItemFn = syn::parse_str(E15AD_MIDDLE_HELD_REGISTER_GUARD_NO_READ_SRC).unwrap();
-    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.8's rule must refuse e15ad_middle_held_register_guard_no_read");
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e15ad_middle_held_register_guard_no_read is admitted by §10.9's rule");
 }
 
 /// AGREE (predicted §10.8, 2026-11-02): `e15f` with a register: the same unobservable lag — §10.7's wire clause refused it (a wire with no deferred read), a false positive measured here and narrowed. See `E15FR_HEAD_WIRE_FROM_CONSTANT_REGISTERED_SRC`.
@@ -6357,10 +6356,11 @@ fn e15ai_extracted_trailing_held_register_guard_read_diverges_refused() {
     assert_eq!(copper_analysis::trailing_out_reads_input(&f), vec!["o".to_string()], "e15ai_extracted_trailing_held_register_guard_read is also trailing_out_reads_input's");
 }
 
-/// The §10.8 verdict table as a test: which `e15*` sources the restated linear-route
-/// rule flags. Every DIVERGE row is flagged, every AGREE row with a buildable form
-/// is clean, and the two agreeing traces whose form is a latch (`e15ac`, `e15ad`)
-/// are flagged for the form. The admitted rows trip no other pre-tick rule either.
+/// The §10.8 verdict table as a test, as §10.9 (2026-11-02) left it: which `e15*`
+/// sources the linear-route rule flags. Every DIVERGE row is flagged, every AGREE
+/// row is clean — since the latch fix that includes the four every-path rows and
+/// the two hold-form rows §10.8 refused for the form. The admitted rows trip no
+/// other pre-tick rule either.
 #[test]
 fn regfree_linear_the_rule_flags_exactly_the_probes_of_section_10_8() {
     let flagged = |src: &str| {
@@ -6368,15 +6368,15 @@ fn regfree_linear_the_rule_flags_exactly_the_probes_of_section_10_8() {
         copper_analysis::linear_out_write_anchor_mismatch(&f)
     };
     let o = vec!["o".to_string()];
-    for (name, src) in [("e15a_head_input_direct", E15A_HEAD_INPUT_DIRECT_SRC), ("e15b_head_input_behind_read", E15B_HEAD_INPUT_BEHIND_READ_SRC), ("e15g_middle_input_direct", E15G_MIDDLE_INPUT_DIRECT_SRC), ("e15h_middle_input_behind_read", E15H_MIDDLE_INPUT_BEHIND_READ_SRC), ("e15j_middle_constant_behind_read", E15J_MIDDLE_CONSTANT_BEHIND_READ_SRC), ("e15l_middle_wire_from_constant", E15L_MIDDLE_WIRE_FROM_CONSTANT_SRC), ("e15n_trailing_input_direct", E15N_TRAILING_INPUT_DIRECT_SRC), ("e15o_trailing_wire_from_input", E15O_TRAILING_WIRE_FROM_INPUT_SRC), ("e15q_trailing_wire_from_constant", E15Q_TRAILING_WIRE_FROM_CONSTANT_SRC), ("e15t_middle_conditional_constant", E15T_MIDDLE_CONDITIONAL_CONSTANT_SRC), ("e15u_trailing_conditional_input", E15U_TRAILING_CONDITIONAL_INPUT_SRC), ("e15w_head_every_path_constants", E15W_HEAD_EVERY_PATH_CONSTANTS_SRC), ("e15x_middle_every_path_inputs", E15X_MIDDLE_EVERY_PATH_INPUTS_SRC), ("e15z_trailing_every_path_constants", E15Z_TRAILING_EVERY_PATH_CONSTANTS_SRC), ("e15aa_trailing_held_constant", E15AA_TRAILING_HELD_CONSTANT_SRC), ("e15ab_trailing_held_wire_from_constant", E15AB_TRAILING_HELD_WIRE_FROM_CONSTANT_SRC), ("e15wr_head_every_path_constants_registered", E15WR_HEAD_EVERY_PATH_CONSTANTS_REGISTERED_SRC), ("e15ac_middle_every_path_register_no_read", E15AC_MIDDLE_EVERY_PATH_REGISTER_NO_READ_SRC), ("e15ad_middle_held_register_guard_no_read", E15AD_MIDDLE_HELD_REGISTER_GUARD_NO_READ_SRC)] {
+    for (name, src) in [("e15a_head_input_direct", E15A_HEAD_INPUT_DIRECT_SRC), ("e15b_head_input_behind_read", E15B_HEAD_INPUT_BEHIND_READ_SRC), ("e15g_middle_input_direct", E15G_MIDDLE_INPUT_DIRECT_SRC), ("e15h_middle_input_behind_read", E15H_MIDDLE_INPUT_BEHIND_READ_SRC), ("e15j_middle_constant_behind_read", E15J_MIDDLE_CONSTANT_BEHIND_READ_SRC), ("e15l_middle_wire_from_constant", E15L_MIDDLE_WIRE_FROM_CONSTANT_SRC), ("e15n_trailing_input_direct", E15N_TRAILING_INPUT_DIRECT_SRC), ("e15o_trailing_wire_from_input", E15O_TRAILING_WIRE_FROM_INPUT_SRC), ("e15q_trailing_wire_from_constant", E15Q_TRAILING_WIRE_FROM_CONSTANT_SRC), ("e15u_trailing_conditional_input", E15U_TRAILING_CONDITIONAL_INPUT_SRC), ("e15z_trailing_every_path_constants", E15Z_TRAILING_EVERY_PATH_CONSTANTS_SRC), ("e15aa_trailing_held_constant", E15AA_TRAILING_HELD_CONSTANT_SRC), ("e15ab_trailing_held_wire_from_constant", E15AB_TRAILING_HELD_WIRE_FROM_CONSTANT_SRC)] {
         assert_eq!(flagged(src), o, "{name}: refused by §10.8's rule");
     }
-    for (name, src) in [("e15c_head_constant", E15C_HEAD_CONSTANT_SRC), ("e15d_head_constant_behind_read", E15D_HEAD_CONSTANT_BEHIND_READ_SRC), ("e15e_head_wire_from_input", E15E_HEAD_WIRE_FROM_INPUT_SRC), ("e15f_head_wire_from_constant", E15F_HEAD_WIRE_FROM_CONSTANT_SRC), ("e15i_middle_constant", E15I_MIDDLE_CONSTANT_SRC), ("e15k_middle_wire_from_input", E15K_MIDDLE_WIRE_FROM_INPUT_SRC), ("e15m_middle_wire_from_constant_behind_read", E15M_MIDDLE_WIRE_FROM_CONSTANT_BEHIND_READ_SRC), ("e15p_trailing_constant", E15P_TRAILING_CONSTANT_SRC), ("e15r_head_conditional_input", E15R_HEAD_CONDITIONAL_INPUT_SRC), ("e15s_middle_conditional_input", E15S_MIDDLE_CONDITIONAL_INPUT_SRC), ("e15v_middle_conditional_wire", E15V_MIDDLE_CONDITIONAL_WIRE_SRC), ("e15y_single_tick_every_path_constants", E15Y_SINGLE_TICK_EVERY_PATH_CONSTANTS_SRC), ("e15fr_head_wire_from_constant_registered", E15FR_HEAD_WIRE_FROM_CONSTANT_REGISTERED_SRC), ("e15af_middle_held_constant_behind_read_registered", E15AF_MIDDLE_HELD_CONSTANT_BEHIND_READ_REGISTERED_SRC), ("e15ag_middle_held_register_behind_read_registered", E15AG_MIDDLE_HELD_REGISTER_BEHIND_READ_REGISTERED_SRC), ("e15ah_single_tick_held_input", E15AH_SINGLE_TICK_HELD_INPUT_SRC), ("e15ai_extracted_trailing_held_register_guard_read", E15AI_EXTRACTED_TRAILING_HELD_REGISTER_GUARD_READ_SRC)] {
+    for (name, src) in [("e15c_head_constant", E15C_HEAD_CONSTANT_SRC), ("e15d_head_constant_behind_read", E15D_HEAD_CONSTANT_BEHIND_READ_SRC), ("e15e_head_wire_from_input", E15E_HEAD_WIRE_FROM_INPUT_SRC), ("e15f_head_wire_from_constant", E15F_HEAD_WIRE_FROM_CONSTANT_SRC), ("e15i_middle_constant", E15I_MIDDLE_CONSTANT_SRC), ("e15k_middle_wire_from_input", E15K_MIDDLE_WIRE_FROM_INPUT_SRC), ("e15m_middle_wire_from_constant_behind_read", E15M_MIDDLE_WIRE_FROM_CONSTANT_BEHIND_READ_SRC), ("e15p_trailing_constant", E15P_TRAILING_CONSTANT_SRC), ("e15r_head_conditional_input", E15R_HEAD_CONDITIONAL_INPUT_SRC), ("e15s_middle_conditional_input", E15S_MIDDLE_CONDITIONAL_INPUT_SRC), ("e15v_middle_conditional_wire", E15V_MIDDLE_CONDITIONAL_WIRE_SRC), ("e15y_single_tick_every_path_constants", E15Y_SINGLE_TICK_EVERY_PATH_CONSTANTS_SRC), ("e15fr_head_wire_from_constant_registered", E15FR_HEAD_WIRE_FROM_CONSTANT_REGISTERED_SRC), ("e15af_middle_held_constant_behind_read_registered", E15AF_MIDDLE_HELD_CONSTANT_BEHIND_READ_REGISTERED_SRC), ("e15ag_middle_held_register_behind_read_registered", E15AG_MIDDLE_HELD_REGISTER_BEHIND_READ_REGISTERED_SRC), ("e15ah_single_tick_held_input", E15AH_SINGLE_TICK_HELD_INPUT_SRC), ("e15t_middle_conditional_constant", E15T_MIDDLE_CONDITIONAL_CONSTANT_SRC), ("e15w_head_every_path_constants", E15W_HEAD_EVERY_PATH_CONSTANTS_SRC), ("e15x_middle_every_path_inputs", E15X_MIDDLE_EVERY_PATH_INPUTS_SRC), ("e15wr_head_every_path_constants_registered", E15WR_HEAD_EVERY_PATH_CONSTANTS_REGISTERED_SRC), ("e15ac_middle_every_path_register_no_read", E15AC_MIDDLE_EVERY_PATH_REGISTER_NO_READ_SRC), ("e15ad_middle_held_register_guard_no_read", E15AD_MIDDLE_HELD_REGISTER_GUARD_NO_READ_SRC), ("e15ai_extracted_trailing_held_register_guard_read", E15AI_EXTRACTED_TRAILING_HELD_REGISTER_GUARD_READ_SRC)] {
         assert!(flagged(src).is_empty(), "{name}: admitted by §10.8's rule");
     }
     // The admitted register-free and single-tick rows compile without an opt-out:
     // no other rule owns them.
-    for (name, src) in [("e15c_head_constant", E15C_HEAD_CONSTANT_SRC), ("e15d_head_constant_behind_read", E15D_HEAD_CONSTANT_BEHIND_READ_SRC), ("e15e_head_wire_from_input", E15E_HEAD_WIRE_FROM_INPUT_SRC), ("e15f_head_wire_from_constant", E15F_HEAD_WIRE_FROM_CONSTANT_SRC), ("e15i_middle_constant", E15I_MIDDLE_CONSTANT_SRC), ("e15k_middle_wire_from_input", E15K_MIDDLE_WIRE_FROM_INPUT_SRC), ("e15m_middle_wire_from_constant_behind_read", E15M_MIDDLE_WIRE_FROM_CONSTANT_BEHIND_READ_SRC), ("e15r_head_conditional_input", E15R_HEAD_CONDITIONAL_INPUT_SRC), ("e15s_middle_conditional_input", E15S_MIDDLE_CONDITIONAL_INPUT_SRC), ("e15v_middle_conditional_wire", E15V_MIDDLE_CONDITIONAL_WIRE_SRC), ("e15y_single_tick_every_path_constants", E15Y_SINGLE_TICK_EVERY_PATH_CONSTANTS_SRC), ("e15fr_head_wire_from_constant_registered", E15FR_HEAD_WIRE_FROM_CONSTANT_REGISTERED_SRC), ("e15af_middle_held_constant_behind_read_registered", E15AF_MIDDLE_HELD_CONSTANT_BEHIND_READ_REGISTERED_SRC), ("e15ag_middle_held_register_behind_read_registered", E15AG_MIDDLE_HELD_REGISTER_BEHIND_READ_REGISTERED_SRC), ("e15ah_single_tick_held_input", E15AH_SINGLE_TICK_HELD_INPUT_SRC)] {
+    for (name, src) in [("e15c_head_constant", E15C_HEAD_CONSTANT_SRC), ("e15d_head_constant_behind_read", E15D_HEAD_CONSTANT_BEHIND_READ_SRC), ("e15e_head_wire_from_input", E15E_HEAD_WIRE_FROM_INPUT_SRC), ("e15f_head_wire_from_constant", E15F_HEAD_WIRE_FROM_CONSTANT_SRC), ("e15i_middle_constant", E15I_MIDDLE_CONSTANT_SRC), ("e15k_middle_wire_from_input", E15K_MIDDLE_WIRE_FROM_INPUT_SRC), ("e15m_middle_wire_from_constant_behind_read", E15M_MIDDLE_WIRE_FROM_CONSTANT_BEHIND_READ_SRC), ("e15r_head_conditional_input", E15R_HEAD_CONDITIONAL_INPUT_SRC), ("e15s_middle_conditional_input", E15S_MIDDLE_CONDITIONAL_INPUT_SRC), ("e15v_middle_conditional_wire", E15V_MIDDLE_CONDITIONAL_WIRE_SRC), ("e15y_single_tick_every_path_constants", E15Y_SINGLE_TICK_EVERY_PATH_CONSTANTS_SRC), ("e15fr_head_wire_from_constant_registered", E15FR_HEAD_WIRE_FROM_CONSTANT_REGISTERED_SRC), ("e15af_middle_held_constant_behind_read_registered", E15AF_MIDDLE_HELD_CONSTANT_BEHIND_READ_REGISTERED_SRC), ("e15ag_middle_held_register_behind_read_registered", E15AG_MIDDLE_HELD_REGISTER_BEHIND_READ_REGISTERED_SRC), ("e15t_middle_conditional_constant", E15T_MIDDLE_CONDITIONAL_CONSTANT_SRC), ("e15w_head_every_path_constants", E15W_HEAD_EVERY_PATH_CONSTANTS_SRC), ("e15x_middle_every_path_inputs", E15X_MIDDLE_EVERY_PATH_INPUTS_SRC), ("e15wr_head_every_path_constants_registered", E15WR_HEAD_EVERY_PATH_CONSTANTS_REGISTERED_SRC), ("e15ac_middle_every_path_register_no_read", E15AC_MIDDLE_EVERY_PATH_REGISTER_NO_READ_SRC), ("e15ad_middle_held_register_guard_no_read", E15AD_MIDDLE_HELD_REGISTER_GUARD_NO_READ_SRC), ("e15ah_single_tick_held_input", E15AH_SINGLE_TICK_HELD_INPUT_SRC)] {
         let f: syn::ItemFn = syn::parse_str(src).expect("parses");
         assert!(copper_analysis::unprotected_pretick_out_write(&f).is_empty(), "{name}");
         assert!(copper_analysis::pretick_out_write_before_update(&f).is_empty(), "{name}");
@@ -6388,4 +6388,1609 @@ fn regfree_linear_the_rule_flags_exactly_the_probes_of_section_10_8() {
     // `e8m`, the registered trailing input operand, is now this rule's as well as
     // `trailing_out_reads_input`'s (clause 3: an input-valued continuous assign).
     assert_eq!(flagged(E8M_SRC), o, "e8m: an input-valued assign on the route");
+}
+
+// ── §10.9: the latch fixed — the conditional drives of the linear multi-tick route (2026-11-02) ──
+// Every probe below was predicted in `design_docs/CYCLE_DATAFLOW_SEMANTICS.md`
+// §10.9 before it ran: the mixed-anchor and no-read conditional drives the mux +
+// hold form (its default outside the phase guards) now realizes, the residue the
+// restated rule still refuses, and the two-driver shape refused for its form.
+
+const E16A_MIDDLE_EVERY_PATH_MIXED_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e16a_middle_every_path_mixed(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(x.read()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e16a_middle_every_path_mixed(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(x.read()); }
+        clk.tick().await;
+    }
+}
+
+const E16B_MIDDLE_HELD_MIXED_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e16b_middle_held_mixed(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { o.write(cnt); } else if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e16b_middle_held_mixed(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { o.write(cnt); } else if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+    }
+}
+
+const E16C_HEAD_EVERY_PATH_REGISTER_NO_READ_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e16c_head_every_path_register_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e16c_head_every_path_register_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+const E16D_TRAILING_HELD_REGISTER_GUARD_NO_READ_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16d_trailing_held_register_guard_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        clk.tick().await;
+        if cnt[0] == Logic::One { o.write(cnt); }
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16d_trailing_held_register_guard_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        clk.tick().await;
+        if cnt[0] == Logic::One { o.write(cnt); }
+    }
+}
+
+const E16E_TRAILING_EVERY_PATH_REGISTER_NO_READ_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16e_trailing_every_path_register_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        clk.tick().await;
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); }
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16e_trailing_every_path_register_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        clk.tick().await;
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); }
+    }
+}
+
+const E16F_REGFREE_CONSTANT_GUARD_PASSTHROUGH_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16f_regfree_constant_guard_passthrough(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    loop {
+        clk.tick().await;
+        let t: Bits<8> = Bits::from_lit::<7>();
+        if t[0] == Logic::One { o.write(x.read()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16f_regfree_constant_guard_passthrough(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    loop {
+        clk.tick().await;
+        let t: Bits<8> = Bits::from_lit::<7>();
+        if t[0] == Logic::One { o.write(x.read()); }
+        clk.tick().await;
+    }
+}
+
+const E16G_MIDDLE_DEFAULT_THEN_HELD_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16g_middle_default_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16g_middle_default_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+
+const E16H_MIDDLE_HELD_READ_THEN_OPENING_ARM_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e16h_middle_held_read_then_opening_arm(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { let _ = x.read(); o.write(Bits::from_lit::<7>()); } else { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e16h_middle_held_read_then_opening_arm(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { let _ = x.read(); o.write(Bits::from_lit::<7>()); } else { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+
+const E16I_HEAD_READ_DEFAULT_THEN_HELD_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16i_head_read_default_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16i_head_read_default_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+const E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e16j_single_tick_default_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e16j_single_tick_default_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+const E16K_MIDDLE_DEFAULT_THEN_HELD_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16k_middle_default_then_held_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let _ = x.read();
+        o.write(cnt);
+        if x.read()[1] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16k_middle_default_then_held_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let _ = x.read();
+        o.write(cnt);
+        if x.read()[1] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+    }
+}
+
+const E16L_MIDDLE_PATH_DEPENDENT_READ_THEN_HELD_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16l_middle_path_dependent_read_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { let _ = x.read(); }
+        if cnt[1] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16l_middle_path_dependent_read_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        if cnt[0] == Logic::One { let _ = x.read(); }
+        if cnt[1] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+
+const E16M_MIDDLE_HELD_WIRE_NO_READ_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16m_middle_held_wire_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let t = cnt + Bits::from_lit::<2>();
+        if cnt[0] == Logic::One { o.write(t); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16m_middle_held_wire_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let t = cnt + Bits::from_lit::<2>();
+        if cnt[0] == Logic::One { o.write(t); }
+        clk.tick().await;
+    }
+}
+
+const E16N_MIDDLE_FORWARDED_GUARD_HELD_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16n_middle_forwarded_guard_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16n_middle_forwarded_guard_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+
+const E16O_MIDDLE_FORWARDED_GUARD_EVERY_PATH_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16o_middle_forwarded_guard_every_path(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e16o_middle_forwarded_guard_every_path(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+    }
+}
+
+const E16P_MIDDLE_FORWARDED_VALUE_COMMITTED_GUARD_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e16p_middle_forwarded_value_committed_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    let mut sel: Bits<8> = Bits::zero();
+    loop {
+        sel = sel + Bits::from_lit::<1>();
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        if sel[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e16p_middle_forwarded_value_committed_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    let mut sel: Bits<8> = Bits::zero();
+    loop {
+        sel = sel + Bits::from_lit::<1>();
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        if sel[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+
+const E16Q_HEAD_EVERY_PATH_MIXED_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e16q_head_every_path_mixed(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(x.read()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e16q_head_every_path_mixed(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(x.read()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+/// AGREE (predicted §10.9, 2026-11-02): an every-path port with one opening and one closing drive in a middle segment takes the drive-level mux + hold form: the comb copy muxes the opening drive under the phase, the closing drive loads the hold register at the odd edge with the `x` the deferred read parked at, and the default outside the phase guard holds. See `E16A_MIDDLE_EVERY_PATH_MIXED_SRC`.
+#[test]
+fn e16a_middle_every_path_mixed_agrees() {
+    let sim = sim_e_in(e16a_middle_every_path_mixed);
+    assert_eq!(sim, vec![1, 1, 1, 13, 3, 3, 3, 17, 5, 5, 5, 21, 7], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16A_MIDDLE_EVERY_PATH_MIXED_SRC, "e16a_middle_every_path_mixed", "LATCH"), "e16a_middle_every_path_mixed: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16A_MIDDLE_EVERY_PATH_MIXED_SRC, "e16a_middle_every_path_mixed");
+        assert_eq!(sim, sv, "sim and SV diverge for e16a_middle_every_path_mixed — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16A_MIDDLE_EVERY_PATH_MIXED_SRC).unwrap();
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e16a_middle_every_path_mixed is admitted by §10.9's rule");
+    assert!(copper_analysis::unprotected_pretick_out_write(&f).is_empty(), "e16a_middle_every_path_mixed: D1 has no claim");
+}
+
+/// AGREE (predicted §10.9, 2026-11-02): the held twin of `e16a`: the nested guard's deferred read parks the `7` at the odd edge (where `x[0]` is always set), the opening drive shows at the opening. See `E16B_MIDDLE_HELD_MIXED_SRC`.
+#[test]
+fn e16b_middle_held_mixed_agrees() {
+    let sim = sim_e_in(e16b_middle_held_mixed);
+    assert_eq!(sim, vec![1, 1, 1, 7, 3, 3, 3, 7, 5, 5, 5, 7, 7], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16B_MIDDLE_HELD_MIXED_SRC, "e16b_middle_held_mixed", "LATCH"), "e16b_middle_held_mixed: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16B_MIDDLE_HELD_MIXED_SRC, "e16b_middle_held_mixed");
+        assert_eq!(sim, sv, "sim and SV diverge for e16b_middle_held_mixed — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16B_MIDDLE_HELD_MIXED_SRC).unwrap();
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e16b_middle_held_mixed is admitted by §10.9's rule");
+    assert!(copper_analysis::unprotected_pretick_out_write(&f).is_empty(), "e16b_middle_held_mixed: D1 has no claim");
+}
+
+/// AGREE (predicted §10.9, 2026-11-02): `e15ac` in the head segment: the hold form in phase 0, its default outside the guard, `cnt` committed at the odd edges. See `E16C_HEAD_EVERY_PATH_REGISTER_NO_READ_SRC`.
+#[test]
+fn e16c_head_every_path_register_no_read_agrees() {
+    let sim = sim_e_in(e16c_head_every_path_register_no_read);
+    assert_eq!(sim, vec![3, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3, 3], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16C_HEAD_EVERY_PATH_REGISTER_NO_READ_SRC, "e16c_head_every_path_register_no_read", "LATCH"), "e16c_head_every_path_register_no_read: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16C_HEAD_EVERY_PATH_REGISTER_NO_READ_SRC, "e16c_head_every_path_register_no_read");
+        assert_eq!(sim, sv, "sim and SV diverge for e16c_head_every_path_register_no_read — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16C_HEAD_EVERY_PATH_REGISTER_NO_READ_SRC).unwrap();
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e16c_head_every_path_register_no_read is admitted by §10.9's rule");
+    assert!(copper_analysis::unprotected_pretick_out_write(&f).is_empty(), "e16c_head_every_path_register_no_read: D1 has no claim");
+}
+
+/// DIVERGE — REFUSED (predicted §10.9, 2026-11-02): a trailing held drive with a register guard and no read is hoisted into phase 0's edge-sampled flop, which loads at the even edge after the trailing instant the simulator wrote at — one observation late; no input read, so only clause B of the linear rule refuses it. See `E16D_TRAILING_HELD_REGISTER_GUARD_NO_READ_SRC`.
+#[test]
+fn e16d_trailing_held_register_guard_no_read_diverges_refused() {
+    let sim = sim_e_in(e16d_trailing_held_register_guard_no_read);
+    assert_eq!(sim, vec![0, 1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5, 5], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16D_TRAILING_HELD_REGISTER_GUARD_NO_READ_SRC, "e16d_trailing_held_register_guard_no_read", "LATCH"), "e16d_trailing_held_register_guard_no_read: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16D_TRAILING_HELD_REGISTER_GUARD_NO_READ_SRC, "e16d_trailing_held_register_guard_no_read");
+        assert_eq!(sv, vec![0, 0, 1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5], "transpiled SV behaviour changed");
+        assert_ne!(sim, sv, "sim and SV now AGREE for e16d_trailing_held_register_guard_no_read — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.9)");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16D_TRAILING_HELD_REGISTER_GUARD_NO_READ_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16d_trailing_held_register_guard_no_read");
+}
+
+/// DIVERGE — REFUSED (predicted §10.9, 2026-11-02): the every-path trailing twin of `e16d`: the hoisted flop loads at edge 0 what the simulator first writes after edge 1, and every value one observation late after that. See `E16E_TRAILING_EVERY_PATH_REGISTER_NO_READ_SRC`.
+#[test]
+fn e16e_trailing_every_path_register_no_read_diverges_refused() {
+    let sim = sim_e_in(e16e_trailing_every_path_register_no_read);
+    assert_eq!(sim, vec![0, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3, 3], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16E_TRAILING_EVERY_PATH_REGISTER_NO_READ_SRC, "e16e_trailing_every_path_register_no_read", "LATCH"), "e16e_trailing_every_path_register_no_read: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16E_TRAILING_EVERY_PATH_REGISTER_NO_READ_SRC, "e16e_trailing_every_path_register_no_read");
+        assert_eq!(sv, vec![3, 3, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3], "transpiled SV behaviour changed");
+        assert_ne!(sim, sv, "sim and SV now AGREE for e16e_trailing_every_path_register_no_read — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.9)");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16E_TRAILING_EVERY_PATH_REGISTER_NO_READ_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16e_trailing_every_path_register_no_read");
+}
+
+/// DIVERGE — REFUSED (predicted §10.9, 2026-11-02): in a register-free body the drive's own `x.read()` is the immediate passthrough and the guard reads no input, so the simulator samples `x` at the opening of the middle segment; the lowering counts the drive closing and the flop samples at the odd edge — admitted by every rule until §10.9 (a gap §10.8 left: its deferred-read predicate counted the drive's own read). See `E16F_REGFREE_CONSTANT_GUARD_PASSTHROUGH_SRC`.
+#[test]
+fn e16f_regfree_constant_guard_passthrough_diverges_refused() {
+    let sim = sim_e_in(e16f_regfree_constant_guard_passthrough);
+    assert_eq!(sim, vec![10, 10, 12, 12, 14, 14, 16, 16, 18, 18, 20, 20, 22], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16F_REGFREE_CONSTANT_GUARD_PASSTHROUGH_SRC, "e16f_regfree_constant_guard_passthrough", "LATCH"), "e16f_regfree_constant_guard_passthrough: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16F_REGFREE_CONSTANT_GUARD_PASSTHROUGH_SRC, "e16f_regfree_constant_guard_passthrough");
+        assert_eq!(sv, vec![0, 11, 11, 13, 13, 15, 15, 17, 17, 19, 19, 21, 21], "transpiled SV behaviour changed");
+        assert_ne!(sim, sv, "sim and SV now AGREE for e16f_regfree_constant_guard_passthrough — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.9)");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16F_REGFREE_CONSTANT_GUARD_PASSTHROUGH_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16f_regfree_constant_guard_passthrough");
+}
+
+/// REFUSED as emitted — two drivers (predicted §10.9, 2026-11-02): a default write followed by a held override in one segment: the default is a module-level continuous assign and the override the hold form's driver — two drivers of `o`, which Verilator refuses as `MULTIDRIVEN` under `-Wall`; refused for the form (clause A), as `e7` is for its two phases. See `E16G_MIDDLE_DEFAULT_THEN_HELD_SRC`.
+#[test]
+fn e16g_middle_default_then_held_refused_as_emitted() {
+    let sim = sim_e_in(e16g_middle_default_then_held);
+    assert_eq!(sim, vec![1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3, 3, 7], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(verilator_refuses_as_emitted(E16G_MIDDLE_DEFAULT_THEN_HELD_SRC, "e16g_middle_default_then_held", "MULTIDRIVEN"), "e16g_middle_default_then_held: the default's continuous assign beside the conditional form's driver is expected to be refused by Verilator as MULTIDRIVEN under -Wall");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16G_MIDDLE_DEFAULT_THEN_HELD_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16g_middle_default_then_held (clause A, two drivers)");
+}
+
+/// AGREE (predicted §10.9, 2026-11-02): `e16a` with the read as a statement in the arm rather than in the operand: the arm-granular walk parks that arm's drive at the edge and leaves the other at the opening — the drive-level form, mixed. See `E16H_MIDDLE_HELD_READ_THEN_OPENING_ARM_SRC`.
+#[test]
+fn e16h_middle_held_read_then_opening_arm_agrees() {
+    let sim = sim_e_in(e16h_middle_held_read_then_opening_arm);
+    assert_eq!(sim, vec![0, 7, 2, 2, 2, 7, 4, 4, 4, 7, 6, 6, 6], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16H_MIDDLE_HELD_READ_THEN_OPENING_ARM_SRC, "e16h_middle_held_read_then_opening_arm", "LATCH"), "e16h_middle_held_read_then_opening_arm: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16H_MIDDLE_HELD_READ_THEN_OPENING_ARM_SRC, "e16h_middle_held_read_then_opening_arm");
+        assert_eq!(sim, sv, "sim and SV diverge for e16h_middle_held_read_then_opening_arm — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16H_MIDDLE_HELD_READ_THEN_OPENING_ARM_SRC).unwrap();
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e16h_middle_held_read_then_opening_arm is admitted by §10.9's rule");
+    assert!(copper_analysis::unprotected_pretick_out_write(&f).is_empty(), "e16h_middle_held_read_then_opening_arm: D1 has no claim");
+}
+
+/// DIVERGE — REFUSED (predicted §10.9, 2026-11-02, the build predicted wrong: `e16g` in the head behind a deferred read emits the continuous assign of the default beside the edge-sampled flop of the override — two drivers of `o`, which Verilator BUILDS, the `MULTIDRIVEN` lint-off pair around `always_ff` silencing the warning; the two drivers then fight, and the trace is whatever the scheduler resolves, pinned here as measured, not derived). See `E16I_HEAD_READ_DEFAULT_THEN_HELD_SRC`.
+#[test]
+fn e16i_head_read_default_then_held_diverges_refused() {
+    let sim = sim_e_in(e16i_head_read_default_then_held);
+    assert_eq!(sim, vec![3, 3, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16I_HEAD_READ_DEFAULT_THEN_HELD_SRC, "e16i_head_read_default_then_held", "MULTIDRIVEN"), "e16i: Verilator now refuses the two drivers — pin the refusal as e16g's");
+        let sv = transpile_and_run_driven(E16I_HEAD_READ_DEFAULT_THEN_HELD_SRC, "e16i_head_read_default_then_held");
+        assert_eq!(sv, vec![3, 3, 1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5], "transpiled SV behaviour changed");
+        assert_ne!(sim, sv, "sim and SV now AGREE for e16i_head_read_default_then_held — the two drivers were reconciled; re-derive linear_out_write_anchor_mismatch (§10.9)");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16I_HEAD_READ_DEFAULT_THEN_HELD_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16i_head_read_default_then_held (clause A, two drivers)");
+}
+
+/// AGREE since §10.10 (2026-11-02): found by §10.9 as the single-tick body's two drivers (`assign o = 3` beside the hold form, `MULTIDRIVEN`, admitted by every rule). The emission fix keeps the default in the comb copy, in program order, so the port is written on every path of one `always_comb` — `o = 3; if (cnt[0]) o = cnt;`, one driver, no hold register — and the comb mux on the committed register is the simulator's trace (predicted before the fix ran). See `E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC`.
+#[test]
+fn e16j_single_tick_default_then_held_agrees() {
+    let sim = sim_e_in(e16j_single_tick_default_then_held);
+    assert_eq!(sim, vec![1, 3, 3, 3, 5, 3, 7, 3, 9, 3, 11, 3, 13], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC).unwrap();
+    assert!(single_tick_rules_flag(&f).is_empty(), "e16j must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC, "e16j_single_tick_default_then_held", w), "e16j: one driver — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC, "e16j_single_tick_default_then_held");
+    assert_eq!(sim, sv, "e16j no longer agrees");
+}
+
+/// REFUSED as emitted — two drivers (predicted §10.9, 2026-11-02): a register-valued default behind a read beside a held override behind its own: two drivers, the continuous assign beside the flop's non-blocking one, which Verilator refuses as `BLKANDNBLK` (an error, not a lint). See `E16K_MIDDLE_DEFAULT_THEN_HELD_BEHIND_READ_SRC`.
+#[test]
+fn e16k_middle_default_then_held_behind_read_refused_as_emitted() {
+    let sim = sim_e_in(e16k_middle_default_then_held_behind_read);
+    assert_eq!(sim, vec![0, 7, 7, 2, 2, 7, 7, 4, 4, 7, 7, 6, 6], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(verilator_refuses_as_emitted(E16K_MIDDLE_DEFAULT_THEN_HELD_BEHIND_READ_SRC, "e16k_middle_default_then_held_behind_read", "BLKANDNBLK"), "e16k_middle_default_then_held_behind_read: the default's continuous assign beside the flop's non-blocking driver is expected to be refused by Verilator (BLKANDNBLK, an error whatever the lint flags)");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16K_MIDDLE_DEFAULT_THEN_HELD_BEHIND_READ_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16k_middle_default_then_held_behind_read (clause A, two drivers)");
+}
+
+/// DIVERGE — REFUSED (predicted §10.9, 2026-11-02): a read in a preceding branch's arm marks the later held drive closing in the lowering (the flop), while the simulator runs it at the opening on the read-free path — one late there (clause C's read-free path, the `e11` mechanism on this route). See `E16L_MIDDLE_PATH_DEPENDENT_READ_THEN_HELD_SRC`.
+#[test]
+fn e16l_middle_path_dependent_read_then_held_diverges_refused() {
+    let sim = sim_e_in(e16l_middle_path_dependent_read_then_held);
+    assert_eq!(sim, vec![0, 0, 2, 2, 2, 3, 3, 3, 3, 3, 6, 6, 6], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16L_MIDDLE_PATH_DEPENDENT_READ_THEN_HELD_SRC, "e16l_middle_path_dependent_read_then_held", "LATCH"), "e16l_middle_path_dependent_read_then_held: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16L_MIDDLE_PATH_DEPENDENT_READ_THEN_HELD_SRC, "e16l_middle_path_dependent_read_then_held");
+        assert_eq!(sv, vec![0, 0, 0, 2, 2, 3, 3, 3, 3, 3, 3, 6, 6], "transpiled SV behaviour changed");
+        assert_ne!(sim, sv, "sim and SV now AGREE for e16l_middle_path_dependent_read_then_held — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.9)");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16L_MIDDLE_PATH_DEPENDENT_READ_THEN_HELD_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16l_middle_path_dependent_read_then_held");
+}
+
+/// DIVERGE — REFUSED (§10.9, 2026-11-02 — the one prediction of the section that MISSED: predicted agreeing under the hold form, measured one observation late): a port with a wire-valued drive is a phase-scoped hold port in the lowering, so every drive of it is the phase-guarded flop and the hold form never reaches it; the flop samples `t` at the odd edge where the simulator wrote at the opening. The rule's clause C was corrected from this measurement. See `E16M_MIDDLE_HELD_WIRE_NO_READ_SRC`.
+#[test]
+fn e16m_middle_held_wire_no_read_diverges_refused() {
+    let sim = sim_e_in(e16m_middle_held_wire_no_read);
+    assert_eq!(sim, vec![3, 3, 3, 3, 5, 5, 5, 5, 7, 7, 7, 7, 9], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16M_MIDDLE_HELD_WIRE_NO_READ_SRC, "e16m_middle_held_wire_no_read", "LATCH"), "e16m: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16M_MIDDLE_HELD_WIRE_NO_READ_SRC, "e16m_middle_held_wire_no_read");
+        assert_eq!(sv, vec![0, 3, 3, 3, 3, 5, 5, 5, 5, 7, 7, 7, 7], "transpiled SV behaviour changed");
+        assert_ne!(sim, sv, "sim and SV now AGREE for e16m_middle_held_wire_no_read — the hold form reaches the wire-valued port; re-derive linear_out_write_anchor_mismatch (§10.9)");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16M_MIDDLE_HELD_WIRE_NO_READ_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16m_middle_held_wire_no_read");
+}
+
+/// DIVERGE — REFUSED (predicted §10.9, 2026-11-02): an opening drive under a guard that tests a register assigned earlier in its segment: the hold form's comb copy tests the COMMITTED `cnt` (and forwards the value), the simulator tests the updated one — D1's forwarded-guard mechanism (`d4a`) in a middle segment, which D1 does not reach; refused by clause C. See `E16N_MIDDLE_FORWARDED_GUARD_HELD_SRC`.
+#[test]
+fn e16n_middle_forwarded_guard_held_diverges_refused() {
+    let sim = sim_e_in(e16n_middle_forwarded_guard_held);
+    assert_eq!(sim, vec![1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5, 5, 7], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16N_MIDDLE_FORWARDED_GUARD_HELD_SRC, "e16n_middle_forwarded_guard_held", "LATCH"), "e16n_middle_forwarded_guard_held: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16N_MIDDLE_FORWARDED_GUARD_HELD_SRC, "e16n_middle_forwarded_guard_held");
+        assert_eq!(sv, vec![0, 1, 2, 1, 1, 3, 4, 3, 3, 5, 6, 5, 5], "transpiled SV behaviour changed");
+        assert_ne!(sim, sv, "sim and SV now AGREE for e16n_middle_forwarded_guard_held — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.9)");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16N_MIDDLE_FORWARDED_GUARD_HELD_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16n_middle_forwarded_guard_held");
+}
+
+/// DIVERGE — REFUSED (predicted §10.9, 2026-11-02): the every-path twin of `e16n` (`d4c`'s mechanism): the comb copy picks the arm by the committed guard. See `E16O_MIDDLE_FORWARDED_GUARD_EVERY_PATH_SRC`.
+#[test]
+fn e16o_middle_forwarded_guard_every_path_diverges_refused() {
+    let sim = sim_e_in(e16o_middle_forwarded_guard_every_path);
+    assert_eq!(sim, vec![1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 3, 3, 7], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16O_MIDDLE_FORWARDED_GUARD_EVERY_PATH_SRC, "e16o_middle_forwarded_guard_every_path", "LATCH"), "e16o_middle_forwarded_guard_every_path: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16O_MIDDLE_FORWARDED_GUARD_EVERY_PATH_SRC, "e16o_middle_forwarded_guard_every_path");
+        assert_eq!(sv, vec![3, 1, 2, 3, 3, 3, 4, 3, 3, 5, 6, 3, 3], "transpiled SV behaviour changed");
+        assert_ne!(sim, sv, "sim and SV now AGREE for e16o_middle_forwarded_guard_every_path — the route realizes this cell; re-derive linear_out_write_anchor_mismatch (§10.9)");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16O_MIDDLE_FORWARDED_GUARD_EVERY_PATH_SRC).unwrap();
+    assert_eq!(copper_analysis::linear_out_write_anchor_mismatch(&f), vec!["o".to_string()], "§10.9's rule must refuse e16o_middle_forwarded_guard_every_path");
+}
+
+/// AGREE (predicted §10.9, 2026-11-02): the forwarded VALUE under a guard the segment does not assign: the comb copy forwards `cnt + 1` as the simulator wrote it, and `sel` is committed at the other edge — realized by the hold form. See `E16P_MIDDLE_FORWARDED_VALUE_COMMITTED_GUARD_SRC`.
+#[test]
+fn e16p_middle_forwarded_value_committed_guard_agrees() {
+    let sim = sim_e_in(e16p_middle_forwarded_value_committed_guard);
+    assert_eq!(sim, vec![1, 1, 1, 1, 3, 3, 3, 3, 5, 5, 5, 5, 7], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16P_MIDDLE_FORWARDED_VALUE_COMMITTED_GUARD_SRC, "e16p_middle_forwarded_value_committed_guard", "LATCH"), "e16p_middle_forwarded_value_committed_guard: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16P_MIDDLE_FORWARDED_VALUE_COMMITTED_GUARD_SRC, "e16p_middle_forwarded_value_committed_guard");
+        assert_eq!(sim, sv, "sim and SV diverge for e16p_middle_forwarded_value_committed_guard — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16P_MIDDLE_FORWARDED_VALUE_COMMITTED_GUARD_SRC).unwrap();
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e16p_middle_forwarded_value_committed_guard is admitted by §10.9's rule");
+    assert!(copper_analysis::unprotected_pretick_out_write(&f).is_empty(), "e16p_middle_forwarded_value_committed_guard: D1 has no claim");
+}
+
+/// AGREE (predicted §10.9, 2026-11-02): `e16a` in the head segment — the shape D1's every-path clause (A2) refused as the every-path comb mux with no hold register: on the linear multi-tick route the port takes the hold form since §10.9 and agrees, so A2 is narrowed off this route. See `E16Q_HEAD_EVERY_PATH_MIXED_SRC`.
+#[test]
+fn e16q_head_every_path_mixed_agrees() {
+    let sim = sim_e_in(e16q_head_every_path_mixed);
+    assert_eq!(sim, vec![10, 1, 1, 1, 14, 3, 3, 3, 18, 5, 5, 5, 22], "simulator behaviour changed");
+    if verilator_available() {
+        assert!(!verilator_refuses_as_emitted(E16Q_HEAD_EVERY_PATH_MIXED_SRC, "e16q_head_every_path_mixed", "LATCH"), "e16q_head_every_path_mixed: the form is a latch under -Wall — the §10.9 emission regressed");
+        let sv = transpile_and_run_driven(E16Q_HEAD_EVERY_PATH_MIXED_SRC, "e16q_head_every_path_mixed");
+        assert_eq!(sim, sv, "sim and SV diverge for e16q_head_every_path_mixed — an agreeing cell of §10.9 no longer agrees; re-derive linear_out_write_anchor_mismatch");
+    }
+    let f: syn::ItemFn = syn::parse_str(E16Q_HEAD_EVERY_PATH_MIXED_SRC).unwrap();
+    assert!(copper_analysis::linear_out_write_anchor_mismatch(&f).is_empty(), "e16q_head_every_path_mixed is admitted by §10.9's rule");
+    assert!(copper_analysis::unprotected_pretick_out_write(&f).is_empty(), "e16q_head_every_path_mixed: D1 has no claim");
+}
+
+/// The §10.9 verdict table as a test: which `e16*` sources the linear-route rule
+/// flags after the latch fix. Every DIVERGE and two-driver row is flagged, every
+/// AGREE row is clean and trips no other pre-tick rule; `e16j` is the single-tick
+/// route's recorded gap.
+#[test]
+fn latch_fix_the_rule_flags_exactly_the_probes_of_section_10_9() {
+    let flagged = |src: &str| {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        copper_analysis::linear_out_write_anchor_mismatch(&f)
+    };
+    let o = vec!["o".to_string()];
+    for (name, src) in [("e16d_trailing_held_register_guard_no_read", E16D_TRAILING_HELD_REGISTER_GUARD_NO_READ_SRC), ("e16e_trailing_every_path_register_no_read", E16E_TRAILING_EVERY_PATH_REGISTER_NO_READ_SRC), ("e16f_regfree_constant_guard_passthrough", E16F_REGFREE_CONSTANT_GUARD_PASSTHROUGH_SRC), ("e16g_middle_default_then_held", E16G_MIDDLE_DEFAULT_THEN_HELD_SRC), ("e16i_head_read_default_then_held", E16I_HEAD_READ_DEFAULT_THEN_HELD_SRC), ("e16k_middle_default_then_held_behind_read", E16K_MIDDLE_DEFAULT_THEN_HELD_BEHIND_READ_SRC), ("e16l_middle_path_dependent_read_then_held", E16L_MIDDLE_PATH_DEPENDENT_READ_THEN_HELD_SRC), ("e16m_middle_held_wire_no_read", E16M_MIDDLE_HELD_WIRE_NO_READ_SRC), ("e16n_middle_forwarded_guard_held", E16N_MIDDLE_FORWARDED_GUARD_HELD_SRC), ("e16o_middle_forwarded_guard_every_path", E16O_MIDDLE_FORWARDED_GUARD_EVERY_PATH_SRC)] {
+        assert_eq!(flagged(src), o, "{name}: refused by §10.9's rule");
+    }
+    for (name, src) in [("e16a_middle_every_path_mixed", E16A_MIDDLE_EVERY_PATH_MIXED_SRC), ("e16b_middle_held_mixed", E16B_MIDDLE_HELD_MIXED_SRC), ("e16c_head_every_path_register_no_read", E16C_HEAD_EVERY_PATH_REGISTER_NO_READ_SRC), ("e16h_middle_held_read_then_opening_arm", E16H_MIDDLE_HELD_READ_THEN_OPENING_ARM_SRC), ("e16p_middle_forwarded_value_committed_guard", E16P_MIDDLE_FORWARDED_VALUE_COMMITTED_GUARD_SRC), ("e16q_head_every_path_mixed", E16Q_HEAD_EVERY_PATH_MIXED_SRC)] {
+        assert!(flagged(src).is_empty(), "{name}: admitted by §10.9's rule");
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        assert!(copper_analysis::unprotected_pretick_out_write(&f).is_empty(), "{name}");
+        assert!(copper_analysis::pretick_out_write_before_update(&f).is_empty(), "{name}");
+        assert!(copper_analysis::trailing_out_reads_input(&f).is_empty(), "{name}");
+        assert!(copper_analysis::multi_phase_out_write(&f).is_empty(), "{name}");
+        assert!(copper_analysis::out_first_driven_late(&f).is_empty(), "{name}");
+        assert!(copper_analysis::multi_write_collapse(&f).is_empty(), "{name}");
+    }
+}
+
+// ---- §10.10: the single-tick default-then-override (two drivers) and its neighbours ----
+// Every row predicted before its probe ran (`CYCLE_DATAFLOW_SEMANTICS.md` §10.10).
+
+const E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e17a_head_override_then_default(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt[0] == Logic::One { o.write(cnt); }
+        o.write(Bits::from_lit::<3>());
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e17a_head_override_then_default(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt[0] == Logic::One { o.write(cnt); }
+        o.write(Bits::from_lit::<3>());
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// AGREE (predicted §10.10, 2026-11-02): an override, then the default — the default always wins in the simulator, and the comb copy ends on it: `o` is 3 everywhere. Before §10.10 the default was a continuous assign beside the hold form (`MULTIDRIVEN`). See `E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC`.
+#[test]
+fn e17a_head_override_then_default_agrees() {
+    let sim = sim_e_in(e17a_head_override_then_default);
+    assert_eq!(sim, vec![3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC).unwrap();
+    assert!(single_tick_rules_flag(&f).is_empty(), "e17a_head_override_then_default must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC, "e17a_head_override_then_default", w), "e17a_head_override_then_default: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC, "e17a_head_override_then_default");
+    assert_eq!(sim, sv, "e17a_head_override_then_default no longer agrees");
+}
+
+const E17B_TRAILING_DEFAULT_THEN_HELD_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e17b_trailing_default_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e17b_trailing_default_then_held(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+    }
+}
+
+/// AGREE (predicted §10.10, 2026-11-02): `e16j`'s pair in the trailing region (`cnt` updated in the head). Before §10.10 the default was a continuous assign beside the edge-sampled flop, and the `always_ff` `MULTIDRIVEN` pragma let it BUILD with the two drivers fighting (`e16i`'s class); the comb mux on the committed register is the simulator's trace. See `E17B_TRAILING_DEFAULT_THEN_HELD_SRC`.
+#[test]
+fn e17b_trailing_default_then_held_agrees() {
+    let sim = sim_e_in(e17b_trailing_default_then_held);
+    assert_eq!(sim, vec![1, 3, 3, 3, 5, 3, 7, 3, 9, 3, 11, 3, 13], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17B_TRAILING_DEFAULT_THEN_HELD_SRC).unwrap();
+    assert!(single_tick_rules_flag(&f).is_empty(), "e17b_trailing_default_then_held must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17B_TRAILING_DEFAULT_THEN_HELD_SRC, "e17b_trailing_default_then_held", w), "e17b_trailing_default_then_held: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17B_TRAILING_DEFAULT_THEN_HELD_SRC, "e17b_trailing_default_then_held");
+    assert_eq!(sim, sv, "e17b_trailing_default_then_held no longer agrees");
+}
+
+const E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17c_head_register_default_input_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(cnt);
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17c_head_register_default_input_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(cnt);
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): an opening register default and a closing override behind an input guard on every path — the simulator never shows the closing write (the next opening write runs before the observation), the comb mux shows it on the odd inputs: D1's every-path clause (A2), which refused the shape before the fix too. See `E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC`.
+#[test]
+fn e17c_head_register_default_input_guard_diverges_refused() {
+    let sim = sim_e_in(e17c_head_register_default_input_guard);
+    assert_eq!(sim, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC).unwrap();
+    assert_eq!(copper_analysis::unprotected_pretick_out_write(&f), vec!["o".to_string()], "e17c_head_register_default_input_guard must be refused by unprotected_pretick_out_write");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC, "e17c_head_register_default_input_guard", w), "e17c_head_register_default_input_guard: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC, "e17c_head_register_default_input_guard");
+    assert_eq!(sv, vec![1, 7, 3, 7, 5, 7, 7, 7, 9, 7, 11, 7, 13], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17c_head_register_default_input_guard now AGREES — re-derive §10.10");
+}
+
+const E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17d_head_input_default_register_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17d_head_input_default_register_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): both drives behind the read (closing), the override reading `cnt`, which the trailing region updates at the very edge the write lands at — the comb mux shows the next generation of `cnt` (as `e17h`). Before §10.10 refused as emitted (`BLKANDNBLK`). See `E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC`.
+#[test]
+fn e17d_head_input_default_register_override_diverges_refused() {
+    let sim = sim_e_in(e17d_head_input_default_register_override);
+    assert_eq!(sim, vec![10, 1, 12, 3, 14, 5, 16, 7, 18, 9, 20, 11, 22], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC).unwrap();
+    assert_eq!(copper_analysis::pretick_out_write_before_update(&f), vec!["o".to_string()], "e17d_head_input_default_register_override must be refused by pretick_out_write_before_update");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC, "e17d_head_input_default_register_override", w), "e17d_head_input_default_register_override: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC, "e17d_head_input_default_register_override");
+    assert_eq!(sv, vec![1, 11, 3, 13, 5, 15, 7, 17, 9, 19, 11, 21, 13], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17d_head_input_default_register_override now AGREES — re-derive §10.10");
+}
+
+const E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17e_head_constant_default_input_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(Bits::from_lit::<3>());
+        if x.read()[0] == Logic::One { o.write(x.read()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17e_head_constant_default_input_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(Bits::from_lit::<3>());
+        if x.read()[0] == Logic::One { o.write(x.read()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): an opening constant default and a closing input override: the simulator shows only the opening writes, the comb mux the override — D1 (A2). See `E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC`.
+#[test]
+fn e17e_head_constant_default_input_override_diverges_refused() {
+    let sim = sim_e_in(e17e_head_constant_default_input_override);
+    assert_eq!(sim, vec![3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC).unwrap();
+    assert_eq!(copper_analysis::unprotected_pretick_out_write(&f), vec!["o".to_string()], "e17e_head_constant_default_input_override must be refused by unprotected_pretick_out_write");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC, "e17e_head_constant_default_input_override", w), "e17e_head_constant_default_input_override: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC, "e17e_head_constant_default_input_override");
+    assert_eq!(sv, vec![3, 11, 3, 13, 3, 15, 3, 17, 3, 19, 3, 21, 3], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17e_head_constant_default_input_override now AGREES — re-derive §10.10");
+}
+
+const E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17f_head_forwarded_guard_default(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17f_head_forwarded_guard_default(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): `e16j`'s pair after a head update of the guard's register: the simulator tests the forwarded `cnt`, the comb mux the committed one — D1's forwarded-guard clause (B). See `E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC`.
+#[test]
+fn e17f_head_forwarded_guard_default_diverges_refused() {
+    let sim = sim_e_in(e17f_head_forwarded_guard_default);
+    assert_eq!(sim, vec![3, 3, 3, 5, 3, 7, 3, 9, 3, 11, 3, 13, 3], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC).unwrap();
+    assert_eq!(copper_analysis::unprotected_pretick_out_write(&f), vec!["o".to_string()], "e17f_head_forwarded_guard_default must be refused by unprotected_pretick_out_write");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC, "e17f_head_forwarded_guard_default", w), "e17f_head_forwarded_guard_default: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC, "e17f_head_forwarded_guard_default");
+    assert_eq!(sv, vec![2, 3, 4, 3, 6, 3, 8, 3, 10, 3, 12, 3, 14], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17f_head_forwarded_guard_default now AGREES — re-derive §10.10");
+}
+
+const E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e17g_trailing_input_default_register_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(cnt); }
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e17g_trailing_input_default_register_override(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(cnt); }
+    }
+}
+
+/// AGREE (predicted §10.10, 2026-11-02): the trailing region's reads are immediate and its writes opening: the comb mux over `x` and the committed `cnt` is the simulator's trace. Before §10.10 refused as emitted (`BLKANDNBLK`). See `E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC`.
+#[test]
+fn e17g_trailing_input_default_register_override_agrees() {
+    let sim = sim_e_in(e17g_trailing_input_default_register_override);
+    assert_eq!(sim, vec![1, 11, 3, 13, 5, 15, 7, 17, 9, 19, 11, 21, 13], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC).unwrap();
+    assert!(single_tick_rules_flag(&f).is_empty(), "e17g_trailing_input_default_register_override must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC, "e17g_trailing_input_default_register_override", w), "e17g_trailing_input_default_register_override: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC, "e17g_trailing_input_default_register_override");
+    assert_eq!(sim, sv, "e17g_trailing_input_default_register_override no longer agrees");
+}
+
+const E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17h_head_register_default_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(cnt);
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17h_head_register_default_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        o.write(cnt);
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): the CONTROL — one write, no override: `o.write(cnt)` behind a read, `cnt` updated after the tick. The write captures `cnt` at the pre-edge settle; the trailing update commits at that same edge, so `assign o = cnt` shows the next generation from the observation on. The single-tick twin of the linear route's `e14n`; admitted by every rule before §10.10 (found here, not a two-driver shape). See `E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC`.
+#[test]
+fn e17h_head_register_default_behind_read_diverges_refused() {
+    let sim = sim_e_in(e17h_head_register_default_behind_read);
+    assert_eq!(sim, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC).unwrap();
+    assert_eq!(copper_analysis::pretick_out_write_before_update(&f), vec!["o".to_string()], "e17h_head_register_default_behind_read must be refused by pretick_out_write_before_update");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC, "e17h_head_register_default_behind_read", w), "e17h_head_register_default_behind_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC, "e17h_head_register_default_behind_read");
+    assert_eq!(sv, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17h_head_register_default_behind_read now AGREES — re-derive §10.10");
+}
+
+const E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e17i_head_default_then_every_path(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<5>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e17i_head_default_then_every_path(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(Bits::from_lit::<3>());
+        if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<5>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// AGREE (predicted §10.10, 2026-11-02): a default, then an every-path override: before §10.10 a continuous assign beside the comb mux (`MULTIDRIVEN`); now one comb mux. See `E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC`.
+#[test]
+fn e17i_head_default_then_every_path_agrees() {
+    let sim = sim_e_in(e17i_head_default_then_every_path);
+    assert_eq!(sim, vec![1, 5, 3, 5, 5, 5, 7, 5, 9, 5, 11, 5, 13], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC).unwrap();
+    assert!(single_tick_rules_flag(&f).is_empty(), "e17i_head_default_then_every_path must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC, "e17i_head_default_then_every_path", w), "e17i_head_default_then_every_path: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC, "e17i_head_default_then_every_path");
+    assert_eq!(sim, sv, "e17i_head_default_then_every_path no longer agrees");
+}
+
+const E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17j_head_input_default_register_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e17j_head_input_default_register_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.10, 2026-11-02): `e17d` with the trailing-updated register in the override's GUARD only: the comb mux tests the next generation of `cnt`. See `E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC`.
+#[test]
+fn e17j_head_input_default_register_guard_diverges_refused() {
+    let sim = sim_e_in(e17j_head_input_default_register_guard);
+    assert_eq!(sim, vec![10, 7, 12, 7, 14, 7, 16, 7, 18, 7, 20, 7, 22], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC).unwrap();
+    assert_eq!(copper_analysis::pretick_out_write_before_update(&f), vec!["o".to_string()], "e17j_head_input_default_register_guard must be refused by pretick_out_write_before_update");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC, "e17j_head_input_default_register_guard", w), "e17j_head_input_default_register_guard: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC, "e17j_head_input_default_register_guard");
+    assert_eq!(sv, vec![7, 11, 7, 13, 7, 15, 7, 17, 7, 19, 7, 21, 7], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e17j_head_input_default_register_guard now AGREES — re-derive §10.10");
+}
+
+const E17K_HEAD_HELD_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e17k_head_held_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e17k_head_held_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+        cnt = cnt + Bits::from_lit::<1>();
+    }
+}
+
+/// AGREE (predicted §10.10, 2026-11-02): the held control of `e17h`: no default, so the port is the edge-sampled flop, which samples `cnt` at the edge the simulator's write lands at — the pre-update value. Agrees; the new clause is scoped to the every-path port. See `E17K_HEAD_HELD_BEHIND_READ_SRC`.
+#[test]
+fn e17k_head_held_behind_read_agrees() {
+    let sim = sim_e_in(e17k_head_held_behind_read);
+    assert_eq!(sim, vec![0, 1, 1, 3, 3, 5, 5, 7, 7, 9, 9, 11, 11], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E17K_HEAD_HELD_BEHIND_READ_SRC).unwrap();
+    assert!(single_tick_rules_flag(&f).is_empty(), "e17k_head_held_behind_read must be admitted by every rule");
+    if !verilator_available() {
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E17K_HEAD_HELD_BEHIND_READ_SRC, "e17k_head_held_behind_read", w), "e17k_head_held_behind_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E17K_HEAD_HELD_BEHIND_READ_SRC, "e17k_head_held_behind_read");
+    assert_eq!(sim, sv, "e17k_head_held_behind_read no longer agrees");
+}
+
+/// Every rule that can refuse a single-tick plain-`Out` drive, by name.
+fn single_tick_rules_flag(f: &syn::ItemFn) -> Vec<&'static str> {
+    [
+        ("unprotected_pretick_out_write", copper_analysis::unprotected_pretick_out_write(f)),
+        ("pretick_out_write_before_update", copper_analysis::pretick_out_write_before_update(f)),
+        ("linear_out_write_anchor_mismatch", copper_analysis::linear_out_write_anchor_mismatch(f)),
+        ("trailing_out_reads_input", copper_analysis::trailing_out_reads_input(f)),
+        ("multi_phase_out_write", copper_analysis::multi_phase_out_write(f)),
+        ("out_first_driven_late", copper_analysis::out_first_driven_late(f)),
+        ("multi_write_collapse", copper_analysis::multi_write_collapse(f)),
+    ]
+    .into_iter()
+    .filter(|(_, v)| !v.is_empty())
+    .map(|(n, _)| n)
+    .collect()
+}
+
+/// The verdict table of §10.10, as a test: the refused set is exactly the
+/// diverging set, each probe refused by the one rule its mechanism names.
+#[test]
+fn single_tick_default_override_refused_set_is_the_diverging_set() {
+    for (name, src, rule) in [("e17c_head_register_default_input_guard", E17C_HEAD_REGISTER_DEFAULT_INPUT_GUARD_SRC, "unprotected_pretick_out_write"), ("e17d_head_input_default_register_override", E17D_HEAD_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC, "pretick_out_write_before_update"), ("e17e_head_constant_default_input_override", E17E_HEAD_CONSTANT_DEFAULT_INPUT_OVERRIDE_SRC, "unprotected_pretick_out_write"), ("e17f_head_forwarded_guard_default", E17F_HEAD_FORWARDED_GUARD_DEFAULT_SRC, "unprotected_pretick_out_write"), ("e17h_head_register_default_behind_read", E17H_HEAD_REGISTER_DEFAULT_BEHIND_READ_SRC, "pretick_out_write_before_update"), ("e17j_head_input_default_register_guard", E17J_HEAD_INPUT_DEFAULT_REGISTER_GUARD_SRC, "pretick_out_write_before_update")] {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        assert_eq!(single_tick_rules_flag(&f), vec![rule], "{name}: refused by exactly {rule}");
+    }
+    for (name, src) in [("e17a_head_override_then_default", E17A_HEAD_OVERRIDE_THEN_DEFAULT_SRC), ("e17b_trailing_default_then_held", E17B_TRAILING_DEFAULT_THEN_HELD_SRC), ("e17g_trailing_input_default_register_override", E17G_TRAILING_INPUT_DEFAULT_REGISTER_OVERRIDE_SRC), ("e17i_head_default_then_every_path", E17I_HEAD_DEFAULT_THEN_EVERY_PATH_SRC), ("e17k_head_held_behind_read", E17K_HEAD_HELD_BEHIND_READ_SRC), ("e16j_single_tick_default_then_held", E16J_SINGLE_TICK_DEFAULT_THEN_HELD_SRC)] {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        assert!(single_tick_rules_flag(&f).is_empty(), "{name}: admitted");
+    }
+}
+
+// ── The pre-tick V8 clause and the GUARD (`CYCLE_DATAFLOW_SEMANTICS.md` §10.11, 2026-11-02).
+// §10.10 (b): the pre-tick clause of `pretick_out_write_before_update` read only the write's
+// value. These probes put a register updated LATER IN THE SAME SEGMENT in the write's guard
+// only, on each route. Every row was predicted, with its emitted form read off the
+// transpiler, before the probe ran (session note `v8-pretick-guard-derivation.md`).
+
+const E18A_HEAD_HELD_REGISTER_GUARD_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e18a_head_held_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let v = x.read();
+        if cnt[0] == Logic::One { o.write(v); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e18a_head_held_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let v = x.read();
+        if cnt[0] == Logic::One { o.write(v); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+/// AGREE (predicted §10.11, 2026-11-02): the task's shape on the single-tick route, held: `cnt` updated later in the segment appears only in the guard. The port is the edge-sampled flop, which tests the guard on `cnt`'s Q at the edge the simulator's write lands at — the pre-update value, as the simulator does. See `E18A_HEAD_HELD_REGISTER_GUARD_BEHIND_READ_SRC`.
+#[test]
+fn e18a_head_held_register_guard_behind_read_agrees() {
+    let sim = sim_e_in(e18a_head_held_register_guard_behind_read);
+    assert_eq!(sim, vec![0, 11, 11, 13, 13, 15, 15, 17, 17, 19, 19, 21, 21], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E18A_HEAD_HELD_REGISTER_GUARD_BEHIND_READ_SRC).unwrap();
+    if !verilator_available() {
+        assert!(single_tick_rules_flag(&f).is_empty(), "e18a_head_held_register_guard_behind_read must be admitted by every rule");
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E18A_HEAD_HELD_REGISTER_GUARD_BEHIND_READ_SRC, "e18a_head_held_register_guard_behind_read", w), "e18a_head_held_register_guard_behind_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E18A_HEAD_HELD_REGISTER_GUARD_BEHIND_READ_SRC, "e18a_head_held_register_guard_behind_read");
+    assert_eq!(sim, sv, "e18a_head_held_register_guard_behind_read no longer agrees");
+    assert!(single_tick_rules_flag(&f).is_empty(), "e18a_head_held_register_guard_behind_read must be admitted by every rule");
+}
+
+const E18B_HEAD_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e18b_head_every_path_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e18b_head_every_path_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.11, 2026-11-02): `e18a`'s guard on an every-path port: the comb mux tests `cnt`'s Q, which from the observation on is the post-update value — one generation ahead of the guard the simulator's barrier-parked write tested. The pre-tick V8 clause read only the value (a constant) and admitted it. See `E18B_HEAD_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC`.
+#[test]
+fn e18b_head_every_path_register_guard_behind_read_diverges_refused() {
+    let sim = sim_e_in(e18b_head_every_path_register_guard_behind_read);
+    assert_eq!(sim, vec![3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E18B_HEAD_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC).unwrap();
+    if !verilator_available() {
+        assert_eq!(single_tick_rules_flag(&f), vec!["pretick_out_write_before_update"], "e18b_head_every_path_register_guard_behind_read must be refused by pretick_out_write_before_update alone");
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E18B_HEAD_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC, "e18b_head_every_path_register_guard_behind_read", w), "e18b_head_every_path_register_guard_behind_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E18B_HEAD_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC, "e18b_head_every_path_register_guard_behind_read");
+    assert_eq!(sv, vec![7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e18b_head_every_path_register_guard_behind_read now AGREES — re-derive §10.11");
+    assert_eq!(single_tick_rules_flag(&f), vec!["pretick_out_write_before_update"], "e18b_head_every_path_register_guard_behind_read must be refused by pretick_out_write_before_update alone");
+}
+
+const E18C_HEAD_INPUT_DEFAULT_REGISTER_GUARD_UPDATE_IN_HEAD_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e18c_head_input_default_register_guard_update_in_head(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e18c_head_input_default_register_guard_update_in_head(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        o.write(x.read());
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+/// DIVERGE — REFUSED (predicted §10.11, 2026-11-02): `e17j` with `cnt` updated in the head instead of the trailing region: the same comb mux, the same next-generation guard, the same traces. Admitted before this probe (the pre-tick clause read only the value). See `E18C_HEAD_INPUT_DEFAULT_REGISTER_GUARD_UPDATE_IN_HEAD_SRC`.
+#[test]
+fn e18c_head_input_default_register_guard_update_in_head_diverges_refused() {
+    let sim = sim_e_in(e18c_head_input_default_register_guard_update_in_head);
+    assert_eq!(sim, vec![10, 7, 12, 7, 14, 7, 16, 7, 18, 7, 20, 7, 22], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E18C_HEAD_INPUT_DEFAULT_REGISTER_GUARD_UPDATE_IN_HEAD_SRC).unwrap();
+    if !verilator_available() {
+        assert_eq!(single_tick_rules_flag(&f), vec!["pretick_out_write_before_update"], "e18c_head_input_default_register_guard_update_in_head must be refused by pretick_out_write_before_update alone");
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E18C_HEAD_INPUT_DEFAULT_REGISTER_GUARD_UPDATE_IN_HEAD_SRC, "e18c_head_input_default_register_guard_update_in_head", w), "e18c_head_input_default_register_guard_update_in_head: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E18C_HEAD_INPUT_DEFAULT_REGISTER_GUARD_UPDATE_IN_HEAD_SRC, "e18c_head_input_default_register_guard_update_in_head");
+    assert_eq!(sv, vec![7, 11, 7, 13, 7, 15, 7, 17, 7, 19, 7, 21, 7], "transpiled SV behaviour changed");
+    assert_ne!(sim, sv, "e18c_head_input_default_register_guard_update_in_head now AGREES — re-derive §10.11");
+    assert_eq!(single_tick_rules_flag(&f), vec!["pretick_out_write_before_update"], "e18c_head_input_default_register_guard_update_in_head must be refused by pretick_out_write_before_update alone");
+}
+
+const E18D_HEAD_EVERY_PATH_UPDATE_BEFORE_GUARD_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e18d_head_every_path_update_before_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e18d_head_every_path_update_before_guard(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        cnt = cnt + Bits::from_lit::<1>();
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+    }
+}
+
+/// AGREE (predicted §10.11, 2026-11-02): the flipping witness of clause 3 for the guard: the update comes first, so the barrier-parked write tests the committing value, which is the Q the comb mux tests from the observation on. Emits byte-for-byte the SV of `e18b`. See `E18D_HEAD_EVERY_PATH_UPDATE_BEFORE_GUARD_SRC`.
+#[test]
+fn e18d_head_every_path_update_before_guard_agrees() {
+    let sim = sim_e_in(e18d_head_every_path_update_before_guard);
+    assert_eq!(sim, vec![7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E18D_HEAD_EVERY_PATH_UPDATE_BEFORE_GUARD_SRC).unwrap();
+    if !verilator_available() {
+        assert!(single_tick_rules_flag(&f).is_empty(), "e18d_head_every_path_update_before_guard must be admitted by every rule");
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E18D_HEAD_EVERY_PATH_UPDATE_BEFORE_GUARD_SRC, "e18d_head_every_path_update_before_guard", w), "e18d_head_every_path_update_before_guard: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E18D_HEAD_EVERY_PATH_UPDATE_BEFORE_GUARD_SRC, "e18d_head_every_path_update_before_guard");
+    assert_eq!(sim, sv, "e18d_head_every_path_update_before_guard no longer agrees");
+    assert!(single_tick_rules_flag(&f).is_empty(), "e18d_head_every_path_update_before_guard must be admitted by every rule");
+}
+
+const E18E_HEAD_EVERY_PATH_REGISTER_GUARD_NO_READ_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e18e_head_every_path_register_guard_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e18e_head_every_path_register_guard_no_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+/// AGREE (predicted §10.11, 2026-11-02): the flipping witness of clause 1 for the guard: no read, so the write runs at the cycle's opening on the committed `cnt` — the comb mux's Q. See `E18E_HEAD_EVERY_PATH_REGISTER_GUARD_NO_READ_SRC`.
+#[test]
+fn e18e_head_every_path_register_guard_no_read_agrees() {
+    let sim = sim_e_in(e18e_head_every_path_register_guard_no_read);
+    assert_eq!(sim, vec![7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7, 3, 7], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E18E_HEAD_EVERY_PATH_REGISTER_GUARD_NO_READ_SRC).unwrap();
+    if !verilator_available() {
+        assert!(single_tick_rules_flag(&f).is_empty(), "e18e_head_every_path_register_guard_no_read must be admitted by every rule");
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E18E_HEAD_EVERY_PATH_REGISTER_GUARD_NO_READ_SRC, "e18e_head_every_path_register_guard_no_read", w), "e18e_head_every_path_register_guard_no_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E18E_HEAD_EVERY_PATH_REGISTER_GUARD_NO_READ_SRC, "e18e_head_every_path_register_guard_no_read");
+    assert_eq!(sim, sv, "e18e_head_every_path_register_guard_no_read no longer agrees");
+    assert!(single_tick_rules_flag(&f).is_empty(), "e18e_head_every_path_register_guard_no_read must be admitted by every rule");
+}
+
+const E18F_LINEAR_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e18f_linear_every_path_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e18f_linear_every_path_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        clk.tick().await;
+    }
+}
+
+/// AGREE (predicted §10.11, 2026-11-02): `e18b` on the linear multi-tick route: every drive is behind the read, so the port is the flop under phase 0, which samples `cnt`'s Q at the head's closing edge — the pre-update value. See `E18F_LINEAR_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC`.
+#[test]
+fn e18f_linear_every_path_register_guard_behind_read_agrees() {
+    let sim = sim_e_in(e18f_linear_every_path_register_guard_behind_read);
+    assert_eq!(sim, vec![3, 3, 7, 7, 3, 3, 7, 7, 3, 3, 7, 7, 3], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E18F_LINEAR_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC).unwrap();
+    if !verilator_available() {
+        assert!(single_tick_rules_flag(&f).is_empty(), "e18f_linear_every_path_register_guard_behind_read must be admitted by every rule");
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E18F_LINEAR_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC, "e18f_linear_every_path_register_guard_behind_read", w), "e18f_linear_every_path_register_guard_behind_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E18F_LINEAR_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC, "e18f_linear_every_path_register_guard_behind_read");
+    assert_eq!(sim, sv, "e18f_linear_every_path_register_guard_behind_read no longer agrees");
+    assert!(single_tick_rules_flag(&f).is_empty(), "e18f_linear_every_path_register_guard_behind_read must be admitted by every rule");
+}
+
+const E18G_LINEAR_HELD_REGISTER_GUARD_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e18g_linear_held_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let v = x.read();
+        if cnt[0] == Logic::One { o.write(v); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e18g_linear_held_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let v = x.read();
+        if cnt[0] == Logic::One { o.write(v); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        clk.tick().await;
+    }
+}
+
+/// AGREE (predicted §10.11, 2026-11-02): `e18a` on the linear multi-tick route: the flop under phase 0. See `E18G_LINEAR_HELD_REGISTER_GUARD_BEHIND_READ_SRC`.
+#[test]
+fn e18g_linear_held_register_guard_behind_read_agrees() {
+    let sim = sim_e_in(e18g_linear_held_register_guard_behind_read);
+    assert_eq!(sim, vec![0, 0, 12, 12, 12, 12, 16, 16, 16, 16, 20, 20, 20], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E18G_LINEAR_HELD_REGISTER_GUARD_BEHIND_READ_SRC).unwrap();
+    if !verilator_available() {
+        assert!(single_tick_rules_flag(&f).is_empty(), "e18g_linear_held_register_guard_behind_read must be admitted by every rule");
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E18G_LINEAR_HELD_REGISTER_GUARD_BEHIND_READ_SRC, "e18g_linear_held_register_guard_behind_read", w), "e18g_linear_held_register_guard_behind_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E18G_LINEAR_HELD_REGISTER_GUARD_BEHIND_READ_SRC, "e18g_linear_held_register_guard_behind_read");
+    assert_eq!(sim, sv, "e18g_linear_held_register_guard_behind_read no longer agrees");
+    assert!(single_tick_rules_flag(&f).is_empty(), "e18g_linear_held_register_guard_behind_read must be admitted by every rule");
+}
+
+const E18H_EXTRACTED_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e18h_extracted_every_path_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e18h_extracted_every_path_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+    }
+}
+
+/// AGREE (predicted §10.11, 2026-11-02): `e18b` on the control-extraction route (the ticks inside a `for`): the flop under `pc == 0`. See `E18H_EXTRACTED_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC`.
+#[test]
+fn e18h_extracted_every_path_register_guard_behind_read_agrees() {
+    let sim = sim_e_in(e18h_extracted_every_path_register_guard_behind_read);
+    assert_eq!(sim, vec![3, 3, 7, 7, 3, 3, 7, 7, 3, 3, 7, 7, 3], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E18H_EXTRACTED_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC).unwrap();
+    if !verilator_available() {
+        assert!(single_tick_rules_flag(&f).is_empty(), "e18h_extracted_every_path_register_guard_behind_read must be admitted by every rule");
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E18H_EXTRACTED_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC, "e18h_extracted_every_path_register_guard_behind_read", w), "e18h_extracted_every_path_register_guard_behind_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E18H_EXTRACTED_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC, "e18h_extracted_every_path_register_guard_behind_read");
+    assert_eq!(sim, sv, "e18h_extracted_every_path_register_guard_behind_read no longer agrees");
+    assert!(single_tick_rules_flag(&f).is_empty(), "e18h_extracted_every_path_register_guard_behind_read must be admitted by every rule");
+}
+
+const E18I_EXTRACTED_HELD_REGISTER_GUARD_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential)]
+async fn e18i_extracted_held_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let v = x.read();
+        if cnt[0] == Logic::One { o.write(v); }
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+    }
+}
+"#;
+#[hardware(sequential)]
+async fn e18i_extracted_held_register_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let v = x.read();
+        if cnt[0] == Logic::One { o.write(v); }
+        cnt = cnt + Bits::from_lit::<1>();
+        for _ in 0..2 { clk.tick().await; }
+    }
+}
+
+/// AGREE (predicted §10.11, 2026-11-02): `e18a` on the control-extraction route: the flop under `pc == 0`. See `E18I_EXTRACTED_HELD_REGISTER_GUARD_BEHIND_READ_SRC`.
+#[test]
+fn e18i_extracted_held_register_guard_behind_read_agrees() {
+    let sim = sim_e_in(e18i_extracted_held_register_guard_behind_read);
+    assert_eq!(sim, vec![0, 0, 12, 12, 12, 12, 16, 16, 16, 16, 20, 20, 20], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E18I_EXTRACTED_HELD_REGISTER_GUARD_BEHIND_READ_SRC).unwrap();
+    if !verilator_available() {
+        assert!(single_tick_rules_flag(&f).is_empty(), "e18i_extracted_held_register_guard_behind_read must be admitted by every rule");
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E18I_EXTRACTED_HELD_REGISTER_GUARD_BEHIND_READ_SRC, "e18i_extracted_held_register_guard_behind_read", w), "e18i_extracted_held_register_guard_behind_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E18I_EXTRACTED_HELD_REGISTER_GUARD_BEHIND_READ_SRC, "e18i_extracted_held_register_guard_behind_read");
+    assert_eq!(sim, sv, "e18i_extracted_held_register_guard_behind_read no longer agrees");
+    assert!(single_tick_rules_flag(&f).is_empty(), "e18i_extracted_held_register_guard_behind_read must be admitted by every rule");
+}
+
+const E18J_HEAD_HELD_REGISTER_VALUE_AND_GUARD_BEHIND_READ_SRC: &str = r#"
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e18j_head_held_register_value_and_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(cnt); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+"#;
+#[hardware(sequential, allow_pretick_alignment)]
+async fn e18j_head_held_register_value_and_guard_behind_read(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(cnt); }
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+    }
+}
+
+/// AGREE — REFUSED (over-refusal, recorded) (predicted §10.11, 2026-11-02): V8a under a guard, held (`e17k` with the update in the head): the flop samples `cnt` at the edge, the pre-update value the simulator's write captured. AGREES, yet the pre-tick VALUE clause refuses it — an over-refusal of the older clause, recorded and not narrowed (admitting a shape is a legality decision). See `E18J_HEAD_HELD_REGISTER_VALUE_AND_GUARD_BEHIND_READ_SRC`.
+#[test]
+fn e18j_head_held_register_value_and_guard_behind_read_agrees_refused_by_the_value_clause() {
+    let sim = sim_e_in(e18j_head_held_register_value_and_guard_behind_read);
+    assert_eq!(sim, vec![0, 1, 1, 3, 3, 5, 5, 7, 7, 9, 9, 11, 11], "simulator behaviour changed");
+    let f: syn::ItemFn = syn::parse_str(E18J_HEAD_HELD_REGISTER_VALUE_AND_GUARD_BEHIND_READ_SRC).unwrap();
+    if !verilator_available() {
+        assert_eq!(single_tick_rules_flag(&f), vec!["pretick_out_write_before_update"], "e18j_head_held_register_value_and_guard_behind_read must be refused by pretick_out_write_before_update alone");
+        return;
+    }
+    for w in ["MULTIDRIVEN", "BLKANDNBLK", "LATCH"] {
+        assert!(!verilator_refuses_as_emitted(E18J_HEAD_HELD_REGISTER_VALUE_AND_GUARD_BEHIND_READ_SRC, "e18j_head_held_register_value_and_guard_behind_read", w), "e18j_head_held_register_value_and_guard_behind_read: one driver, no latch — refused as {w}");
+    }
+    let sv = transpile_and_run_driven(E18J_HEAD_HELD_REGISTER_VALUE_AND_GUARD_BEHIND_READ_SRC, "e18j_head_held_register_value_and_guard_behind_read");
+    assert_eq!(sim, sv, "e18j_head_held_register_value_and_guard_behind_read no longer agrees");
+    assert_eq!(single_tick_rules_flag(&f), vec!["pretick_out_write_before_update"], "e18j_head_held_register_value_and_guard_behind_read must be refused by pretick_out_write_before_update alone");
+}
+
+/// The verdict table of §10.11, as a test: the guard-only probes the rule refuses are
+/// exactly the diverging ones, and `e18j` — agreeing, refused by the older value clause —
+/// is pinned as the over-refusal it is.
+#[test]
+fn pretick_guard_refused_set_is_the_diverging_set() {
+    for (name, src) in [("e18b_head_every_path_register_guard_behind_read", E18B_HEAD_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC), ("e18c_head_input_default_register_guard_update_in_head", E18C_HEAD_INPUT_DEFAULT_REGISTER_GUARD_UPDATE_IN_HEAD_SRC), ("e18j_head_held_register_value_and_guard_behind_read", E18J_HEAD_HELD_REGISTER_VALUE_AND_GUARD_BEHIND_READ_SRC)] {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        assert_eq!(single_tick_rules_flag(&f), vec!["pretick_out_write_before_update"], "{name}: refused by exactly pretick_out_write_before_update");
+    }
+    for (name, src) in [("e18a_head_held_register_guard_behind_read", E18A_HEAD_HELD_REGISTER_GUARD_BEHIND_READ_SRC), ("e18d_head_every_path_update_before_guard", E18D_HEAD_EVERY_PATH_UPDATE_BEFORE_GUARD_SRC), ("e18e_head_every_path_register_guard_no_read", E18E_HEAD_EVERY_PATH_REGISTER_GUARD_NO_READ_SRC), ("e18f_linear_every_path_register_guard_behind_read", E18F_LINEAR_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC), ("e18g_linear_held_register_guard_behind_read", E18G_LINEAR_HELD_REGISTER_GUARD_BEHIND_READ_SRC), ("e18h_extracted_every_path_register_guard_behind_read", E18H_EXTRACTED_EVERY_PATH_REGISTER_GUARD_BEHIND_READ_SRC), ("e18i_extracted_held_register_guard_behind_read", E18I_EXTRACTED_HELD_REGISTER_GUARD_BEHIND_READ_SRC)] {
+        let f: syn::ItemFn = syn::parse_str(src).expect("parses");
+        assert!(single_tick_rules_flag(&f).is_empty(), "{name}: admitted");
+    }
 }

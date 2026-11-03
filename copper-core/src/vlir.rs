@@ -115,6 +115,15 @@ pub struct VLIRSeqBody {
     /// Memory arrays declared by this module, with their read-port output nets.
     pub memories: Vec<VLIRMemDecl>,
     pub submodules: Vec<VLIRSubmoduleInst>,
+    /// Assignments at the TOP of the `always_comb` block, before and outside every
+    /// phase guard: the `<port> = <port>_hold` default of each plain `Out` emitted
+    /// in the mux + hold form (phase C). Until 2026-11-02 the default was the
+    /// first statement of the port's own phase, so in a multi-phase body it sat
+    /// inside `if (phase_r == K)` and the port was assigned nowhere else — a latch
+    /// outside its phase, which Verilator refuses under `-Wall`
+    /// (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10.9). A single-phase body has
+    /// one unguarded phase, where the top of the block is the same place.
+    pub comb_defaults: Vec<VLIRStmt>,
     /// One `always_comb` block per phase (pre-edge wires + conditional port
     /// drives). Single-phase modules have exactly one, with `phase_guard: None`.
     pub comb_phases: Vec<VLIRCombPhase>,

@@ -420,3 +420,32 @@ async fn linear_held_constant_behind_read(clk: Clock<MainClk>, x: In<Bits<8>, Ma
         clk.tick().await;
     }
 }
+
+// §10.9 (2026-11-02): an every-path conditional write in a register-free
+// two-tick body, behind the condition's deferred read — the edge-sampled flop
+// under phase 0, closing on both sides. Refused until 2026-11-02 for its form
+// (a phase-gated comb mux, a latch), measured agreeing once the latch was fixed
+// (`e15w_head_every_path_constants` in tests/sequential_forwarding_divergence.rs).
+#[hardware(sequential)]
+async fn linear_regfree_every_path(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    loop {
+        if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
+        clk.tick().await;
+        clk.tick().await;
+    }
+}
+
+// §10.9: a held write with no input read before it in a middle segment — the
+// drive-level mux + hold form, its `o = o_hold` default outside the phase guard
+// since 2026-11-02 (`e15ad_middle_held_register_guard_no_read`, agreeing).
+#[hardware(sequential)]
+async fn linear_held_no_read(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+    let mut cnt: Bits<8> = Bits::zero();
+    loop {
+        cnt = cnt + Bits::from_lit::<1>();
+        clk.tick().await;
+        let _ = x.read();
+        if cnt[0] == Logic::One { o.write(cnt); }
+        clk.tick().await;
+    }
+}
