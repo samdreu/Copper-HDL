@@ -40,6 +40,9 @@
 #   G-E  how much of that sweep is anchored to an INDEPENDENT hand-written Verilog
 #        reference rather than only cross-checked against the transpiler (printed,
 #        not enforced)
+#   G-F  the REFERENCE-INTERPRETER leg (copper-ref, the spec made executable —
+#        design_docs/SPEC_OVERVIEW.md §7) ran on every module it covers, and the
+#        modules it skips are skipped with a sentence (build.rs REF_SKIP)
 #
 # and it prints the `#[ignore]`d tests every run, because a skipped check that prints
 # nothing is indistinguishable from a passing one.
@@ -193,6 +196,22 @@ if [ "$RUN_TEST" -eq 1 ]; then
   POLICY_LINE=$(grep -h "stimulus policy:" "$TMP"/*.log 2>/dev/null | tail -1 | sed 's/.*stimulus policy: //')
   [ -n "$POLICY_LINE" ] && echo "       policy: $POLICY_LINE"
 
+  # G-F — the REFERENCE-INTERPRETER leg. copper-ref runs the kernel under SPEC
+  # §I.0's one-resumption protocol with no rustc lowering and no executor, so it is
+  # the one leg that can say the simulator is wrong (SPEC_OVERVIEW.md §7: sim ≠ ref
+  # with SV = ref is a simulator/macro bug). build.rs generates one
+  # `<name>_reference_leg` case per module — `#[ignore]`d with a sentence where the
+  # interpreter defers the class (plain `Out` awaiting Phase C, memories, a second
+  # clock, combinational, structural) or a REF_SKIP row names the module. The leg
+  # needs no Verilator. Zero cases run means the leg silently stopped covering the
+  # corpus, which is the bug class every other guard exists for.
+  REF_RAN=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ok" "$TMP/test.log")
+  REF_SKIPPED=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ignored" "$TMP/test.log")
+  [ "$REF_RAN" -gt 0 ] || fail "G-F: the reference-interpreter leg ran on zero modules"
+  echo "  G-F ok: reference-interpreter leg ran on $REF_RAN module(s) ($REF_SKIPPED skipped with a reason)"
+  REF_LINE=$(grep -h "reference leg:" "$TMP"/*.log 2>/dev/null | grep "REF_SKIP" | tail -1 | sed 's/.*reference leg: //')
+  [ -n "$REF_LINE" ] && echo "       coverage: $REF_LINE"
+
   # G-E — ANCHORING. The sweep checks the simulator against the SystemVerilog the
   # transpiler emitted: two implementations of one source, which proves CONSISTENCY.
   # A module additionally checked against an independent hand-written Verilog
@@ -220,6 +239,24 @@ if [ "$RUN_TEST" -eq 1 ]; then
   fi
 else
   echo; echo "  (cargo test skipped)"
+fi
+
+# ── 3q. --quick: the reference-interpreter leg alone (no Verilator needed) ─────
+# The leg is cheap (the simulator plus an interpreter, no Verilator build), so the
+# fast loop runs it even though it skips `cargo test`: a spec disagreement shows up
+# in the inner loop, not only in the full regression.
+if [ "$QUICK" -eq 1 ]; then
+  step "3q   reference-interpreter leg (copper-ref vs simulator, no Verilator)"
+  cargo test -q --test corpus_generated -- reference_leg > "$TMP/refleg.log" 2>&1
+  REF_RC=$?
+  REF_RAN=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ok" "$TMP/refleg.log")
+  REF_SKIPPED=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ignored" "$TMP/refleg.log")
+  if [ "$REF_RC" -ne 0 ]; then
+    grep -E "^(test .* FAILED|error(\[|:)|reference leg: FAIL)" "$TMP/refleg.log" | head -20
+    fail "reference-interpreter leg"
+  fi
+  [ "$REF_RAN" -gt 0 ] || fail "G-F: the reference-interpreter leg ran on zero modules"
+  echo "  G-F ok: reference-interpreter leg ran on $REF_RAN module(s) ($REF_SKIPPED skipped with a reason)"
 fi
 
 # ── 4. examples: sim vs Verilator ────────────────────────────────────────────

@@ -44,6 +44,15 @@ pub mod value;
 
 pub use bits::RefBits;
 pub use interp::{Flow, TickSite};
+
+/// The static `tick` sites of any `#[hardware]` fn's body — the states of H(M)
+/// (SPEC I.0.4) — without constructing a [`Module`], so a module the interpreter
+/// defers (a plain `Out`) can still be counted against the transpiler's `pc` states.
+pub fn static_tick_sites(f: &syn::ItemFn) -> std::collections::BTreeSet<TickSite> {
+    let mut out = std::collections::BTreeSet::new();
+    interp::collect_tick_sites(&f.block.stmts, &mut Vec::new(), &mut out);
+    out
+}
 pub use module::{Module, Port, PortKind};
 pub use value::{IntTy, Ty, Value};
 

@@ -230,7 +230,7 @@ impl<'a> Exec<'a> {
                 (0, None)
             }
         };
-        if start >= stmts.len() {
+        if resume.is_some() && start >= stmts.len() {
             return Err(rt(format!("resume index {start} past the end of a {}-statement block", stmts.len())));
         }
         let mut resume_rest = rest;

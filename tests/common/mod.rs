@@ -686,6 +686,10 @@ pub struct EquivalenceTest {
     /// reference leg replays the same boundaries, and the failure report names the
     /// sequence a mismatch fell in.
     sequences: Vec<(usize, String)>,
+    /// Set by [`with_reference_interpreter`](Self::with_reference_interpreter): also
+    /// replay the recorded stimulus through `copper_ref` — the THIRD leg
+    /// (`design_docs/SPEC_OVERVIEW.md` §7), the spec made executable.
+    reference_interpreter: bool,
 }
 
 impl EquivalenceTest {
@@ -712,6 +716,7 @@ impl EquivalenceTest {
             params: Vec::new(),
             differential: false,
             sequences: Vec::new(),
+            reference_interpreter: false,
         }
     }
 
@@ -768,6 +773,26 @@ impl EquivalenceTest {
         self
     }
 
+    /// Also replay the recorded stimulus through the **reference interpreter**
+    /// (`copper_ref`): the kernel run under SPEC §I.0's one-resumption protocol
+    /// without rustc's lowering or the executor. The simulator's recorded trace is
+    /// compared cycle for cycle with what the interpreter observes after each edge.
+    ///
+    /// How a disagreement reads (`SPEC_OVERVIEW.md` §7, `copper-ref/README.md`):
+    /// the interpreter is the spec, so sim ≠ ref with SV = ref is a simulator or
+    /// macro bug; sim = ref ≠ SV is a transpiler bug or a II.3 row; all three
+    /// different is a spec gap or an interpreter bug. All legs run before any
+    /// fails, so the report names which.
+    ///
+    /// A module the interpreter defers (a plain `Out`, a memory, a second clock)
+    /// is a FAILURE here, not a skip: `build.rs`'s `REF_SKIP` table is where such a
+    /// module is excused, with a sentence, and the generated case then does not
+    /// call this.
+    pub fn with_reference_interpreter(mut self) -> Self {
+        self.reference_interpreter = true;
+        self
+    }
+
     /// Like `new`, but checks the simulator against the reference model only —
     /// no transpilation, no Verilator cross-check. Use this for DUTs where the
     /// transpiler is known not to agree with the simulator yet (see
@@ -787,6 +812,7 @@ impl EquivalenceTest {
             params: Vec::new(),
             differential: false,
             sequences: Vec::new(),
+            reference_interpreter: false,
         }
     }
 
@@ -858,6 +884,15 @@ impl EquivalenceTest {
     /// `with_reference_registers` was set — that the inferred register set
     /// structurally matches the independent reference SV (G2).
     pub fn finish(self) {
+        let v = self.finish_report();
+        if !v.all_ok() {
+            panic!("{}", v.report);
+        }
+    }
+
+    /// `finish` without the panic: every leg's verdict, for a measurement that
+    /// predicts a disagreement and wants to read it rather than fail on it.
+    pub fn finish_report(self) -> Verdicts {
         if let Some((ref_sv_path, mode)) = &self.reg_check {
             let src = self
                 .src
@@ -881,6 +916,34 @@ impl EquivalenceTest {
         // must be driven with the SAME stimulus and held to the SAME expectations.
         let replay = self.expected.clone();
         let sequences = self.sequences.clone();
+
+        // The reference-interpreter leg FIRST: it needs no Verilator and its
+        // verdict is what the other two are read against. Never asserted here.
+        let interpreter = if self.reference_interpreter {
+            let src = self
+                .src
+                .as_deref()
+                .expect("with_reference_interpreter requires a DUT source (not sim_only)");
+            let module = self.module.clone().unwrap_or_else(|| self.name.clone());
+            let ps: Vec<(&str, i64)> = self.params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            let mut leg = ReferenceLeg::new(&self.name, src, &module, &ps);
+            for (i, c) in replay.iter().enumerate() {
+                for (_, label) in sequences.iter().filter(|(start, _)| *start == i) {
+                    leg.begin_sequence(label);
+                }
+                let ins: Vec<(&str, &[Logic])> =
+                    c.inputs.iter().map(|(n, v)| (n.as_str(), &v[..])).collect();
+                let outs: Vec<(&str, &[Logic])> =
+                    c.outputs.iter().map(|(n, v)| (n.as_str(), &v[..])).collect();
+                leg.record(&ins, &outs);
+            }
+            let v = leg.run();
+            println!("{}", v.summary_line());
+            Some(v)
+        } else {
+            None
+        };
+
         let expected = SimulationTrace::from_cycles(self.expected);
         let transpiled = self.test.finish_with_expected(&expected);
         transpiled.print_summary();
@@ -913,8 +976,15 @@ impl EquivalenceTest {
         });
 
         let ref_failed = reference.as_ref().is_some_and(|r| !r.passed());
-        if transpiled.passed() && !ref_failed {
-            return;
+        let interp_failed = interpreter.as_ref().is_some_and(|v| !v.passed());
+        let mut verdicts = Verdicts {
+            transpiled: transpiled.passed(),
+            reference_sv: reference.as_ref().map(|r| r.passed()),
+            interpreter: interpreter.as_ref().map(|v| v.verdict()),
+            report: String::new(),
+        };
+        if transpiled.passed() && !ref_failed && !interp_failed {
+            return verdicts;
         }
 
         // WHICH legs failed is the diagnosis, so say it rather than making the reader
@@ -932,9 +1002,33 @@ impl EquivalenceTest {
             }
             (false, true) => "both legs failed: the transpiler disagrees with the simulator, \
                               AND both disagree with the independent reference",
-            (true, false) => unreachable!("early-returned above"),
+            // Reachable only through the interpreter leg (the two Verilator legs
+            // passed): its reading follows.
+            (true, false) => "the transpiled SystemVerilog agrees with the simulator and the \
+                              REFERENCE INTERPRETER disagrees",
         };
         report.push_str(&format!("equivalence failed for '{}': {verdict}\n", self.name));
+        if let Some(v) = interpreter.as_ref() {
+            // The three-way reading, with the interpreter as the spec (§7).
+            let reading = match (transpiled.passed(), v.passed()) {
+                (true, false) => {
+                    "the simulator and the transpiled SystemVerilog AGREE WITH EACH OTHER and the \
+                     REFERENCE INTERPRETER disagrees: both implementations share a reading the \
+                     spec does not give — a simulator/macro bug (SPEC_OVERVIEW.md §7), or a Phase C \
+                     obligation not yet landed (the two-job residue), or a spec gap"
+                }
+                (false, true) => {
+                    "the simulator and the REFERENCE INTERPRETER agree and the transpiled \
+                     SystemVerilog disagrees: a transpiler bug, or a II.3 row"
+                }
+                (false, false) => {
+                    "all three differ: a spec gap or an interpreter bug (read the interpreter's \
+                     first disagreement first)"
+                }
+                (true, true) => "the interpreter leg passed",
+            };
+            report.push_str(&format!("reference interpreter: {reading}\n"));
+        }
         if !transpiled.passed() {
             report.push_str("\n-- simulator vs transpiled SystemVerilog --\n");
             report.push_str(&errors_by_sequence(&sequences, &transpiled.errors));
@@ -943,8 +1037,256 @@ impl EquivalenceTest {
             report.push_str("\n-- simulator vs independent reference --\n");
             report.push_str(&errors_by_sequence(&sequences, &r.errors));
         }
-        panic!("{report}");
+        if let Some(v) = interpreter.filter(|v| !v.passed()) {
+            report.push_str("\n-- simulator vs REFERENCE INTERPRETER (copper-ref) --\n");
+            report.push_str(&v.detail());
+        }
+        verdicts.report = report;
+        verdicts
     }
+}
+
+/// Every leg's verdict from [`EquivalenceTest::finish_report`].
+pub struct Verdicts {
+    /// The transpiled SystemVerilog under Verilator agreed with the simulator.
+    pub transpiled: bool,
+    /// The independent hand-written reference agreed, if one was set.
+    pub reference_sv: Option<bool>,
+    /// The reference interpreter agreed (`Ok(cycles)`), if it was set; `Err` is the
+    /// first disagreement or refusal.
+    pub interpreter: Option<Result<usize, String>>,
+    /// The failure report `finish` would have panicked with (empty when all ok).
+    pub report: String,
+}
+
+impl Verdicts {
+    pub fn all_ok(&self) -> bool {
+        self.transpiled
+            && self.reference_sv != Some(false)
+            && !matches!(self.interpreter, Some(Err(_)))
+    }
+}
+
+// ── The reference-interpreter leg ────────────────────────────────────────────
+
+/// The simulator's recorded trace replayed through `copper_ref::Module` — the
+/// third leg of the sweep (`design_docs/SPEC_OVERVIEW.md` §7). Driven exactly like
+/// `EquivalenceTest`: `begin_sequence`, `record` per cycle, `finish`. Needs no
+/// Verilator, so the generated `*_reference_leg` cases run under `--no-examples`
+/// and `--quick` too.
+///
+/// The harness convention is the protocol's: the inputs recorded for cycle `i`
+/// are `x_{i+1}`, driven before edge `i+1`, so the leg calls `resume` with them,
+/// then `edge`, then compares `observe` — `obs_{i+1}` — with what the simulator
+/// read after its `tick_clock`. `obs_0` is never recorded by the harness today
+/// (SPEC I.9.4; a III.2 item), so it is not compared here either.
+pub struct ReferenceLeg {
+    name: String,
+    src: String,
+    module: String,
+    params: Vec<(String, u64)>,
+    cycles: Vec<CycleData>,
+    sequences: Vec<(usize, String)>,
+}
+
+/// What the replay found.
+#[derive(Debug, Clone)]
+pub struct ReferenceVerdict {
+    pub name: String,
+    /// Cycles compared and agreeing.
+    pub agreed: usize,
+    /// Cycles compared and disagreeing.
+    pub disagreed: usize,
+    /// The first disagreement or refusal, in full.
+    pub first_failure: Option<String>,
+    /// Up to 40 `FAIL:` lines.
+    pub fails: Vec<String>,
+    /// Static tick sites of the kernel and how many of them some resumption reached.
+    pub sites_static: usize,
+    pub sites_reached: usize,
+}
+
+impl ReferenceVerdict {
+    pub fn passed(&self) -> bool {
+        self.first_failure.is_none()
+    }
+    pub fn verdict(&self) -> Result<usize, String> {
+        match &self.first_failure {
+            None => Ok(self.agreed),
+            Some(f) => Err(f.clone()),
+        }
+    }
+    /// The one line `tools/regression.sh` and a reader look for.
+    pub fn summary_line(&self) -> String {
+        match &self.first_failure {
+            None => format!(
+                "reference leg: {} cycles agreed ({} of {} tick sites reached) [{}]",
+                self.agreed, self.sites_reached, self.sites_static, self.name
+            ),
+            Some(f) => format!(
+                "reference leg: FAIL — {} of {} cycles disagree; first: {f} [{}]",
+                self.disagreed,
+                self.agreed + self.disagreed,
+                self.name
+            ),
+        }
+    }
+    pub fn detail(&self) -> String {
+        let mut s = String::new();
+        s.push_str(&self.summary_line());
+        s.push('\n');
+        for l in &self.fails {
+            s.push_str(l);
+            s.push('\n');
+        }
+        s
+    }
+}
+
+impl ReferenceLeg {
+    pub fn new(name: &str, src: &str, module: &str, params: &[(&str, i64)]) -> Self {
+        ReferenceLeg {
+            name: name.to_string(),
+            src: src.to_string(),
+            module: module.to_string(),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), u64::try_from(*v).expect("a non-negative parameter")))
+                .collect(),
+            cycles: Vec::new(),
+            sequences: Vec::new(),
+        }
+    }
+
+    pub fn begin_sequence(&mut self, label: &str) {
+        self.sequences.push((self.cycles.len(), label.to_string()));
+    }
+
+    /// Port names may be the source names or the emitted (legalized) ones.
+    pub fn record(&mut self, inputs: &[(&str, &[Logic])], outputs: &[(&str, &[Logic])]) {
+        let i = self.cycles.len();
+        self.cycles.push(make_cycle(i, inputs, outputs));
+    }
+
+    /// Replay. A refusal by the interpreter (a construct it does not cover, or a
+    /// module class it defers) is a failure, never a skip: the `REF_SKIP` table in
+    /// `build.rs` is the one place a module is excused, with a sentence.
+    pub fn run(&self) -> ReferenceVerdict {
+        let mut v = ReferenceVerdict {
+            name: self.name.clone(),
+            agreed: 0,
+            disagreed: 0,
+            first_failure: None,
+            fails: Vec::new(),
+            sites_static: 0,
+            sites_reached: 0,
+        };
+        let ps: Vec<(&str, u64)> = self.params.iter().map(|(k, x)| (k.as_str(), *x)).collect();
+        let fresh = || copper_ref::Module::new(&self.src, &self.module, &ps);
+        let mut m = match fresh() {
+            Ok(m) => m,
+            Err(e) => {
+                v.first_failure = Some(format!(
+                    "copper_ref refused `{}` at construction: {e} — if this is a module class the \
+                     interpreter defers, name it in build.rs's REF_SKIP with that sentence",
+                    self.module
+                ));
+                return v;
+            }
+        };
+        v.sites_static = m.tick_sites().len();
+        let mut reached = std::collections::BTreeSet::new();
+        let sequence_of = |cycle: usize| {
+            self.sequences
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, (start, _))| *start <= cycle)
+                .map(|(i, (_, label))| format!("sequence {i} \"{label}\""))
+                .unwrap_or_default()
+        };
+        let mut fail = |v: &mut ReferenceVerdict, line: String| {
+            if v.first_failure.is_none() {
+                v.first_failure = Some(line.clone());
+            }
+            if v.fails.len() < 40 {
+                v.fails.push(format!("FAIL: {line}"));
+            }
+            v.disagreed += 1;
+        };
+        for (i, c) in self.cycles.iter().enumerate() {
+            if i > 0 && self.sequences.iter().any(|(start, _)| *start == i) {
+                reached.extend(m.reached_sites().iter().cloned());
+                m = fresh().expect("constructed once already");
+            }
+            let in_ports = m.input_ports();
+            let mut ins: Vec<(&str, &[Logic])> = Vec::new();
+            for p in &in_ports {
+                let legal = copper_codegen::legalized_port_name(&p.name);
+                let Some((_, bits)) = c.inputs.iter().find(|(n, _)| *n == p.name || *n == legal) else {
+                    fail(&mut v, format!("Cycle {i}: no recorded value for input `{}`", p.name));
+                    return v;
+                };
+                ins.push((p.name.as_str(), &bits[..]));
+            }
+            if let Err(e) = m.resume_bits(&ins) {
+                fail(&mut v, format!("Cycle {i} ({}): the interpreter stopped: {e}", sequence_of(i)));
+                return v;
+            }
+            m.edge();
+            let obs = m.observe_bits();
+            let mut cycle_ok = true;
+            for (port, got) in &obs {
+                let legal = copper_codegen::legalized_port_name(port);
+                let Some((_, want)) = c.outputs.iter().find(|(n, _)| n == port || *n == legal) else {
+                    fail(&mut v, format!("Cycle {i}: the simulator recorded no output `{port}`"));
+                    return v;
+                };
+                if want != got {
+                    cycle_ok = false;
+                    fail(
+                        &mut v,
+                        format!(
+                            "Cycle {i} ({}): {port} simulator {} interpreter {}",
+                            sequence_of(i),
+                            fmt_bits(want),
+                            fmt_bits(got)
+                        ),
+                    );
+                }
+            }
+            if cycle_ok {
+                v.agreed += 1;
+            }
+        }
+        reached.extend(m.reached_sites().iter().cloned());
+        v.sites_reached = reached.len();
+        v
+    }
+
+    /// Print the summary line and panic on a disagreement.
+    pub fn finish(self) {
+        let v = self.run();
+        println!("{}", v.summary_line());
+        if !v.passed() {
+            panic!(
+                "reference-interpreter leg failed for '{}': the simulator and the spec's \
+                 interpreter disagree\n{}",
+                self.name,
+                v.detail()
+            );
+        }
+    }
+}
+
+/// A bit vector as the integer it spells (MSB first as `b…`), X shown as such.
+fn fmt_bits(v: &[Logic]) -> String {
+    if v.iter().any(|b| *b == Logic::X) {
+        let s: String = v.iter().rev().map(|b| match b { Logic::One => '1', Logic::Zero => '0', Logic::X => 'x' }).collect();
+        return format!("b{s}");
+    }
+    let n = v.iter().enumerate().fold(0u128, |a, (i, b)| a | ((*b == Logic::One) as u128) << i);
+    format!("{n}")
 }
 
 /// A leg's errors, as recorded — or, for a multi-sequence run, a digest: which

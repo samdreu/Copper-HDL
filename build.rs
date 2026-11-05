@@ -227,6 +227,48 @@ const RESET: &[(&str, &str, bool)] = &[
     ("rv32i_cpu_transpilable", "rstn", true),
 ];
 
+/// Modules the **reference-interpreter leg** (`copper-ref`, the third leg of the
+/// sweep — `design_docs/SPEC_OVERVIEW.md` §7) must not run, each with the reason,
+/// by name. The classes the interpreter defers as a whole are computed from the
+/// signature below (`ref_skip_reason`) and need no row here; a row is for a module
+/// whose BODY the interpreter cannot give a meaning to yet. Validated at build
+/// time like `SKIP`: a row naming no covered module is dead and fails the build.
+///
+/// Every row is a sentence with the SPEC clause that owes it. Under D-8 a module
+/// with a plain `Out` port "awaits the Phase C rewrite" and is skipped by class.
+const REF_SKIP: &[(&str, &str)] = &[
+    (
+        "rom_paced",
+        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC I.10, TBD \
+         (Round 2); the interpreter has no memory model yet",
+    ),
+    (
+        "rom_gated",
+        "a `Memory` binding in the body (`Memory::from_fn`): SPEC I.10, TBD (Round 2)",
+    ),
+    (
+        "ram_arms",
+        "a `Memory` binding in the body (`Memory::new`): SPEC I.10, TBD (Round 2)",
+    ),
+    (
+        "mp_regout",
+        "a `Memory` binding in the body (`Memory::from_fn`): SPEC I.10, TBD (Round 2)",
+    ),
+    (
+        "regout_trailing_single_tick",
+        "MEASURED DISAGREEMENT, sim = SV ≠ ref (2026-11-05, 854 of 864 cycles, first at cycle 1): \
+         `tick; let d = step.read(); acc = acc + d; q.write(acc)` reads AFTER its only tick. \
+         Under the one-job body (D-8, SPEC I.0.2) the trailing region is the head of the next \
+         resumption and the read sees x_{N+1}, so obs_{N+1} = Σ x_1..x_{N+1}; today's simulator \
+         reads it immediately after the edge (x_N) and the linear route's trailing fold \
+         (I.6.9, I.3.8) realizes the same, so both show Σ x_1..x_N. Not a transpiler bug and not \
+         a simulator bug of its own: the two-job residue that Phase C removes from the simulator \
+         (one resumption per tick) — the first module the interpreter catches. Pinned as an \
+         expected divergence in tests/reference_leg_measurements.rs; delete this row when \
+         Phase C lands",
+    ),
+];
+
 // ── The multi-sequence stimulus policy (2026-10-28) ────────────────────────────
 //
 // `design_docs/CORPUS_DIFFERENTIAL_SWEEP.md` §3.2. Until 2026-10-28 every module was
@@ -279,6 +321,10 @@ fn main() {
     );
     let (mut emitted, mut ignored) = (0usize, 0usize);
     let mut covered: Vec<String> = Vec::new();
+    // The reference-interpreter leg's coverage: modules it runs on, and the ones
+    // it skips by class (a REF_SKIP row or a signature class).
+    let mut ref_leg = 0usize;
+    let mut ref_skip: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
 
     for path in &files {
         let src = std::fs::read_to_string(path).expect("fixture is readable");
@@ -296,6 +342,32 @@ fn main() {
         let (m, i) = emit_file(&mut code, path, &src, &modules, &key);
         emitted += m;
         ignored += i;
+        for m in &modules {
+            let q = format!("{key}::{}", m.name);
+            if m.skip_reason(&q).is_none() {
+                match m.ref_skip_reason() {
+                    None => ref_leg += 1,
+                    Some(why) => {
+                        let class = if why.starts_with("MEASURED DISAGREEMENT") {
+                            "measured disagreement (REF_SKIP row)"
+                        } else if why.starts_with("plain `Out`") {
+                            "plain Out (D-8, awaits Phase C)"
+                        } else if why.contains("I.10") {
+                            "Memory (I.10)"
+                        } else if why.contains("I.11") {
+                            "combinational (I.11)"
+                        } else if why.contains("I.13") {
+                            "structural (I.13)"
+                        } else if why.contains("I.12") {
+                            "multi-clock (I.12)"
+                        } else {
+                            "other"
+                        };
+                        *ref_skip.entry(class).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
         covered.extend(modules.iter().map(|m| format!("{key}::{}", m.name)));
     }
 
@@ -377,6 +449,20 @@ fn main() {
         }
     }
 
+    // Validate REF_SKIP the same way, and count the reference leg's coverage so
+    // G-F in tools/regression.sh can print it beside the `ok` count it asserts.
+    {
+        let leaves: Vec<&str> =
+            covered.iter().map(|n| n.rsplit("::").next().unwrap_or(n)).collect();
+        for (module, _) in REF_SKIP {
+            assert!(
+                leaves.contains(module),
+                "REF_SKIP names `{module}`, which is not a module the sweep covers — the row is \
+                 dead. Delete it (or fix the name)"
+            );
+        }
+    }
+
     // The anchoring ledger. A module cross-checked only against the transpiler's own
     // output is verified for CONSISTENCY; one checked against an independent
     // reference is verified for SEMANTICS. Keeping the two counts apart is the point
@@ -416,6 +502,11 @@ fn main() {
 
     // Surfaced in the build log too, so the counts are visible without running.
     println!("cargo:warning=corpus sweep: {emitted} generated, {ignored} ignored-with-reason");
+    println!(
+        "cargo:warning=reference leg: {ref_leg} module(s) run through copper-ref, {} REF_SKIP'd ({})",
+        ref_skip.values().sum::<usize>(),
+        ref_skip.iter().map(|(k, v)| format!("{v} {k}")).collect::<Vec<_>>().join(", ")
+    );
     println!(
         "cargo:warning=stimulus policy: {SEEDS} seeds x {SEED_CYCLES} cycles per module, plus a \
          {FIRST_CYCLES}-cycle sequence from every initial input vector up to {EXHAUSTIVE_BITS} input \
@@ -489,6 +580,9 @@ fn wrapper_name(manifest: &Path, path: &Path) -> String {
 /// One `#[hardware]` module, as much of it as generation needs.
 struct Module {
     name: String,
+    /// The mode word of `#[hardware(mode[, flags])]`, read off the attribute's first
+    /// token (never `parse_args::<Ident>()`, which fails once a flag is present).
+    mode: String,
     /// Const-generic parameter names in signature order, empty for a concrete module.
     /// A generic module emits a PARAMETRIC SystemVerilog module, so it can be swept —
     /// at the widths `PARAMS` records for it.
@@ -519,11 +613,20 @@ enum Kind {
 impl Module {
     fn from_item(item: &syn::Item) -> Option<Module> {
         let syn::Item::Fn(f) = item else { return None };
-        if !f.attrs.iter().any(|a| {
-            a.path().segments.last().is_some_and(|s| s.ident == "hardware")
-        }) {
+        let Some(attr) = f
+            .attrs
+            .iter()
+            .find(|a| a.path().segments.last().is_some_and(|s| s.ident == "hardware"))
+        else {
             return None;
-        }
+        };
+        let mode = match &attr.meta {
+            syn::Meta::List(l) => match l.tokens.clone().into_iter().next() {
+                Some(proc_macro2::TokenTree::Ident(i)) => i.to_string(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
         let mut ports = Vec::new();
         for arg in &f.sig.inputs {
             let syn::FnArg::Typed(pt) = arg else { return None };
@@ -541,7 +644,7 @@ impl Module {
                 _ => None,
             })
             .collect();
-        Some(Module { name: f.sig.ident.to_string(), generics, ports })
+        Some(Module { name: f.sig.ident.to_string(), mode, generics, ports })
     }
 
     fn clock(&self) -> Option<&Port> {
@@ -615,6 +718,58 @@ impl Module {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        }
+        None
+    }
+}
+
+impl Module {
+    /// Why the reference-interpreter leg cannot run on this module, if it cannot —
+    /// the classes `copper_ref::Module::new` defers, decided here from the
+    /// signature so the generated case is `#[ignore]`d with the sentence rather
+    /// than failing at run time, plus the named rows of `REF_SKIP`. A module the
+    /// sweep itself skips never reaches either leg and is not asked.
+    fn ref_skip_reason(&self) -> Option<String> {
+        if let Some((_, why)) = REF_SKIP.iter().find(|(n, _)| *n == self.name) {
+            return Some((*why).to_string());
+        }
+        match self.mode.as_str() {
+            "sequential" | "synchronizer" => {}
+            "combinational" => {
+                return Some(
+                    "a `combinational` module: one evaluation per settle, SPEC I.11 (TBD, Round 3) \
+                     — the interpreter runs the clocked kernel only"
+                        .to_string(),
+                )
+            }
+            "structural" => {
+                return Some(
+                    "a `structural` module: a wiring language, SPEC I.13 (TBD, Round 3)".to_string(),
+                )
+            }
+            other => return Some(format!("unknown #[hardware] mode `{other}`")),
+        }
+        let plain_outs: Vec<&str> = self
+            .ports
+            .iter()
+            .filter(|p| p.kind == Kind::Out)
+            .map(|p| p.name.as_str())
+            .collect();
+        if !plain_outs.is_empty() {
+            return Some(format!(
+                "plain `Out` port(s) {} on a clocked module: under the one-job body a sequential \
+                 module has no plain `Out` (D-8, SPEC I.2.2) — the module awaits the Phase C \
+                 rewrite to `RegOut`, and until then the interpreter has no meaning for it",
+                plain_outs.join(", ")
+            ));
+        }
+        if self.ports.iter().any(|p| p.kind == Kind::Memory) {
+            return Some("a `Memory` parameter: memories are SPEC I.10 (TBD, Round 2)".to_string());
+        }
+        if self.ports.iter().filter(|p| p.kind == Kind::Clock).count() > 1 {
+            return Some(
+                "more than one clock: per-domain gating is SPEC I.12 (TBD, Round 3)".to_string(),
+            );
         }
         None
     }
@@ -754,7 +909,7 @@ fn emit_file(
          use copper_core::types::Bits as __Bits;\n    \
          use copper_core::{{Clock as __Clock, Logic as __Logic}};\n    \
          use copper_sim::HardwareExecutor as __Exec;\n    \
-         use crate::common::{{EquivalenceTest as __Eq, RandStim as __RandStim, Rng as __Rng, \
+         use crate::common::{{EquivalenceTest as __Eq, ReferenceLeg as __RefLeg, RandStim as __RandStim, Rng as __Rng, \
          StimulusPlan as __Plan}};"
     );
     if !has_own_imports {
@@ -796,12 +951,24 @@ fn emit_file(
         match reason {
             Some(reason) => {
                 let _ = writeln!(code, "    #[ignore = \"{}\"]", escape(&reason));
-                emit_test(code, m, /*body=*/ false);
+                emit_test(code, m, /*body=*/ false, Leg::Differential);
                 ignored += 1;
+                // A module the sweep skips is not asked about the reference leg
+                // either: its case exists, ignored, under the SAME reason, so the
+                // count of reference-leg cases stays one per module.
+                let _ = writeln!(code, "    #[ignore = \"{}\"]", escape(&reason));
+                emit_test(code, m, false, Leg::Reference);
             }
             None => {
-                emit_test(code, m, true);
+                emit_test(code, m, true, Leg::Differential);
                 emitted += 1;
+                match m.ref_skip_reason() {
+                    Some(why) => {
+                        let _ = writeln!(code, "    #[ignore = \"REF_SKIP: {}\"]", escape(&why));
+                        emit_test(code, m, false, Leg::Reference);
+                    }
+                    None => emit_test(code, m, true, Leg::Reference),
+                }
             }
         }
     }
@@ -809,17 +976,34 @@ fn emit_file(
     (emitted, ignored)
 }
 
+/// Which generated case `emit_test` writes.
+#[derive(Clone, Copy, PartialEq)]
+enum Leg {
+    /// `<name>_differential`: simulator vs the transpiled SystemVerilog under
+    /// Verilator (and the hand-written reference, and — unless `REF_SKIP`ped — the
+    /// reference interpreter, so one failure report carries all three readings).
+    Differential,
+    /// `<name>_reference_leg`: simulator vs the reference interpreter alone. No
+    /// Verilator, so it runs everywhere; its `ok`/`ignored` lines are what G-F in
+    /// `tools/regression.sh` counts.
+    Reference,
+}
+
 /// The test itself. With `body == false` the case is `#[ignore]`d and the body is a
 /// single `panic!` — it must still *exist* (so the skip is listed and counted), and
 /// it must not be silently green if someone removes the `#[ignore]`.
-fn emit_test(code: &mut String, m: &Module, body: bool) {
+fn emit_test(code: &mut String, m: &Module, body: bool, leg: Leg) {
     let name = &m.name;
+    let suffix = match leg {
+        Leg::Differential => "differential",
+        Leg::Reference => "reference_leg",
+    };
     let _ = writeln!(code, "    #[test]");
-    let _ = writeln!(code, "    fn {name}_differential() {{");
+    let _ = writeln!(code, "    fn {name}_{suffix}() {{");
     if !body {
         let _ = writeln!(
             code,
-            "        panic!(\"skipped by build.rs's SKIP table — see the #[ignore] reason\");"
+            "        panic!(\"skipped by build.rs's SKIP or REF_SKIP table — see the #[ignore] reason\");"
         );
         let _ = writeln!(code, "    }}\n");
         return;
@@ -844,10 +1028,29 @@ fn emit_test(code: &mut String, m: &Module, body: bool) {
         ),
         None => String::new(),
     };
-    let _ = writeln!(
-        code,
-        "        let mut eq = __Eq::differential_only(\"{name}\", SRC, Some(\"{name}\")){with_params}{with_reference};"
-    );
+    match leg {
+        Leg::Differential => {
+            let with_interp = if m.ref_skip_reason().is_none() {
+                "\n            .with_reference_interpreter()"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                code,
+                "        let mut eq = __Eq::differential_only(\"{name}\", SRC, Some(\"{name}\")){with_params}{with_reference}{with_interp};"
+            );
+        }
+        Leg::Reference => {
+            let ps = match params {
+                Some(ps) => ps.iter().map(|(n, v)| format!("(\"{n}\", {v})")).collect::<Vec<_>>().join(", "),
+                None => String::new(),
+            };
+            let _ = writeln!(
+                code,
+                "        let mut eq = __RefLeg::new(\"{name}\", SRC, \"{name}\", &[{ps}]);"
+            );
+        }
+    }
     // The stimulus plan: the `In` ports in signature order with their widths, which
     // are resolved by the compiler (`RandStim::WIDTH`) rather than parsed here, so
     // a width written as a file-scope `const` or a generic parameter is exact.
@@ -1011,9 +1214,13 @@ fn emit_test(code: &mut String, m: &Module, body: bool) {
         .filter(|p| matches!(p.kind, Kind::Out | Kind::RegOut))
         .map(|p| format!("(&{n}_sv[..], &{n}_v.as_bits()[..])", n = p.name))
         .collect();
+    let record = match leg {
+        Leg::Differential => "record_differential",
+        Leg::Reference => "record",
+    };
     let _ = writeln!(
         code,
-        "                eq.record_differential(&[{}], &[{}]);",
+        "                eq.{record}(&[{}], &[{}]);",
         ins.join(", "),
         outs.join(", ")
     );

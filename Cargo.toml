@@ -25,6 +25,7 @@ log = "0.4.29"
 # parsing their signatures — the same `syn` the rest of the pipeline reads.
 syn = { version = "2", features = ["full", "parsing"] }
 quote = "1"
+proc-macro2 = "1"
 
 [dev-dependencies]
 # The reference interpreter — the third leg of the corpus sweep (SPEC_OVERVIEW.md

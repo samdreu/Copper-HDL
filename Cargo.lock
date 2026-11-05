@@ -79,6 +79,7 @@ dependencies = [
  "copper-sim",
  "env_logger",
  "log",
+ "proc-macro2",
  "quote",
  "syn",
 ]
