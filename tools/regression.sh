@@ -247,7 +247,8 @@ fi
 # in the inner loop, not only in the full regression.
 if [ "$QUICK" -eq 1 ]; then
   step "3q   reference-interpreter leg (copper-ref vs simulator, no Verilator)"
-  cargo test -q --test corpus_generated -- reference_leg > "$TMP/refleg.log" 2>&1
+  # Not `-q`: quiet mode drops the per-test lines the count below reads.
+  cargo test --test corpus_generated -- reference_leg > "$TMP/refleg.log" 2>&1
   REF_RC=$?
   REF_RAN=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ok" "$TMP/refleg.log")
   REF_SKIPPED=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ignored" "$TMP/refleg.log")
