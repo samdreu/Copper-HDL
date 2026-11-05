@@ -75,6 +75,7 @@ dependencies = [
  "copper-codegen",
  "copper-core",
  "copper-macros",
+ "copper-ref",
  "copper-sim",
  "env_logger",
  "log",
@@ -124,6 +125,17 @@ dependencies = [
  "quote",
  "syn",
  "trybuild",
+]
+
+[[package]]
+name = "copper-ref"
+version = "0.1.0"
+dependencies = [
+ "copper-analysis",
+ "copper-core",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

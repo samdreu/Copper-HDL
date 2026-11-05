@@ -1,0 +1,12 @@
+[package]
+name = "copper-ref"
+version = "0.1.0"
+edition = "2024"
+description = "Copper reference interpreter: runs a #[hardware(sequential)] module's syn::ItemFn under the one-resumption protocol of SPEC §I.0 (D-8), the third leg of the corpus sweep"
+
+[dependencies]
+copper-core = { version = "0.1.0", path = "../copper-core" }
+copper-analysis = { version = "0.1.0", path = "../copper-analysis" }
+syn = { version = "2.0.114", features = ["full", "extra-traits"] }
+proc-macro2 = "1.0"
+quote = "1"

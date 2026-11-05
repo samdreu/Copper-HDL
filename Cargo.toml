@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["copper-core", "copper-analysis", "copper-macros", "copper-codegen", "copper-sim"]
+members = ["copper-core", "copper-analysis", "copper-macros", "copper-codegen", "copper-sim", "copper-ref"]
 
 [package]
 name = "copper"
@@ -27,6 +27,10 @@ syn = { version = "2", features = ["full", "parsing"] }
 quote = "1"
 
 [dev-dependencies]
+# The reference interpreter — the third leg of the corpus sweep (SPEC_OVERVIEW.md
+# §7): it runs the kernel under the one-resumption protocol without rustc's
+# lowering, so sim ≠ ref with SV = ref reads as a simulator/macro bug.
+copper-ref = { path = "copper-ref" }
 # The shared control/liveness analysis — the equivalence harness uses it to
 # structurally reg-match inferred registers against independent hand-written SV
 # (G2 of design_docs/SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md).
