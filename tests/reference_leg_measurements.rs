@@ -45,10 +45,6 @@ include!("fixtures/uart_rx_dut.rs");
 include!("fixtures/regout_multiphase_dut.rs");
 include!("fixtures/handshake_dut.rs");
 
-fn logic(b: bool) -> Logic {
-    if b { Logic::One } else { Logic::Zero }
-}
-
 // ── (i) startup probes and the corpus disagreement ─────────────────────────
 
 /// Drive a one-input (`Logic`), one-output (`Bits<8>`) probe for `$cycles` cycles

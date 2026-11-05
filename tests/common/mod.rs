@@ -1205,7 +1205,7 @@ impl ReferenceLeg {
                 .map(|(i, (_, label))| format!("sequence {i} \"{label}\""))
                 .unwrap_or_default()
         };
-        let mut fail = |v: &mut ReferenceVerdict, line: String| {
+        let fail = |v: &mut ReferenceVerdict, line: String| {
             if v.first_failure.is_none() {
                 v.first_failure = Some(line.clone());
             }
