@@ -13,7 +13,7 @@
 mod common;
 
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_macros::hardware;
@@ -54,7 +54,7 @@ fn shift_register_sim_matches_transpiled_verilog() {
     let (en_drv, en_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (dir_drv, dir_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (rstn_drv, rstn_in) = wire::<Logic, MainClk>(Logic::One);
-    let (out_drv, out_obs) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (out_drv, out_obs) = registered_wire::<Bits<N>, MainClk>(&clk, Bits::zero());
     let dh = out_drv.dirty_handle();
     let reads = vec![d_in.wire_id(), en_in.wire_id(), dir_in.wire_id(), rstn_in.wire_id()];
     exec.spawn_wired(

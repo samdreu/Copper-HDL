@@ -38,7 +38,7 @@
 //! still run), mirroring the rest of the suite.
 
 use copper::sync_2ff;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -103,7 +103,7 @@ fn trace_with(dut: Dut, schedule: &[Vec<u8>]) -> Vec<u8> {
     let mut exec = HardwareExecutor::new();
 
     let (d_drv, d_in) = wire::<Logic, SrcClk>(Logic::Zero);
-    let (q_out, q_obs) = wire::<Logic, DstClk>(Logic::Zero);
+    let (q_out, q_obs) = registered_wire::<Logic, DstClk>(&clk_dst, Logic::Zero);
     let dh_q = q_out.dirty_handle();
     let reads = vec![d_in.wire_id()];
 
@@ -191,7 +191,7 @@ fn source_domain_ticks_do_not_advance_the_synchronizer() {
     let mut exec = HardwareExecutor::new();
 
     let (d_drv, d_in) = wire::<Logic, SrcClk>(Logic::Zero);
-    let (q_out, q_obs) = wire::<Logic, DstClk>(Logic::Zero);
+    let (q_out, q_obs) = registered_wire::<Logic, DstClk>(&clk_dst, Logic::Zero);
     let dh_q = q_out.dirty_handle();
     let reads = vec![d_in.wire_id()];
     exec.spawn_wired(sync_2ff(clk_dst.clone(), d_in, q_out), vec![dh_q], reads);
@@ -250,12 +250,10 @@ fn pulse_held_across_an_edge_is_captured() {
 /// degenerate neighbour of `sync_2ff`. Its only job is to be the thing
 /// `synchronizer_behaves_as_two_flops_not_one` distinguishes the library from.
 #[hardware(synchronizer)]
-async fn sync_1ff(clk: Clock<DstClk>, d: In<Logic, SrcClk>, q: Out<Logic, DstClk>) {
-    let mut ff1 = Logic::Zero;
+async fn sync_1ff(clk: Clock<DstClk>, d: In<Logic, SrcClk>, q: RegOut<Logic, DstClk>) {
     loop {
-        q.write(ff1);
+        q.write(d.read());
         clk.tick().await;
-        ff1 = d.read();
     }
 }
 
@@ -276,7 +274,7 @@ fn synchronizer_behaves_as_two_flops_not_one() {
     let mut clk_dst = Clock::<DstClk>::new();
     let mut exec = HardwareExecutor::new();
     let (d_drv, d_in) = wire::<Logic, SrcClk>(Logic::Zero);
-    let (q_out, q_obs) = wire::<Logic, DstClk>(Logic::Zero);
+    let (q_out, q_obs) = registered_wire::<Logic, DstClk>(&clk_dst, Logic::Zero);
     let dh_q = q_out.dirty_handle();
     let reads = vec![d_in.wire_id()];
     exec.spawn_wired(sync_1ff(clk_dst.clone(), d_in, q_out), vec![dh_q], reads);
@@ -317,12 +315,33 @@ fn register_inference_matches_the_independent_reference() {
     // never been reconciled because `register_reconciliation.rs` filtered on
     // `#[hardware(sequential)]`; that filter is now lifted, so this shape is covered
     // corpus-wide too.
+    //
+    // D-8 (2026-11-06, Phase C step 3): in the one-job spelling `ff2` is a WIRE of
+    // one resumption (assigned and consumed before the tick, dead at it), and the
+    // second flop is the `RegOut` `q`. G2's convention counts locals live at a tick
+    // and excludes output ports on both sides, so the name sets no longer coincide
+    // ({ff1} vs the reference's {ff1, ff2}, measured). The storage claim is checked
+    // instead: the inferred registers are exactly {ff1}, and they plus the `RegOut`
+    // flop are as many flip-flops as the reference has.
     let sv = std::fs::read_to_string(REFERENCE_SV).expect("read independent reference");
-    copper_analysis::assert_source_registers_match_reference_sv(
-        FIXTURE_SRC,
-        Some("sync_2ff_concrete"),
-        &sv,
-        copper_analysis::RegMatch::NameExact,
+    let file = syn::parse_file(FIXTURE_SRC).expect("fixture parses");
+    let f = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            syn::Item::Fn(f) if f.sig.ident == "sync_2ff_concrete" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("sync_2ff_concrete in the fixture");
+    let inferred: std::collections::BTreeSet<String> =
+        copper_analysis::infer_registers(&f).into_iter().collect();
+    assert_eq!(inferred, ["ff1".to_string()].into_iter().collect(), "inferred registers");
+    let reference = copper_analysis::reference_sv_registers(&sv);
+    let regout_ports = 1; // `q: RegOut<Logic, DstClk>`
+    assert_eq!(
+        inferred.len() + regout_ports,
+        reference.len(),
+        "flip-flop count: inferred {inferred:?} + the RegOut `q` vs reference {reference:?}"
     );
 }
 

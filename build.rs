@@ -238,6 +238,15 @@ const RESET: &[(&str, &str, bool)] = &[
 /// with a plain `Out` port "awaits the Phase C rewrite" and is skipped by class.
 const REF_SKIP: &[(&str, &str)] = &[
     (
+        "shift_register",
+        "a `const { assert!(N - 1 == N_1, …) }` block in the body: a compile-time check of the \
+         generic widths that the interpreter's front-end refuses as a statement macro (II.1 \
+         R13/R14). Measured 2026-11-06 when Phase C step 3 made the module `RegOut`-only and the \
+         reference leg reached it for the first time; the macro and the transpiler evaluate \
+         the assertion at monomorphization, the interpreter has no const evaluator for it yet \
+         (I.14.4's shared evaluator)",
+    ),
+    (
         "rom_paced",
         "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
          2026-11-05), but the reference interpreter has no memory model yet — that model is a \

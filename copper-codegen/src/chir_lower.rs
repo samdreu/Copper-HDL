@@ -915,7 +915,7 @@ fn resolve_enum_path(path: &str, enums: &EnumRegistry) -> Option<(CHIRType, u128
 /// Build a symbol table of a module's data ports (`In<T,D>` / `Out<T,D>`) mapping
 /// port name → inner hardware type. Clock ports are excluded.
 /// Forward width-inference: map an un-annotated local to the type of the output
-/// port it is later written to. Copper users write
+/// port (`Out` or `RegOut`) it is later written to. Copper users write
 /// `let mut acc = Bits::zero(); …; out.write(acc);` and Rust infers `acc`'s width
 /// from the write; the bottom-up pass can't, so we look ahead for the write.
 fn build_write_inferred_types(fir: &FrontendModuleIR, port_symbols: &SymbolTable) -> SymbolTable {
@@ -925,7 +925,12 @@ fn build_write_inferred_types(fir: &FrontendModuleIR, port_symbols: &SymbolTable
         .iter()
         .filter(|p| {
             let c = compact_type(&p.ty.ty_text);
-            c.starts_with("Out<")
+            // A `RegOut` write infers a width exactly as a plain `Out` write
+            // does (Phase C step 3: under D-8 every clocked output is a `RegOut`,
+            // and `let mut n = Bits::x(); … q.write(n)` lost its width when the
+            // port kind changed — measured on `shift_register`,
+            // `bsg_counter_up_down`).
+            c.starts_with("Out<") || c.starts_with("RegOut<")
         })
         .map(|p| p.name.clone())
         .collect();

@@ -22,7 +22,7 @@
 mod common;
 
 use copper::sync_2ff;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, Out, RegOut};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -36,28 +36,30 @@ impl ClockDomain for ClkSlow {}
 #[hardware(sequential)]
 async fn fast_counter(
     clk: Clock<ClkFast>,
-    count_out: Out<Bits<8>, ClkFast>,
-    flag_out: Out<Logic, ClkFast>,
+    count_out: RegOut<Bits<8>, ClkFast>,
+    flag_out: RegOut<Logic, ClkFast>,
 ) {
+    // One job per cycle (D-8): the resumption that ends at fast edge N+1 updates
+    // the counter and the sticky flag and writes both `RegOut`s, which show from
+    // obs_{N+1}.
     let mut count: Bits<8> = Bits::zero();
     let mut latched = Logic::Zero;
     loop {
-        count_out.write(count);
-        flag_out.write(latched);
-        clk.tick().await;
         if count[3] == Logic::One {
             latched = Logic::One;
         }
         count = count + Bits::from_lit::<1>();
+        count_out.write(count);
+        flag_out.write(latched);
+        clk.tick().await;
     }
 }
 
-#[hardware(sequential)]
-async fn slow_consumer(clk: Clock<ClkSlow>, flag_in: In<Logic, ClkSlow>, out: Out<Logic, ClkSlow>) {
-    loop {
-        out.write(flag_in.read());
-        clk.tick().await;
-    }
+#[hardware(combinational)]
+fn slow_consumer(flag_in: In<Logic, ClkSlow>, out: Out<Logic, ClkSlow>) {
+    // A passthrough is a wire, so it is a combinational module (D-8: a clocked
+    // body has no plain `Out`).
+    out.write(flag_in.read());
 }
 
 /// One row per slow cycle: `(count, flag_raw, sync_q, consumer)`.
@@ -66,9 +68,9 @@ fn trace(fast_per_slow: usize, slow_cycles: usize) -> Vec<(u8, u8, u8, u8)> {
     let mut clk_slow = Clock::<ClkSlow>::new();
     let mut exec = HardwareExecutor::new();
 
-    let (count_port, count_obs) = wire::<Bits<8>, ClkFast>(Bits::zero());
-    let (flag_port, flag_in) = wire::<Logic, ClkFast>(Logic::Zero);
-    let (sync_q_port, sync_in) = wire::<Logic, ClkSlow>(Logic::Zero);
+    let (count_port, count_obs) = registered_wire::<Bits<8>, ClkFast>(&clk_fast, Bits::zero());
+    let (flag_port, flag_in) = registered_wire::<Logic, ClkFast>(&clk_fast, Logic::Zero);
+    let (sync_q_port, sync_in) = registered_wire::<Logic, ClkSlow>(&clk_slow, Logic::Zero);
     let (consumer_port, consumer_obs) = wire::<Logic, ClkSlow>(Logic::Zero);
 
     // Observe the intermediate wires directly — `In` is `Clone`, so a copy can be
@@ -91,7 +93,7 @@ fn trace(fast_per_slow: usize, slow_cycles: usize) -> Vec<(u8, u8, u8, u8)> {
     );
     exec.spawn_wired(sync_2ff(clk_slow.clone(), flag_in, sync_q_port), vec![dh.2], sync_reads);
     exec.spawn_wired(
-        slow_consumer(clk_slow.clone(), sync_in, consumer_port),
+        slow_consumer(sync_in, consumer_port),
         vec![dh.3],
         cons_reads,
     );

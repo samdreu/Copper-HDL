@@ -114,7 +114,7 @@ mod lfsr_ex {
 
         let (reset_drv, reset_in) = wire::<Logic, MainClk>(Logic::Zero);
         let (yumi_drv, yumi_in) = wire::<Logic, MainClk>(Logic::Zero);
-        let (o_out, o_obs) = wire::<Bits<32>, MainClk>(Bits::from_u32(1));
+        let (o_out, o_obs) = registered_wire::<Bits<32>, MainClk>(&clk, Bits::from_u32(1));
 
         let dh = o_out.dirty_handle();
         let reads = vec![reset_in.wire_id(), yumi_in.wire_id()];
@@ -172,7 +172,7 @@ mod det_ex {
 
         let (rstn_drv, rstn_in) = wire::<Logic, MainClk>(Logic::One);
         let (in_drv, in_in) = wire::<Logic, MainClk>(Logic::Zero);
-        let (out_out, out_obs) = wire::<Logic, MainClk>(Logic::Zero);
+        let (out_out, out_obs) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
 
         let dh = out_out.dirty_handle();
         let reads = vec![rstn_in.wire_id(), in_in.wire_id()];

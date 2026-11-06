@@ -36,7 +36,7 @@
 //! If Verilator is not installed the Verilator arms are skipped (the sim arm and
 //! its invariant checks still run), mirroring the rest of the suite.
 
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, Out, RegOut};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -65,47 +65,44 @@ impl ClockDomain for ClkSlow {}
 #[hardware(sequential)]
 async fn fast_counter(
     clk: Clock<ClkFast>,
-    count_out: Out<Bits<8>, ClkFast>,
-    flag_out: Out<Logic, ClkFast>,
+    count_out: RegOut<Bits<8>, ClkFast>,
+    flag_out: RegOut<Logic, ClkFast>,
 ) {
+    // One job per cycle (D-8): the resumption that ends at fast edge N+1 updates
+    // the counter and the sticky flag and writes both `RegOut`s, which show from
+    // obs_{N+1} — `count_o = cnt` and `flag_o = latch` of the reference.
     let mut count: Bits<8> = Bits::zero();
     let mut latched = Logic::Zero;
     loop {
-        count_out.write(count);
-        flag_out.write(latched);
-        clk.tick().await;
-        // Sticky threshold, updated AFTER the edge so it reads the pre-edge `count`
-        // exactly as `if (cnt[3]) latch <= 1'b1;` does. Updating it *before* the
-        // writes puts a register assignment in the pre-tick segment with no input
-        // read to pin the phase — the simulator then runs that segment a phase early
-        // and silently disagrees with the synthesized hardware. Measured against the
-        // independent reference in `sv/two_domain_hierarchy.sv`; see
-        // design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md.
         if count[3] == Logic::One {
             latched = Logic::One;
         }
         count = count + Bits::from_lit::<1>();
+        count_out.write(count);
+        flag_out.write(latched);
+        clk.tick().await;
     }
 }
 
 #[hardware(synchronizer)]
-async fn flag_sync(clk: Clock<ClkSlow>, d: In<Logic, ClkFast>, q: Out<Logic, ClkSlow>) {
+async fn flag_sync(clk: Clock<ClkSlow>, d: In<Logic, ClkFast>, q: RegOut<Logic, ClkSlow>) {
+    // `copper::sync_2ff`'s one-job spelling: `ff1` the first flop, the `RegOut`
+    // `q` the second, `ff2` a wire of the resumption.
     let mut ff1 = Logic::Zero;
-    let mut ff2 = Logic::Zero;
     loop {
+        let ff2 = ff1;
+        ff1 = d.read();
         q.write(ff2);
         clk.tick().await;
-        ff2 = ff1;
-        ff1 = d.read();
     }
 }
 
-#[hardware(sequential)]
-async fn slow_consumer(clk: Clock<ClkSlow>, flag_in: In<Logic, ClkSlow>, out: Out<Logic, ClkSlow>) {
-    loop {
-        out.write(flag_in.read());
-        clk.tick().await;
-    }
+#[hardware(combinational)]
+fn slow_consumer(flag_in: In<Logic, ClkSlow>, out: Out<Logic, ClkSlow>) {
+    // A passthrough is a wire, so it is a combinational module (D-8: a clocked
+    // body has no plain `Out`); the reference's `flag_sync_out` is the
+    // synchronizer's `q` itself.
+    out.write(flag_in.read());
 }
 
 /// (count_out, flag_sync_out) observed each slow cycle under a `fast_per_slow`
@@ -115,9 +112,9 @@ fn sim_trace(fast_per_slow: usize, slow_cycles: usize) -> Vec<(u8, u8)> {
     let mut clk_slow = Clock::<ClkSlow>::new();
     let mut exec = HardwareExecutor::new();
 
-    let (count_port, count_obs) = wire::<Bits<8>, ClkFast>(Bits::zero());
-    let (flag_port, flag_to_sync) = wire::<Logic, ClkFast>(Logic::Zero);
-    let (sync_q_port, sync_to_consumer) = wire::<Logic, ClkSlow>(Logic::Zero);
+    let (count_port, count_obs) = registered_wire::<Bits<8>, ClkFast>(&clk_fast, Bits::zero());
+    let (flag_port, flag_to_sync) = registered_wire::<Logic, ClkFast>(&clk_fast, Logic::Zero);
+    let (sync_q_port, sync_to_consumer) = registered_wire::<Logic, ClkSlow>(&clk_slow, Logic::Zero);
     let (consumer_port, consumer_obs) = wire::<Logic, ClkSlow>(Logic::Zero);
 
     let dh_count = count_port.dirty_handle();
@@ -129,7 +126,7 @@ fn sim_trace(fast_per_slow: usize, slow_cycles: usize) -> Vec<(u8, u8)> {
     let consumer_reads = vec![sync_to_consumer.wire_id()];
     exec.spawn_wired(fast_counter(clk_fast.clone(), count_port, flag_port), vec![dh_count, dh_flag], vec![]);
     exec.spawn_wired(flag_sync(clk_slow.clone(), flag_to_sync, sync_q_port), vec![dh_sync_q], sync_reads);
-    exec.spawn_wired(slow_consumer(clk_slow.clone(), sync_to_consumer, consumer_port), vec![dh_consumer], consumer_reads);
+    exec.spawn_wired(slow_consumer(sync_to_consumer, consumer_port), vec![dh_consumer], consumer_reads);
 
     let mut trace = Vec::with_capacity(slow_cycles);
     for _ in 0..slow_cycles {

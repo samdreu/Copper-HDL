@@ -1,5 +1,5 @@
 use copper_core::types::{Bits, Logic, Clock, ClockDomain};
-use copper_core::port::{In, Out, wire};
+use copper_core::port::{In, Out, wire, RegOut, registered_wire};
 use copper_macros::hardware;
 use copper_sim::{HardwareExecutor, HardwareTest, SimulationTrace, make_cycle};
 
@@ -12,7 +12,7 @@ async fn lfsr (
     clk: Clock<MainClk>,
     reset_i: In<Logic, MainClk>,
     yumi_i: In<Logic, MainClk>,
-    o: Out<Bits<32>, MainClk>,
+    o: RegOut<Bits<32>, MainClk>,
 ) {
     let xor_mask = Bits::from_u32((1 << 31) | (1 << 29) | (1 << 26) | (1 << 25));
     let mut state = Bits::from_u32(1);
@@ -39,7 +39,7 @@ fn main() {
 
     let (reset_i_drv, reset_i_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (yumi_i_drv, yumi_i_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (o_out, o_obs) = wire::<Bits<32>, MainClk>(Bits::from_u32(1));
+    let (o_out, o_obs) = registered_wire::<Bits<32>, MainClk>(&clk, Bits::from_u32(1));
 
     let dh = o_out.dirty_handle();
     let reads = vec![reset_i_in.wire_id(), yumi_i_in.wire_id()];

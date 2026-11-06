@@ -22,8 +22,9 @@
 //!
 //! ## Scope: all five outputs
 //!
-//! Both the `RegOut` (`data_o`) and the four `wN_dbg` plain `Out` debug ports are
-//! compared. The `wN_dbg` ports needed a third fix — a plain `Out` written in
+//! Both the `RegOut` (`data_o`) and the four `wN_dbg` debug ports are compared;
+//! since Phase C step 3 (D-8) the debug ports are `RegOut`s too, each showing its
+//! word from the edge after it is read. Historically they were plain `Out`s, and The `wN_dbg` ports needed a third fix — a plain `Out` written in
 //! only some phases of a multi-phase loop must hold, not drop to 0 (see
 //! `tests/plain_out_multiphase_hold.rs`). Comparing them matters: they expose the
 //! module's internal per-cycle capture, which is exactly what the mid-phase-read
@@ -45,10 +46,10 @@ fn sipo_block_sim_matches_transpiled_verilog() {
 
     let (d_drv, d_in) = wire::<Bits<4>, MainClk>(Bits::zero());
     let (o_drv, o_obs) = registered_wire::<Bits<16>, MainClk>(&clk, Bits::zero());
-    let (w0_o, w0_obs) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (w1_o, w1_obs) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (w2_o, w2_obs) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (w3_o, w3_obs) = wire::<Bits<4>, MainClk>(Bits::zero());
+    let (w0_o, w0_obs) = registered_wire::<Bits<4>, MainClk>(&clk, Bits::zero());
+    let (w1_o, w1_obs) = registered_wire::<Bits<4>, MainClk>(&clk, Bits::zero());
+    let (w2_o, w2_obs) = registered_wire::<Bits<4>, MainClk>(&clk, Bits::zero());
+    let (w3_o, w3_obs) = registered_wire::<Bits<4>, MainClk>(&clk, Bits::zero());
 
     let dirties = vec![
         o_drv.dirty_handle(),

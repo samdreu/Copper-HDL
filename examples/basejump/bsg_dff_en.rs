@@ -5,7 +5,7 @@
 // own transpiler — which is what makes the same-source sim≡synth claim a hardware
 // property rather than a self-consistency check.
 
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::{make_cycle, HardwareExecutor, HardwareTest, SimulationTrace};
@@ -20,13 +20,15 @@ async fn bsg_dff_en(
     clk: Clock<MainClk>,
     data_i: In<Bits<8>, MainClk>,
     en_i: In<Logic, MainClk>,
-    data_o: Out<Bits<8>, MainClk>,
+    data_o: RegOut<Bits<8>, MainClk>,
 ) {
+    // The enabled register (D-6): an unwritten `RegOut` holds; written, it takes
+    // `data_i` at the edge that ends this resumption — BaseJump's `data_r`.
     loop {
-        clk.tick().await;
         if en_i.read() == Logic::One {
             data_o.write(data_i.read());
         }
+        clk.tick().await;
     }
 }
 
@@ -36,7 +38,7 @@ fn main() {
 
     let (data_drv, data_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (en_drv, en_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (out_drv, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_drv, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = out_drv.dirty_handle();
     let reads = vec![data_in.wire_id(), en_in.wire_id()];
     exec.spawn_wired(bsg_dff_en(clk.clone(), data_in, en_in, out_drv), vec![dh], reads);

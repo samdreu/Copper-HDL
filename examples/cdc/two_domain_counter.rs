@@ -1,5 +1,5 @@
 use copper_core::{Bits, Clock, ClockDomain, Logic};
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, Out, RegOut};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -21,26 +21,22 @@ impl ClockDomain for ClkSlow {}
 #[hardware(sequential)]
 async fn fast_counter(
     clk: Clock<ClkFast>,
-    count_out: Out<Bits<8>, ClkFast>,
-    flag_out: Out<Logic, ClkFast>,
+    count_out: RegOut<Bits<8>, ClkFast>,
+    flag_out: RegOut<Logic, ClkFast>,
 ) {
+    // One job per cycle (D-8): the resumption that ends at fast edge N+1 updates
+    // the counter and the sticky flag and writes both `RegOut`s, which show from
+    // obs_{N+1}.
     let mut count: Bits<8> = Bits::zero();
     let mut latched = Logic::Zero;
     loop {
-        count_out.write(count);
-        flag_out.write(latched);
-        clk.tick().await;
-        // Sticky threshold, updated AFTER the edge so it reads the pre-edge `count`
-        // exactly as `if (cnt[3]) latch <= 1'b1;` does. Updating it *before* the
-        // writes puts a register assignment in the pre-tick segment with no input
-        // read to pin the phase — the simulator then runs that segment a phase early
-        // and silently disagrees with the synthesized hardware. Measured against the
-        // independent reference in `sv/two_domain_hierarchy.sv`; see
-        // design_docs/PRETICK_ALIGNMENT_GUARDRAIL.md.
         if count[3] == Logic::One {
             latched = Logic::One;
         }
         count = count + Bits::from_lit::<1>();
+        count_out.write(count);
+        flag_out.write(latched);
+        clk.tick().await;
     }
 }
 
@@ -51,7 +47,7 @@ async fn fast_counter(
 // an *un*synchronized crossing impossible:
 //   1. The phantom domain types: passing the ClkFast wire directly to a ClkSlow
 //      module is a compile error —
-//        // slow_consumer(clk_slow.clone(), flag_to_sync, consumer_port);
+//        // slow_consumer(flag_to_sync, consumer_port);
 //        // error[E0308]: expected `In<Logic, ClkSlow>`, found `In<Logic, ClkFast>`
 //   2. The CDC check in `#[hardware(sequential)]`: a regular module may not even
 //      *declare* a foreign-domain port. Only a `#[hardware(synchronizer)]` module
@@ -59,16 +55,11 @@ async fn fast_counter(
 use copper::sync_2ff;
 
 // ── Consumer: reads the synchronized flag in the slow domain ──────────────────
-#[hardware(sequential)]
-async fn slow_consumer(
-    clk: Clock<ClkSlow>,
-    flag_in: In<Logic, ClkSlow>,
-    out: Out<Logic, ClkSlow>,
-) {
-    loop {
-        out.write(flag_in.read());
-        clk.tick().await;
-    }
+#[hardware(combinational)]
+fn slow_consumer(flag_in: In<Logic, ClkSlow>, out: Out<Logic, ClkSlow>) {
+    // A passthrough is a wire, so it is a combinational module (D-8: a clocked
+    // body has no plain `Out`).
+    out.write(flag_in.read());
 }
 
 fn main() {
@@ -77,11 +68,11 @@ fn main() {
     let mut exec = HardwareExecutor::new();
 
     // fast_counter → count_out wire (ClkFast domain)
-    let (count_port, count_obs)         = wire::<Bits<8>, ClkFast>(Bits::zero());
+    let (count_port, count_obs)         = registered_wire::<Bits<8>, ClkFast>(&clk_fast, Bits::zero());
     // fast_counter → sync_2ff wire: ClkFast-tagged, metastable in ClkSlow context
-    let (flag_port, flag_to_sync)       = wire::<Logic, ClkFast>(Logic::Zero);
+    let (flag_port, flag_to_sync)       = registered_wire::<Logic, ClkFast>(&clk_fast, Logic::Zero);
     // sync_2ff → slow_consumer wire (ClkSlow domain, metastability resolved)
-    let (sync_q_port, sync_to_consumer) = wire::<Logic, ClkSlow>(Logic::Zero);
+    let (sync_q_port, sync_to_consumer) = registered_wire::<Logic, ClkSlow>(&clk_slow, Logic::Zero);
     // slow_consumer → output (ClkSlow domain)
     let (consumer_port, consumer_obs)   = wire::<Logic, ClkSlow>(Logic::Zero);
 
@@ -108,7 +99,7 @@ fn main() {
         sync_reads,
     );
     exec.spawn_wired(
-        slow_consumer(clk_slow.clone(), sync_to_consumer, consumer_port),
+        slow_consumer(sync_to_consumer, consumer_port),
         vec![dh_consumer],
         consumer_reads,
     );

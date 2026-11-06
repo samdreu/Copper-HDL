@@ -1,5 +1,5 @@
 use copper_core::types::{Logic, Clock, ClockDomain};
-use copper_core::port::{In, Out, RegOut, wire};
+use copper_core::port::{In, RegOut, wire, registered_wire};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -15,11 +15,11 @@ enum State {
 
 
 #[hardware(sequential)]
-async fn det_010 (
+async fn det_010(
     clk: Clock<MainClk>,
     rstn: In<Logic, MainClk>,
     in_i: In<Logic, MainClk>,
-    out_o: Out<Logic, MainClk>,
+    out_o: RegOut<Logic, MainClk>,
 ) {
     let mut state = State::A;
     loop {
@@ -34,15 +34,15 @@ async fn det_010 (
                 (State::D, Logic::Zero) => State::B,
                 _ => State::A,
             };
-            
         }
-        clk.tick().await;
-
+        // The Moore output of the NEXT state, written before the tick: the `RegOut`
+        // shows it from the edge that commits `state` (D-8; Q1_TRADEOFFS §4 (a)).
         if matches!(state, State::D) {
             out_o.write(Logic::One);
         } else {
             out_o.write(Logic::Zero);
         }
+        clk.tick().await;
     }
 }
 
@@ -90,7 +90,7 @@ fn main() {
     let mut exec = HardwareExecutor::new();
     let (rstn_drv, rstn) = wire::<Logic, MainClk>(Logic::One);
     let (in_drv, in_i) = wire::<Logic, MainClk>(Logic::Zero);
-    let (out_drv, out_obs) = wire::<Logic, MainClk>(Logic::Zero);
+    let (out_drv, out_obs) = copper_core::port::registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
     let dh = out_drv.dirty_handle();
     let reads = vec![rstn.wire_id(), in_i.wire_id()];
     exec.spawn_wired(det_010(clk.clone(), rstn, in_i, out_drv), vec![dh], reads);
@@ -136,7 +136,7 @@ mod tests {
 
         let (rstn_drv_a, rstn_a) = wire::<Logic, MainClk>(Logic::One);
         let (in_drv_a, in_a) = wire::<Logic, MainClk>(Logic::Zero);
-        let (out_drv_a, out_obs_a) = wire::<Logic, MainClk>(Logic::Zero);
+        let (out_drv_a, out_obs_a) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
 
         let (rstn_drv_b, rstn_b) = wire::<Logic, MainClk>(Logic::One);
         let (in_drv_b, in_b) = wire::<Logic, MainClk>(Logic::Zero);

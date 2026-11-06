@@ -5,7 +5,7 @@ async fn lfsr(
     clk: Clock<MainClk>,
     reset_i: In<Logic, MainClk>,
     yumi_i: In<Logic, MainClk>,
-    o: Out<Bits<32>, MainClk>,
+    o: RegOut<Bits<32>, MainClk>,
 ) {
     let xor_mask = Bits::from_u32((1 << 31) | (1 << 29) | (1 << 26) | (1 << 25));
     let mut state = Bits::from_u32(1);

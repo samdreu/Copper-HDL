@@ -21,7 +21,7 @@
 mod common;
 
 use copper::sync_2ff;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, Out, RegOut};
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -32,28 +32,17 @@ struct ClkSlow;
 impl ClockDomain for ClkSlow {}
 
 // Kept identical to `examples/cdc/flag_crossing.rs`.
-#[hardware(sequential)]
-async fn event_source(
-    clk: Clock<ClkFast>,
-    trigger: In<Logic, ClkFast>,
-    event: Out<Logic, ClkFast>,
-) {
-    loop {
-        event.write(trigger.read());
-        clk.tick().await;
-    }
+#[hardware(combinational)]
+fn event_source(trigger: In<Logic, ClkFast>, event: Out<Logic, ClkFast>) {
+    // A passthrough is a wire, so it is a combinational module (D-8: a clocked
+    // body has no plain `Out`); it is still tagged `ClkFast` by its port types.
+    event.write(trigger.read());
 }
 
-#[hardware(sequential)]
-async fn event_sink(
-    clk: Clock<ClkSlow>,
-    event_synced: In<Logic, ClkSlow>,
-    seen: Out<Logic, ClkSlow>,
-) {
-    loop {
-        seen.write(event_synced.read());
-        clk.tick().await;
-    }
+#[hardware(combinational)]
+fn event_sink(event_synced: In<Logic, ClkSlow>, seen: Out<Logic, ClkSlow>) {
+    // A passthrough is a wire, so it is a combinational module (D-8).
+    seen.write(event_synced.read());
 }
 
 /// Drive `trigger` per **fast** tick and observe once per **slow** cycle.
@@ -70,7 +59,7 @@ fn run(schedule: &[Vec<u8>]) -> Vec<(u8, u8, u8)> {
 
     let (trig_drv, trig_in) = wire::<Logic, ClkFast>(Logic::Zero);
     let (event_out, event_in) = wire::<Logic, ClkFast>(Logic::Zero);
-    let (synced_out, synced_in) = wire::<Logic, ClkSlow>(Logic::Zero);
+    let (synced_out, synced_in) = registered_wire::<Logic, ClkSlow>(&clk_slow, Logic::Zero);
     let (seen_out, seen_obs) = wire::<Logic, ClkSlow>(Logic::Zero);
 
     // Observers on the intermediate wires, cloned before the originals are moved.
@@ -81,9 +70,9 @@ fn run(schedule: &[Vec<u8>]) -> Vec<(u8, u8, u8)> {
     let sync_reads = vec![event_in.wire_id()];
     let sink_reads = vec![synced_in.wire_id()];
 
-    exec.spawn_wired(event_source(clk_fast.clone(), trig_in, event_out), vec![dh.0], source_reads);
+    exec.spawn_wired(event_source(trig_in, event_out), vec![dh.0], source_reads);
     exec.spawn_wired(sync_2ff(clk_slow.clone(), event_in, synced_out), vec![dh.1], sync_reads);
-    exec.spawn_wired(event_sink(clk_slow.clone(), synced_in, seen_out), vec![dh.2], sink_reads);
+    exec.spawn_wired(event_sink(synced_in, seen_out), vec![dh.2], sink_reads);
 
     let bit = |l: Logic| u8::from(l == Logic::One);
     schedule

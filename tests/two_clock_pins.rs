@@ -164,38 +164,46 @@ fn never_ticked_startup_two_job_is_the_pinned_divergence() {
 // that file from disk, so the two never silently drift (the same arrangement as
 // `tests/two_domain_hierarchy_cdc.rs`).
 #[hardware(sequential)]
-async fn fast_counter(clk: Clock<ClkA>, count_out: Out<Bits<8>, ClkA>, flag_out: Out<Logic, ClkA>) {
+async fn fast_counter(
+    clk: Clock<ClkA>,
+    count_out: RegOut<Bits<8>, ClkA>,
+    flag_out: RegOut<Logic, ClkA>,
+) {
+    // One job per cycle (D-8): the resumption that ends at fast edge N+1 updates
+    // the counter and the sticky flag and writes both `RegOut`s, which show from
+    // obs_{N+1} — `count_o = cnt` and `flag_o = latch` of the reference.
     let mut count: Bits<8> = Bits::zero();
     let mut latched = Logic::Zero;
     loop {
-        count_out.write(count);
-        flag_out.write(latched);
-        clk.tick().await;
         if count[3] == Logic::One {
             latched = Logic::One;
         }
         count = count + Bits::from_lit::<1>();
+        count_out.write(count);
+        flag_out.write(latched);
+        clk.tick().await;
     }
 }
 
 #[hardware(synchronizer)]
-async fn flag_sync(clk: Clock<ClkB>, d: In<Logic, ClkA>, q: Out<Logic, ClkB>) {
+async fn flag_sync(clk: Clock<ClkB>, d: In<Logic, ClkA>, q: RegOut<Logic, ClkB>) {
+    // `copper::sync_2ff`'s one-job spelling: `ff1` the first flop, the `RegOut`
+    // `q` the second, `ff2` a wire of the resumption.
     let mut ff1 = Logic::Zero;
-    let mut ff2 = Logic::Zero;
     loop {
+        let ff2 = ff1;
+        ff1 = d.read();
         q.write(ff2);
         clk.tick().await;
-        ff2 = ff1;
-        ff1 = d.read();
     }
 }
 
-#[hardware(sequential)]
-async fn slow_consumer(clk: Clock<ClkB>, flag_in: In<Logic, ClkB>, out: Out<Logic, ClkB>) {
-    loop {
-        out.write(flag_in.read());
-        clk.tick().await;
-    }
+#[hardware(combinational)]
+fn slow_consumer(flag_in: In<Logic, ClkB>, out: Out<Logic, ClkB>) {
+    // A passthrough is a wire, so it is a combinational module (D-8: a clocked
+    // body has no plain `Out`); the reference's `flag_sync_out` is the
+    // synchronizer's `q` itself.
+    out.write(flag_in.read());
 }
 
 const DESIGN_FILE: &str = "examples/cdc/two_domain_hierarchy.rs";
@@ -217,9 +225,9 @@ fn sim_traces(mode: ResumptionMode, sched: &[usize]) -> Traces {
     let mut clk_a = Clock::<ClkA>::new();
     let mut clk_b = Clock::<ClkB>::new();
     let mut exec = HardwareExecutor::new().with_resumption_mode(mode);
-    let (count_port, count_obs) = wire::<Bits<8>, ClkA>(Bits::zero());
-    let (flag_port, flag_in) = wire::<Logic, ClkA>(Logic::Zero);
-    let (sync_q_port, sync_in) = wire::<Logic, ClkB>(Logic::Zero);
+    let (count_port, count_obs) = registered_wire::<Bits<8>, ClkA>(&clk_a, Bits::zero());
+    let (flag_port, flag_in) = registered_wire::<Logic, ClkA>(&clk_a, Logic::Zero);
+    let (sync_q_port, sync_in) = registered_wire::<Logic, ClkB>(&clk_b, Logic::Zero);
     let (consumer_port, consumer_obs) = wire::<Logic, ClkB>(Logic::Zero);
     let dh = (
         count_port.dirty_handle(),
@@ -231,7 +239,7 @@ fn sim_traces(mode: ResumptionMode, sched: &[usize]) -> Traces {
     let cons_reads = vec![sync_in.wire_id()];
     exec.spawn_wired(fast_counter(clk_a.clone(), count_port, flag_port), vec![dh.0, dh.1], vec![]);
     exec.spawn_wired(flag_sync(clk_b.clone(), flag_in, sync_q_port), vec![dh.2], sync_reads);
-    exec.spawn_wired(slow_consumer(clk_b.clone(), sync_in, consumer_port), vec![dh.3], cons_reads);
+    exec.spawn_wired(slow_consumer(sync_in, consumer_port), vec![dh.3], cons_reads);
     let mut t = Traces { fast: Vec::new(), slow: Vec::new() };
     for &k in sched {
         for _ in 0..k {
@@ -349,27 +357,11 @@ fn interleavings_sim_against_the_transpiled_hierarchy() {
         let sv = sv_traces(sched);
         let two = sim_traces(ResumptionMode::Two, sched);
         assert_eq!(two, sv, "Two, interleaving {name}: sim ≡ SV per domain");
+        // Phase C step 3 (D-8): the hierarchy is rewritten in the one-job spelling
+        // (every clocked output a `RegOut`, the consumer a combinational module), so
+        // the lag F.3 pinned under `One` is gone: both modes agree with the SV on
+        // both domains under P, Q and R (R's empty slow periods included).
         let one = sim_traces(ResumptionMode::One, sched);
-        println!("interleaving {name}: SV fast {:?}\n  One fast {:?}\n  SV slow {:?}\n  One slow {:?}", sv.fast, one.fast, sv.slow, one.slow);
-        // The two-job spelling under one resumption: a plain-`Out` write at the loop
-        // head after the tick runs at t_{N+1}⁻ and is visible from obs_{N+1}, one
-        // observation after the emitted `assign` of the register shows it.
-        let lagged: Vec<u8> = std::iter::once(0).chain(sv.fast.iter().copied()).take(sv.fast.len()).collect();
-        assert_eq!(one.fast, lagged, "One, {name}: count_out lags the SV by one fast observation");
-        // Measured 2026-11-06 (predicted to differ under P and Q; it does not): the
-        // slow chain agrees under P and Q BY CANCELLATION. `flag_out` shows one fast
-        // observation late (the head write above), and `flag_sync`'s trailing
-        // `d.read()` now runs at the slow t_{N+1}⁻, after the period's fast ticks,
-        // instead of at the slow t_N⁺ before them — one fast tick later on each side
-        // when the period has at least one fast tick. R has empty periods, and there
-        // the two do not cancel: the synchronized flag rises one slow observation late.
-        // The same design agreed by cancellation once before (the module comment of
-        // `tests/two_domain_hierarchy_cdc.rs`); step 3's rewrite removes both terms.
-        let slow_lagged: Vec<u8> =
-            std::iter::once(0).chain(sv.slow.iter().copied()).take(sv.slow.len()).collect();
-        match name {
-            "R" => assert_eq!(one.slow, slow_lagged, "One, R: the slow chain is one slow observation late"),
-            _ => assert_eq!(one.slow, sv.slow, "One, {name}: the slow chain (agreement by cancellation)"),
-        }
+        assert_eq!(one, sv, "One, interleaving {name}: sim ≡ SV per domain");
     }
 }

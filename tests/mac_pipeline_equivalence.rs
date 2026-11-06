@@ -12,7 +12,7 @@
 mod common;
 
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain};
 use copper_macros::hardware;
@@ -42,7 +42,7 @@ fn mac_pipeline_sim_matches_transpiled_verilog() {
     let (a_drv, a_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (b_drv, b_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (c_drv, c_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (out_drv, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_drv, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = out_drv.dirty_handle();
     let reads = vec![a_in.wire_id(), b_in.wire_id(), c_in.wire_id()];
     exec.spawn_wired(

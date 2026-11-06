@@ -9,7 +9,7 @@
 //
 // This is the accum_2 mid-phase-read question with a third-party hardware golden.
 
-use copper_core::port::{registered_wire, wire, In, Out, RegOut};
+use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_core::{Bits, Logic};
 use copper_macros::hardware;
 use copper_sim::{HardwareExecutor, HardwareTest};
@@ -24,18 +24,20 @@ impl copper_core::ClockDomain for MainClk {}
 // right when `.write()` runs instead of at the following edge).
 //
 // `w0_dbg`..`w3_dbg` are debug-only output ports (not present in the reference
-// design) that mirror each internal `wN` the instant it's captured, so the
-// waveform can show the exact same internal state the .sv reference already
-// exposes (it has `w0`/`w1`/`w2` as real registers) for direct comparison.
+// design) that mirror each internal `wN`, so the waveform can show the same
+// internal state the .sv reference exposes (it has `w0`/`w1`/`w2` as real
+// registers). Since Phase C step 3 (D-8) they are `RegOut`s, so each shows its
+// word from the edge after it is read — exactly when the reference's `wN`
+// register takes it.
 #[hardware(sequential)]
 async fn sipo_block(
     clk: copper_core::Clock<MainClk>,
     data_i: In<Bits<4>, MainClk>,
     data_o: RegOut<Bits<16>, MainClk>,
-    w0_dbg: Out<Bits<4>, MainClk>,
-    w1_dbg: Out<Bits<4>, MainClk>,
-    w2_dbg: Out<Bits<4>, MainClk>,
-    w3_dbg: Out<Bits<4>, MainClk>,
+    w0_dbg: RegOut<Bits<4>, MainClk>,
+    w1_dbg: RegOut<Bits<4>, MainClk>,
+    w2_dbg: RegOut<Bits<4>, MainClk>,
+    w3_dbg: RegOut<Bits<4>, MainClk>,
 ) {
     loop {
         let w0 = data_i.read();
@@ -71,10 +73,10 @@ fn main() {
     let mut exec = HardwareExecutor::new();
     let (d_drv, d_in) = wire::<Bits<4>, MainClk>(Bits::zero());
     let (o_drv, o_obs) = registered_wire::<Bits<16>, MainClk>(&clk, Bits::zero());
-    let (w0_drv, w0_obs) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (w1_drv, w1_obs) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (w2_drv, w2_obs) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (w3_drv, w3_obs) = wire::<Bits<4>, MainClk>(Bits::zero());
+    let (w0_drv, w0_obs) = registered_wire::<Bits<4>, MainClk>(&clk, Bits::zero());
+    let (w1_drv, w1_obs) = registered_wire::<Bits<4>, MainClk>(&clk, Bits::zero());
+    let (w2_drv, w2_obs) = registered_wire::<Bits<4>, MainClk>(&clk, Bits::zero());
+    let (w3_drv, w3_obs) = registered_wire::<Bits<4>, MainClk>(&clk, Bits::zero());
     let dhs = vec![
         o_drv.dirty_handle(),
         w0_drv.dirty_handle(),

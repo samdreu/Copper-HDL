@@ -10,7 +10,7 @@ async fn shift_register<const N: usize, const N_1: usize>(
     en: In<Logic, MainClk>,
     dir: In<Logic, MainClk>,
     rstn: In<Logic, MainClk>,
-    out: Out<Bits<N>, MainClk>,
+    out: RegOut<Bits<N>, MainClk>,
 ) {
     const { assert!(N - 1 == N_1, "N_1 must equal N-1") };
     let mut out_n = Bits::x();

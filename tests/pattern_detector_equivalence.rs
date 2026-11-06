@@ -10,7 +10,7 @@
 mod common;
 
 use common::{logic, EquivalenceTest};
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -52,7 +52,7 @@ fn pattern_detector_sim_matches_transpiled_verilog() {
 
     let (rstn_drv, rstn_in) = wire::<Logic, MainClk>(Logic::One);
     let (in_drv, in_port) = wire::<Logic, MainClk>(Logic::Zero);
-    let (out_drv, out_obs) = wire::<Logic, MainClk>(Logic::Zero);
+    let (out_drv, out_obs) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
     let dh = out_drv.dirty_handle();
     let reads = vec![rstn_in.wire_id(), in_port.wire_id()];
     exec.spawn_wired(det_110101(clk.clone(), rstn_in, in_port, out_drv), vec![dh], reads);

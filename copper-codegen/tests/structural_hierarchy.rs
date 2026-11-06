@@ -9,7 +9,7 @@ use copper_codegen::{transpile_source, transpile_source_hierarchy, EmitConfig};
 
 const DUAL_CLOCK_SRC: &str = r#"
 use copper_core::{Bits, Clock, ClockDomain, Logic};
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, Out, RegOut};
 use copper_macros::hardware;
 
 struct ClkFast;
@@ -20,52 +20,48 @@ impl ClockDomain for ClkSlow {}
 #[hardware(sequential)]
 async fn fast_counter(
     clk: Clock<ClkFast>,
-    count_out: Out<Bits<8>, ClkFast>,
-    flag_out: Out<Logic, ClkFast>,
+    count_out: RegOut<Bits<8>, ClkFast>,
+    flag_out: RegOut<Logic, ClkFast>,
 ) {
     let mut count: Bits<8> = Bits::zero();
     let mut latched = Logic::Zero;
     loop {
         if count[3] == Logic::One { latched = Logic::One; }
+        count = count + Bits::from_lit::<1>();
         count_out.write(count);
         flag_out.write(latched);
         clk.tick().await;
-        count = count + Bits::from_lit::<1>();
     }
 }
 
 #[hardware(synchronizer)]
-async fn sync_2ff(clk: Clock<ClkSlow>, d: In<Logic, ClkFast>, q: Out<Logic, ClkSlow>) {
+async fn sync_2ff(clk: Clock<ClkSlow>, d: In<Logic, ClkFast>, q: RegOut<Logic, ClkSlow>) {
     let mut ff1 = Logic::Zero;
-    let mut ff2 = Logic::Zero;
     loop {
+        let ff2 = ff1;
+        ff1 = d.read();
         q.write(ff2);
         clk.tick().await;
-        ff2 = ff1;
-        ff1 = d.read();
     }
 }
 
-#[hardware(sequential)]
-async fn slow_consumer(clk: Clock<ClkSlow>, flag_in: In<Logic, ClkSlow>, out: Out<Logic, ClkSlow>) {
-    loop {
-        out.write(flag_in.read());
-        clk.tick().await;
-    }
+#[hardware(combinational)]
+fn slow_consumer(flag_in: In<Logic, ClkSlow>, out: Out<Logic, ClkSlow>) {
+    out.write(flag_in.read());
 }
 
 #[hardware(structural)]
 async fn two_domain_top(
     wr_clk: Clock<ClkFast>,
     rd_clk: Clock<ClkSlow>,
-    count_out: Out<Bits<8>, ClkFast>,
+    count_out: RegOut<Bits<8>, ClkFast>,
     flag_sync_out: Out<Logic, ClkSlow>,
 ) {
-    let flag = wire::<Logic, ClkFast>(Logic::Zero);
-    let synced = wire::<Logic, ClkSlow>(Logic::Zero);
+    let flag = registered_wire::<Logic, ClkFast>(&wr_clk, Logic::Zero);
+    let synced = registered_wire::<Logic, ClkSlow>(&rd_clk, Logic::Zero);
     fast_counter(wr_clk, count_out, flag.0);
     sync_2ff(rd_clk, flag.1, synced.0);
-    slow_consumer(rd_clk, synced.1, flag_sync_out);
+    slow_consumer(synced.1, flag_sync_out);
 }
 "#;
 
@@ -124,7 +120,7 @@ fn hierarchy_co_emits_children_deepest_first() {
 /// consumer, skipping the synchronizer — an unsynchronized clock-domain crossing.
 const UNSYNCED_CROSSING_SRC: &str = r#"
 use copper_core::{Bits, Clock, ClockDomain, Logic};
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, Out, RegOut};
 use copper_macros::hardware;
 
 struct ClkFast;
@@ -135,36 +131,33 @@ impl ClockDomain for ClkSlow {}
 #[hardware(sequential)]
 async fn fast_counter(
     clk: Clock<ClkFast>,
-    count_out: Out<Bits<8>, ClkFast>,
-    flag_out: Out<Logic, ClkFast>,
+    count_out: RegOut<Bits<8>, ClkFast>,
+    flag_out: RegOut<Logic, ClkFast>,
 ) {
     let mut count: Bits<8> = Bits::zero();
     loop {
+        count = count + Bits::from_lit::<1>();
         count_out.write(count);
         flag_out.write(count[3]);
         clk.tick().await;
-        count = count + Bits::from_lit::<1>();
     }
 }
 
-#[hardware(sequential)]
-async fn slow_consumer(clk: Clock<ClkSlow>, flag_in: In<Logic, ClkSlow>, out: Out<Logic, ClkSlow>) {
-    loop {
-        out.write(flag_in.read());
-        clk.tick().await;
-    }
+#[hardware(combinational)]
+fn slow_consumer(flag_in: In<Logic, ClkSlow>, out: Out<Logic, ClkSlow>) {
+    out.write(flag_in.read());
 }
 
 #[hardware(structural)]
 async fn bad_top(
     wr_clk: Clock<ClkFast>,
     rd_clk: Clock<ClkSlow>,
-    count_out: Out<Bits<8>, ClkFast>,
+    count_out: RegOut<Bits<8>, ClkFast>,
     out: Out<Logic, ClkSlow>,
 ) {
-    let flag = wire::<Logic, ClkFast>(Logic::Zero);
+    let flag = registered_wire::<Logic, ClkFast>(&wr_clk, Logic::Zero);
     fast_counter(wr_clk, count_out, flag.0);
-    slow_consumer(rd_clk, flag.1, out);
+    slow_consumer(flag.1, out);
 }
 "#;
 

@@ -66,7 +66,7 @@ fn line(cycle: usize, inputs: &[(&str, u128)], outputs: &[(&str, u128)]) -> Stri
 
 mod counter {
     use crate::line;
-    use copper_core::port::{wire, In, Out};
+    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
     use copper_core::types::{Bits, Clock, ClockDomain};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};
@@ -78,7 +78,7 @@ mod counter {
         let mut clk = Clock::<MainClk>::new();
         let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
         let (step_drv, step_in) = wire::<Bits<8>, MainClk>(Bits::from_u8(3));
-        let (out_drv, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+        let (out_drv, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
         let dh = out_drv.dirty_handle();
         let reads = vec![step_in.wire_id()];
         exec.spawn_wired(counter(clk.clone(), step_in, out_drv), vec![dh], reads);
@@ -96,7 +96,7 @@ mod counter {
 
 mod lfsr {
     use crate::line;
-    use copper_core::port::{wire, In, Out};
+    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
     use copper_core::types::{Bits, Clock, ClockDomain, Logic};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};
@@ -109,7 +109,7 @@ mod lfsr {
         let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
         let (rst_drv, rst_in) = wire::<Logic, MainClk>(Logic::One);
         let (yumi_drv, yumi_in) = wire::<Logic, MainClk>(Logic::Zero);
-        let (o_drv, o_obs) = wire::<Bits<32>, MainClk>(Bits::from_u32(0));
+        let (o_drv, o_obs) = registered_wire::<Bits<32>, MainClk>(&clk, Bits::from_u32(0));
         let dh = o_drv.dirty_handle();
         let reads = vec![rst_in.wire_id(), yumi_in.wire_id()];
         exec.spawn_wired(lfsr(clk.clone(), rst_in, yumi_in, o_drv), vec![dh], reads);
@@ -136,7 +136,7 @@ mod lfsr {
 
 mod shift_register {
     use crate::line;
-    use copper_core::port::{wire, In, Out};
+    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
     use copper_core::types::{Bits, Clock, ClockDomain, Logic};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};
@@ -151,7 +151,7 @@ mod shift_register {
         let (en_drv, en_in) = wire::<Logic, MainClk>(Logic::One);
         let (dir_drv, dir_in) = wire::<Logic, MainClk>(Logic::Zero);
         let (rstn_drv, rstn_in) = wire::<Logic, MainClk>(Logic::One);
-        let (out_drv, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+        let (out_drv, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
         let dh = out_drv.dirty_handle();
         let reads = vec![d_in.wire_id(), en_in.wire_id(), dir_in.wire_id(), rstn_in.wire_id()];
         exec.spawn_wired(
@@ -194,7 +194,7 @@ mod shift_register {
 
 mod pattern_detector {
     use crate::line;
-    use copper_core::port::{wire, In, Out};
+    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
     use copper_core::types::{Clock, ClockDomain, Logic};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};
@@ -207,7 +207,7 @@ mod pattern_detector {
         let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
         let (rstn_drv, rstn_in) = wire::<Logic, MainClk>(Logic::One);
         let (in_drv, in_port) = wire::<Logic, MainClk>(Logic::Zero);
-        let (out_drv, out_obs) = wire::<Logic, MainClk>(Logic::Zero);
+        let (out_drv, out_obs) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
         let dh = out_drv.dirty_handle();
         let reads = vec![rstn_in.wire_id(), in_port.wire_id()];
         exec.spawn_wired(det_110101(clk.clone(), rstn_in, in_port, out_drv), vec![dh], reads);
@@ -234,7 +234,7 @@ mod pattern_detector {
 
 mod det_010 {
     use crate::line;
-    use copper_core::port::{wire, In, Out};
+    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
     use copper_core::types::{Clock, ClockDomain, Logic};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};
@@ -247,7 +247,7 @@ mod det_010 {
         let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
         let (rstn_drv, rstn_in) = wire::<Logic, MainClk>(Logic::One);
         let (in_drv, in_port) = wire::<Logic, MainClk>(Logic::Zero);
-        let (out_drv, out_obs) = wire::<Logic, MainClk>(Logic::Zero);
+        let (out_drv, out_obs) = copper_core::port::registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
         let dh = out_drv.dirty_handle();
         let reads = vec![rstn_in.wire_id(), in_port.wire_id()];
         exec.spawn_wired(det_010(clk.clone(), rstn_in, in_port, out_drv), vec![dh], reads);
@@ -274,7 +274,7 @@ mod det_010 {
 
 mod mac_pipeline {
     use crate::line;
-    use copper_core::port::{wire, In, Out};
+    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
     use copper_core::types::{Bits, Clock, ClockDomain};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};
@@ -288,7 +288,7 @@ mod mac_pipeline {
         let (a_drv, a_in) = wire::<Bits<8>, MainClk>(Bits::zero());
         let (b_drv, b_in) = wire::<Bits<8>, MainClk>(Bits::zero());
         let (c_drv, c_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-        let (out_drv, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+        let (out_drv, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
         let dh = out_drv.dirty_handle();
         let reads = vec![a_in.wire_id(), b_in.wire_id(), c_in.wire_id()];
         exec.spawn_wired(mac_pipeline(clk.clone(), a_in, b_in, c_in, out_drv), vec![dh], reads);

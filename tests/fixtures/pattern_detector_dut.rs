@@ -17,7 +17,7 @@ async fn det_110101(
     clk: Clock<MainClk>,
     rstn: In<Logic, MainClk>,
     in_i: In<Logic, MainClk>,
-    out_o: Out<Logic, MainClk>,
+    out_o: RegOut<Logic, MainClk>,
 ) {
     let mut state = State::IDLE;
     loop {

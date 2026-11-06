@@ -11,7 +11,7 @@ async fn mac_pipeline(
     a: In<Bits<8>, MainClk>,
     b: In<Bits<8>, MainClk>,
     c: In<Bits<8>, MainClk>,
-    out: Out<Bits<8>, MainClk>,
+    out: RegOut<Bits<8>, MainClk>,
 ) {
     loop {
         // Stage 1 — sample inputs and multiply (product, c_s live across .await)
@@ -19,12 +19,15 @@ async fn mac_pipeline(
         let c_s = c.read();
         clk.tick().await;
 
-        // Stage 2 — add c captured in stage 1 (sum lives across .await)
+        // Stage 2 — add c captured in stage 1, and register the sum on the
+        // output: the `RegOut` commits at the edge that ends this stage, so the
+        // result shows from stage 3 on (D-8: the stage-3 output register IS the
+        // `RegOut`, so stage 3 itself has no work).
         let sum = product + c_s;
+        out.write(sum);
         clk.tick().await;
 
-        // Stage 3 — output
-        out.write(sum);
+        // Stage 3 — the output register holds
         clk.tick().await;
     }
 }

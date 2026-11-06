@@ -792,3 +792,69 @@ predicted.**
    then, the order of two coroutines of one domain joined by a plain `Out` is
    visit-order-dependent under the fixpoint scheduler; the levelized scheduler orders them
    by the wire. This is outside the language-to-be, and nothing in the corpus measures it.
+
+## G. Phase C step 3 — the macro, the D-8 rewrites, the flip (2026-11-06)
+
+Branch `claude/phase-c-macro-0f3e3b` (from `paper` at `2aafbed`). SPEC II.1 R8, D-8, D-13
+(II.3.2's deletion list), D-20 obligation (3). Every prediction below was written here before
+the code it predicts was changed.
+
+### G.0 Inventory and predictions (written before any code change)
+
+Measured by a scan of every `#[hardware(sequential|synchronizer)]` signature in the tree
+(`paper/` and `target/` excluded) for a plain `Out<`: **697 module definitions in 101 files**,
+counting the Rust-source strings (`r#"…"#`, `parse_quote!`) that tests transpile or analyse.
+By group:
+
+**(A) Anchored to an independent reference — rewritten first.**
+
+| module(s) | file(s) | reference | predicted trace (new spelling, `Two` and `One`) |
+|---|---|---|---|
+| `sync_2ff`, `sync_2ff_concrete` (and `structural_hierarchy.rs`'s copy) | `src/sync.rs`, `tests/fixtures/sync_2ff_dut.rs` | `examples/cdc/sv/sync_2ff_ref.sv` (`cdc_synchronizer_anchor.rs`) | identical, in the measured tick-last spelling (`tests/ref_probes/sync_2ff_tick_last.rs`). **G2 `NameExact` predicted to FAIL**: inference gives `{ff1}` (`ff2` is a wire of one resumption, D-8 packet note 1), the reference `{ff1, ff2}`; the second flop is the `RegOut` `q`, which G2's convention (output ports excluded) does not count |
+| `sync_1ff` (the one-flop negative control) | `tests/cdc_synchronizer_anchor.rs` | the 2-FF trace | still one destination cycle faster than `sync_2ff` |
+| `det_010` (example + fixture) | `examples/sequential/pattern_detector_2.rs`, `tests/fixtures/det_010_dut.rs` | `pattern_detector_010.sv` | identical (Q1 §4 (a)); G2 `StorageEquivalent` unchanged (`{state}`) |
+| `det_110101` (example + fixture) | `pattern_detector.rs`, `pattern_detector_dut.rs` | `pattern_detector.sv` | identical on the example's stimulus; the LCG overlap at cycles 15/271 is the golden's (Q1 §4 (i)) and is not on any test's stream |
+| `bsg_dff_en`, `bsg_counter_up_down`, `sipo_block` | `examples/basejump/` | BaseJump | identical (Q1 §4 (b), (c), (c'')) |
+| `lfsr`, `shift_register` (example + fixture each) | `examples/sequential/`, fixtures | `lfsr.sv`, `shift_register.sv` | identical (closing writes; unchanged under `One` in F.1) |
+| `dual_port_ram` | `examples/memory/` | `dual_port_ram.sv` | identical |
+| `fast_counter`, `flag_sync`, `slow_consumer` | `examples/cdc/two_domain_hierarchy.rs` (+ `two_clock_pins.rs`, `two_domain_hierarchy_cdc.rs`) | `two_domain_hierarchy.sv` and the transpiled `two_domain_top` | identical on both domains under P, Q and R in both modes; `two_clock_pins` (vi)'s `One` lag assertions become equalities |
+| `ram_read_first`, `bit_not_bits` | fixtures (`REFERENCE` rows) | `reference_sv/` | identical |
+| `accumulator_en`, `held_temp_trap`/`total_expr_temp`/`enabled_register` | fixtures | `reference_sv/accumulator_en_dut.sv`, `aggregate_locals_dut.sv` | identical |
+| `stage_add_one`, `stage_double`, `counter_by` | `tests/module_composition_hybrid.rs` | `reference_sv/hybrid_pipeline.sv` | identical |
+| `dff`, `dff_after`, `enff`, `counter` | `tests/timing_probe_investigation.rs` | `timing_probe_sv/` | identical (`dff_after` becomes `dff`'s spelling) |
+| `ram_straddle`, `ram_prewrite` | `tests/mem_latency_probe.rs` | `timing_probe_sv/ram1.sv` | identical |
+| `rv32i_cpu_pipelined` | — | 13 programs (`rv32i_pipelined_verilator.rs`) | **not affected**: no plain `Out`; 13/13 unchanged |
+| `rv32i_cpu_transpilable` | `examples/cpu/` | its `selfcheck` | identical (closing writes) |
+
+**(B) The remaining swept modules** (`examples/`, `tests/fixtures/`): 87 plain-`Out` modules,
+83 swept (F.1's 65 changed + 18 closing-write) and 4 `SKIP` rows. Predicted: every swept
+rewrite PASSes under both modes; the `obs_0` EXCUSED class (25 modules, 131 sequences) shrinks
+to 0 as its members become `RegOut`. The four `SKIP`-row modules: `probe`,
+`out_from_reg_before_commit`, `vr_sink_mealy`, `vr_skid` — demonstrations of a two-job hazard,
+**deleted** (unexpressible under D-8; `vr_sink_moore` / `q1_b_vr_sink` and
+`out_from_reg_after_commit` are their agreeing spellings), with their `SKIP` rows (D-13: 4 of 7).
+
+**(C) Hand-written tests** with inline plain-`Out` modules (excluding the battery): 33 modules in
+13 root `tests/*.rs` files, 33 in 5 crate test files (`analysis_semantics.rs` 16,
+`unsupported_constructs.rs` 8, `structural_hierarchy.rs` 5, `branch_local_defaults.rs` 2,
+`literal_operand_width.rs` 1, `interp_smoke.rs` 1), plus every test that wires a rewritten
+fixture (its `wire` becomes `registered_wire`). Predicted: each passes with the module
+rewritten; the three frozen `golden_traces` (`counter`, `det_010`, `mac_pipeline`) unchanged.
+
+**(D) The battery** `tests/sequential_forwarding_divergence.rs`: 167 tests, 318 module
+definitions (each module twice, compiled and as a source string). Predicted: every test whose
+modules include a plain `Out` is deleted (unexpressible); tests over `RegOut`-only modules stay.
+
+**(E) Rule machinery** (D-13 sizing, II.3.2): ui/fail 18 of 39 for rules 8–15 (+1 for rule 7);
+ui/pass `pretick_alignment_ok`; `pretick_alignment_corpus.rs` (83 entries) and
+`hold_form_audit.rs` (20 entries) whole; `front_end_parity.rs` test 2; `cfg.rs` ≈109 of 165
+unit tests by prefix; 4 of 7 `SKIP` rows. ui/fail cases for other rules that use a plain `Out`
+incidentally (`cdc_crossing`, `clock_construction`, `foreign_await`, `function_typed_*`,
+`multiple_top_level_loops`, `param_shadowing`, `partial_tick_path`,
+`sequential_unprotectable_read`, `tickless_loop`) are re-spelled with `RegOut` so they still fail
+for their own reason. Predicted: deleted counts within D-13's sizing.
+
+**(F) After the flip** (predicted): G-G differential 0 DISAGREE, 0 EXCUSED (the class deleted),
+reference leg unchanged; `regout_trailing_single_tick` pinned sim=ref≠SV (its `REF_SKIP` row
+re-worded); the three sim=ref≠SV pins (f2)/(f3)/(f4) unchanged; `b_reg`'s never-ticked `Two`
+pin deleted; G-H merged into G-G.

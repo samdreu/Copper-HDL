@@ -7,7 +7,7 @@
 //! crossings don't compile; this proves the *legal* one behaves correctly.
 
 use copper::sync_2ff;
-use copper_core::port::wire;
+use copper_core::port::{registered_wire, wire};
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_sim::HardwareExecutor;
 
@@ -31,7 +31,7 @@ fn sync_2ff_crosses_delayed_not_combinational() {
 
     // The source wire is tagged `Fast`; the synchronizer's output is `Slow`.
     let (d_drv, d_in) = wire::<Logic, Fast>(Logic::Zero);
-    let (q_out, q_obs) = wire::<Logic, Slow>(Logic::Zero);
+    let (q_out, q_obs) = registered_wire::<Logic, Slow>(&clk, Logic::Zero);
     let dh = q_out.dirty_handle();
     let reads = vec![d_in.wire_id()];
     exec.spawn_wired(sync_2ff(clk.clone(), d_in, q_out), vec![dh], reads);
@@ -61,7 +61,7 @@ fn sync_2ff_settles_to_a_held_input() {
     let mut exec = HardwareExecutor::new();
 
     let (d_drv, d_in) = wire::<Logic, Fast>(Logic::Zero);
-    let (q_out, q_obs) = wire::<Logic, Slow>(Logic::Zero);
+    let (q_out, q_obs) = registered_wire::<Logic, Slow>(&clk, Logic::Zero);
     let dh = q_out.dirty_handle();
     let reads = vec![d_in.wire_id()];
     exec.spawn_wired(sync_2ff(clk.clone(), d_in, q_out), vec![dh], reads);

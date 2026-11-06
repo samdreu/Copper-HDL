@@ -15,7 +15,7 @@
 // Both illegal paths are shown commented-out below with the error they produce.
 
 use copper::sync_2ff;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, Out, RegOut};
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::{HardwareExecutor, HardwareTest, SimulationTrace, make_cycle};
@@ -27,22 +27,19 @@ impl ClockDomain for ClkSlow {}
 
 // ── Fast-domain producer ──────────────────────────────────────────────────────
 // Raises `event` for one fast cycle whenever `trigger` is seen, then lowers it.
-#[hardware(sequential)]
-async fn event_source(clk: Clock<ClkFast>, trigger: In<Logic, ClkFast>, event: Out<Logic, ClkFast>) {
-    loop {
-        event.write(trigger.read());
-        clk.tick().await;
-    }
+#[hardware(combinational)]
+fn event_source(trigger: In<Logic, ClkFast>, event: Out<Logic, ClkFast>) {
+    // A passthrough is a wire, so it is a combinational module (D-8: a clocked
+    // body has no plain `Out`); it is still tagged `ClkFast` by its port types.
+    event.write(trigger.read());
 }
 
 // ── Slow-domain consumer ──────────────────────────────────────────────────────
 // Reads the *synchronized* flag (already in ClkSlow) and mirrors it out.
-#[hardware(sequential)]
-async fn event_sink(clk: Clock<ClkSlow>, event_synced: In<Logic, ClkSlow>, seen: Out<Logic, ClkSlow>) {
-    loop {
-        seen.write(event_synced.read());
-        clk.tick().await;
-    }
+#[hardware(combinational)]
+fn event_sink(event_synced: In<Logic, ClkSlow>, seen: Out<Logic, ClkSlow>) {
+    // A passthrough is a wire, so it is a combinational module (D-8).
+    seen.write(event_synced.read());
 }
 
 // A regular module may NOT cross domains — both of these fail to compile:
@@ -55,7 +52,7 @@ async fn event_sink(clk: Clock<ClkSlow>, event_synced: In<Logic, ClkSlow>, seen:
 //   //        module is clocked on `ClkSlow`. ... bring the signal across with a synchronizer
 //
 //   // and even wiring the fast flag straight into the slow sink is rejected by the types:
-//   //   event_sink(clk_slow.clone(), fast_event_wire, seen_out);
+//   //   event_sink(fast_event_wire, seen_out);
 //   //   error[E0308]: expected `In<Logic, ClkSlow>`, found `In<Logic, ClkFast>`
 
 fn main() {
@@ -67,7 +64,7 @@ fn main() {
     let (trig_drv, trig_in) = wire::<Logic, ClkFast>(Logic::Zero);
     let (event_out, event_in) = wire::<Logic, ClkFast>(Logic::Zero);
     // The crossing: event (ClkFast) → sync_2ff → event_synced (ClkSlow).
-    let (synced_out, synced_in) = wire::<Logic, ClkSlow>(Logic::Zero);
+    let (synced_out, synced_in) = registered_wire::<Logic, ClkSlow>(&clk_slow, Logic::Zero);
     // Slow domain: event_synced → event_sink → seen (ClkSlow).
     let (seen_out, seen_obs) = wire::<Logic, ClkSlow>(Logic::Zero);
 
@@ -78,9 +75,9 @@ fn main() {
     let source_reads = vec![trig_in.wire_id()];
     let sync_reads = vec![event_in.wire_id()];
     let sink_reads = vec![synced_in.wire_id()];
-    exec.spawn_wired(event_source(clk_fast.clone(), trig_in, event_out), vec![dh_event], source_reads);
+    exec.spawn_wired(event_source(trig_in, event_out), vec![dh_event], source_reads);
     exec.spawn_wired(sync_2ff(clk_slow.clone(), event_in, synced_out), vec![dh_synced], sync_reads);
-    exec.spawn_wired(event_sink(clk_slow.clone(), synced_in, seen_out), vec![dh_seen], sink_reads);
+    exec.spawn_wired(event_sink(synced_in, seen_out), vec![dh_seen], sink_reads);
 
     let mut test = HardwareTest::new("flag_crossing");
 

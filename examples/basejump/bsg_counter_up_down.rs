@@ -11,7 +11,7 @@
 // wrap and simultaneous up+down edge cases the DUT supports. The golden model is
 // the DUT's own recurrence, `count <= count - down + up` (mod 8).
 
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::{make_cycle, HardwareExecutor, HardwareTest, SimulationTrace};
@@ -29,17 +29,16 @@ async fn bsg_counter_up_down(
     reset_i: In<Logic, MainClk>,
     up_i: In<Logic, MainClk>,
     down_i: In<Logic, MainClk>,
-    count_o: Out<Bits<PTR_W>, MainClk>,
+    count_o: RegOut<Bits<PTR_W>, MainClk>,
 ) {
     // `Bits<PTR_W>`, not a bare `usize`: a `usize` local is a 32-bit signal, so
     // driving the 3-bit `count_o` from it is a width truncation Verilator rejects
     // under `-Wall`. Typing the counter at its real width also removes the
-    // `+ MOD … % MOD` dance — that existed only to keep a `usize` from
-    // underflowing, and `Bits<3>` wraps on its own, which is what the hardware
-    // does. The recurrence below is now BaseJump's own: `count_o - down_i + up_i`.
+    // `+ MOD … % MOD` dance — `Bits<3>` wraps on its own, which is what the
+    // hardware does. The recurrence below is BaseJump's own:
+    // `count_o - down_i + up_i`.
     let mut count = Bits::<PTR_W>::zero(); // init_val_p
     loop {
-        clk.tick().await;
         if reset_i.read() == Logic::One {
             count = Bits::zero();
         } else {
@@ -50,7 +49,9 @@ async fn bsg_counter_up_down(
             let down: Bits<PTR_W> = if down_i.read() == Logic::One { step } else { Bits::zero() };
             count = count - down + up; // 3-bit wrap-around, no saturation
         }
+        // The next count, committed at this resumption's edge (D-8).
         count_o.write(count);
+        clk.tick().await;
     }
 }
 
@@ -64,7 +65,7 @@ fn main() {
     let (rst_drv, rst_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (up_drv, up_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (dn_drv, dn_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (out_drv, out_obs) = wire::<Bits<PTR_W>, MainClk>(Bits::zero());
+    let (out_drv, out_obs) = registered_wire::<Bits<PTR_W>, MainClk>(&clk, Bits::zero());
     let dh = out_drv.dirty_handle();
     let reads = vec![rst_in.wire_id(), up_in.wire_id(), dn_in.wire_id()];
     exec.spawn_wired(

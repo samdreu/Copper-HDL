@@ -5,7 +5,7 @@
 //! 10,13,16 at cycles 0,3,6) and the transpiler (phase-0 edges 0,3,6).
 //! Run with: cargo test --test mac_read_timing_investigation -- --nocapture
 mod common;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain};
 use copper_macros::hardware;
@@ -22,7 +22,7 @@ fn mac_pipeline_sim_read_cadence() {
     let (a_drv, a_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (b_drv, b_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (c_drv, c_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (out_drv, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_drv, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = out_drv.dirty_handle();
     let reads = vec![a_in.wire_id(), b_in.wire_id(), c_in.wire_id()];
     exec.spawn_wired(mac_pipeline(clk.clone(), a_in, b_in, c_in, out_drv), vec![dh], reads);

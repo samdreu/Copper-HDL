@@ -1,7 +1,7 @@
 // Single source of truth for the det_010 equivalence test.
-// A 4-state Moore "010" detector, single-tick, with the output written AFTER the
-// tick (a post-tick / trailing-segment Moore output) — the case that was silently
-// dropped before the trailing port-drive fix. Also exercises `matches!`.
+// A 4-state Moore "010" detector, single-tick, in the one-job spelling (D-8): the
+// output is a `RegOut` of the next state, written before the tick. Also exercises
+// `matches!`.
 enum State { A, B, C, D }
 
 #[hardware(sequential)]
@@ -9,7 +9,7 @@ async fn det_010(
     clk: Clock<MainClk>,
     rstn: In<Logic, MainClk>,
     in_i: In<Logic, MainClk>,
-    out_o: Out<Logic, MainClk>,
+    out_o: RegOut<Logic, MainClk>,
 ) {
     let mut state = State::A;
     loop {
@@ -25,12 +25,13 @@ async fn det_010(
                 _ => State::A,
             };
         }
-        clk.tick().await;
-
+        // The Moore output of the NEXT state, written before the tick: the `RegOut`
+        // shows it from the edge that commits `state` (D-8; Q1_TRADEOFFS §4 (a)).
         if matches!(state, State::D) {
             out_o.write(Logic::One);
         } else {
             out_o.write(Logic::Zero);
         }
+        clk.tick().await;
     }
 }

@@ -6,7 +6,7 @@
 mod common;
 
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::{Bits, Clock, ClockDomain};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -25,7 +25,7 @@ fn counter_sim_matches_transpiled_verilog() {
     let mut exec = HardwareExecutor::new();
 
     let (step_drv, step_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (out_out, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_out, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = out_out.dirty_handle();
     let reads = vec![step_in.wire_id()];
     exec.spawn_wired(counter(clk.clone(), step_in, out_out), vec![dh], reads);

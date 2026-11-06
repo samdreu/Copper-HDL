@@ -1,5 +1,5 @@
 use copper_core::types::{Bits, Logic, Clock, ClockDomain};
-use copper_core::port::{In, Out, wire};
+use copper_core::port::{In, Out, wire, RegOut, registered_wire};
 use copper_macros::hardware;
 use copper_sim::{HardwareExecutor, HardwareTest, SimulationTrace, make_cycle};
 
@@ -13,7 +13,7 @@ async fn shift_register <const N: usize, const N_1: usize> (
     en: In<Logic, MainClk>,
     dir: In<Logic, MainClk>,
     rstn: In<Logic, MainClk>,
-    out: Out<Bits<N>, MainClk>,
+    out: RegOut<Bits<N>, MainClk>,
 ) {
     const { assert!(N-1 == N_1, "N_1 must equal N-1") };
     let mut out_n = Bits::x();
@@ -55,7 +55,7 @@ fn main() {
     let (en_drv, en_in)     = wire::<Logic, MainClk>(Logic::Zero);
     let (dir_drv, dir_in)   = wire::<Logic, MainClk>(Logic::Zero);
     let (rstn_drv, rstn_in) = wire::<Logic, MainClk>(Logic::One);
-    let (out_out, out_obs)  = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (out_out, out_obs)  = registered_wire::<Bits<N>, MainClk>(&clk, Bits::zero());
 
     let dh = out_out.dirty_handle();
     let reads = vec![d_in.wire_id(), en_in.wire_id(), dir_in.wire_id(), rstn_in.wire_id()];

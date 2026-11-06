@@ -17,14 +17,14 @@
 //! — the crossing must go through a synchronizer instead:
 //!
 //! ```compile_fail
-//! use copper_core::port::{In, Out};
+//! use copper_core::port::{In, RegOut};
 //! use copper_core::{Clock, ClockDomain, Logic};
 //! use copper_macros::hardware;
 //! struct Fast; impl ClockDomain for Fast {}
 //! struct Slow; impl ClockDomain for Slow {}
 //!
 //! #[hardware(sequential)]
-//! async fn bad(clk: Clock<Slow>, fast: In<Logic, Fast>, q: Out<Logic, Slow>) {
+//! async fn bad(clk: Clock<Slow>, fast: In<Logic, Fast>, q: RegOut<Logic, Slow>) {
 //!     loop { q.write(fast.read()); clk.tick().await; }   // rejected: foreign input `fast`
 //! }
 //! ```
@@ -37,25 +37,27 @@
 //! responsibility for the timing correctness inside it.
 //!
 //! ```
-//! use copper_core::port::{In, Out};
+//! use copper_core::port::{In, RegOut};
 //! use copper_core::{Clock, ClockDomain, Logic};
 //! use copper_macros::hardware;
 //! struct Slow; impl ClockDomain for Slow {}
 //!
-//! // A three-flip-flop synchronizer for an extra-conservative crossing.
+//! // A three-flip-flop synchronizer for an extra-conservative crossing: `a` and
+//! // `b` are registers, the `RegOut` `q` is the third flop.
 //! #[hardware(synchronizer)]
-//! async fn sync_3ff<Src: ClockDomain>(clk: Clock<Slow>, d: In<Logic, Src>, q: Out<Logic, Slow>) {
-//!     let (mut a, mut b, mut c) = (Logic::Zero, Logic::Zero, Logic::Zero);
+//! async fn sync_3ff<Src: ClockDomain>(clk: Clock<Slow>, d: In<Logic, Src>, q: RegOut<Logic, Slow>) {
+//!     let (mut a, mut b) = (Logic::Zero, Logic::Zero);
 //!     loop {
-//!         q.write(c);
+//!         q.write(b);
+//!         b = a;
+//!         a = d.read();
 //!         clk.tick().await;
-//!         c = b; b = a; a = d.read();
 //!     }
 //! }
 //! let _ = sync_3ff::<Slow>;
 //! ```
 
-use copper_core::port::{In, Out};
+use copper_core::port::{In, RegOut};
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 
@@ -69,16 +71,18 @@ use copper_macros::hardware;
 pub async fn sync_2ff<Src: ClockDomain, Dst: ClockDomain>(
     clk: Clock<Dst>,
     d: In<Logic, Src>,
-    q: Out<Logic, Dst>,
+    q: RegOut<Logic, Dst>,
 ) {
+    // The one-job spelling (D-8, SPEC I.7.5; measured identical to
+    // examples/cdc/sv/sync_2ff_ref.sv): `ff1` is the first flop (a register, live
+    // at the tick), the `RegOut` `q` the second. `ff2` is a wire of one resumption —
+    // it takes the OLD `ff1` before `ff1` is reassigned, so the two stages stay
+    // distinct; reading `ff1` after its update would collapse them into one flop.
     let mut ff1 = Logic::Zero;
-    let mut ff2 = Logic::Zero;
     loop {
+        let ff2 = ff1;
+        ff1 = d.read();
         q.write(ff2);
         clk.tick().await;
-        // ff2 captures the OLD ff1 (ff1 is reassigned after), so the two stages
-        // stay distinct — reversing these lines would collapse them into one flop.
-        ff2 = ff1;
-        ff1 = d.read();
     }
 }

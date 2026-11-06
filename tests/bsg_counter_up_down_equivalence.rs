@@ -43,7 +43,7 @@ fn bsg_counter_up_down_sim_matches_transpiled_verilog() {
     let (rst_drv, rst_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (up_drv, up_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (dn_drv, dn_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (out_o, out_obs) = wire::<Bits<PTR_W>, MainClk>(Bits::zero());
+    let (out_o, out_obs) = registered_wire::<Bits<PTR_W>, MainClk>(&clk, Bits::zero());
     let dh = out_o.dirty_handle();
     let reads = vec![rst_in.wire_id(), up_in.wire_id(), dn_in.wire_id()];
     exec.spawn_wired(

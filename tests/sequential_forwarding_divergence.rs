@@ -152,7 +152,7 @@
 mod common;
 use common::{verilator_available, verilator_command};
 use copper::sync_2ff;
-use copper_core::port::{wire, In, Out, RegOut};
+use copper_core::port::{registered_wire, wire, In, Out, RegOut};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -562,7 +562,7 @@ fn chain_assert_cycles(corrected: bool) -> (usize, usize, usize) {
 
     let (cp, _co) = wire::<Bits<8>, ClkFast>(Bits::zero());
     let (fp, fi) = wire::<Logic, ClkFast>(Logic::Zero);
-    let (qp, qi) = wire::<Logic, ClkSlow>(Logic::Zero);
+    let (qp, qi) = registered_wire::<Logic, ClkSlow>(&cs, Logic::Zero);
     let (op, oo) = wire::<Logic, ClkSlow>(Logic::Zero);
     let (flag_obs, syncq_obs) = (fi.clone(), qi.clone());
 

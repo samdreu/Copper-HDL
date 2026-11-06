@@ -10,7 +10,7 @@
 mod common;
 
 use common::{transpile_fixture, verilator_available, EquivalenceTest};
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -51,7 +51,7 @@ fn lfsr_sim_matches_transpiled_verilog() {
 
     let (reset_drv, reset_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (yumi_drv, yumi_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (o_out, o_obs) = wire::<Bits<32>, MainClk>(Bits::from_u32(1));
+    let (o_out, o_obs) = registered_wire::<Bits<32>, MainClk>(&clk, Bits::from_u32(1));
     let dh = o_out.dirty_handle();
     let reads = vec![reset_in.wire_id(), yumi_in.wire_id()];
     exec.spawn_wired(lfsr(clk.clone(), reset_in, yumi_in, o_out), vec![dh], reads);
@@ -105,7 +105,7 @@ fn before_reset_the_sv_holds_the_rust_initial_value_like_the_simulator() {
     let mut exec = HardwareExecutor::new();
     let (reset_drv, reset_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (yumi_drv, yumi_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (o_out, o_obs) = wire::<Bits<32>, MainClk>(Bits::zero());
+    let (o_out, o_obs) = registered_wire::<Bits<32>, MainClk>(&clk, Bits::zero());
     let dh = o_out.dirty_handle();
     let reads = vec![reset_in.wire_id(), yumi_in.wire_id()];
     exec.spawn_wired(lfsr(clk.clone(), reset_in, yumi_in, o_out), vec![dh], reads);
@@ -133,7 +133,7 @@ fn before_reset_the_sv_holds_the_rust_initial_value_like_the_simulator() {
     let sv = transpile_fixture("lfsr", DUT_SRC, None);
     let text = std::fs::read_to_string(&sv).expect("read the transpiled lfsr");
     assert!(
-        text.contains("initial begin\n        state = 32'd1;\n    end"),
+        text.contains("initial begin\n        state = 32'd1;\n"),
         "the Rust initializer `Bits::from_u32(1)` must reach the SV as `state`'s initial value; \
          emitted:\n{text}"
     );
