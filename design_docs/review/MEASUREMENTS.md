@@ -909,3 +909,12 @@ re-spell the two anchors with an array register (`dob.write(ram[addr])`, which i
 `dob <= ram[a]`) and accept +1 on the unanchored ones; (c) accept +1 everywhere and
 re-anchor. Until it is decided, R8 and the flip cannot land (each of these modules would be
 refused).
+
+**Part 2 regression** (`a6ccc98`, `--no-examples`): PARTIAL OK (446 s), 1471 passed, 0
+failed, 89 ignored. G-D 160 differential cases (3 ignored-with-reason: the `SKIP` table is
+down to `rv32i_cpu_pipelined`, `two_domain_top`, `mod8`). G-F 87 modules through the
+interpreter (46 at E.7). G-G differential **1226 PASS / 0 EXCUSED / 0 DISAGREE** — the
+`obs_0` plain-`Out` excuse class is already **empty** (predicted to empty at the flip; it
+emptied with the rewrites, because every member was rewritten); reference 712 PASS. G-H:
+**15 of 160** cases still change under `One` (F.6: 66) — exactly the 14 `Memory`-output
+modules of G.2 and P12 (`regout_trailing_single_tick`), 186 sequences, all `sim≠SV,no-ref`.
