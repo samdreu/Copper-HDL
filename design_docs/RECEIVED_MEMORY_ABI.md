@@ -5,6 +5,9 @@ ledger). Verified end to end by `tests/received_memory_abi.rs` — the simulator
 running a real `Memory` object and the transpiled child instantiated under a
 hand-written owner both reproduce the trace derived from the memory windows.
 
+> **Meaning:** `SPEC.md` §I.10.5 (D-16, 2026-11-05) — one owner per port, one domain, the port set and
+> mode fixed per module; this document records the emitted realization and its date.
+
 ## 1. The question, and the fork that was recorded
 
 `#[hardware]` accepts a `Memory<…>` **parameter** (2026-08-26): a module may be

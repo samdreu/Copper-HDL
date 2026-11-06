@@ -612,6 +612,10 @@ increment B — repeating waits* and the *mid-phase read seam* entry that follow
 
 ## Memory — staging and read latency
 
+> **Superseded in meaning by `SPEC.md` §I.10 (D-16, 2026-11-05):** the per-port stage/observe model, the
+> declared read-during-write mode, the constant initial array and the memory rules'
+> principles are stated there; this section is kept as the implementation history.
+
 `Memory<T, R, W, D, READ_LAT, WRITE_LAT>` (`copper-core/src/memory.rs`) is a first-class multi-port
 synchronous memory: `R` read ports, `W` write ports, latencies in cycles (`≥ 1`), a
 `WriteMode::{ReadFirst, WriteFirst}` same-address collision policy and a `ReadMode::{Sync, Async}`

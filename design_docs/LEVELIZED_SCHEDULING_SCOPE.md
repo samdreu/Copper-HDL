@@ -1,5 +1,8 @@
 # Item 6 — Levelized dependency-graph scheduling: as-built design
 
+> **Meaning:** `SPEC.md` §I.13.2–I.13.3 (D-18, 2026-11-05) — the settle is a function of the
+> sources, so order independence is a theorem (III.1); this document records the realization.
+
 > Scope for impl-plan item 6 (`SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md`), written
 > 2026-07-30 before implementation and kept as the design record. **All five phases
 > landed in `56bfe5e` (2026-08-03).** `SchedulerMode::Levelized` is the compiled
