@@ -19,7 +19,7 @@
 
 mod common;
 
-use common::{verilator_available, EquivalenceTest, Rng};
+use common::{verilator_available, EquivalenceTest, Pattern, Rng};
 use copper_core::port::{registered_wire, wire, In, Out, RegOut};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
@@ -65,7 +65,16 @@ macro_rules! run_go_q {
             // (D-11's probe (ii): a head write on every path hides it).
             let go = if i < 4 { Logic::Zero } else { rng.logic() };
             go_drv.write(go);
-            exec.tick_clock(&mut clk);
+            if i == 0 {
+                // Observation 0 (SPEC §III.2.1): after the first resumption's settle,
+                // before edge 1 — init(q) on every leg (I.9.4), PREDICTED to agree.
+                exec.pre_edge_settle::<MainClk>();
+                let q0 = q_obs.read();
+                eq.record_observation_zero(&[("q", &q0[..])]);
+                exec.post_edge_settle(&mut clk);
+            } else {
+                exec.tick_clock(&mut clk);
+            }
             let q = q_obs.read();
             eq.record_differential(&[("go", std::slice::from_ref(&go))], &[("q", &q[..])]);
         }
@@ -93,6 +102,9 @@ fn preloop_statement_is_spec_vs_transpiler_on_both_routes() {
             v.interpreter
         );
         assert!(!v.transpiled, "{name}: the transpiled SV was predicted to diverge (II.3 rows (f2)/(f3))");
+        // SPEC §III.2.8: sim = ref ≠ SV — a transpiler bug or a II.3 row (here (f2)/(f3)).
+        assert_eq!(v.pattern, Some(Pattern::SimEqRefNeSv), "{name}: {}", v.report);
+        v.record_pin(&format!("{name}: II.3 row {} (P15), the Phase C entry fixes it", if name == "preloop_probe" { "(f2)" } else { "(f3)" }));
     }
 }
 
@@ -111,7 +123,14 @@ fn trailing_fold_at_edge_1_is_spec_vs_transpiler() {
     exec.spawn_wired(trailing_fold(clk.clone(), q_out), vec![dh], vec![]);
     let mut first = None;
     for i in 0..16 {
-        exec.tick_clock(&mut clk);
+        if i == 0 {
+            exec.pre_edge_settle::<MainClk>();
+            let q0 = q_obs.read();
+            eq.record_observation_zero(&[("q", &q0[..])]);
+            exec.post_edge_settle(&mut clk);
+        } else {
+            exec.tick_clock(&mut clk);
+        }
         let q = q_obs.read();
         if i == 0 {
             first = Some(q.as_u8());
@@ -126,6 +145,8 @@ fn trailing_fold_at_edge_1_is_spec_vs_transpiler() {
     let fails: Vec<&str> = v.report.lines().filter(|l| l.starts_with("FAIL: Cycle")).collect();
     assert_eq!(fails.len(), 1, "the divergence is at obs_1 only:\n{}", v.report);
     assert!(fails[0].starts_with("FAIL: Cycle 0 "), "the divergence is at obs_1 (recorded cycle 0):\n{}", v.report);
+    assert_eq!(v.pattern, Some(Pattern::SimEqRefNeSv), "{}", v.report);
+    v.record_pin("trailing_fold: II.3 row (f4) (P15), D-11's trailing fold at edge 1");
 }
 
 /// The one corpus disagreement the leg found (its `REF_SKIP` row in build.rs):
@@ -171,6 +192,10 @@ fn regout_trailing_single_tick_is_the_two_job_residue() {
     println!("regout_trailing_single_tick: transpiled {} interpreter {:?}", v.transpiled, v.interpreter);
     assert!(v.transpiled, "sim = SV today (the sweep passes this module)");
     assert!(matches!(v.interpreter, Some(Err(_))), "the one-job interpreter reads x_{{N+1}}: Σ x_1..x_{{N+1}}");
+    // SPEC §III.2.8: sim = SV ≠ ref — the two-job residue (P12); its REF_SKIP row
+    // in build.rs names the same pattern, and G-G matches the two.
+    assert_eq!(v.pattern, Some(Pattern::SimEqSvNeRef), "{}", v.report);
+    v.record_pin("regout_trailing_single_tick: the two-job residue (P12), REF_SKIP row");
 }
 
 // ── corpus walk shared by (ii) and (iii) ───────────────────────────────────

@@ -13,6 +13,15 @@ pub struct SimulationTrace {
     /// Empty for a single-sequence trace, which is every trace recorded before
     /// 2026-10-28 and produces a byte-identical testbench to that date's.
     pub sequences: Vec<SequenceMark>,
+    /// The testbench form of the agreement relation (SPEC §III.2), set by the
+    /// differential harness: observation 0 is checked where a mark carries one
+    /// (III.2.1), a mismatch prints the full 64-bit value Verilator showed (the
+    /// harness reads the SV's value back to classify a disagreement by pattern,
+    /// III.2.8), and an X in an expected value is refused at generation time —
+    /// under the relation an X observation is reported OUTSIDE before it gets here
+    /// (III.2.2), never compared as 1. `false` (every trace built before 2026-11-06)
+    /// produces a byte-identical testbench to that date's.
+    pub relation: bool,
 }
 
 /// The start of one stimulus sequence inside a trace. Every sequence begins from
@@ -28,6 +37,11 @@ pub struct SequenceMark {
     /// What the sequence is (a seed, a first-cycle vector, …), carried into the
     /// testbench's `FAIL:` lines so a mismatch names the stimulus that produced it.
     pub label: String,
+    /// Observation 0 of this sequence (SPEC §I.1.4, §III.2.1): every output's value
+    /// after the settle at `t_1⁻` and before the first edge — in the testbench, after
+    /// the sequence's first inputs are applied and `eval()` with the clock low.
+    /// Checked only on a [`SimulationTrace::relation`] trace with a clock.
+    pub obs0: Option<Vec<(String, Vec<Logic>)>>,
 }
 
 /// Represents the data for a single cycle in the simulation, including the cycle number, input signal values, and output signal values. 
@@ -42,12 +56,12 @@ pub struct CycleData {
 impl SimulationTrace {
     /// Create a new empty simulation trace.
     pub fn new() -> Self {
-        SimulationTrace { cycles: Vec::new(), sequences: Vec::new() }
+        SimulationTrace { cycles: Vec::new(), sequences: Vec::new(), relation: false }
     }
 
     /// Create a trace from a pre-built list of cycles. Useful for constructing expected traces.
     pub fn from_cycles(cycles: Vec<CycleData>) -> Self {
-        SimulationTrace { cycles, sequences: Vec::new() }
+        SimulationTrace { cycles, sequences: Vec::new(), relation: false }
     }
 
     /// Begin a new stimulus sequence: the cycles recorded from here on start from
@@ -55,7 +69,7 @@ impl SimulationTrace {
     /// it before the first cycle of every sequence, the first included (a mark at
     /// index 0 needs no restart and emits none).
     pub fn begin_sequence(&mut self, label: &str) {
-        self.sequences.push(SequenceMark { start: self.cycles.len(), label: label.to_string() });
+        self.sequences.push(SequenceMark { start: self.cycles.len(), label: label.to_string(), obs0: None });
     }
 
     /// The sequence (its index among the marks and the mark itself) that the cycle
@@ -266,6 +280,27 @@ pub fn generate_testbench(
             if tracing {
                 tb.push_str("    tfp->dump(vcd_time++);\n");
             }
+            // Observation 0 (SPEC §III.2.1): the outputs after the first settle,
+            // before the first posedge — a relation trace's mark carries it.
+            if trace.relation {
+                if let Some(obs0) = trace
+                    .sequences
+                    .iter()
+                    .find(|m| m.start == index)
+                    .and_then(|m| m.obs0.as_ref())
+                {
+                    let seq0 = match trace.sequence_of(index) {
+                        Some((k, mark)) => format!(
+                            " (sequence {k} \\\"{}\\\", observation 0)",
+                            cpp_string(&mark.label)
+                        ),
+                        None => " (observation 0)".to_string(),
+                    };
+                    for (name, expected) in obs0 {
+                        tb.push_str(&relation_check(name, expected, cycle_data.cycle, "@obs0", &seq0));
+                    }
+                }
+            }
             tb.push_str("    top->clk = 1;\n");
             tb.push_str("    top->eval();\n");
             if tracing {
@@ -279,6 +314,13 @@ pub fn generate_testbench(
         }
 
         // Output checks — log failures but keep running so the full waveform is captured.
+        if trace.relation {
+            for (name, expected) in &cycle_data.outputs {
+                tb.push_str(&relation_check(name, expected, cycle_data.cycle, "", &seq_note));
+            }
+            tb.push_str("\n");
+            continue;
+        }
         for (name, expected) in &cycle_data.outputs {
             let expected_val = logic_vec_to_int(expected);
             tb.push_str(&format!(
@@ -324,6 +366,33 @@ fn cpp_string(label: &str) -> String {
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace(['\n', '\r'], " ")
+}
+
+/// One output check of a [`SimulationTrace::relation`] testbench. `tag` is appended
+/// to the port name in the FAIL line (`@obs0` for observation 0) so the harness can
+/// tell an observation-0 mismatch from a later one; the value Verilator showed is
+/// printed as an unsigned 64-bit integer (the `(int)` cast of the legacy form
+/// truncates a port wider than 32 bits, and the harness reads this value back).
+///
+/// An X bit in `expected` is a harness bug here, not a value: under the relation
+/// the differential harness reports an X observation OUTSIDE (SPEC §III.2.2) and
+/// never hands it to Verilator. Comparing it as 1 is what the legacy form did.
+fn relation_check(name: &str, expected: &[Logic], cycle: usize, tag: &str, seq_note: &str) -> String {
+    assert!(
+        !expected.iter().any(|b| *b == Logic::X),
+        "an X observation of `{name}` (cycle {cycle}{tag}) reached the SystemVerilog comparison: \
+         under the agreement relation it is OUTSIDE (SPEC §III.2.2) and must be cut before the \
+         testbench is generated"
+    );
+    let exp = logic_vec_to_int(expected);
+    format!(
+        "    if ((unsigned long long)top->{name} != {exp}ULL) {{\n\
+         \x20\x20\x20\x20    std::cout << \"FAIL: Cycle {cycle} {name}{tag} expected {exp} got \" << (unsigned long long)top->{name} << \"{seq_note}\" << std::endl;\n\
+         \x20\x20\x20\x20    failures++;\n\
+         \x20\x20\x20\x20}} else {{\n\
+         \x20\x20\x20\x20    std::cout << \"PASS: Cycle {cycle} {name}{tag}\" << std::endl;\n\
+         \x20\x20\x20\x20}}\n"
+    )
 }
 
 /// Convert Logic vector to integer for C++ testbench

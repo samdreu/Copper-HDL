@@ -337,3 +337,48 @@ and is tight up to the counters.
 6. **I.14 / the constant evaluator:** the interpreter folds `const` items with expression
    bodies and const generics as values (II.3 row (d)'s first two shapes) and refuses
    associated consts and const fns; `is_constant_expr` accepts all four syntactically.
+
+## E. Phase C step 1 — the harness implements the agreement relation (2026-11-06)
+
+Branch `claude/phase-c-harness-5ee569` (from `paper` at `649ea17`). SPEC §III.2.0–III.2.13
+implemented in `tests/common/mod.rs` (+ `tests/common/relation.rs`), the generated sweep
+cases (`build.rs`), the relation testbench form (`copper-sim/src/verification.rs`,
+`SimulationTrace::relation`) and `tools/regression.sh` (G-G). Every prediction below was
+written into this file before its measurement ran.
+
+### E.0 Predictions (written before the first run)
+
+- **(i) `obs_0` on the corpus.** A `RegOut` port: sim = the `registered_wire` initial (0),
+  ref = `init(q)` (0), SV = the port's `initial` (0) → agree on every leg, every sequence;
+  so the 46 reference-leg modules agree at `obs_0` on all three legs. P15's probes (f2)–(f4)
+  (`preloop_probe`, `preloop_linear`, `trailing_fold`, all `RegOut`): agree at `obs_0` on all
+  three legs; their divergences stay where they are (obs_1 and later). A plain `Out` written
+  before its first tick (an opening drive): realized by the forwarded comb/hold form, agrees.
+  A plain `Out` first written AFTER a tick and realized as a continuous `assign` of a
+  register/input expression: sim shows the wire's creation zero at `obs_0` (the write runs
+  at `t_1⁺`), SV shows the expression at power-on with `x_1` → disagrees whenever that is
+  non-zero. A static scan finds 62 such ports in ~45 modules; predicted to disagree for
+  certain: `bit_not_bits`, `bit_not_via_xor`, `bit_not_bool` (`!` of a zero register is all
+  ones); the rest depend on the emitted form and are not predicted individually; expected
+  count 3–15 modules, every one pattern `sim≠SV,no-ref` (plain `Out` ⇒ no reference leg).
+  The 3 `RESET` modules: `obs_0` declared out of the SV pair by the row on every sequence,
+  not counted OUTSIDE. Combinational modules: no separate `obs_0` (I.11.2(e): it is the
+  first evaluation, already the first compared observation).
+- **(ii) OUTSIDE (X vs SV) on the corpus: 0 sequences.** The only `Bits::x()` registers are
+  the 3 `RESET` modules' (`obs_0` declared out; the reset assigns them before `obs_1`), and
+  the only other X source swept until now was `mod8`'s `% 0`, which is a `SKIP`. Today's
+  green sweep is itself the evidence: an X written as 1 against Verilator's 0 would fail.
+  Deliberate X probe (`a % b`, `b` driven 0 on cycle 3): OUTSIDE from that observation on,
+  sim ≡ ref still compared exactly through the end.
+- **(iii) TRUNCATED probes.** X into `as_usize` (no memory, reference leg runs): sim and ref
+  fail at the same resumption → TRUNCATED at it, SV agreeing before. Out-of-range memory
+  address and undelivered `data()` (both have a `Memory` binding, so no reference leg):
+  TRUNCATED at the failing resumption with "reference leg not run", SV agreeing before.
+- **(iv) Patterns of the pinned/excused disagreements.** `preloop_probe` (f2),
+  `preloop_linear` (f3), `trailing_fold` (f4): `sim=ref≠SV`. `regout_trailing_single_tick`
+  (P12, its `REF_SKIP` row): `sim=SV≠ref`. The `SKIP` demonstrations `out_from_reg_before_commit`,
+  `vr_sink_mealy`, `vr_skid`: still divergent, `sim≠SV,no-ref` (plain `Out`); `probe`: agrees
+  (§A found the row stale on 2026-11-03).
+- **(v) Bare regression.** 159 differential cases, every sequence PASS except the `obs_0`
+  disagreements of (i) (excused by a row each once measured); OUTSIDE 0, TRUNCATED 0,
+  DISAGREE 0; reference leg 46 cases, every sequence PASS.

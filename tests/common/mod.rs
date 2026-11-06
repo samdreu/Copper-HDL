@@ -28,6 +28,11 @@ use copper_core::types::Bits;
 use copper_core::Logic;
 use copper_sim::{make_cycle, CycleData, HardwareTest, SimulationTrace};
 
+mod relation;
+#[allow(unused_imports)]
+pub use relation::{ledger_write, run_step, runtime_failure_kind, Pattern, SeqOutcome, LEDGER_ENV};
+use relation::{one_line, ref_runtime_failure_kind, to_int};
+
 /// Whether Verilator can be used, for tests that drive it directly rather than
 /// through `EquivalenceTest`.
 ///
@@ -690,6 +695,34 @@ pub struct EquivalenceTest {
     /// replay the recorded stimulus through `copper_ref` — the THIRD leg
     /// (`design_docs/SPEC_OVERVIEW.md` §7), the spec made executable.
     reference_interpreter: bool,
+    /// The transpiled SystemVerilog, kept so a differential run can Verilate the
+    /// trace the agreement relation admits rather than the trace recorded.
+    sv_path: Option<PathBuf>,
+    /// Per sequence (parallel to `sequences`): observation 0, if recorded
+    /// ([`record_observation_zero`](Self::record_observation_zero), SPEC §III.2.1).
+    seq_obs0: Vec<Option<Vec<(String, Vec<Logic>)>>>,
+    /// Per sequence: the simulator's run-time failure that ended it, if any
+    /// ([`record_failure`](Self::record_failure), SPEC §III.2.4).
+    seq_failure: Vec<Option<SimFailure>>,
+    /// The module has a `RESET` row: its observation 0 is declared outside the SV
+    /// pair (SPEC §III.2.2, "from reset").
+    reset_row: bool,
+    /// The sweep case's name, for the verdict ledger; `None` outside the sweep.
+    case: Option<String>,
+    /// A table row excusing a disagreement AT OBSERVATION 0 only, with its sentence.
+    obs0_excuse: Option<String>,
+}
+
+/// The simulator's run-time failure at one resumption (SPEC §III.2.4).
+#[derive(Clone, Debug)]
+pub struct SimFailure {
+    /// Index into the recorded cycles at which the failing resumption's observation
+    /// would have been recorded (the sequence's cycle count so far, from its start).
+    pub at: usize,
+    /// The inputs driven for that resumption — the reference replays it with them.
+    pub inputs: Vec<(String, Vec<Logic>)>,
+    pub message: String,
+    pub kind: &'static str,
 }
 
 impl EquivalenceTest {
@@ -706,6 +739,12 @@ impl EquivalenceTest {
             test: HardwareTest::new(module_name).with_verilog(
                 sv_path.to_str().expect("temp path is valid UTF-8"),
             ),
+            sv_path: Some(sv_path.clone()),
+            seq_obs0: Vec::new(),
+            seq_failure: Vec::new(),
+            reset_row: false,
+            case: None,
+            obs0_excuse: None,
             expected: Vec::new(),
             cycle: 0,
             src: Some(src.to_string()),
@@ -802,6 +841,12 @@ impl EquivalenceTest {
     pub fn sim_only(module_name: &str) -> Self {
         EquivalenceTest {
             test: HardwareTest::new(module_name),
+            sv_path: None,
+            seq_obs0: Vec::new(),
+            seq_failure: Vec::new(),
+            reset_row: false,
+            case: None,
+            obs0_excuse: None,
             expected: Vec::new(),
             cycle: 0,
             src: None,
@@ -844,6 +889,70 @@ impl EquivalenceTest {
     pub fn begin_sequence(&mut self, label: &str) {
         self.test.begin_sequence(label);
         self.sequences.push((self.cycle, label.to_string()));
+        self.seq_obs0.push(None);
+        self.seq_failure.push(None);
+    }
+
+    /// Name this run as the sweep case `case` (`<wrapper>::<module>`): its verdicts
+    /// go to the ledger `tools/regression.sh` counts (G-G).
+    pub fn sweep_case(mut self, case: &str) -> Self {
+        self.case = Some(case.to_string());
+        self
+    }
+
+    /// The module has a `RESET` row (build.rs): observation 0 is outside the SV pair
+    /// by the row's declaration (SPEC §III.2.2 — the relation covers `obs_k`, k ≥ 1),
+    /// and is still compared between the simulator and the reference.
+    pub fn with_reset_row(mut self) -> Self {
+        self.reset_row = true;
+        self
+    }
+
+    /// A table row excuses a disagreement at observation 0 (and nowhere else): it is
+    /// reported EXCUSED with its pattern and the row's sentence. A row whose module
+    /// agrees at observation 0 on every sequence is stale and fails the case.
+    pub fn with_obs0_excuse(mut self, sentence: &str) -> Self {
+        self.obs0_excuse = Some(sentence.to_string());
+        self
+    }
+
+    /// Record observation 0 of the current sequence (SPEC §I.1.4, §III.2.1): every
+    /// output's value after the first resumption's settle (`pre_edge_settle`) and
+    /// before the first edge. Call it once, before the sequence's first `record_*`.
+    pub fn record_observation_zero(&mut self, outputs: &[(&str, &[Logic])]) {
+        assert!(self.differential, "observation 0 is recorded by the differential harness only");
+        if self.sequences.is_empty() && self.cycle == 0 {
+            // A single-sequence run (a hand-driven measurement): its one sequence.
+            self.begin_sequence("");
+        }
+        let k = self.sequences.len().checked_sub(1).expect("begin_sequence before record_observation_zero");
+        assert_eq!(self.sequences[k].0, self.cycle, "observation 0 precedes the sequence's first recorded cycle");
+        assert!(self.seq_obs0[k].is_none(), "observation 0 recorded twice");
+        self.seq_obs0[k] = Some(outputs.iter().map(|(n, v)| (n.to_string(), v.to_vec())).collect());
+    }
+
+    /// The simulator failed at this cycle's resumption (a panic caught by
+    /// [`run_step`]): the sequence's trace ends here (SPEC §III.2.4). `inputs` are
+    /// the values driven for the failing resumption. A panic that is NOT one of
+    /// III.2.4's run-time failures is not truncation — it fails the case here.
+    pub fn record_failure(&mut self, inputs: &[(&str, &[Logic])], message: &str) {
+        let Some(kind) = runtime_failure_kind(message) else {
+            panic!(
+                "the simulator panicked at recorded cycle {} of '{}', and not with a run-time \
+                 failure of SPEC §III.2.4 (an undelivered data(), an out-of-range address, an X \
+                 fed to a condition or an as_* view, integer overflow) — this is a failure, not a \
+                 truncation:\n{message}",
+                self.cycle, self.name
+            );
+        };
+        let k = self.sequences.len().checked_sub(1).expect("begin_sequence before record_failure");
+        assert!(self.seq_failure[k].is_none(), "a sequence fails at most once");
+        self.seq_failure[k] = Some(SimFailure {
+            at: self.cycle,
+            inputs: inputs.iter().map(|(n, v)| (n.to_string(), v.to_vec())).collect(),
+            message: message.to_string(),
+            kind,
+        });
     }
 
     /// Record one cycle of a [`differential_only`](Self::differential_only) run: the
@@ -893,6 +1002,9 @@ impl EquivalenceTest {
     /// `finish` without the panic: every leg's verdict, for a measurement that
     /// predicts a disagreement and wants to read it rather than fail on it.
     pub fn finish_report(self) -> Verdicts {
+        if self.differential {
+            return self.finish_relation();
+        }
         if let Some((ref_sv_path, mode)) = &self.reg_check {
             let src = self
                 .src
@@ -982,6 +1094,10 @@ impl EquivalenceTest {
             reference_sv: reference.as_ref().map(|r| r.passed()),
             interpreter: interpreter.as_ref().map(|v| v.verdict()),
             report: String::new(),
+            pattern: None,
+            sequences: Vec::new(),
+            name: self.name.clone(),
+            failed_hard: false,
         };
         if transpiled.passed() && !ref_failed && !interp_failed {
             return verdicts;
@@ -1046,6 +1162,351 @@ impl EquivalenceTest {
     }
 }
 
+// ── The agreement relation (SPEC §III.2) on a differential run ──────────────
+
+/// A sequence's span in the recorded cycles.
+struct Span {
+    start: usize,
+    end: usize,
+    label: String,
+}
+
+/// Parse a relation testbench's FAIL lines: `(cycle, port, at obs_0) → the value
+/// Verilator showed`.
+fn sv_values(output: &str) -> std::collections::HashMap<(usize, String, bool), u64> {
+    let mut m = std::collections::HashMap::new();
+    for l in output.lines().filter(|l| l.starts_with("FAIL: Cycle ")) {
+        let t: Vec<&str> = l.split_whitespace().collect();
+        // FAIL: Cycle <c> <port>[@obs0] expected <e> got <g> …
+        if t.len() < 8 || t[4] != "expected" || t[6] != "got" {
+            continue;
+        }
+        let (Ok(c), Ok(g)) = (t[2].parse::<usize>(), t[7].parse::<u64>()) else { continue };
+        let (port, obs0) = match t[3].strip_suffix("@obs0") {
+            Some(p) => (p.to_string(), true),
+            None => (t[3].to_string(), false),
+        };
+        m.insert((c, port, obs0), g);
+    }
+    m
+}
+
+impl EquivalenceTest {
+    fn spans(&self) -> Vec<Span> {
+        if self.sequences.is_empty() {
+            return vec![Span { start: 0, end: self.expected.len(), label: String::new() }];
+        }
+        self.sequences
+            .iter()
+            .enumerate()
+            .map(|(k, (start, label))| Span {
+                start: *start,
+                end: self.sequences.get(k + 1).map_or(self.expected.len(), |(s, _)| *s),
+                label: label.clone(),
+            })
+            .collect()
+    }
+
+    /// The differential run under the relation: observation 0 compared (III.2.1),
+    /// an X observation taking the SV pair OUTSIDE (III.2.2), a run-time failure
+    /// TRUNCATING the trace with the simulator and the reference required to fail
+    /// at the same resumption (III.2.4), and every disagreement read by its pattern
+    /// (III.2.8). All legs run before any verdict is drawn.
+    fn finish_relation(self) -> Verdicts {
+        let spans = self.spans();
+        let marked = !self.sequences.is_empty();
+        let obs0_of = |k: usize| self.seq_obs0.get(k).cloned().flatten();
+        let failure_of = |k: usize| self.seq_failure.get(k).cloned().flatten();
+
+        // 1. The SV trace the relation admits, and each sequence's OUTSIDE cut.
+        let mut outcomes: Vec<SeqOutcome> = Vec::new();
+        let mut cuts: Vec<usize> = Vec::new();
+        let mut obs0_compared: Vec<bool> = Vec::new();
+        let mut sv_trace = SimulationTrace::new();
+        sv_trace.relation = true;
+        for (k, sp) in spans.iter().enumerate() {
+            let mut o = SeqOutcome { index: k, label: sp.label.clone(), ..Default::default() };
+            let mut cut = sp.end;
+            let mut obs0_sv = None;
+            if let Some(ob) = obs0_of(k) {
+                if self.reset_row {
+                    o.obs0_declared_out = true;
+                } else if let Some((port, _)) = ob.iter().find(|(_, v)| v.contains(&Logic::X)) {
+                    o.outside = Some((sp.start, None, port.clone()));
+                    cut = sp.start;
+                } else {
+                    obs0_sv = Some(ob);
+                }
+            }
+            if o.outside.is_none() {
+                for p in sp.start..sp.end {
+                    if let Some((port, _)) = self.expected[p].outputs.iter().find(|(_, v)| v.contains(&Logic::X)) {
+                        o.outside = Some((p, Some(p - sp.start), port.clone()));
+                        cut = p;
+                        break;
+                    }
+                }
+            }
+            let mut cycles: Vec<CycleData> = self.expected[sp.start..cut].to_vec();
+            if cycles.is_empty() && obs0_sv.is_some() {
+                // Observation 0 alone: the testbench checks it after the first
+                // drive and settle, so it needs that cycle's inputs and nothing else.
+                let inputs = if sp.start < sp.end {
+                    Some(self.expected[sp.start].inputs.clone())
+                } else {
+                    failure_of(k).map(|f| f.inputs)
+                };
+                match inputs {
+                    Some(inputs) => cycles.push(CycleData { cycle: sp.start, inputs, outputs: Vec::new() }),
+                    None => obs0_sv = None,
+                }
+            }
+            obs0_compared.push(obs0_sv.is_some());
+            if !cycles.is_empty() {
+                if marked || obs0_sv.is_some() {
+                    sv_trace.begin_sequence(&sp.label);
+                    sv_trace.sequences.last_mut().expect("just pushed").obs0 = obs0_sv;
+                }
+                sv_trace.cycles.extend(cycles);
+            }
+            cuts.push(cut);
+            outcomes.push(o);
+        }
+
+        // 2. The reference interpreter (no Verilator), over the full recorded trace.
+        let interpreter = if self.reference_interpreter {
+            let src = self.src.as_deref().expect("with_reference_interpreter requires a DUT source");
+            let module = self.module.clone().unwrap_or_else(|| self.name.clone());
+            let ps: Vec<(&str, i64)> = self.params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            let mut leg = ReferenceLeg::new(&self.name, src, &module, &ps);
+            for (k, sp) in spans.iter().enumerate() {
+                leg.begin_sequence(&sp.label);
+                if let Some(ob) = obs0_of(k) {
+                    let outs: Vec<(&str, &[Logic])> = ob.iter().map(|(n, v)| (n.as_str(), &v[..])).collect();
+                    leg.record_observation_zero(&outs);
+                }
+                for c in &self.expected[sp.start..sp.end] {
+                    let ins: Vec<(&str, &[Logic])> = c.inputs.iter().map(|(n, v)| (n.as_str(), &v[..])).collect();
+                    let outs: Vec<(&str, &[Logic])> = c.outputs.iter().map(|(n, v)| (n.as_str(), &v[..])).collect();
+                    leg.record(&ins, &outs);
+                }
+                if let Some(f) = failure_of(k) {
+                    let ins: Vec<(&str, &[Logic])> = f.inputs.iter().map(|(n, v)| (n.as_str(), &v[..])).collect();
+                    leg.record_failure(&ins, &f.message);
+                }
+            }
+            let v = leg.run();
+            println!("{}", v.summary_line());
+            Some(v)
+        } else {
+            None
+        };
+
+        // 3. The transpiled SV (and the hand-written reference) under Verilator.
+        let policy = copper_sim::VerilatorCachePolicy::from_env();
+        let run_sv = |path: &str| -> Result<Option<copper_sim::verification::VerilatorRun>, String> {
+            if sv_trace.cycles.is_empty() {
+                println!("  [verilator] no observation of '{}' is inside the SV pair — not run", self.name);
+                return Ok(None);
+            }
+            match copper_sim::verify_with_verilator_report(path, &self.name, &sv_trace, None, &self.params, policy) {
+                Ok(r) => Ok(Some(r)),
+                Err(e) if copper_sim::is_missing_verilator(&e) => {
+                    println!("  [verilator] not available: {e}");
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            }
+        };
+        let mut hard: Vec<String> = Vec::new();
+        let sv_run = match self.sv_path.as_ref().map(|p| run_sv(p.to_str().expect("utf-8 temp path"))) {
+            Some(Ok(r)) => r,
+            Some(Err(e)) => {
+                hard.push(format!("Verilator error (transpiled SV): {e}"));
+                None
+            }
+            None => None,
+        };
+        let sv_runs = sv_run.is_some();
+        let got = sv_run.as_ref().map(|r| sv_values(&r.output)).unwrap_or_default();
+        let reference = self.reference_sv.as_ref().map(|path| {
+            println!("=== {} vs INDEPENDENT reference {path} ===", self.name);
+            match run_sv(path) {
+                Ok(Some(r)) => (r.passed, r.output),
+                Ok(None) => (true, String::new()),
+                Err(e) => (false, format!("Verilator error (independent reference): {e}")),
+            }
+        });
+
+        // 4. Each sequence's verdict.
+        let mut sv_unexcused = false;
+        let mut excused_any = false;
+        for (k, sp) in spans.iter().enumerate() {
+            let o = &mut outcomes[k];
+            let cut = cuts[k];
+            let rseq = interpreter.as_ref().and_then(|v| v.seqs.get(k));
+            let mut first: Option<(Pattern, String, bool)> = None; // (pattern, where, at obs_0)
+            // SV mismatches, wherever they fall: (at observation 0, later).
+            let mut sv_bad = (false, false);
+            let observe = |obs: &[(String, Vec<Logic>)], at: Option<usize>, compared: bool, first: &mut Option<(Pattern, String, bool)>, sv_bad: &mut (bool, bool)| {
+                for (port, s) in obs {
+                    let r = match at {
+                        None => rseq.and_then(|q| q.obs0.get(port)),
+                        Some(p) => interpreter.as_ref().and_then(|v| v.values.get(&(p, port.clone()))),
+                    };
+                    let v = (sv_runs && compared).then(|| {
+                        let key = match at {
+                            None => (sp.start, port.clone(), true),
+                            Some(p) => (self.expected[p].cycle, port.clone(), false),
+                        };
+                        got.get(&key).copied().or_else(|| to_int(s)).unwrap_or(0)
+                    });
+                    if v.is_some_and(|v| Some(v) != to_int(s)) {
+                        if at.is_none() {
+                            sv_bad.0 = true;
+                        } else {
+                            sv_bad.1 = true;
+                        }
+                    }
+                    if let Some(pat) = Pattern::of(s, r.map(|r| &r[..]), v, !compared, sv_runs) {
+                        if first.is_none() {
+                            let wher = match at {
+                                None => "observation 0".to_string(),
+                                Some(p) => format!("cycle {} (recorded cycle {p})", p - sp.start),
+                            };
+                            let show = |x: Option<String>| x.unwrap_or_else(|| "—".to_string());
+                            *first = Some((
+                                pat,
+                                format!(
+                                    "at {wher}, port {port}: sim {} ref {} SV {}",
+                                    fmt_bits(s),
+                                    show(r.map(|r| fmt_bits(r))),
+                                    show(v.map(|v| v.to_string()))
+                                ),
+                                at.is_none(),
+                            ));
+                        }
+                    }
+                }
+            };
+            if let Some(ob) = obs0_of(k) {
+                observe(&ob, None, obs0_compared[k], &mut first, &mut sv_bad);
+            }
+            for p in sp.start..sp.end {
+                let outs = self.expected[p].outputs.clone();
+                observe(&outs, Some(p), p < cut, &mut first, &mut sv_bad);
+            }
+            // Run-time failures: the simulator's, and whether the reference agreed.
+            let sim_fail = failure_of(k);
+            match (rseq, &sim_fail) {
+                (Some(q), _) if q.failure_mismatch.is_some() && first.is_none() => {
+                    first = Some((Pattern::SimNeRefSvOutside, q.failure_mismatch.clone().unwrap(), false));
+                }
+                (Some(q), Some(f)) if q.truncated_agree => {
+                    o.truncated = Some((f.at - sp.start + 1, format!("{} — {}", f.kind, f.message)));
+                }
+                (None, Some(f)) => {
+                    o.truncated = Some((
+                        f.at - sp.start + 1,
+                        format!("{} — {} (reference leg not run)", f.kind, f.message),
+                    ));
+                }
+                _ => {}
+            }
+            let mut obs0_excused = false;
+            if let Some((pat, wher, at0)) = first {
+                match &self.obs0_excuse {
+                    Some(why) if at0 && !sv_bad.1 && matches!(pat, Pattern::SimNeSvNoRef | Pattern::SimEqRefNeSv) => {
+                        o.excused = Some((pat, format!("{wher} — {why}")));
+                        excused_any = true;
+                        obs0_excused = true;
+                    }
+                    _ => o.disagree = Some((pat, wher)),
+                }
+            }
+            if sv_bad.1 || (sv_bad.0 && !obs0_excused) {
+                sv_unexcused = true;
+            }
+        }
+        if self.obs0_excuse.is_some() && !excused_any {
+            hard.push(format!(
+                "'{}' has an observation-0 excuse row, but no sequence disagrees at observation 0 — \
+                 the row is stale; delete it",
+                self.name
+            ));
+        }
+        // An SV mismatch the per-observation walk did not attribute (it cannot
+        // happen if the walk and the testbench agree on what was compared) is a
+        // harness bug, never a pass.
+        let sv_failed_lines = sv_run.as_ref().is_some_and(|r| !r.passed);
+        if sv_failed_lines != (sv_unexcused || excused_any) {
+            hard.push("the testbench's verdict and the relation walk's disagree about whether the SV matched — a harness bug".into());
+        }
+
+        let pattern = outcomes.iter().find_map(|o| o.disagree.as_ref().map(|(p, _)| *p));
+        let interp_ok = interpreter.as_ref().map(|v| v.verdict());
+        let interp_failed = interpreter.as_ref().is_some_and(|v| !v.passed());
+        let mut verdicts = Verdicts {
+            transpiled: !sv_unexcused && hard.iter().all(|h| !h.contains("transpiled SV")),
+            reference_sv: reference.as_ref().map(|(ok, _)| *ok),
+            interpreter: interp_ok,
+            report: String::new(),
+            pattern,
+            sequences: outcomes,
+            name: self.name.clone(),
+            failed_hard: !hard.is_empty(),
+        };
+        let summary = format!("agreement relation: {} sequence(s): {} [{}]", verdicts.sequences.len(), verdicts.counts(), self.name);
+        println!("{summary}");
+        for o in verdicts.sequences.iter().filter(|o| o.verdict() != "PASS" || o.obs0_declared_out) {
+            println!("  {}", o.line(&self.name));
+        }
+        if let Some(case) = &self.case {
+            let mut lines: Vec<String> = verdicts.sequences.iter().map(|o| o.line(case)).collect();
+            lines.push(format!(
+                "CASE\t{case}\t{}\tpattern={}",
+                verdicts.counts(),
+                pattern.map_or("none", Pattern::label)
+            ));
+            ledger_write("sweep-differential", case, &lines);
+        }
+        if verdicts.all_ok() {
+            return verdicts;
+        }
+
+        let mut report = String::new();
+        report.push_str(&format!("equivalence failed for '{}': {summary}\n", self.name));
+        for h in &hard {
+            report.push_str(&format!("{h}\n"));
+        }
+        if let Some(p) = pattern {
+            report.push_str(&format!("first disagreement: pattern {} — {}\n", p.label(), p.reading()));
+        }
+        for o in verdicts.sequences.iter().filter(|o| o.disagree.is_some()) {
+            report.push_str(&format!("  {}\n", o.line(&self.name)));
+        }
+        let seqs = self.sequences.clone();
+        if let Some(r) = sv_run.as_ref().filter(|r| !r.passed) {
+            report.push_str("\n-- simulator vs transpiled SystemVerilog --\n");
+            report.push_str(&errors_by_sequence(&seqs, &[format!("Simulation failed:\n{}", r.output)]));
+        }
+        if let Some((false, out)) = &reference {
+            report.push_str("\n-- simulator vs independent reference --\n");
+            report.push_str(&errors_by_sequence(&seqs, &[out.clone()]));
+            report.push_str(
+                "(the hand-written reference is anchoring, not a leg of the relation: a \
+                 disagreement with it is a shared misconception or a reference to fix)\n",
+            );
+        }
+        if let Some(v) = interpreter.filter(|_| interp_failed) {
+            report.push_str("\n-- simulator vs REFERENCE INTERPRETER (copper-ref) --\n");
+            report.push_str(&v.detail());
+        }
+        verdicts.report = report;
+        verdicts
+    }
+}
+
 /// Every leg's verdict from [`EquivalenceTest::finish_report`].
 pub struct Verdicts {
     /// The transpiled SystemVerilog under Verilator agreed with the simulator.
@@ -1057,6 +1518,14 @@ pub struct Verdicts {
     pub interpreter: Option<Result<usize, String>>,
     /// The failure report `finish` would have panicked with (empty when all ok).
     pub report: String,
+    /// The first disagreement's pattern (SPEC §III.2.8), on a differential run.
+    pub pattern: Option<Pattern>,
+    /// Every sequence's outcome under the relation, on a differential run.
+    pub sequences: Vec<SeqOutcome>,
+    pub name: String,
+    /// A failure that is not a disagreement of values: Verilator broken, the
+    /// interpreter refusing the module, a stale excuse row.
+    pub failed_hard: bool,
 }
 
 impl Verdicts {
@@ -1064,6 +1533,31 @@ impl Verdicts {
         self.transpiled
             && self.reference_sv != Some(false)
             && !matches!(self.interpreter, Some(Err(_)))
+            && !self.failed_hard
+    }
+
+    /// Counts of each sequence verdict, in a fixed order, for the summary line.
+    pub fn counts(&self) -> String {
+        let mut c = std::collections::BTreeMap::new();
+        for s in &self.sequences {
+            *c.entry(s.verdict()).or_insert(0usize) += 1;
+        }
+        ["PASS", "OUTSIDE", "TRUNCATED", "EXCUSED", "DISAGREE"]
+            .iter()
+            .map(|v| format!("{} {v}", c.get(v).copied().unwrap_or(0)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// A measurement test that PINS this run's disagreement records it in the
+    /// ledger as pinned, with its pattern, so G-G can match it against the row
+    /// excusing the module (or see that a disagreement is pinned at all).
+    pub fn record_pin(&self, pin: &str) {
+        let pattern = self.pattern.map_or("none", Pattern::label);
+        let mut lines = vec![format!("PINNED\t{}\t{pin}\tpattern={pattern}", self.name)];
+        lines.extend(self.sequences.iter().map(|s| s.line(&self.name)));
+        ledger_write("pin", &self.name, &lines);
+        println!("pinned disagreement [{}]: pattern {pattern} — {pin}", self.name);
     }
 }
 
@@ -1071,15 +1565,19 @@ impl Verdicts {
 
 /// The simulator's recorded trace replayed through `copper_ref::Module` — the
 /// third leg of the sweep (`design_docs/SPEC_OVERVIEW.md` §7). Driven exactly like
-/// `EquivalenceTest`: `begin_sequence`, `record` per cycle, `finish`. Needs no
-/// Verilator, so the generated `*_reference_leg` cases run under `--no-examples`
-/// and `--quick` too.
+/// `EquivalenceTest`: `begin_sequence`, `record_observation_zero`, `record` per
+/// cycle, `record_failure` at a run-time failure, `finish`. Needs no Verilator, so
+/// the generated `*_reference_leg` cases run under `--no-examples` and `--quick` too.
 ///
 /// The harness convention is the protocol's: the inputs recorded for cycle `i`
 /// are `x_{i+1}`, driven before edge `i+1`, so the leg calls `resume` with them,
 /// then `edge`, then compares `observe` — `obs_{i+1}` — with what the simulator
-/// read after its `tick_clock`. `obs_0` is never recorded by the harness today
-/// (SPEC I.9.4; a III.2 item), so it is not compared here either.
+/// read after its `tick_clock`. Observation 0 (SPEC §III.2.1) is `observe` after the
+/// first `resume` and before the first `edge`, compared exactly (X included,
+/// III.2.0) with what the simulator read between `pre_edge_settle` and
+/// `post_edge_settle`. A run-time failure (III.2.4) must happen at the same
+/// resumption on both sides: the interpreter is resumed once more, with the failing
+/// resumption's inputs, and must fail there.
 pub struct ReferenceLeg {
     name: String,
     src: String,
@@ -1087,6 +1585,20 @@ pub struct ReferenceLeg {
     params: Vec<(String, u64)>,
     cycles: Vec<CycleData>,
     sequences: Vec<(usize, String)>,
+    obs0: Vec<Option<Vec<(String, Vec<Logic>)>>>,
+    failures: Vec<Option<SimFailure>>,
+    case: Option<String>,
+}
+
+/// One sequence of the replay.
+#[derive(Debug, Clone, Default)]
+pub struct RefSeq {
+    /// The interpreter's observation 0, by (legalized) port.
+    pub obs0: std::collections::HashMap<String, Vec<Logic>>,
+    /// The simulator and the interpreter failed at the same resumption.
+    pub truncated_agree: bool,
+    /// One failed where the other did not, in words.
+    pub failure_mismatch: Option<String>,
 }
 
 /// What the replay found.
@@ -1104,6 +1616,16 @@ pub struct ReferenceVerdict {
     /// Static tick sites of the kernel and how many of them some resumption reached.
     pub sites_static: usize,
     pub sites_reached: usize,
+    /// Per sequence.
+    pub seqs: Vec<RefSeq>,
+    /// The interpreter's observation after each recorded cycle, by (recorded cycle,
+    /// legalized port) — what the pattern of a disagreement is read from.
+    pub values: std::collections::HashMap<(usize, String), Vec<Logic>>,
+    /// Observations 0 compared, and how many agreed.
+    pub obs0_compared: usize,
+    pub obs0_agreed: usize,
+    /// Sequences truncated with both sides failing at the same resumption.
+    pub truncated: usize,
 }
 
 impl ReferenceVerdict {
@@ -1118,13 +1640,17 @@ impl ReferenceVerdict {
     }
     /// The one line `tools/regression.sh` and a reader look for.
     pub fn summary_line(&self) -> String {
+        let extra = format!(
+            "; observation 0 agreed on {} of {}; {} sequence(s) truncated at an agreed run-time failure",
+            self.obs0_agreed, self.obs0_compared, self.truncated
+        );
         match &self.first_failure {
             None => format!(
-                "reference leg: {} cycles agreed ({} of {} tick sites reached) [{}]",
+                "reference leg: {} cycles agreed ({} of {} tick sites reached){extra} [{}]",
                 self.agreed, self.sites_reached, self.sites_static, self.name
             ),
             Some(f) => format!(
-                "reference leg: FAIL — {} of {} cycles disagree; first: {f} [{}]",
+                "reference leg: FAIL — {} of {} cycles disagree{extra}; first: {f} [{}]",
                 self.disagreed,
                 self.agreed + self.disagreed,
                 self.name
@@ -1155,23 +1681,84 @@ impl ReferenceLeg {
                 .collect(),
             cycles: Vec::new(),
             sequences: Vec::new(),
+            obs0: Vec::new(),
+            failures: Vec::new(),
+            case: None,
         }
+    }
+
+    /// Name this run as the sweep case `case`, for the verdict ledger (G-G).
+    pub fn sweep_case(mut self, case: &str) -> Self {
+        self.case = Some(case.to_string());
+        self
+    }
+
+    /// Accepted for symmetry with [`EquivalenceTest::with_reset_row`]: the reset
+    /// row's declaration concerns the SV pair only; `sim ≡ ref` compares
+    /// observation 0 exactly, X included (SPEC §III.2.0).
+    pub fn with_reset_row(self) -> Self {
+        self
+    }
+
+    /// Accepted for symmetry with [`EquivalenceTest::with_obs0_excuse`]: such a row
+    /// excuses an SV disagreement; the reference leg is not excused by it.
+    pub fn with_obs0_excuse(self, _sentence: &str) -> Self {
+        self
     }
 
     pub fn begin_sequence(&mut self, label: &str) {
         self.sequences.push((self.cycles.len(), label.to_string()));
+        self.obs0.push(None);
+        self.failures.push(None);
+    }
+
+    fn ensure_sequence(&mut self) {
+        if self.sequences.is_empty() {
+            self.begin_sequence("");
+        }
+    }
+
+    /// Observation 0 of the current sequence, as the simulator recorded it.
+    pub fn record_observation_zero(&mut self, outputs: &[(&str, &[Logic])]) {
+        self.ensure_sequence();
+        let k = self.sequences.len() - 1;
+        assert_eq!(self.sequences[k].0, self.cycles.len(), "observation 0 precedes the sequence's first cycle");
+        self.obs0[k] = Some(outputs.iter().map(|(n, v)| (n.to_string(), v.to_vec())).collect());
     }
 
     /// Port names may be the source names or the emitted (legalized) ones.
     pub fn record(&mut self, inputs: &[(&str, &[Logic])], outputs: &[(&str, &[Logic])]) {
+        self.ensure_sequence();
         let i = self.cycles.len();
         self.cycles.push(make_cycle(i, inputs, outputs));
+    }
+
+    /// The simulator failed at this resumption (SPEC §III.2.4); see
+    /// [`EquivalenceTest::record_failure`].
+    pub fn record_failure(&mut self, inputs: &[(&str, &[Logic])], message: &str) {
+        self.ensure_sequence();
+        let Some(kind) = runtime_failure_kind(message) else {
+            panic!(
+                "the simulator panicked at recorded cycle {} of '{}', and not with a run-time \
+                 failure of SPEC §III.2.4 — this is a failure, not a truncation:\n{message}",
+                self.cycles.len(),
+                self.name
+            );
+        };
+        let k = self.sequences.len() - 1;
+        self.failures[k] = Some(SimFailure {
+            at: self.cycles.len(),
+            inputs: inputs.iter().map(|(n, v)| (n.to_string(), v.to_vec())).collect(),
+            message: message.to_string(),
+            kind,
+        });
     }
 
     /// Replay. A refusal by the interpreter (a construct it does not cover, or a
     /// module class it defers) is a failure, never a skip: the `REF_SKIP` table in
     /// `build.rs` is the one place a module is excused, with a sentence.
     pub fn run(&self) -> ReferenceVerdict {
+        use copper_ref::RefError;
         let mut v = ReferenceVerdict {
             name: self.name.clone(),
             agreed: 0,
@@ -1180,10 +1767,15 @@ impl ReferenceLeg {
             fails: Vec::new(),
             sites_static: 0,
             sites_reached: 0,
+            seqs: Vec::new(),
+            values: Default::default(),
+            obs0_compared: 0,
+            obs0_agreed: 0,
+            truncated: 0,
         };
         let ps: Vec<(&str, u64)> = self.params.iter().map(|(k, x)| (k.as_str(), *x)).collect();
         let fresh = || copper_ref::Module::new(&self.src, &self.module, &ps);
-        let mut m = match fresh() {
+        let probe = match fresh() {
             Ok(m) => m,
             Err(e) => {
                 v.first_failure = Some(format!(
@@ -1194,17 +1786,8 @@ impl ReferenceLeg {
                 return v;
             }
         };
-        v.sites_static = m.tick_sites().len();
+        v.sites_static = probe.tick_sites().len();
         let mut reached = std::collections::BTreeSet::new();
-        let sequence_of = |cycle: usize| {
-            self.sequences
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, (start, _))| *start <= cycle)
-                .map(|(i, (_, label))| format!("sequence {i} \"{label}\""))
-                .unwrap_or_default()
-        };
         let fail = |v: &mut ReferenceVerdict, line: String| {
             if v.first_failure.is_none() {
                 v.first_failure = Some(line.clone());
@@ -1214,65 +1797,202 @@ impl ReferenceLeg {
             }
             v.disagreed += 1;
         };
-        for (i, c) in self.cycles.iter().enumerate() {
-            if i > 0 && self.sequences.iter().any(|(start, _)| *start == i) {
-                reached.extend(m.reached_sites().iter().cloned());
-                m = fresh().expect("constructed once already");
-            }
-            let in_ports = m.input_ports();
-            let mut ins: Vec<(&str, &[Logic])> = Vec::new();
-            for p in &in_ports {
-                let legal = copper_codegen::legalized_port_name(&p.name);
-                let Some((_, bits)) = c.inputs.iter().find(|(n, _)| *n == p.name || *n == legal) else {
-                    fail(&mut v, format!("Cycle {i}: no recorded value for input `{}`", p.name));
-                    return v;
+        let lp = |p: &str| copper_codegen::legalized_port_name(p);
+        let spans: Vec<(usize, usize, String)> = if self.sequences.is_empty() {
+            vec![(0, self.cycles.len(), String::new())]
+        } else {
+            self.sequences
+                .iter()
+                .enumerate()
+                .map(|(k, (s, l))| (*s, self.sequences.get(k + 1).map_or(self.cycles.len(), |(n, _)| *n), l.clone()))
+                .collect()
+        };
+        for (k, (start, end, label)) in spans.iter().enumerate() {
+            let seq_name = format!("sequence {k} \"{label}\"");
+            let mut rs = RefSeq::default();
+            let mut m = fresh().expect("constructed once already");
+            let sim_fail = self.failures.get(k).cloned().flatten();
+            let obs0 = self.obs0.get(k).cloned().flatten();
+            let mut ref_failed: Option<(usize, String)> = None;
+            let mut pos = *start;
+            loop {
+                let inputs: &[(String, Vec<Logic>)] = if pos < *end {
+                    &self.cycles[pos].inputs
+                } else if let Some(f) = &sim_fail {
+                    &f.inputs
+                } else {
+                    break;
                 };
-                ins.push((p.name.as_str(), &bits[..]));
-            }
-            if let Err(e) = m.resume_bits(&ins) {
-                fail(&mut v, format!("Cycle {i} ({}): the interpreter stopped: {e}", sequence_of(i)));
-                return v;
-            }
-            m.edge();
-            let obs = m.observe_bits();
-            let mut cycle_ok = true;
-            for (port, got) in &obs {
-                let legal = copper_codegen::legalized_port_name(port);
-                let Some((_, want)) = c.outputs.iter().find(|(n, _)| n == port || *n == legal) else {
-                    fail(&mut v, format!("Cycle {i}: the simulator recorded no output `{port}`"));
-                    return v;
-                };
-                if want != got {
-                    cycle_ok = false;
-                    fail(
-                        &mut v,
-                        format!(
-                            "Cycle {i} ({}): {port} simulator {} interpreter {}",
-                            sequence_of(i),
-                            fmt_bits(want),
-                            fmt_bits(got)
-                        ),
-                    );
+                let in_ports = m.input_ports();
+                let mut ins: Vec<(&str, &[Logic])> = Vec::new();
+                for p in &in_ports {
+                    let legal = lp(&p.name);
+                    let Some((_, bits)) = inputs.iter().find(|(n, _)| *n == p.name || *n == legal) else {
+                        fail(&mut v, format!("Cycle {pos}: no recorded value for input `{}`", p.name));
+                        return v;
+                    };
+                    ins.push((p.name.as_str(), &bits[..]));
                 }
+                let resumption = pos - start + 1;
+                match m.resume_bits(&ins) {
+                    Ok(_) => {}
+                    Err(RefError::Runtime(e)) if ref_runtime_failure_kind(&e).is_some() => {
+                        ref_failed = Some((pos, e));
+                        break;
+                    }
+                    Err(e) => {
+                        fail(&mut v, format!("Cycle {pos} ({seq_name}): the interpreter stopped: {e}"));
+                        return v;
+                    }
+                }
+                if pos == *start {
+                    if let Some(ob) = &obs0 {
+                        v.obs0_compared += 1;
+                        let mut ok = true;
+                        for (port, got) in m.observe_bits() {
+                            let Some((_, want)) = ob.iter().find(|(n, _)| *n == port || *n == lp(&port)) else {
+                                fail(&mut v, format!("observation 0: the simulator recorded no output `{port}`"));
+                                return v;
+                            };
+                            if *want != got {
+                                ok = false;
+                                fail(
+                                    &mut v,
+                                    format!(
+                                        "Cycle {pos} ({seq_name}, observation 0): {port} simulator {} interpreter {}",
+                                        fmt_bits(want),
+                                        fmt_bits(&got)
+                                    ),
+                                );
+                            }
+                            rs.obs0.insert(lp(&port), got);
+                        }
+                        if ok {
+                            v.obs0_agreed += 1;
+                        }
+                    }
+                }
+                if pos == *end {
+                    // The simulator failed at this resumption; the interpreter did not.
+                    let f = sim_fail.as_ref().expect("past the end only at a failure");
+                    let line = format!(
+                        "Cycle {pos} ({seq_name}): the simulator failed at resumption {resumption} \
+                         ({}: {}) and the interpreter completed it — a run-time failure must end both \
+                         traces at the same resumption (SPEC §III.2.4)",
+                        f.kind,
+                        one_line(&f.message)
+                    );
+                    rs.failure_mismatch = Some(line.clone());
+                    fail(&mut v, line);
+                    break;
+                }
+                m.edge();
+                let c = &self.cycles[pos];
+                let mut cycle_ok = true;
+                for (port, got) in m.observe_bits() {
+                    let Some((_, want)) = c.outputs.iter().find(|(n, _)| *n == port || *n == lp(&port)) else {
+                        fail(&mut v, format!("Cycle {pos}: the simulator recorded no output `{port}`"));
+                        return v;
+                    };
+                    if *want != got {
+                        cycle_ok = false;
+                        fail(
+                            &mut v,
+                            format!(
+                                "Cycle {pos} ({seq_name}): {port} simulator {} interpreter {}",
+                                fmt_bits(want),
+                                fmt_bits(&got)
+                            ),
+                        );
+                    }
+                    v.values.insert((pos, lp(&port)), got);
+                }
+                if cycle_ok {
+                    v.agreed += 1;
+                }
+                pos += 1;
             }
-            if cycle_ok {
-                v.agreed += 1;
+            match (&ref_failed, &sim_fail) {
+                (Some((p, _)), Some(f)) if *p == f.at => {
+                    rs.truncated_agree = true;
+                    v.truncated += 1;
+                }
+                (Some((p, e)), _) => {
+                    let line = format!(
+                        "Cycle {p} ({seq_name}): the interpreter failed at resumption {} ({}) and the \
+                         simulator did not — a run-time failure must end both traces at the same \
+                         resumption (SPEC §III.2.4)",
+                        p - start + 1,
+                        one_line(e)
+                    );
+                    rs.failure_mismatch = Some(line.clone());
+                    fail(&mut v, line);
+                }
+                _ => {}
             }
+            reached.extend(m.reached_sites().iter().cloned());
+            v.seqs.push(rs);
         }
-        reached.extend(m.reached_sites().iter().cloned());
         v.sites_reached = reached.len();
         v
+    }
+
+    /// The per-sequence outcomes of a reference-leg case (no SV: the pattern of a
+    /// disagreement is `sim≠ref,no-SV`).
+    fn outcomes(&self, v: &ReferenceVerdict) -> Vec<SeqOutcome> {
+        let labels: Vec<String> = if self.sequences.is_empty() {
+            vec![String::new()]
+        } else {
+            self.sequences.iter().map(|(_, l)| l.clone()).collect()
+        };
+        labels
+            .iter()
+            .enumerate()
+            .map(|(k, label)| {
+                let mut o = SeqOutcome { index: k, label: label.clone(), ..Default::default() };
+                let tag = format!("sequence {k} \"{label}\"");
+                if let Some(f) = v.fails.iter().find(|l| l.contains(&tag)) {
+                    o.disagree = Some((Pattern::SimNeRefNoSv, f.clone()));
+                }
+                if v.seqs.get(k).is_some_and(|q| q.truncated_agree) {
+                    let f = self.failures[k].as_ref().expect("truncated at a recorded failure");
+                    o.truncated = Some((f.at - self.sequences[k].0 + 1, format!("{} — {}", f.kind, f.message)));
+                }
+                o
+            })
+            .collect()
     }
 
     /// Print the summary line and panic on a disagreement.
     pub fn finish(self) {
         let v = self.run();
         println!("{}", v.summary_line());
+        let outcomes = self.outcomes(&v);
+        for o in outcomes.iter().filter(|o| o.verdict() != "PASS") {
+            println!("  {}", o.line(&self.name));
+        }
+        if let Some(case) = &self.case {
+            let mut lines: Vec<String> = outcomes.iter().map(|o| o.line(case)).collect();
+            let mut c = std::collections::BTreeMap::new();
+            for o in &outcomes {
+                *c.entry(o.verdict()).or_insert(0usize) += 1;
+            }
+            let counts = ["PASS", "OUTSIDE", "TRUNCATED", "EXCUSED", "DISAGREE"]
+                .iter()
+                .map(|k| format!("{} {k}", c.get(k).copied().unwrap_or(0)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let pattern = if v.passed() { "none" } else { Pattern::SimNeRefNoSv.label() };
+            lines.push(format!("CASE\t{case}\t{counts}\tpattern={pattern}"));
+            ledger_write("sweep-reference", case, &lines);
+        }
         if !v.passed() {
             panic!(
                 "reference-interpreter leg failed for '{}': the simulator and the spec's \
-                 interpreter disagree\n{}",
+                 interpreter disagree (pattern {} — {})\n{}",
                 self.name,
+                Pattern::SimNeRefNoSv.label(),
+                Pattern::SimNeRefNoSv.reading(),
                 v.detail()
             );
         }

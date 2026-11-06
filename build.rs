@@ -227,6 +227,14 @@ const RESET: &[(&str, &str, bool)] = &[
     ("rv32i_cpu_transpilable", "rstn", true),
 ];
 
+/// Modules whose simulator and SystemVerilog are MEASURED to disagree at
+/// observation 0 (SPEC §III.2.1) and nowhere else, each with the reason: the SV
+/// pair's disagreement there is reported EXCUSED with its pattern rather than
+/// failing the case, and a disagreement at any later observation still fails it.
+/// A row whose module agrees at observation 0 on every sequence fails the case as
+/// stale. Filled from the 2026-11-06 measurement (MEASUREMENTS §E.1), not predicted.
+const OBS0_EXCUSE: &[(&str, &str)] = &[];
+
 /// Modules the **reference-interpreter leg** (`copper-ref`, the third leg of the
 /// sweep — `design_docs/SPEC_OVERVIEW.md` §7) must not run, each with the reason,
 /// by name. The classes the interpreter defers as a whole are computed from the
@@ -951,23 +959,23 @@ fn emit_file(
         match reason {
             Some(reason) => {
                 let _ = writeln!(code, "    #[ignore = \"{}\"]", escape(&reason));
-                emit_test(code, m, /*body=*/ false, Leg::Differential);
+                emit_test(code, m, /*body=*/ false, Leg::Differential, wrapper);
                 ignored += 1;
                 // A module the sweep skips is not asked about the reference leg
                 // either: its case exists, ignored, under the SAME reason, so the
                 // count of reference-leg cases stays one per module.
                 let _ = writeln!(code, "    #[ignore = \"{}\"]", escape(&reason));
-                emit_test(code, m, false, Leg::Reference);
+                emit_test(code, m, false, Leg::Reference, wrapper);
             }
             None => {
-                emit_test(code, m, true, Leg::Differential);
+                emit_test(code, m, true, Leg::Differential, wrapper);
                 emitted += 1;
                 match m.ref_skip_reason() {
                     Some(why) => {
                         let _ = writeln!(code, "    #[ignore = \"REF_SKIP: {}\"]", escape(&why));
-                        emit_test(code, m, false, Leg::Reference);
+                        emit_test(code, m, false, Leg::Reference, wrapper);
                     }
-                    None => emit_test(code, m, true, Leg::Reference),
+                    None => emit_test(code, m, true, Leg::Reference, wrapper),
                 }
             }
         }
@@ -992,7 +1000,7 @@ enum Leg {
 /// The test itself. With `body == false` the case is `#[ignore]`d and the body is a
 /// single `panic!` — it must still *exist* (so the skip is listed and counted), and
 /// it must not be silently green if someone removes the `#[ignore]`.
-fn emit_test(code: &mut String, m: &Module, body: bool, leg: Leg) {
+fn emit_test(code: &mut String, m: &Module, body: bool, leg: Leg, wrapper: &str) {
     let name = &m.name;
     let suffix = match leg {
         Leg::Differential => "differential",
@@ -1028,6 +1036,16 @@ fn emit_test(code: &mut String, m: &Module, body: bool, leg: Leg) {
         ),
         None => String::new(),
     };
+    // The agreement relation's per-module declarations (SPEC §III.2): the ledger
+    // name, a `RESET` row (observation 0 outside the SV pair, III.2.2), and an
+    // observation-0 excuse row.
+    let mut relation = format!("\n            .sweep_case(\"{wrapper}::{name}\")");
+    if RESET.iter().any(|(n, _, _)| *n == m.name) {
+        relation.push_str("\n            .with_reset_row()");
+    }
+    if let Some((_, why)) = OBS0_EXCUSE.iter().find(|(n, _)| *n == m.name) {
+        let _ = write!(relation, "\n            .with_obs0_excuse(\"{}\")", escape(why));
+    }
     match leg {
         Leg::Differential => {
             let with_interp = if m.ref_skip_reason().is_none() {
@@ -1037,7 +1055,7 @@ fn emit_test(code: &mut String, m: &Module, body: bool, leg: Leg) {
             };
             let _ = writeln!(
                 code,
-                "        let mut eq = __Eq::differential_only(\"{name}\", SRC, Some(\"{name}\")){with_params}{with_reference}{with_interp};"
+                "        let mut eq = __Eq::differential_only(\"{name}\", SRC, Some(\"{name}\")){with_params}{with_reference}{with_interp}{relation};"
             );
         }
         Leg::Reference => {
@@ -1047,7 +1065,7 @@ fn emit_test(code: &mut String, m: &Module, body: bool, leg: Leg) {
             };
             let _ = writeln!(
                 code,
-                "        let mut eq = __RefLeg::new(\"{name}\", SRC, \"{name}\", &[{ps}]);"
+                "        let mut eq = __RefLeg::new(\"{name}\", SRC, \"{name}\", &[{ps}]){relation};"
             );
         }
     }
@@ -1194,14 +1212,6 @@ fn emit_test(code: &mut String, m: &Module, body: bool, leg: Leg) {
             n = p.name
         );
     }
-    let _ = writeln!(
-        code,
-        "                {}",
-        if clk.is_some() { "exec.tick_clock(&mut clk);" } else { "exec.poll_tasks();" }
-    );
-    for p in m.ports.iter().filter(|p| matches!(p.kind, Kind::Out | Kind::RegOut)) {
-        let _ = writeln!(code, "                let {n}_v = {n}_obs.read();", n = p.name);
-    }
     let ins: Vec<String> = m
         .ports
         .iter()
@@ -1214,6 +1224,52 @@ fn emit_test(code: &mut String, m: &Module, body: bool, leg: Leg) {
         .filter(|p| matches!(p.kind, Kind::Out | Kind::RegOut))
         .map(|p| format!("(&{n}_sv[..], &{n}_v.as_bits()[..])", n = p.name))
         .collect();
+    // One step, a run-time failure caught (SPEC §III.2.4): the simulator has no
+    // error channel, so a failing resumption is a panic inside the poll. A clocked
+    // module's first step is split at the edge so observation 0 — every output
+    // after the first resumption's settle, before edge 1 (III.2.1, I.1.4) — is read
+    // between the halves; `tick_clock` is exactly `pre_edge_settle` then
+    // `post_edge_settle`, so the trace is otherwise unchanged.
+    match clk {
+        Some(c) => {
+            let obs0: Vec<String> = m
+                .ports
+                .iter()
+                .filter(|p| matches!(p.kind, Kind::Out | Kind::RegOut))
+                .map(|p| format!("(&{n}_sv[..], &{n}_obs.read().as_bits()[..])", n = p.name))
+                .collect();
+            let _ = writeln!(
+                code,
+                "                let __step = if __cycle == 0 {{\n                    \
+                 match crate::common::run_step(|| exec.pre_edge_settle::<{d}>()) {{\n                        \
+                 Ok(()) => {{\n                            \
+                 eq.record_observation_zero(&[{obs0}]);\n                            \
+                 crate::common::run_step(|| exec.post_edge_settle(&mut clk))\n                        \
+                 }}\n                        \
+                 Err(__m) => Err(__m),\n                    \
+                 }}\n                \
+                 }} else {{\n                    \
+                 crate::common::run_step(|| exec.tick_clock(&mut clk))\n                \
+                 }};",
+                d = c.domain,
+                obs0 = obs0.join(", ")
+            );
+        }
+        None => {
+            let _ = writeln!(code, "                let __step = crate::common::run_step(|| exec.poll_tasks());");
+        }
+    }
+    let _ = writeln!(
+        code,
+        "                if let Err(__m) = __step {{\n                    \
+         eq.record_failure(&[{}], &__m);\n                    \
+         break;\n                \
+         }}",
+        ins.join(", ")
+    );
+    for p in m.ports.iter().filter(|p| matches!(p.kind, Kind::Out | Kind::RegOut)) {
+        let _ = writeln!(code, "                let {n}_v = {n}_obs.read();", n = p.name);
+    }
     let record = match leg {
         Leg::Differential => "record_differential",
         Leg::Reference => "record",
