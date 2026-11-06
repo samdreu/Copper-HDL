@@ -277,7 +277,7 @@ async fn m(clk: Clock<MainClk>, go: In<Logic, MainClk>, o: RegOut<Bits<8>, MainC
 fn nested_loop_without_a_tick_is_unsupported() {
     let src = r#"
 #[hardware(sequential)]
-async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<8>, MainClk>) {
     loop {
         loop {
             o.write(a.read());
@@ -296,7 +296,7 @@ async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk
     // owns this one, and its message is the better of the two.
     let no_tick = r#"
 #[hardware(sequential)]
-async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {
+async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<8>, MainClk>) {
     loop {
         loop {
             o.write(a.read());
@@ -344,7 +344,7 @@ fn mem_dut(decl: &str, body: &str) -> String {
         r#"
 #[hardware(sequential)]
 async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, d: In<Bits<16>, MainClk>,
-           we: In<Logic, MainClk>, o: Out<Bits<16>, MainClk>) {{
+           we: In<Logic, MainClk>, o: RegOut<Bits<16>, MainClk>) {{
     {decl}
     let mut q: Bits<16> = Bits::zero();
     loop {{
@@ -434,7 +434,7 @@ fn rom_dut(decl: &str) -> String {
     format!(
         r#"
 #[hardware(sequential)]
-async fn r(clk: Clock<MainClk>, a: In<Bits<4>, MainClk>, o: Out<Bits<16>, MainClk>) {{
+async fn r(clk: Clock<MainClk>, a: In<Bits<4>, MainClk>, o: RegOut<Bits<16>, MainClk>) {{
     let rom = {decl};
     let mut q: Bits<16> = Bits::zero();
     loop {{
@@ -540,7 +540,7 @@ fn two_accesses_to_one_memory_port_are_rejected() {
 fn memory_in_a_multi_phase_loop_is_supported() {
     let src = r#"
 #[hardware(sequential)]
-async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<16>, MainClk>) {
+async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<16>, MainClk>) {
     let mem = Memory::<Bits<16>, 1, 0, MainClk, 1, 1>::new(clk.clone(), 256);
     let mut q: Bits<16> = Bits::zero();
     loop {
@@ -581,7 +581,7 @@ async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<16>, MainCl
 fn trailing_combinational_statements_in_a_multi_tick_loop_lower_into_phase_zero() {
     let src = r#"
 #[hardware(sequential)]
-async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>,
+async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<8>, MainClk>,
            t: RegOut<Bits<8>, MainClk>) {
     let mut r: Bits<8> = Bits::zero();
     loop {
@@ -610,7 +610,7 @@ async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk
 fn memory_read_result_before_the_tick_is_rejected() {
     let src = r#"
 #[hardware(sequential)]
-async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<16>, MainClk>) {
+async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<16>, MainClk>) {
     let mem = Memory::<Bits<16>, 1, 1, MainClk, 1, 1>::new(clk.clone(), 256);
     let mut q: Bits<16> = Bits::zero();
     loop {
@@ -653,36 +653,6 @@ async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<16>, Mai
     assert!(
         sv.contains("case (pc)") && sv.contains("rom_rd0_q0 <= rom_rd0_data;"),
         "expected an extracted FSM with a read pipeline stage, got:\n{sv}"
-    );
-}
-
-/// A plain `Out` driven straight from a read result in an EXTRACTED module. The
-/// read pipeline re-captures on every edge, so this has no correct emitted form —
-/// measured on exactly this DUT, one cycle late on every sampled value, before the
-/// rule was moved somewhere that can see it. `vlir_lower`'s copy gives up on
-/// `phases.len() < 2`, and an extracted module always has exactly one lowered
-/// phase; it was unreachable only because the staging rules used to reject every
-/// extracted memory design first.
-#[test]
-fn a_plain_out_driven_from_a_read_result_in_an_extracted_module_is_rejected() {
-    let src = r#"
-#[hardware(sequential)]
-async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<16>, MainClk>) {
-    let rom = Memory::<Bits<16>, 1, 0, MainClk, 1, 1>::new(clk.clone(), 256);
-    loop {
-        rom.read_port::<0>().read(a.read().as_usize());
-        clk.tick().await;
-        o.write(rom.read_port::<0>().data());
-        for _ in 0..2 { clk.tick().await; }
-    }
-}
-"#;
-    let err = transpile(src).expect_err(
-        "NOW SUPPORTED: a plain `Out` driven from a read result across phases. It was measured          landing a full cycle late; promote it to an equivalence test before believing this.",
-    );
-    assert!(
-        err.contains("multi-phase") && err.contains("RegOut"),
-        "reproduced a *different* error than the tracked plain-Out gap: {err}"
     );
 }
 

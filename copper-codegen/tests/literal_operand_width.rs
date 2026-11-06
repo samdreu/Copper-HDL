@@ -29,7 +29,7 @@ async fn simple_counter(
     clk: Clock<MainClk>,
     reset_i: In<Logic, MainClk>,
     en_i: In<Logic, MainClk>,
-    count_o: Out<Bits<8>, MainClk>,
+    count_o: RegOut<Bits<8>, MainClk>,
 ) {
     let mut count = Bits::<8>::x();
     loop {

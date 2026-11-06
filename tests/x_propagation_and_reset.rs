@@ -24,7 +24,7 @@
 mod common;
 
 use common::{verilator_available, verilator_command};
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -43,12 +43,12 @@ impl ClockDomain for C {}
 
 const HELD_SRC: &str = r#"
 #[hardware(sequential)]
-async fn held(clk: Clock<C>, en: In<Logic, C>, d: In<Bits<8>, C>, q: Out<Bits<8>, C>) {
+async fn held(clk: Clock<C>, en: In<Logic, C>, d: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) {
     let mut r: Bits<8> = Bits::x();
     loop {
+        if en.read() == Logic::One { r = d.read(); }
         q.write(r);
         clk.tick().await;
-        if en.read() == Logic::One { r = d.read(); }
     }
 }
 "#;
@@ -61,27 +61,27 @@ async fn held(clk: Clock<C>, en: In<Logic, C>, d: In<Bits<8>, C>, q: Out<Bits<8>
 /// settle, after the load — so the X is real but invisible. Holding the register is
 /// what makes it reachable.
 #[hardware(sequential)]
-async fn held(clk: Clock<C>, en: In<Logic, C>, d: In<Bits<8>, C>, q: Out<Bits<8>, C>) {
+async fn held(clk: Clock<C>, en: In<Logic, C>, d: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) {
     let mut r: Bits<8> = Bits::x();
     loop {
-        q.write(r);
-        clk.tick().await;
         if en.read() == Logic::One {
             r = d.read();
         }
+        q.write(r);
+        clk.tick().await;
     }
 }
 
 /// Branches on a control input — the shape that aborts when the control is X.
 #[hardware(sequential)]
-async fn gated_counter(clk: Clock<C>, en: In<Logic, C>, q: Out<Bits<8>, C>) {
+async fn gated_counter(clk: Clock<C>, en: In<Logic, C>, q: RegOut<Bits<8>, C>) {
     let mut r: Bits<8> = Bits::zero();
     loop {
-        q.write(r);
-        clk.tick().await;
         if en.read().as_bool() {
             r = r + Bits::from_lit::<1>();
         }
+        q.write(r);
+        clk.tick().await;
     }
 }
 
@@ -91,17 +91,17 @@ async fn resettable(
     clk: Clock<C>,
     rstn: In<Logic, C>,
     d: In<Bits<8>, C>,
-    q: Out<Bits<8>, C>,
+    q: RegOut<Bits<8>, C>,
 ) {
     let mut r: Bits<8> = Bits::x();
     loop {
-        q.write(r);
-        clk.tick().await;
         if rstn.read() == Logic::Zero {
             r = Bits::zero();
         } else {
             r = d.read();
         }
+        q.write(r);
+        clk.tick().await;
     }
 }
 
@@ -118,7 +118,7 @@ macro_rules! held_rig {
         let mut $exec = HardwareExecutor::new();
         let ($en, en_in) = wire::<Logic, C>(Logic::Zero);
         let ($d, d_in) = wire::<Bits<8>, C>(Bits::zero());
-        let (q_out, $q) = wire::<Bits<8>, C>(Bits::zero());
+        let (q_out, $q) = registered_wire::<Bits<8>, C>(&$clk, Bits::zero());
         let dh = q_out.dirty_handle();
         let reads = vec![en_in.wire_id(), d_in.wire_id()];
         $exec.spawn_wired(held($clk.clone(), en_in, d_in, q_out), vec![dh], reads);
@@ -187,7 +187,7 @@ fn x_on_a_control_input_panics() {
         let mut clk = Clock::<C>::new();
         let mut exec = HardwareExecutor::new();
         let (en_drv, en_in) = wire::<Logic, C>(Logic::Zero);
-        let (q_out, _q_obs) = wire::<Bits<8>, C>(Bits::zero());
+        let (q_out, _q_obs) = registered_wire::<Bits<8>, C>(&clk, Bits::zero());
         let dh = q_out.dirty_handle();
         let reads = vec![en_in.wire_id()];
         exec.spawn_wired(gated_counter(clk.clone(), en_in, q_out), vec![dh], reads);
@@ -226,7 +226,7 @@ fn reset_drives_an_unknown_register_to_a_known_state() {
     let mut exec = HardwareExecutor::new();
     let (rstn_drv, rstn_in) = wire::<Logic, C>(Logic::One);
     let (d_drv, d_in) = wire::<Bits<8>, C>(Bits::zero());
-    let (q_out, q_obs) = wire::<Bits<8>, C>(Bits::zero());
+    let (q_out, q_obs) = registered_wire::<Bits<8>, C>(&clk, Bits::zero());
     let dh = q_out.dirty_handle();
     let reads = vec![rstn_in.wire_id(), d_in.wire_id()];
     exec.spawn_wired(resettable(clk.clone(), rstn_in, d_in, q_out), vec![dh], reads);
@@ -269,7 +269,7 @@ fn reset_is_what_makes_a_design_verilator_checkable() {
     let mut exec = HardwareExecutor::new();
     let (rstn_drv, rstn_in) = wire::<Logic, C>(Logic::One);
     let (d_drv, d_in) = wire::<Bits<8>, C>(Bits::zero());
-    let (q_out, q_obs) = wire::<Bits<8>, C>(Bits::zero());
+    let (q_out, q_obs) = registered_wire::<Bits<8>, C>(&clk, Bits::zero());
     let dh = q_out.dirty_handle();
     let reads = vec![rstn_in.wire_id(), d_in.wire_id()];
     exec.spawn_wired(resettable(clk.clone(), rstn_in, d_in, q_out), vec![dh], reads);

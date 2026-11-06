@@ -19,7 +19,7 @@
 //! Futures are single-use, so each poll order rebuilds the design from scratch;
 //! the closures below are the "design + stimulus", parameterized by `PollOrder`.
 
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::types::{Bits, Clock, ClockDomain};
 use copper_macros::hardware;
 use copper_sim::{HardwareExecutor, PollOrder, SchedulerMode};
@@ -54,22 +54,22 @@ fn assert_order_independent(name: &str, run: impl Fn(PollOrder) -> Vec<u128>) {
 // ── modules (real #[hardware] macro path) ─────────────────────────────────────
 
 #[hardware(sequential)]
-async fn counter_a(clk: Clock<ClkA>, out: Out<Bits<8>, ClkA>) {
+async fn counter_a(clk: Clock<ClkA>, out: RegOut<Bits<8>, ClkA>) {
     let mut v = Bits::<8>::from_lit::<0>();
     loop {
+        v = v + Bits::<8>::from_u8(1);
         out.write(v);
         clk.tick().await;
-        v = v + Bits::<8>::from_u8(1);
     }
 }
 
 #[hardware(sequential)]
-async fn counter_b(clk: Clock<ClkB>, out: Out<Bits<8>, ClkB>) {
+async fn counter_b(clk: Clock<ClkB>, out: RegOut<Bits<8>, ClkB>) {
     let mut v = Bits::<8>::from_lit::<0>();
     loop {
+        v = v + Bits::<8>::from_u8(1);
         out.write(v);
         clk.tick().await;
-        v = v + Bits::<8>::from_u8(1);
     }
 }
 
@@ -98,7 +98,7 @@ fn combinational_chain_is_poll_order_independent() {
         let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Fixpoint);
         exec.set_poll_order(order);
 
-        let (c_out, c_in) = wire::<Bits<8>, ClkA>(Bits::from_lit::<0>());
+        let (c_out, c_in) = registered_wire::<Bits<8>, ClkA>(&clk, Bits::from_lit::<0>());
         let (a_out, a_in) = wire::<Bits<8>, ClkA>(Bits::from_lit::<0>());
         let (b_out, b_in) = wire::<Bits<8>, ClkA>(Bits::from_lit::<0>());
 
@@ -145,8 +145,8 @@ fn multi_domain_counters_are_poll_order_independent() {
         let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Fixpoint);
         exec.set_poll_order(order);
 
-        let (a_out, a_in) = wire::<Bits<8>, ClkA>(Bits::from_lit::<0>());
-        let (b_out, b_in) = wire::<Bits<8>, ClkB>(Bits::from_lit::<0>());
+        let (a_out, a_in) = registered_wire::<Bits<8>, ClkA>(&clk_a, Bits::from_lit::<0>());
+        let (b_out, b_in) = registered_wire::<Bits<8>, ClkB>(&clk_b, Bits::from_lit::<0>());
         let ad = a_out.dirty_handle();
         let bd = b_out.dirty_handle();
         exec.spawn_wired(counter_a(clk_a.clone(), a_out), vec![ad], vec![]);

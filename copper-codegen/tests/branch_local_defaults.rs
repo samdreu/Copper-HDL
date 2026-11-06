@@ -25,7 +25,7 @@ fn transpile(src: &str) -> Result<String, String> {
 fn a_branch_local_with_a_computed_initializer_gets_a_default_and_keeps_its_computation() {
     let src = r#"
 #[hardware(sequential)]
-async fn m(clk: Clock<MainClk>, r: In<Logic, MainClk>, up_i: In<Logic, MainClk>, o: Out<Bits<3>, MainClk>) {
+async fn m(clk: Clock<MainClk>, r: In<Logic, MainClk>, up_i: In<Logic, MainClk>, o: RegOut<Bits<3>, MainClk>) {
     let mut count = Bits::<3>::zero();
     loop {
         clk.tick().await;
@@ -61,7 +61,7 @@ async fn m(clk: Clock<MainClk>, r: In<Logic, MainClk>, up_i: In<Logic, MainClk>,
 fn a_conditionally_driven_register_is_never_given_a_default() {
     let src = r#"
 #[hardware(sequential)]
-async fn m(clk: Clock<MainClk>, en_i: In<Logic, MainClk>, d_i: In<Bits<4>, MainClk>, o: Out<Bits<4>, MainClk>) {
+async fn m(clk: Clock<MainClk>, en_i: In<Logic, MainClk>, d_i: In<Bits<4>, MainClk>, o: RegOut<Bits<4>, MainClk>) {
     let mut q = Bits::<4>::zero();
     loop {
         clk.tick().await;

@@ -38,12 +38,12 @@ impl ClockDomain for Slow {}
 // ── modules (real #[hardware] macro path) ─────────────────────────────────────
 
 #[hardware(sequential)]
-async fn counter(clk: Clock<Dm>, out: Out<Bits<8>, Dm>) {
+async fn counter(clk: Clock<Dm>, out: RegOut<Bits<8>, Dm>) {
     let mut v = Bits::<8>::from_lit::<0>();
     loop {
+        v = v + Bits::<8>::from_u8(1);
         out.write(v);
         clk.tick().await;
-        v = v + Bits::<8>::from_u8(1);
     }
 }
 
@@ -61,7 +61,7 @@ fn add2(a: In<Bits<8>, Dm>, b: In<Bits<8>, Dm>, out: Out<Bits<8>, Dm>) {
 
 /// A plain-`Out` register: `q` captures `d` at the edge.
 #[hardware(sequential)]
-async fn dff(clk: Clock<Dm>, d: In<Bits<8>, Dm>, q: Out<Bits<8>, Dm>) {
+async fn dff(clk: Clock<Dm>, d: In<Bits<8>, Dm>, q: RegOut<Bits<8>, Dm>) {
     loop {
         q.write(d.read());
         clk.tick().await;
@@ -96,12 +96,12 @@ fn buf(in_i: In<Bits<8>, Dm>, out: Out<Bits<8>, Dm>) {
 }
 
 #[hardware(sequential)]
-async fn counter_fast(clk: Clock<Fast>, out: Out<Bits<8>, Fast>) {
+async fn counter_fast(clk: Clock<Fast>, out: RegOut<Bits<8>, Fast>) {
     let mut v = Bits::<8>::from_lit::<0>();
     loop {
+        v = v + Bits::<8>::from_u8(1);
         out.write(v);
         clk.tick().await;
-        v = v + Bits::<8>::from_u8(1);
     }
 }
 
@@ -111,12 +111,12 @@ fn add_one_fast(in_i: In<Bits<8>, Fast>, out: Out<Bits<8>, Fast>) {
 }
 
 #[hardware(sequential)]
-async fn counter_slow(clk: Clock<Slow>, out: Out<Bits<8>, Slow>) {
+async fn counter_slow(clk: Clock<Slow>, out: RegOut<Bits<8>, Slow>) {
     let mut v = Bits::<8>::from_lit::<0>();
     loop {
+        v = v + Bits::<8>::from_u8(1);
         out.write(v);
         clk.tick().await;
-        v = v + Bits::<8>::from_u8(1);
     }
 }
 
@@ -190,7 +190,7 @@ fn diff_comb_chain() {
         let clk = Clock::<Dm>::new();
         let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
 
-        let (c_out, c_in) = wire::<Bits<8>, Dm>(Bits::zero());
+        let (c_out, c_in) = registered_wire::<Bits<8>, Dm>(&clk, Bits::zero());
         let (a_out, a_in) = wire::<Bits<8>, Dm>(Bits::zero());
         let (b_out, b_in) = wire::<Bits<8>, Dm>(Bits::zero());
 
@@ -231,7 +231,7 @@ fn diff_diamond_fanout_fanin() {
         let clk = Clock::<Dm>::new();
         let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
 
-        let (c_out, c_in) = wire::<Bits<8>, Dm>(Bits::zero());
+        let (c_out, c_in) = registered_wire::<Bits<8>, Dm>(&clk, Bits::zero());
         let (x_out, x_in) = wire::<Bits<8>, Dm>(Bits::zero());
         let (y_out, y_in) = wire::<Bits<8>, Dm>(Bits::zero());
         let (z_out, z_in) = wire::<Bits<8>, Dm>(Bits::zero());
@@ -283,7 +283,7 @@ fn diff_register_then_comb() {
         let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
 
         let (d_drv, d_in) = wire::<Bits<8>, Dm>(Bits::zero());
-        let (q_out, q_in) = wire::<Bits<8>, Dm>(Bits::zero());
+        let (q_out, q_in) = registered_wire::<Bits<8>, Dm>(&clk, Bits::zero());
         let (r_out, r_in) = wire::<Bits<8>, Dm>(Bits::zero());
 
         let qd = q_out.dirty_handle();
@@ -422,9 +422,9 @@ fn diff_multi_domain_independent() {
         let clk_slow = Clock::<Slow>::new();
         let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
 
-        let (fc_out, fc_in) = wire::<Bits<8>, Fast>(Bits::zero());
+        let (fc_out, fc_in) = registered_wire::<Bits<8>, Fast>(&clk_fast, Bits::zero());
         let (fa_out, fa_in) = wire::<Bits<8>, Fast>(Bits::zero());
-        let (sc_out, sc_in) = wire::<Bits<8>, Slow>(Bits::zero());
+        let (sc_out, sc_in) = registered_wire::<Bits<8>, Slow>(&clk_slow, Bits::zero());
         let (sa_out, sa_in) = wire::<Bits<8>, Slow>(Bits::zero());
 
         let fcd = fc_out.dirty_handle();
