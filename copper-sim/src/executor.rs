@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::future::Future;
 use std::pin::Pin;
 use std::cmp::Reverse;
@@ -47,6 +48,12 @@ const MAX_DELTA_CYCLES: usize = 1000;
 /// ```
 pub struct HardwareModule<F> {
     future: F,
+    /// The clock domain whose edges resume this module's coroutine (SPEC §I.12.1):
+    /// `Some` for a `sequential`/`synchronizer` module (the `D` of its one
+    /// `Clock<D>`), `None` for a combinational module (it has no clock; it is part
+    /// of the network every settle evaluates) and for hand-built futures. Read only
+    /// under [`ResumptionMode::One`]; the two-job executor ignores it.
+    domain: Option<TypeId>,
 }
 
 impl<F> HardwareModule<F> {
@@ -54,7 +61,20 @@ impl<F> HardwareModule<F> {
     /// `#[hardware]`-generated code; not meant to be used by hand.
     #[doc(hidden)]
     pub fn __new(future: F) -> Self {
-        HardwareModule { future }
+        HardwareModule { future, domain: None }
+    }
+
+    /// Construct a clocked module from its future, tagged with the domain of its
+    /// one `Clock<D>`. **Macro-internal** — what `#[hardware(sequential)]` and
+    /// `#[hardware(synchronizer)]` emit.
+    #[doc(hidden)]
+    pub fn __new_in_domain<D: ClockDomain>(future: F) -> Self {
+        HardwareModule { future, domain: Some(TypeId::of::<D>()) }
+    }
+
+    /// The domain tag (see the field). Crate-internal.
+    pub(crate) fn domain(&self) -> Option<TypeId> {
+        self.domain
     }
 
     /// Unwrap the future (crate-internal, for the executor to poll).
@@ -70,8 +90,6 @@ impl<F> HardwareModule<F> {
 pub struct HardwareExecutor {
     // tasks to be done
     tasks: Vec<TaskEntry>,
-    // cycle that the exection is on
-    cycle: u64,
     // modules included in the execution model
     modules: HashMap<String, ModuleInfo>,
     // order in which poll_tasks visits tasks within each delta cycle
@@ -86,6 +104,71 @@ pub struct HardwareExecutor {
     // rebuild after a spawn.
     levelized_plan: Vec<Vec<usize>>,
     graph_dirty: bool,
+    // how many resumptions a sequential coroutine gets per tick (Phase C step 2)
+    resumption: ResumptionMode,
+    // per-domain edge count (SPEC §I.1.6, §I.12.6 (8)): edges are numbered per
+    // domain, so the executor counts each domain's ticks separately
+    cycles: HashMap<TypeId, u64>,
+}
+
+/// How many times a sequential coroutine is resumed per tick of its domain —
+/// Phase C step 2 (SPEC §I.0.2, D-8), behind a switch until the corpus's two-job
+/// spellings are rewritten (step 3).
+///
+/// - [`ResumptionMode::Two`] — **the default today**, the two-job executor: a tick
+///   resolves in the POST-edge settle, so the code after a `tick` runs after the
+///   edge, and a read the macro classified as deferred parks at a
+///   [`PreEdgeBarrier`](crate::PreEdgeBarrier) until the next pre-edge settle. Every
+///   task is polled in every settle of every domain.
+/// - [`ResumptionMode::One`] — the spec's protocol: per tick of `D`, the network
+///   settles on the driven inputs, then each coroutine of `D` parked at a `tick` is
+///   resumed **once** and runs to its next `tick` (`t_{N+1}⁻`), then the edge
+///   commits, then the network settles for the observation; the post-edge settle
+///   resumes no coroutine (§I.13.2(b)). A coroutine is resumed by its own domain's
+///   ticks only, and a domain never ticked has run nothing (§I.12.2). The barrier is
+///   a no-op (Ready at once), which is exactly the body without the injection.
+///
+/// Selected by `COPPER_RESUMPTION` (`one` | `two`, case-insensitive; unset or
+/// anything else = the compiled default) or [`HardwareExecutor::with_resumption_mode`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ResumptionMode {
+    /// The two-job executor (compiled default until Phase C step 3).
+    #[default]
+    Two,
+    /// One resumption per tick of the coroutine's own domain (SPEC §I.0.2).
+    One,
+}
+
+impl ResumptionMode {
+    /// The mode a fresh executor uses: `COPPER_RESUMPTION`, else [`ResumptionMode::Two`].
+    pub fn env_default() -> ResumptionMode {
+        match std::env::var("COPPER_RESUMPTION") {
+            Ok(v) if v.eq_ignore_ascii_case("one") => ResumptionMode::One,
+            Ok(v) if v.eq_ignore_ascii_case("two") => ResumptionMode::Two,
+            _ => ResumptionMode::Two,
+        }
+    }
+}
+
+/// Which tasks a settle polls under [`ResumptionMode::One`].
+#[derive(Clone, Copy)]
+enum PollSet {
+    /// Every task (the two-job executor; and any direct `poll_tasks` call).
+    All,
+    /// The combinational network only: untagged tasks.
+    Network,
+    /// The network and the coroutines of one domain.
+    NetworkAnd(TypeId),
+}
+
+impl PollSet {
+    fn admits(self, domain: Option<TypeId>) -> bool {
+        match (self, domain) {
+            (PollSet::All, _) | (_, None) => true,
+            (PollSet::Network, Some(_)) => false,
+            (PollSet::NetworkAnd(d), Some(t)) => d == t,
+        }
+    }
 }
 
 /// Which settling algorithm [`HardwareExecutor::poll_tasks`] uses within a phase
@@ -260,6 +343,8 @@ struct TaskEntry {
     /// are these reads. Consumed by [`Self::compute_topo_order`] under
     /// [`SchedulerMode::Levelized`]; the fixpoint scheduler ignores it.
     reads: Vec<WireId>,
+    /// The module's domain tag ([`HardwareModule`]'s), read under [`ResumptionMode::One`].
+    domain: Option<TypeId>,
 }
 
 /// Modules in the execution, with parent-child relationships. This is used for tracking the hierarchy of modules in the system, which can be useful for debugging and visualization.
@@ -277,13 +362,31 @@ impl HardwareExecutor {
     pub fn new() -> Self {
         Self {
             tasks: Vec::new(),
-            cycle: 0,
             modules: HashMap::new(),
             poll_order: PollOrder::Insertion,
             scheduler: SchedulerMode::env_default(),
             levelized_plan: Vec::new(),
             graph_dirty: true,
+            resumption: ResumptionMode::env_default(),
+            cycles: HashMap::new(),
         }
+    }
+
+    /// Select how many resumptions a coroutine gets per tick (Phase C step 2).
+    /// Overrides `COPPER_RESUMPTION`. Set it before the first settle.
+    pub fn set_resumption_mode(&mut self, mode: ResumptionMode) {
+        self.resumption = mode;
+    }
+
+    /// Builder form of [`Self::set_resumption_mode`].
+    pub fn with_resumption_mode(mut self, mode: ResumptionMode) -> Self {
+        self.resumption = mode;
+        self
+    }
+
+    /// The resumption mode this executor runs.
+    pub fn resumption_mode(&self) -> ResumptionMode {
+        self.resumption
     }
 
     /// Select the settling algorithm (item 6). The default is
@@ -365,11 +468,13 @@ impl HardwareExecutor {
     where
         F: Future<Output = ()> + 'static,
     {
+        let domain = module.domain();
         self.tasks.push(TaskEntry {
             future: Box::pin(module.into_future()),
             consecutive_dirty: 0,
             port_dirties: vec![],
             reads,
+            domain,
         });
         self.graph_dirty = true;
     }
@@ -406,11 +511,13 @@ impl HardwareExecutor {
     ) where
         F: Future<Output = ()> + 'static,
     {
+        let domain = module.domain();
         self.tasks.push(TaskEntry {
             future: Box::pin(module.into_future()),
             consecutive_dirty: 0,
             port_dirties: dirties,
             reads,
+            domain,
         });
         self.graph_dirty = true;
     }
@@ -518,12 +625,18 @@ impl HardwareExecutor {
     /// runs the SCC-condensed levelized settle (item 6); [`SchedulerMode::Fixpoint`]
     /// (the differential oracle) runs the delta-cycle loop described above.
     pub fn poll_tasks(&mut self) {
+        self.poll_set(PollSet::All);
+    }
+
+    /// Settle over the tasks `set` admits (every task under the two-job executor).
+    fn poll_set(&mut self, set: PollSet) {
+        crate::set_one_resumption(self.resumption == ResumptionMode::One);
         match self.scheduler {
-            SchedulerMode::Fixpoint => self.poll_tasks_fixpoint(),
+            SchedulerMode::Fixpoint => self.poll_tasks_fixpoint(set),
             SchedulerMode::Levelized => {
                 self.ensure_graph();
                 let plan = std::mem::take(&mut self.levelized_plan);
-                self.poll_tasks_levelized(&plan);
+                self.poll_tasks_levelized(&plan, set);
                 self.levelized_plan = plan;
             }
         }
@@ -543,14 +656,21 @@ impl HardwareExecutor {
     /// This reaches the same global fixed point as [`Self::poll_tasks_fixpoint`]
     /// (a topological sweep with per-SCC fixpoints equals the whole-graph fixpoint),
     /// which the differential harness verifies corpus-wide.
-    fn poll_tasks_levelized(&mut self, plan: &[Vec<usize>]) {
+    fn poll_tasks_levelized(&mut self, plan: &[Vec<usize>], set: PollSet) {
         let waker = noop_waker();
         let mut context = Context::from_waker(&waker);
         for component in plan {
             if component.len() == 1 {
-                self.poll_task_once(component[0], &mut context);
+                if set.admits(self.tasks[component[0]].domain) {
+                    self.poll_task_once(component[0], &mut context);
+                }
             } else {
-                self.iterate_scc(component, &mut context);
+                let members: Vec<usize> = component
+                    .iter()
+                    .copied()
+                    .filter(|&i| set.admits(self.tasks[i].domain))
+                    .collect();
+                self.iterate_scc(&members, &mut context);
             }
         }
     }
@@ -750,7 +870,7 @@ impl HardwareExecutor {
 
     /// The iterate-to-fixpoint delta-cycle settle (the default scheduler). Uses the
     /// shared [`OSCILLATION_THRESHOLD`] / [`MAX_DELTA_CYCLES`] bounds.
-    fn poll_tasks_fixpoint(&mut self) {
+    fn poll_tasks_fixpoint(&mut self, set: PollSet) {
         let waker = noop_waker();
         let mut context = Context::from_waker(&waker);
 
@@ -763,6 +883,9 @@ impl HardwareExecutor {
             let order = self.visit_order(delta);
             let mut any_dirty = false;
             for &i in &order {
+                if !set.admits(self.tasks[i].domain) {
+                    continue;
+                }
                 let task = &mut self.tasks[i];
                 assert!(
                     task.future.as_mut().poll(&mut context).is_pending(),
@@ -804,57 +927,87 @@ impl HardwareExecutor {
     /// Advance the clock edge only (no polling)
     pub fn advance<Domain: ClockDomain>(&mut self, clk: &mut Clock<Domain>) {
         clk.advance();
-        self.cycle += 1;
+        *self.cycles.entry(TypeId::of::<Domain>()).or_insert(0) += 1;
     }
 
-    /// Advance the simulation by one clock cycle. 
-    /// This includes a pre-edge settle phase where all tasks are polled to allow combinational logic to run, 
-    /// then the clock is advanced, and then a post-edge settle phase where tasks are polled again to allow sequential logic to update based on the new clock edge.
+    /// Advance the simulation by one tick of `Domain`.
+    ///
+    /// Under [`ResumptionMode::Two`] (today's default): a pre-edge settle in which
+    /// every task is polled with `Domain`'s ticks not resolving (a deferred read
+    /// parked at its barrier resumes here), the edge, then a post-edge settle in
+    /// which every task is polled with `Domain`'s ticks resolving — so a coroutine
+    /// is resumed in both settles, and its post-tick code runs after the edge.
+    ///
+    /// Under [`ResumptionMode::One`] (SPEC §I.0.2, §I.13.2(b)): drive (the caller,
+    /// before this call), settle the network, resume each of `Domain`'s coroutines
+    /// once to its next `tick`, the edge, settle the network for the observation.
+    /// No other domain's coroutine is polled, and the post-edge settle polls no
+    /// coroutine at all.
+    ///
+    /// All phase/resolution signals are keyed per clock domain (`Domain`), so
+    /// ticking this clock cannot perturb any other domain's tasks.
     pub fn tick_clock<Domain: ClockDomain>(&mut self, clk: &mut Clock<Domain>) {
-        // Post-edge continuation convention: a `clk.tick()` resolves in the
-        // POST-edge settle, so a reaction's post-tick code runs in the SAME
-        // `tick_clock`, AFTER the advance. A register clocked at edge N is thus
-        // observable in cycle N — the standard synchronous-testbench convention —
-        // so the primitive constructs (flip-flop `q<=d`, enabled register,
-        // synchronous-read RAM) match hand-written Verilog. Held/registered OUTPUT
-        // ports that need one more cycle of latency use an explicit `RegOut`.
-        // See design_docs/OUTDATED/EXECUTOR_CONVENTION_EXPERIMENT.md.
-        //
-        // All three phase/resolution/call-id signals are keyed per clock domain
-        // (`Domain`), so ticking this clock cannot perturb any other domain's
-        // tasks — required for multi-clock designs to be poll-order- and
-        // interleave-independent (see design_docs/SYNCHRONOUS_SEMANTICS.md).
         self.pre_edge_settle::<Domain>();
         self.post_edge_settle::<Domain>(clk);
     }
 
-    /// The **pre-edge settle** half of [`Self::tick_clock`]: set `Domain` to its
-    /// pre-edge phase and settle all tasks, without advancing the clock.
+    /// The **pre-edge settle** half of [`Self::tick_clock`], without advancing the
+    /// clock: under [`ResumptionMode::Two`] every task is polled with `Domain`'s
+    /// ticks not resolving; under [`ResumptionMode::One`] the network settles on the
+    /// driven inputs and then `Domain`'s coroutines are resumed once (`t_{N+1}⁻`),
+    /// re-settling the network over what they wrote.
     ///
-    /// Split out so the differential harness (item 6) can compare settled signal
-    /// values *between* phases; ordinary callers use [`Self::tick_clock`].
+    /// Split out so the differential harness can read signal values *between*
+    /// phases (observation 0 is read here); ordinary callers use [`Self::tick_clock`].
     pub fn pre_edge_settle<Domain: ClockDomain>(&mut self) {
         crate::set_poll_phase::<Domain>(crate::PollPhase::PreEdge);
-        copper_core::types::set_tick_resolving::<Domain>(false);
-        self.poll_tasks();
+        match self.resumption {
+            ResumptionMode::Two => {
+                copper_core::types::set_tick_resolving::<Domain>(false);
+                self.poll_set(PollSet::All);
+            }
+            ResumptionMode::One => {
+                // A coroutine parked at `Domain`'s tick from the previous resumption
+                // has `cycle >= target` since that edge; resolving it here, and only
+                // here, is the one resumption of this tick.
+                copper_core::types::set_tick_resolving::<Domain>(true);
+                // The network settles on (q_N, x_{N+1}) first, so every resumption
+                // reads settled wires whatever the scheduler's visit order.
+                self.poll_set(PollSet::Network);
+                self.poll_set(PollSet::NetworkAnd(TypeId::of::<Domain>()));
+            }
+        }
     }
 
     /// The **clock-edge + post-edge settle** half of [`Self::tick_clock`]: advance
-    /// `Domain`'s clock, set its post-edge phase, settle all tasks, and count the
-    /// cycle. Must follow [`Self::pre_edge_settle`] for the same domain.
+    /// `Domain`'s clock, settle, and count the edge in `Domain`'s cycle counter.
+    /// Under [`ResumptionMode::Two`] every task is polled with `Domain`'s ticks
+    /// resolving (the second resumption); under [`ResumptionMode::One`] only the
+    /// network is evaluated, on the committed values, for the observation.
+    /// Must follow [`Self::pre_edge_settle`] for the same domain.
     pub fn post_edge_settle<Domain: ClockDomain>(&mut self, clk: &mut Clock<Domain>) {
         clk.advance();
 
         crate::set_poll_phase::<Domain>(crate::PollPhase::PostEdge);
-        copper_core::types::set_tick_resolving::<Domain>(true);
-        self.poll_tasks();
+        match self.resumption {
+            ResumptionMode::Two => {
+                copper_core::types::set_tick_resolving::<Domain>(true);
+                self.poll_set(PollSet::All);
+            }
+            ResumptionMode::One => {
+                copper_core::types::set_tick_resolving::<Domain>(false);
+                self.poll_set(PollSet::Network);
+            }
+        }
 
-        self.cycle += 1;
+        *self.cycles.entry(TypeId::of::<Domain>()).or_insert(0) += 1;
     }
 
-    /// Get the current cycle number. This can be used for tracking the progress of the simulation and for debugging purposes.
-    pub fn cycle(&self) -> u64 {
-        self.cycle
+    /// The number of edges of `Domain` this executor has driven (SPEC §I.1.1:
+    /// edges are numbered per domain). Replaces the former global counter, which
+    /// summed the ticks of every domain (D-1 A2's artifact, §I.12.6 (8)).
+    pub fn cycle<Domain: ClockDomain>(&self) -> u64 {
+        self.cycles.get(&TypeId::of::<Domain>()).copied().unwrap_or(0)
     }
 
     /// Ensure a module exists in the module info map, creating it if necessary

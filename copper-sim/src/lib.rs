@@ -19,7 +19,9 @@ pub use testing::{HardwareTest, TestResult, make_cycle};
 
 pub mod executor;
 
-pub use executor::{HardwareExecutor, HardwareModule, ModuleInfo, PollOrder, SchedulerMode};
+pub use executor::{
+    HardwareExecutor, HardwareModule, ModuleInfo, PollOrder, ResumptionMode, SchedulerMode,
+};
 
 /// Which phase of the clock cycle `tick_clock` is currently executing.
 /// Set by the executor before each `poll_tasks()` call so that phase-aware futures
@@ -42,6 +44,18 @@ pub(crate) fn set_poll_phase<Domain: ClockDomain>(phase: PollPhase) {
     POLL_PHASE.with(|cell| {
         cell.borrow_mut().insert(TypeId::of::<Domain>(), phase);
     });
+}
+
+thread_local! {
+    /// Whether the executor polling on this thread runs [`ResumptionMode::One`]
+    /// (Phase C step 2). Set by the executor at the start of every settle. Under it
+    /// the barrier is Ready at once — the body without the injection — so neither
+    /// `POLL_PHASE` nor its `PreEdge` default has any meaning there.
+    static ONE_RESUMPTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn set_one_resumption(one: bool) {
+    ONE_RESUMPTION.with(|c| c.set(one));
 }
 
 fn is_pre_edge<Domain: ClockDomain>() -> bool {
@@ -105,7 +119,7 @@ pub struct PreEdgeBarrier<Domain: ClockDomain> {
 impl<Domain: ClockDomain> Future for PreEdgeBarrier<Domain> {
     type Output = ();
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        if is_pre_edge::<Domain>() {
+        if ONE_RESUMPTION.with(|c| c.get()) || is_pre_edge::<Domain>() {
             Poll::Ready(())
         } else {
             Poll::Pending

@@ -877,14 +877,36 @@ fn wrap_combinational(mut f: ItemFn) -> ItemFn {
 /// the attribute.
 fn wrap_in_module(f: &mut ItemFn) {
     let body = f.block.clone();
+    // A clocked module (one `Clock<D>` parameter: `sequential`, `synchronizer`) is
+    // tagged with `D`, the domain whose edges resume it (SPEC §I.12.1). The tag is
+    // read only by the one-resumption executor (Phase C step 2); the body is
+    // wrapped unchanged either way. A combinational module has no clock and no tag.
+    let clock_domains: Vec<Type> = f
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|a| match a {
+            FnArg::Typed(pt) if outer_type_name(&pt.ty).as_deref() == Some("Clock") => {
+                clock_domain_type(&pt.ty)
+            }
+            _ => None,
+        })
+        .collect();
     f.sig.asyncness = None;
     f.sig.output = syn::parse_quote! {
         -> ::copper_sim::HardwareModule<impl ::core::future::Future<Output = ()>>
     };
-    f.block = Box::new(syn::parse_quote! {
-        {
-            ::copper_sim::HardwareModule::__new(async move #body)
-        }
+    f.block = Box::new(match clock_domains.as_slice() {
+        [d] => syn::parse_quote! {
+            {
+                ::copper_sim::HardwareModule::__new_in_domain::<#d>(async move #body)
+            }
+        },
+        _ => syn::parse_quote! {
+            {
+                ::copper_sim::HardwareModule::__new(async move #body)
+            }
+        },
     });
 }
 
