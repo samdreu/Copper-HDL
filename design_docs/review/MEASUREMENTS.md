@@ -725,3 +725,70 @@ as **Σ x_2..x_{N+1}**: the first resumption runs only to the head `tick`, so x_
 one, and obs_1 = 0. The interpreter agrees on 48 of 48 cycles. The `REF_SKIP` row's
 pattern (`sim=SV≠ref`) is the `Two` pin's and stays until the default flips; under `One` the
 row would name `sim=ref≠SV` (the trailing fold, D-20 step 4).
+
+### F.6 (vi) The decision and the bare regression
+
+**Decided (user, 2026-11-06): option A.** Step 2 lands with the default `Two`. The switch,
+the per-domain counter, the two-clock pins and the per-mode P12 pins are in the tree, and
+`tools/regression.sh` gained **G-H**: on every full test run the sweep runs again under
+`COPPER_RESUMPTION=one`, and its verdict counts, its number of changed cases and their
+patterns are printed. G-H fails on a reference-leg disagreement or a differential pattern
+with sim ≠ ref; the sim ≠ SV of the two-job spellings is counted, not failed. The main run
+unsets `COPPER_RESUMPTION`. The filter was checked on synthetic ledger lines:
+`sim≠SV,no-ref` and `sim=ref≠SV` pass, while `sim≠ref,SV=ref`, `sim=SV≠ref` and a
+reference-leg DISAGREE fail. The default flips with step 3 (B was step 3's rewrite without
+its macro rule; C would excuse 428 sequences and two anchors by class).
+
+**Predicted** (before the bare run): REGRESSION OK. G-G identical to E.7 (differential 1148
+PASS / 131 EXCUSED, reference 385 PASS), with 5 pins (E.7's 4 plus `b_reg`'s never-ticked
+startup, sim≠ref,SV=ref). G-H: differential 798 PASS / 53 EXCUSED / 428 DISAGREE,
+reference 385 PASS, 66 cases changed, all `sim≠SV,no-ref`. G-C 117 test files (116 +
+`two_clock_pins`). 1429 tests passed (1428 + the `One` arm of P12).
+
+**Measured** (bare `tools/regression.sh` on `308beda` + this section's text, laptop):
+**REGRESSION OK (442 s)**. 1429 passed, 0 failed, 137 ignored across 143 binaries; G-C 117
+test files; G-D 159 differential cases + 7 ignored; G-F 46 run, 120 skipped; G-E 5 anchored,
+161 not; examples 32/32. G-G: differential 1148 PASS / 131 EXCUSED / 0 DISAGREE, reference
+385 PASS, 42 `obs_0` sequences declared by `RESET` rows, 5 pins (`b_reg` sim≠ref,SV=ref;
+`preloop_probe`, `preloop_linear`, `trailing_fold` sim=ref≠SV; `regout_trailing_single_tick`
+sim=SV≠ref, matched to its `REF_SKIP` row). G-H: differential 798 PASS / 53 EXCUSED / 428
+DISAGREE, reference 385 PASS, 66 of 159 cases changed, all `sim≠SV,no-ref`. **Every count as
+predicted.**
+
+### F.7 What step 3 inherits
+
+- Flip `ResumptionMode`'s default. Delete the `Two` arms: the P12 `Two` pin and its `REF_SKIP`
+  row's `sim=SV≠ref` wording (under `One` that module is sim=ref≠SV, the trailing fold, which
+  is D-20 item 4), the never-ticked `Two` pin, `PreEdgeBarrier`, `POLL_PHASE`,
+  `set_one_resumption`, and the injection. G-H then folds into G-G.
+- The 65 plain-`Out` sweep modules of F.1, the 96 `sequential_forwarding_divergence` probes,
+  49 hand-written tests (two anchors among them: `det_010_independent_golden` and
+  `cdc_synchronizer_anchor`'s latency test; three frozen `golden_traces`), and the two example
+  self-checks.
+- The 8 executor unit tests build clocked futures with `HardwareModule::__new` and no domain
+  tag. Under `One` such a future is a network task (polled in every settle, ticks resolving
+  pre-edge). Tag them (`__new_in_domain`) or rewrite them with the unit domain's removal (D-17 A1).
+- `two_clock_pins`' (vi) `One` assertions (the fast lag, the slow cancellation under P/Q, the
+  slow lag under R) become equalities with the SV once the CDC example is rewritten.
+
+### F.8 What the SPEC must say that it does not (for the coordinator; SPEC files untouched)
+
+1. **III.2.6's interleavings exercise no empty period.** P and Q give every slow period at
+   least one fast tick, so a two-job spelling agrees with the SV there by cancellation. R,
+   with empty periods, separates them. The relation's multi-domain pins should name one
+   interleaving with a zero-tick period.
+2. **A task with no domain.** I.13.2(b) and I.12.1 know two kinds, the network's
+   combinational functions and a domain's coroutines. The executor also admits a hand-built
+   clocked future with no domain (`__new`, test scaffolding only). Under `One` it is polled
+   as part of the network. The spec should say such a task is outside the language (with the
+   unit domain, D-17 A1), or the executor should refuse it.
+3. **Cycle 0's input in a tick-first body.** P12's `One` trace is Σ x_2..x_{N+1}: the
+   first resumption runs only to the head `tick`, so x_1 is read by no one. I.9 / I.4.4
+   imply this; a sentence there would make it a stated consequence rather than a surprise
+   (F.5's prediction missed it).
+4. **The pre-edge network evaluation runs twice under `One` today,** before the resumptions
+   and after them, because plain `Out`s still exist on clocked bodies. I.13.2(b)'s "a
+   resumption changes no wire" makes the second evaluation vacuous after step 3. Until
+   then, the order of two coroutines of one domain joined by a plain `Out` is
+   visit-order-dependent under the fixpoint scheduler; the levelized scheduler orders them
+   by the wire. This is outside the language-to-be, and nothing in the corpus measures it.
