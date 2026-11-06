@@ -571,3 +571,157 @@ with a reason; G-E 5 anchored, 161 not; G-A/G-B 32/32 examples.
 (`preloop_probe`, `preloop_linear`, `trailing_fold` `sim=ref≠SV`; `regout_trailing_single_tick`
 `sim=SV≠ref`, matched to its `REF_SKIP` row). As predicted, every count. E.0 (v)'s first
 prediction (DISAGREE 0 before any excuse) was wrong by the 131 `obs_0` sequences of E.1.
+
+## F. Phase C step 2 — the one-resumption simulator (2026-11-06)
+
+Branch `claude/phase-c-simulator-29253d` (from `paper` at `a9349b0`). SPEC §I.0.2, §I.12.2,
+§I.13.2(b), D-8, D-17, D-18, D-20 obligation (2). The executor gained
+`ResumptionMode::{Two, One}` (`copper-sim/src/executor.rs`), selected by `COPPER_RESUMPTION`
+(`one` | `two`) or `HardwareExecutor::with_resumption_mode`; **the compiled default stays
+`Two`**. Under `One`, `tick_clock::<D>` settles the network (untagged tasks: the
+combinational modules), resumes `D`'s coroutines once to their next `tick` (the network
+re-settled over what they wrote), commits the edge, and settles the network again for the
+observation; no other domain's coroutine is polled, and the post-edge settle polls no
+coroutine. The macro tags every clocked module with the `D` of its one `Clock<D>`
+(`HardwareModule::__new_in_domain`); the tag is read only under `One`. The barrier stays
+injected and is Ready at once under `One` (a thread-local the executor sets per settle),
+which is the body without the injection, so `POLL_PHASE` and its `PreEdge` default have no
+meaning there. The global `cycle()` became `cycle::<D>()` (§I.1.6; no caller used it).
+Every prediction below was written into the scratchpad before its measurement ran and is
+copied here unchanged.
+
+### F.0 Predictions (written before the first run under `One`)
+
+Mechanism. Under `Two`, tick N's post-edge settle runs the code after a tick up to the first
+deferred-read barrier: immediate reads there see x_N, and plain-`Out` writes there show at
+obs_N. Under `One` the same code runs at t_{N+1}⁻: reads see x_{N+1}, plain-`Out` writes
+show from obs_{N+1}. `RegOut` writes and register updates commit at edge N+1 in both. Code
+after a deferred read runs pre-edge in both. So a module changes iff (a) it has an immediate
+read whose value reaches an observable, or (b) it has a plain-`Out` write in the post-edge
+(opening) part whose value is not constant over time.
+
+- **(i) The changed set in the sweep** (Q1_TRADEOFFS §2's rows): row (3), plain-`Out` writes
+  only in the opening (70 of 135 clocked), changes unless every opening write is a
+  constant; immediate-read modules with no plain `Out` (40 − 30 ≈ 10) change; row (2), the
+  18 closing-write modules, change only if they also have an opening write or an immediate
+  read; RegOut-only deferred-read modules (≈ 37), every combinational module and the
+  closing-only plain-`Out` modules are unchanged. **About 80** of the swept clocked modules
+  go to DISAGREE, sim ≠ SV with the SV equal to the two-job sim, typically first at obs_1
+  (obs_0 is the first resumption, identical in both modes).
+- **(ii) The never-ticked pin**: `Two` q = 1 (D-17 (i)), `One` q = 2 = Verilator.
+- **(iii) Two interleavings** (`two_domain_counter`, P = [2;10], Q = [1,3,1,3,2,2,3,1,2,2]):
+  one per-domain trace under both, in both modes.
+- **(iv)** Under `One`: the five Q1 B-rewrites PASS, the 46 reference-leg modules PASS,
+  P15's (f2)/(f3)/(f4) stay sim = ref ≠ SV.
+- **(v) P12** (`regout_trailing_single_tick`): under `One`, sim = ref ≠ SV — the pin flips
+  from sim = SV ≠ ref.
+
+### F.1 (i) The changed-verdict set — measured
+
+`two` first, to show the switch changes nothing by default: `cargo test --test
+corpus_generated` gives 1148 PASS / 131 EXCUSED differential sequences and 385 PASS
+reference sequences, **identical to E.7**; `cargo test --workspace` 1428 passed, 0 failed
+(E.7's 1424 plus the four pins of F.2–F.3).
+
+`COPPER_RESUMPTION=one cargo test --test corpus_generated` (ledger per mode):
+
+| Leg | PASS | OUTSIDE | TRUNCATED | EXCUSED | DISAGREE |
+|---|---|---|---|---|---|
+| differential (159 cases), `Two` | 1148 | 0 | 0 | 131 | 0 |
+| differential (159 cases), `One` | 798 | 0 | 0 | 53 | **428** |
+| reference (46 cases), both | 385 | 0 | 0 | 0 | 0 |
+
+**66 of 159 cases change** (68 failed tests: the 66 differential cases plus two example
+self-checks swept as tests, `rv32i_cpu_transpilable::selfcheck` and
+`pattern_detector_2::det_010_variants_match_transition_table`). Every one of the 428 is
+pattern **`sim≠SV,no-ref`** (no changed module runs the reference leg); the first
+disagreement is at obs_1 in 143 sequences, obs_2 in 67, later in the rest. By signature:
+
+| Kind (signature) | swept | changed | unchanged |
+|---|---|---|---|
+| combinational | 25 | 0 | 25 |
+| `RegOut`-only (and one with no output) | 51 | **1** (`regout_trailing_single_tick`, P12) | 50 (incl. the 46 reference-leg modules and the 5 Q1 B-rewrites) |
+| plain `Out` on a clocked body | 83 | **65** | 18 |
+
+The 18 unchanged plain-`Out` modules are Q1 §2's closing-write list, as predicted
+mechanism-wise: `sipo_block`, `det_110101` ×2, `lfsr` ×2, `shift_register` ×2,
+`simple_counter`, `event_source`, `event_sink`, `slow_consumer` ×2, `rv32i_cpu_transpilable`
+(sweep sequences only; its self-check fails), `plain_out_multiphase`, `conditional_plain_out`,
+and three `match_selector` modules (`ifchain_on_const_expr`, `match_on_const_pattern`,
+`match_on_literals`). Of the 25 modules E.1 excuses at obs_0, 20 change and 5 do not.
+
+**Predicted about 80, measured 66.** The plain-`Out` half held (65 of the 70 + 18
+predicted-at-risk; the 18 unchanged are exactly the closing-only ones). The other half was
+wrong: predicted ≈ 10 `RegOut`-only modules with an immediate read to change, measured 1.
+Q1's 40 immediate-read modules are almost all plain-`Out` modules in the swept set.
+
+The 66 changed cases: `accum_2`, `accumulator_en`, `bit_not_bits`, `bit_not_bool`,
+`bit_not_via_xor`, `block_binding_shadow`, `branch_local_counter`, `branch_merge`,
+`branch_merge_explicit`, `bsg_counter_up_down`, `bsg_dff_en`, `counter`, `det_010` ×2,
+`dual_port_ram`, `dynamic_shift`, `enabled_register`, `fast_counter` ×2, `flag_sync`,
+`held_temp_trap`, `ifchain_on_usize`, `late_constant_one_edge`, `lit_width_in_ternary`,
+`lit_width_via_locals`, `mac_pipeline` (the fixture), `manual_sra`, `match_on_usize`,
+`mp_reg`, `narrow_index_into_narrow_addr`, `out_from_reg_after_commit`, `probe_fsm`,
+`ram_r1w2_wf`, `ram_r2w2`, `ram_r3w1`, `ram_read_first`, `ram_wf_priority`,
+`ram_write_first`, `regfile_read_first`, `regfile_write_through`,
+`regout_trailing_single_tick`, `rom_direct`, `rom_from_contents`, `rom_from_fn`,
+`sample_hold_2`, `seq6`, `sign_extend_via_cast`, `sign_extend_via_mask`,
+`signed_lt_after_sub`, `signed_lt_via_bias`, `signed_lt_via_cast`, `slow_counter`,
+`sra_method`, `struct_latch`, `struct_latch_cond`, `sum_hold_2`, `sync_2ff_concrete`,
+`total_expr_temp`, `traffic_light` ×2, `trailing_local_into_head`, `trailing_out`,
+`tuple_destructure`, `up_down_counter`, `wide_index_into_narrow_addr`,
+`wide_index_sole_consumer`.
+
+**The test suite under `One`** (`cargo test --workspace`): 1205 passed, **223 failed**, 137
+ignored, in 35 binaries: `sequential_forwarding_divergence` 96 (the two-job divergence
+probes, every one a plain `Out`), `corpus_generated` 68 (above), 10 unit tests (8 executor
+tests whose hand-built clocked futures carry no domain tag, so `One` treats them as
+network tasks resolved pre-edge, plus the two example self-checks), and 49 in 31 hand-written
+equivalence, golden and anchor tests: among them `det_010_independent_golden`,
+`cdc_synchronizer_anchor::sync_2ff_observable_latency_is_one_destination_cycle` and three
+frozen `golden_traces` (`counter`, `det_010`, `mac_pipeline`). These are the modules D-8
+rewrites, which is why the anchors fail. Under `One`, `det_010` and `sync_2ff` in their
+present two-job spelling no longer match BaseJump / `sync_2ff_ref.sv`. Q1 §4 measured their
+`RegOut` spellings identical to the anchors.
+
+### F.2 (ii) The never-ticked pin — `tests/two_clock_pins.rs`
+
+`b_reg` (`tests/ref_probes/two_clock_probes.rs`) in `ClkB`, a counter in `ClkA`; x = 1,
+A ×3, x = 2, B, x = 3, B, x = 4, B, three legs through the relation harness. **Predicted
+`Two` q = 1, `One` q = 2; measured the same.** `One`: resumption counts 0,0,0,0,1,2,3 (none
+during A's ticks), trace (obs_0…obs_3) 0,2,3,4, sim ≡ SV ≡ ref. `Two`: counts 0,1,1,1,2,3,4
+(the first resumption in A's first settle), trace 0,1,3,4, pattern **sim≠ref,SV=ref** at
+obs_1 only, pinned (`record_pin`). `cycle::<ClkA>() = 3`, `cycle::<ClkB>() = 3` in both.
+
+### F.3 (iii) Two interleavings — `tests/two_clock_pins.rs`
+
+Per-domain traces (P11): under P and Q the fast trace per fast edge and the slow trace per
+slow edge are each one sequence, in both modes, **as predicted**. Sim against the transpiled
+`two_domain_top` under Verilator, per domain, P, Q and a third interleaving R =
+[3,0,2,0,3,0,1,2,0,0,3,0,1,2] with empty slow periods (added after the result below):
+- `Two`: sim ≡ SV on both domains under P, Q and R.
+- `One`: `count_out` lags the SV by one fast observation under all three (the head write,
+  as predicted for a plain-`Out` opening write). The slow chain was **predicted to differ
+  and measured equal under P and Q**. That is agreement by cancellation: `flag_out` shows
+  one fast cycle late, and `flag_sync`'s trailing `d.read()` moves from the slow t_N⁺ (before
+  the period's fast ticks) to t_{N+1}⁻ (after them). Under R, whose empty periods break that
+  cancellation, the synchronized flag rises **one slow observation late** (measured). All
+  three are pinned. Step 3's rewrite removes both terms.
+
+### F.4 (iv) The Q1 rewrites, the reference leg, P15 — under `One`
+
+The five `q1_b_*` rewrites: PASS on every sequence (**as predicted**). The 46 reference-leg
+modules: 385 of 385 sequences PASS, so sim ≡ ref under `One` wherever the reference runs, and
+none of them changes against the SV (**as predicted**). P15: `preloop_statement_is_spec_vs_
+transpiler_on_both_routes` and `trailing_fold_at_edge_1_is_spec_vs_transpiler` pass under
+`One` unchanged, sim = ref ≠ SV (**as predicted**).
+
+### F.5 (v) P12 flips
+
+`tests/reference_leg_measurements.rs` now runs `regout_trailing_single_tick` under each mode
+explicitly. `Two`: sim = SV ≠ ref, obs_{N+1} = Σ x_1..x_N, pinned as before. `One`:
+**sim = ref ≠ SV** (**as predicted**). The trace was predicted as Σ x_1..x_{N+1} and measured
+as **Σ x_2..x_{N+1}**: the first resumption runs only to the head `tick`, so x_1 is read by no
+one, and obs_1 = 0. The interpreter agrees on 48 of 48 cycles. The `REF_SKIP` row's
+pattern (`sim=SV≠ref`) is the `Two` pin's and stays until the default flips; under `One` the
+row would name `sim=ref≠SV` (the trailing fold, D-20 step 4).
