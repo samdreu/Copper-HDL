@@ -9,12 +9,14 @@
 async fn sample_hold_2(
     clk: Clock<MainClk>,
     inp: In<Bits<8>, MainClk>,
-    out: Out<Bits<8>, MainClk>,
+    out: RegOut<Bits<8>, MainClk>,
 ) {
     loop {
+        // One job per cycle (D-8): the sample is registered on `out` at the edge
+        // that ends phase 0, and the `RegOut` holds it through phase 1.
         let x = inp.read();
-        clk.tick().await;
         out.write(x);
+        clk.tick().await;
         clk.tick().await;
     }
 }
@@ -26,13 +28,15 @@ async fn sample_hold_2(
 async fn accum_2(
     clk: Clock<MainClk>,
     step: In<Bits<8>, MainClk>,
-    out: Out<Bits<8>, MainClk>,
+    out: RegOut<Bits<8>, MainClk>,
 ) {
     let mut acc: Bits<8> = Bits::from_lit::<0>();
     loop {
-        out.write(acc.clone());
+        // One job per cycle (D-8): phase 0 does nothing; phase 1 folds the step
+        // in and registers the sum on `out`, which holds it through phase 0.
         clk.tick().await;
         acc = acc + step.read();
+        out.write(acc.clone());
         clk.tick().await;
     }
 }
@@ -43,12 +47,14 @@ async fn sum_hold_2(
     clk: Clock<MainClk>,
     in_a: In<Bits<8>, MainClk>,
     in_b: In<Bits<8>, MainClk>,
-    out: Out<Bits<8>, MainClk>,
+    out: RegOut<Bits<8>, MainClk>,
 ) {
     loop {
+        // One job per cycle (D-8): registered at the end of phase 0, held through
+        // phase 1.
         let s = in_a.read() + in_b.read();
-        clk.tick().await;
         out.write(s);
+        clk.tick().await;
         clk.tick().await;
     }
 }

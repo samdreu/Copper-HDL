@@ -18,55 +18,47 @@
 /// already used for its own memory control nets. This is the module that was broken
 /// before the fix above; keep it, because it is the shape that regressing would
 /// break first.
-#[hardware(sequential)]
-pub async fn held_temp_trap(
-    clk: Clock<MainClk>,
+#[hardware(combinational)]
+pub fn held_temp_trap(
     a: In<Bits<8>, MainClk>,
     sel: In<Logic, MainClk>,
     hi: Out<Bits<8>, MainClk>,
     lo: Out<Bits<8>, MainClk>,
 ) {
-    loop {
-        clk.tick().await;
-        let mut u: Bits<8> = Bits::zero();
-        let mut v: Bits<8> = Bits::zero();
-        if sel.read() == Logic::One {
-            u = a.read();
-        } else if a.read() == Bits::zero() {
-            v = Bits::<8>::from_u8(0xFF);
-        }
-        hi.write(u);
-        lo.write(v);
+    let mut u: Bits<8> = Bits::zero();
+    let mut v: Bits<8> = Bits::zero();
+    if sel.read() == Logic::One {
+        u = a.read();
+    } else if a.read() == Bits::zero() {
+        v = Bits::<8>::from_u8(0xFF);
     }
+    hi.write(u);
+    lo.write(v);
 }
 
 /// The working spelling: one TOTAL if-chain expression per value. Every path
 /// assigns, so each stays combinational and single-driver.
-#[hardware(sequential)]
-pub async fn total_expr_temp(
-    clk: Clock<MainClk>,
+#[hardware(combinational)]
+pub fn total_expr_temp(
     a: In<Bits<8>, MainClk>,
     sel: In<Logic, MainClk>,
     hi: Out<Bits<8>, MainClk>,
     lo: Out<Bits<8>, MainClk>,
 ) {
-    loop {
-        clk.tick().await;
-        let u: Bits<8> = if sel.read() == Logic::One {
-            a.read()
-        } else {
-            Bits::zero()
-        };
-        let v: Bits<8> = if sel.read() == Logic::One {
-            Bits::zero()
-        } else if a.read() == Bits::zero() {
-            Bits::<8>::from_u8(0xFF)
-        } else {
-            Bits::zero()
-        };
-        hi.write(u);
-        lo.write(v);
-    }
+    let u: Bits<8> = if sel.read() == Logic::One {
+        a.read()
+    } else {
+        Bits::zero()
+    };
+    let v: Bits<8> = if sel.read() == Logic::One {
+        Bits::zero()
+    } else if a.read() == Bits::zero() {
+        Bits::<8>::from_u8(0xFF)
+    } else {
+        Bits::zero()
+    };
+    hi.write(u);
+    lo.write(v);
 }
 
 /// A `let mut` that IS meant to be a register — declared OUTSIDE the loop, so its
@@ -79,14 +71,14 @@ pub async fn enabled_register(
     clk: Clock<MainClk>,
     a: In<Bits<8>, MainClk>,
     en: In<Logic, MainClk>,
-    q: Out<Bits<8>, MainClk>,
+    q: RegOut<Bits<8>, MainClk>,
 ) {
     let mut held: Bits<8> = Bits::zero();
     loop {
-        clk.tick().await;
         if en.read() == Logic::One {
             held = a.read();
         }
         q.write(held);
+        clk.tick().await;
     }
 }

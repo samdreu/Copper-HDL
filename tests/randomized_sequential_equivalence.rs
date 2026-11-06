@@ -41,7 +41,7 @@ fn up_down_counter_random_directions() {
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
     let (dir_drv, dir_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (out_out, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_out, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = out_out.dirty_handle();
     exec.spawn_wired(up_down_counter(clk.clone(), dir_in, out_out), vec![dh], vec![]);
 
@@ -69,7 +69,7 @@ fn accumulator_en_random_stream() {
     let mut exec = HardwareExecutor::new();
     let (en_drv, en_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (data_drv, data_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (out_out, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_out, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = out_out.dirty_handle();
     exec.spawn_wired(accumulator_en(clk.clone(), en_in, data_in, out_out), vec![dh], vec![]);
 

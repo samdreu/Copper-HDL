@@ -8,7 +8,7 @@
 pub async fn plain_out_multiphase(
     clk: Clock<MainClk>,
     data_i: In<Bits<4>, MainClk>,
-    seen_o: Out<Bits<4>, MainClk>,
+    seen_o: RegOut<Bits<4>, MainClk>,
 ) {
     loop {
         let v = data_i.read();

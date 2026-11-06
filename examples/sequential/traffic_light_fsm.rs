@@ -1,5 +1,5 @@
 use copper_core::types::{Logic, Clock, ClockDomain};
-use copper_core::port::{In, Out, wire};
+use copper_core::port::{In, Out, wire, RegOut, registered_wire};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -21,9 +21,9 @@ enum Phase {
 async fn traffic_light(
     clk: Clock<MainClk>,
     request: In<Logic, MainClk>,
-    red: Out<Logic, MainClk>,
-    yellow: Out<Logic, MainClk>,
-    green_out: Out<Logic, MainClk>,
+    red: RegOut<Logic, MainClk>,
+    yellow: RegOut<Logic, MainClk>,
+    green_out: RegOut<Logic, MainClk>,
 ) {
     // Both variables live across .await → both become registers in the
     // generated Future struct, i.e. flip-flops in synthesized hardware.
@@ -31,6 +31,23 @@ async fn traffic_light(
     let mut timer: u8 = 0;
 
     loop {
+
+        // Post-edge: sample inputs and compute next state.
+        // `request.read()` here is the value stable at the rising edge —
+        // equivalent to how a flip-flop samples its D input.
+        (phase, timer) = match (phase, timer, request.read()) {
+            // Green: hold until a request arrives
+            (Phase::Green, _, Logic::One) => (Phase::Yellow,    0),
+            (Phase::Green, _, _)          => (Phase::Green,     0),
+            // Yellow: 2-cycle dwell (timer 0 → 1 → transition)
+            (Phase::Yellow, t, _) if t < 1 => (Phase::Yellow,  t + 1),
+            (Phase::Yellow, _, _)           => (Phase::Red,     0),
+            // Red: 4-cycle dwell (timer 0 → 1 → 2 → 3 → transition)
+            (Phase::Red, t, _) if t < 3    => (Phase::Red,       t + 1),
+            (Phase::Red, _, _)             => (Phase::RedYellow, 0),
+            // RedYellow: single-cycle, then back to Green
+            (Phase::RedYellow, _, _)       => (Phase::Green,     0),
+        };
         // Pre-edge: drive outputs from current phase.
         // Because this is a Moore FSM, there is no input term here.
         match phase {
@@ -55,25 +72,7 @@ async fn traffic_light(
                 green_out.write(Logic::Zero);
             }
         }
-
         clk.tick().await;
-
-        // Post-edge: sample inputs and compute next state.
-        // `request.read()` here is the value stable at the rising edge —
-        // equivalent to how a flip-flop samples its D input.
-        (phase, timer) = match (phase, timer, request.read()) {
-            // Green: hold until a request arrives
-            (Phase::Green, _, Logic::One) => (Phase::Yellow,    0),
-            (Phase::Green, _, _)          => (Phase::Green,     0),
-            // Yellow: 2-cycle dwell (timer 0 → 1 → transition)
-            (Phase::Yellow, t, _) if t < 1 => (Phase::Yellow,  t + 1),
-            (Phase::Yellow, _, _)           => (Phase::Red,     0),
-            // Red: 4-cycle dwell (timer 0 → 1 → 2 → 3 → transition)
-            (Phase::Red, t, _) if t < 3    => (Phase::Red,       t + 1),
-            (Phase::Red, _, _)             => (Phase::RedYellow, 0),
-            // RedYellow: single-cycle, then back to Green
-            (Phase::RedYellow, _, _)       => (Phase::Green,     0),
-        };
     }
 }
 
@@ -92,9 +91,9 @@ fn main() {
     let mut exec = HardwareExecutor::new();
 
     let (req_drv, req_in)        = wire::<Logic, MainClk>(Logic::Zero);
-    let (red_out, red_obs)       = wire::<Logic, MainClk>(Logic::Zero);
-    let (yellow_out, yellow_obs) = wire::<Logic, MainClk>(Logic::Zero);
-    let (green_out, green_obs)   = wire::<Logic, MainClk>(Logic::Zero);
+    let (red_out, red_obs)       = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
+    let (yellow_out, yellow_obs) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
+    let (green_out, green_obs)   = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
 
     // dirty_handle() must be called on Out<T> before it is moved into the module
     let dh_r = red_out.dirty_handle();

@@ -67,7 +67,7 @@
 mod common;
 
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain};
 use copper_macros::hardware;
@@ -87,7 +87,7 @@ fn plain_out_multiphase_sim_matches_transpiled_verilog() {
     let mut exec = HardwareExecutor::new();
 
     let (d_drv, d_in) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (s_out, s_obs) = wire::<Bits<4>, MainClk>(Bits::zero());
+    let (s_out, s_obs) = registered_wire::<Bits<4>, MainClk>(&clk, Bits::zero());
     let dh = s_out.dirty_handle();
     exec.spawn_wired(
         plain_out_multiphase(clk.clone(), d_in.clone(), s_out),

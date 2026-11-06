@@ -33,14 +33,14 @@
 async fn trailing_out(
     clk: Clock<MainClk>,
     a: In<Bits<8>, MainClk>,
-    mid: Out<Bits<8>, MainClk>,
+    mid: RegOut<Bits<8>, MainClk>,
     tail: RegOut<Bits<8>, MainClk>,
 ) {
     let mut r: Bits<8> = Bits::zero();
     loop {
         r = a.read();
-        clk.tick().await;
         mid.write(r);
+        clk.tick().await;
         clk.tick().await;
         tail.write(r);
     }
@@ -54,7 +54,7 @@ async fn trailing_out(
 async fn trailing_local_into_head(
     clk: Clock<MainClk>,
     a: In<Bits<8>, MainClk>,
-    o: Out<Bits<8>, MainClk>,
+    o: RegOut<Bits<8>, MainClk>,
 ) {
     let mut r: Bits<8> = Bits::zero();
     let mut w: Bits<8> = Bits::zero();
@@ -79,15 +79,15 @@ async fn trailing_local_into_head(
 async fn late_constant_one_edge(
     clk: Clock<MainClk>,
     a: In<Bits<8>, MainClk>,
-    dv: Out<Logic, MainClk>,
-    o: Out<Bits<8>, MainClk>,
+    dv: RegOut<Logic, MainClk>,
+    o: RegOut<Bits<8>, MainClk>,
 ) {
     let mut r: Bits<8> = Bits::zero();
     loop {
         r = a.read();
-        clk.tick().await;
         dv.write(Logic::One);
         o.write(r);
+        clk.tick().await;
         clk.tick().await;
     }
 }

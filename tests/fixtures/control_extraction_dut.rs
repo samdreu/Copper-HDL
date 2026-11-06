@@ -78,9 +78,9 @@ async fn if_tick_explicit(
 async fn branch_merge(
     clk: Clock<MainClk>,
     sel: In<Logic, MainClk>,
-    head_o: Out<Logic, MainClk>,
-    mid_o: Out<Logic, MainClk>,
-    tail_o: Out<Logic, MainClk>,
+    head_o: RegOut<Logic, MainClk>,
+    mid_o: RegOut<Logic, MainClk>,
+    tail_o: RegOut<Logic, MainClk>,
 ) {
     loop {
         head_o.write(Logic::One);
@@ -122,9 +122,9 @@ async fn branch_merge(
 async fn branch_merge_explicit(
     clk: Clock<MainClk>,
     sel: In<Logic, MainClk>,
-    head_o: Out<Logic, MainClk>,
-    mid_o: Out<Logic, MainClk>,
-    tail_o: Out<Logic, MainClk>,
+    head_o: RegOut<Logic, MainClk>,
+    mid_o: RegOut<Logic, MainClk>,
+    tail_o: RegOut<Logic, MainClk>,
 ) {
     let mut pc: u8 = 0;
     loop {

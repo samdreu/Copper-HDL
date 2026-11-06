@@ -48,7 +48,7 @@ pub async fn struct_latch(
     clk: Clock<MainClk>,
     x: In<Bits<8>, MainClk>,
     en: In<Logic, MainClk>,
-    o: Out<Bits<8>, MainClk>,
+    o: RegOut<Bits<8>, MainClk>,
 ) {
     let mut latch = Latch::bubble();
     loop {
@@ -59,8 +59,8 @@ pub async fn struct_latch(
         }
         let xv = x.read();
         let env = en.read();
-        clk.tick().await;
         latch = Latch { valid: env == Logic::One, data: xv };
+        clk.tick().await;
     }
 }
 
@@ -71,7 +71,7 @@ pub async fn struct_latch_cond(
     clk: Clock<MainClk>,
     x: In<Bits<8>, MainClk>,
     sel: In<Logic, MainClk>,
-    o: Out<Bits<8>, MainClk>,
+    o: RegOut<Bits<8>, MainClk>,
 ) {
     let mut latch = Latch::bubble();
     loop {
@@ -82,7 +82,6 @@ pub async fn struct_latch_cond(
         }
         let xv = x.read();
         let sv = sel.read();
-        clk.tick().await;
         let next = if sv == Logic::One {
             let bumped = xv + Bits::<8>::from_lit::<1>();
             Latch { valid: true, data: bumped }
@@ -90,6 +89,7 @@ pub async fn struct_latch_cond(
             Latch::bubble()
         };
         latch = next;
+        clk.tick().await;
     }
 }
 
@@ -100,8 +100,8 @@ pub async fn tuple_destructure(
     clk: Clock<MainClk>,
     x: In<Bits<8>, MainClk>,
     sel: In<Logic, MainClk>,
-    o: Out<Bits<8>, MainClk>,
-    t: Out<Bits<8>, MainClk>,
+    o: RegOut<Bits<8>, MainClk>,
+    t: RegOut<Bits<8>, MainClk>,
 ) {
     let mut latch = Latch::bubble();
     let mut target: Bits<8> = Bits::zero();
@@ -114,7 +114,6 @@ pub async fn tuple_destructure(
         t.write(target);
         let xv = x.read();
         let sv = sel.read();
-        clk.tick().await;
         let (st, flag, tgt) = if sv == Logic::One {
             let doubled = xv + xv;
             (Latch { valid: true, data: doubled }, true, xv + Bits::<8>::from_lit::<1>())
@@ -127,44 +126,37 @@ pub async fn tuple_destructure(
         } else {
             target = Bits::zero();
         }
+        clk.tick().await;
     }
 }
 
 /// Two block bindings whose inner `let`s share a name — the forwarding-unit
 /// shape. The rename pin: `hit` must stay per-block.
-#[hardware(sequential)]
-pub async fn block_binding_shadow(
-    clk: Clock<MainClk>,
+#[hardware(combinational)]
+pub fn block_binding_shadow(
     a: In<Bits<8>, MainClk>,
     b: In<Bits<8>, MainClk>,
     o1: Out<Bits<8>, MainClk>,
     o2: Out<Bits<8>, MainClk>,
 ) {
-    loop {
-        clk.tick().await;
-        let fwd_a = {
-            let hit = a.read().as_u8() > b.read().as_u8();
-            if hit { a.read() } else { b.read() }
-        };
-        let fwd_b = {
-            let hit = b.read().as_u8() > a.read().as_u8();
-            if hit { b.read() } else { a.read() }
-        };
-        o1.write(fwd_a);
-        o2.write(fwd_b);
-    }
+    let fwd_a = {
+        let hit = a.read().as_u8() > b.read().as_u8();
+        if hit { a.read() } else { b.read() }
+    };
+    let fwd_b = {
+        let hit = b.read().as_u8() > a.read().as_u8();
+        if hit { b.read() } else { a.read() }
+    };
+    o1.write(fwd_a);
+    o2.write(fwd_b);
 }
 
 /// `a.arithmetic_shift_right(n)` — the SRA method spelling.
-#[hardware(sequential)]
-pub async fn sra_method(
-    clk: Clock<MainClk>,
+#[hardware(combinational)]
+pub fn sra_method(
     a: In<Bits<8>, MainClk>,
     o: Out<Bits<8>, MainClk>,
 ) {
-    loop {
-        clk.tick().await;
-        let av = a.read();
-        o.write(av.arithmetic_shift_right(3));
-    }
+    let av = a.read();
+    o.write(av.arithmetic_shift_right(3));
 }

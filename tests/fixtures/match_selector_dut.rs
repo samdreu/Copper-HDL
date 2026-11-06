@@ -18,12 +18,11 @@ pub async fn match_on_usize(
     clk: Clock<MainClk>,
     sel: In<Bits<2>, MainClk>,
     a: In<Bits<16>, MainClk>,
-    o: Out<Bits<16>, MainClk>,
+    o: RegOut<Bits<16>, MainClk>,
 ) {
     let mut x1: Bits<16> = Bits::zero();
     let mut x2: Bits<16> = Bits::zero();
     loop {
-        clk.tick().await;
         let s: usize = sel.read().as_usize();
         match s {
             1 => x1 = a.read(),
@@ -36,6 +35,7 @@ pub async fn match_on_usize(
             _ => Bits::zero(),
         };
         o.write(v);
+        clk.tick().await;
     }
 }
 
@@ -46,16 +46,16 @@ pub async fn ifchain_on_usize(
     clk: Clock<MainClk>,
     sel: In<Bits<2>, MainClk>,
     a: In<Bits<16>, MainClk>,
-    o: Out<Bits<16>, MainClk>,
+    o: RegOut<Bits<16>, MainClk>,
 ) {
     let mut x1: Bits<16> = Bits::zero();
     let mut x2: Bits<16> = Bits::zero();
     loop {
-        clk.tick().await;
         let s: usize = sel.read().as_usize();
         if s == 1 { x1 = a.read(); } else if s == 2 { x2 = a.read(); }
         let v: Bits<16> = if s == 1 { x1 } else if s == 2 { x2 } else { Bits::zero() };
         o.write(v);
+        clk.tick().await;
     }
 }
 
@@ -64,37 +64,29 @@ pub async fn ifchain_on_usize(
 /// `localparam` NAME (`op == OP_ALPHA`), which SystemVerilog evaluates, exactly
 /// as consts do in expression position. Sweeps differentially. Previously it
 /// read as an enum-variant pattern and was refused.
-#[hardware(sequential)]
-pub async fn match_on_const_pattern(
-    clk: Clock<MainClk>,
+#[hardware(combinational)]
+pub fn match_on_const_pattern(
     instr: In<Bits<32>, MainClk>,
     o: Out<Logic, MainClk>,
 ) {
-    loop {
-        clk.tick().await;
-        let op: u32 = instr.read().as_u32() & 0x7F;
-        let known: bool = match op {
-            OP_ALPHA | OP_BETA => true,
-            _ => false,
-        };
-        if known { o.write(Logic::One); } else { o.write(Logic::Zero); }
-    }
+    let op: u32 = instr.read().as_u32() & 0x7F;
+    let known: bool = match op {
+        OP_ALPHA | OP_BETA => true,
+        _ => false,
+    };
+    if known { o.write(Logic::One); } else { o.write(Logic::Zero); }
 }
 
 /// The same decode with the consts in EXPRESSION position, which is where they do
 /// lower. This is the shape `rv32i_cpu_transpilable` uses.
-#[hardware(sequential)]
-pub async fn ifchain_on_const_expr(
-    clk: Clock<MainClk>,
+#[hardware(combinational)]
+pub fn ifchain_on_const_expr(
     instr: In<Bits<32>, MainClk>,
     o: Out<Logic, MainClk>,
 ) {
-    loop {
-        clk.tick().await;
-        let op: u32 = instr.read().as_u32() & 0x7F;
-        let known: bool = op == OP_ALPHA || op == OP_BETA;
-        if known { o.write(Logic::One); } else { o.write(Logic::Zero); }
-    }
+    let op: u32 = instr.read().as_u32() & 0x7F;
+    let known: bool = op == OP_ALPHA || op == OP_BETA;
+    if known { o.write(Logic::One); } else { o.write(Logic::Zero); }
 }
 
 /// FIXED 2026-08-27 (and originally written as a control expected to pass —
@@ -103,19 +95,15 @@ pub async fn ifchain_on_const_expr(
 /// It emits `op == 64'd55`. That is what narrowed the claim above from "a `match`
 /// on a `usize`" to "a `match` literal", and it is the reason this file exists: the
 /// probe that only asked "does it transpile" had already called this one working.
-#[hardware(sequential)]
-pub async fn match_on_literals(
-    clk: Clock<MainClk>,
+#[hardware(combinational)]
+pub fn match_on_literals(
     instr: In<Bits<32>, MainClk>,
     o: Out<Logic, MainClk>,
 ) {
-    loop {
-        clk.tick().await;
-        let op: u32 = instr.read().as_u32() & 0x7F;
-        let known: bool = match op {
-            0x37 | 0x6F => true,
-            _ => false,
-        };
-        if known { o.write(Logic::One); } else { o.write(Logic::Zero); }
-    }
+    let op: u32 = instr.read().as_u32() & 0x7F;
+    let known: bool = match op {
+        0x37 | 0x6F => true,
+        _ => false,
+    };
+    if known { o.write(Logic::One); } else { o.write(Logic::Zero); }
 }

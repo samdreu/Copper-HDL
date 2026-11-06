@@ -23,7 +23,7 @@
 mod common;
 
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -44,7 +44,7 @@ fn branch_local_temporaries_sim_matches_transpiled_verilog() {
     let (rst_drv, rst_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (up_drv, up_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (dn_drv, dn_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (out_out, out_obs) = wire::<Bits<4>, MainClk>(Bits::zero());
+    let (out_out, out_obs) = registered_wire::<Bits<4>, MainClk>(&clk, Bits::zero());
     let dh = out_out.dirty_handle();
     let reads = vec![rst_in.wire_id(), up_in.wire_id(), dn_in.wire_id()];
     exec.spawn_wired(

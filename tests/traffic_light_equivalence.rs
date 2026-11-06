@@ -11,7 +11,7 @@
 mod common;
 
 use common::{logic, EquivalenceTest};
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -53,9 +53,9 @@ fn traffic_light_sim_matches_transpiled_verilog() {
     let mut exec = HardwareExecutor::new();
 
     let (req_drv, req_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (red_o, red_obs) = wire::<Logic, MainClk>(Logic::Zero);
-    let (yel_o, yel_obs) = wire::<Logic, MainClk>(Logic::Zero);
-    let (grn_o, grn_obs) = wire::<Logic, MainClk>(Logic::Zero);
+    let (red_o, red_obs) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
+    let (yel_o, yel_obs) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
+    let (grn_o, grn_obs) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
     let dhs = vec![red_o.dirty_handle(), yel_o.dirty_handle(), grn_o.dirty_handle()];
     let reads = vec![req_in.wire_id()];
     exec.spawn_wired(traffic_light(clk.clone(), req_in, red_o, yel_o, grn_o), dhs, reads);

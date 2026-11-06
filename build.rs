@@ -51,11 +51,6 @@ use quote::ToTokens;
 /// fail" is a claim that should have an author and a sentence.
 const SKIP: &[(&str, &str)] = &[
     (
-        "probe",
-        "an `allow_pretick_alignment` witness: the module exists to DEMONSTRATE the pre-tick \
-         divergence, so sim ≠ SV is its purpose. probe_timing_investigation.rs measures it",
-    ),
-    (
         "rv32i_cpu_pipelined",
         "ANCHORED OUTSIDE THIS SWEEP as of 2026-08-27: tests/rv32i_pipelined_verilator.rs \
          runs all 13 architectural programs on the simulator AND on the transpiled core \
@@ -80,41 +75,6 @@ const SKIP: &[(&str, &str)] = &[
     // by a 2026-09-01 audit that re-transpiled them; the `bit_not_bits` REFERENCE
     // anchor had been inert the whole time. Re-transpile the module before trusting
     // a reason that names emitted text.
-    (
-        "out_from_reg_before_commit",
-        "ONE-CYCLE DIVERGENCE, GUARDED as of 2026-08-27: the trailing clause of \
-         `pretick_out_write_before_update` refuses the shape (a trailing plain-`Out` write \
-         before the update of a register it reads publishes the previous generation for the \
-         whole cycle); this fixture keeps `allow_pretick_alignment` as the demonstration. \
-         Measured minimal as `v8t_stage_publish_then_load`; the landing-day catch was \
-         module_composition_hybrid's three pipeline stages (sim-only tests), migrated to the \
-         canonical write/read/tick/update spelling. `out_from_reg_after_commit` is the \
-         agreeing flip and sweeps",
-    ),
-    (
-        "vr_sink_mealy",
-        "ONE-CYCLE DIVERGENCE, GUARDED as of 2026-10-20: a Mealy `ready = !full || drain` \
-         computed into a `let can_take: Logic` temporary, written, and only then `full` \
-         updated in the same segment — V8a with one rename, which \
-         `pretick_out_write_before_update` did not see through until it learned to follow \
-         same-segment temporaries (reaching definitions). MEASURED before the fix: `ready` \
-         the only diverging port, the simulator at 1 against the SV at 0 on 15 of 200 \
-         cycles (hardware leads by one — the emitted `assign ready = can_take` is a wire of \
-         `full`'s Q, the simulator reads `full` pre-update). The macro now refuses the shape \
-         (ui/fail/write_before_update_via_temp.rs); this fixture keeps \
-         `allow_pretick_alignment` as the demonstration. `vr_sink_moore` is the registered \
-         spelling and sweeps",
-    ),
-    (
-        "vr_skid",
-        "ONE-CYCLE DIVERGENCE, GUARDED as of 2026-10-20: the same temporary-routed Mealy \
-         ready as `vr_sink_mealy` (`let ir: Logic = …; in_ready.write(ir); … full = …`) in a \
-         one-entry skid buffer whose `out_valid`/`out_data` are written before any input \
-         read (the agreeing V8c position) and sweep clean. MEASURED before the fix: \
-         `in_ready` the only diverging port, simulator 1 against SV 0 on 20 of 200 cycles. \
-         Kept with `allow_pretick_alignment` as the demonstration; the guard refuses it \
-         without the opt-out",
-    ),
     (
         "two_domain_top",
         "a `#[hardware(structural)]` parent: transpile-only by design, with no simulatable body \
@@ -237,6 +197,34 @@ const RESET: &[(&str, &str, bool)] = &[
 /// Every row is a sentence with the SPEC clause that owes it. Under D-8 a module
 /// with a plain `Out` port "awaits the Phase C rewrite" and is skipped by class.
 const REF_SKIP: &[(&str, &str)] = &[
+    (
+        "struct_latch",
+        "a struct literal spelled `Self { .. }` inside an associated fn (`Latch::bubble()`): the \
+         interpreter stops with \"unknown struct Self\" at the first call. Measured 2026-11-06 \
+         when Phase C step 3 made the module `RegOut`-only and the reference leg reached it for \
+         the first time; an interpreter front-end gap (I.14's struct values), not a meaning",
+    ),
+    (
+        "struct_latch_cond",
+        "a struct literal spelled `Self { .. }` inside an associated fn (`Latch::bubble()`): the \
+         interpreter stops with \"unknown struct Self\" at the first call. Measured 2026-11-06 \
+         when Phase C step 3 made the module `RegOut`-only and the reference leg reached it for \
+         the first time; an interpreter front-end gap (I.14's struct values), not a meaning",
+    ),
+    (
+        "tuple_destructure",
+        "a struct literal spelled `Self { .. }` inside an associated fn (`Latch::bubble()`): the \
+         interpreter stops with \"unknown struct Self\" at the first call. Measured 2026-11-06 \
+         when Phase C step 3 made the module `RegOut`-only and the reference leg reached it for \
+         the first time; an interpreter front-end gap (I.14's struct values), not a meaning",
+    ),
+    (
+        "rv32i_cpu_transpilable",
+        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one. Reached 2026-11-06 when \
+         Phase C step 3 made the module `RegOut`-only",
+    ),
     (
         "shift_register",
         "a `const { assert!(N - 1 == N_1, …) }` block in the body: a compile-time check of the \

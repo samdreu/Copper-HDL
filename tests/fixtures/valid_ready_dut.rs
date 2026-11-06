@@ -10,14 +10,11 @@
 // * `vr_src_regout`, `vr_sink_moore`, `vr_src_same_cycle`,
 //   `vr_read_after_delay` — AGREE. Every output is a `RegOut`, so the phase a
 //   write executes in is unobservable through the port.
-// * `vr_sink_mealy`, `vr_skid` — DIVERGE by one cycle (hardware leads). A plain
-//   `Out` ready is written from a register and an input THROUGH A `let`
-//   TEMPORARY, and the register is updated later in the same segment: the V8a
-//   shape of `pretick_out_write_before_update`, which the rule did not see
-//   through the temporary. As of 2026-10-20 it does, so both carry
-//   `allow_pretick_alignment` as demonstrations; the refused spellings are
-//   `copper-macros/tests/ui/fail/write_before_update_via_temp.rs` and
-//   `write_before_update_via_bool_temp.rs`.
+// * `vr_sink_mealy`, `vr_skid` — deleted 2026-11-06 (Phase C step 3): each was a
+//   plain-`Out` Mealy `ready` kept with `allow_pretick_alignment` to demonstrate
+//   the V8a divergence. Under D-8 a clocked body has no plain `Out`, so the shape
+//   is unexpressible; the registered spelling is `vr_sink_moore`, and the Mealy
+//   ready's one-job form is `q1_b_vr_sink` (`tests/fixtures/q1_b_rewrites_dut.rs`).
 
 /// Producer with registered `valid`/`data`: idle until `go`, then present one
 /// item and hold it until the consumer's `ready`.
@@ -68,79 +65,6 @@ async fn vr_sink_moore(
         ready.write(Logic::Zero);
         sum.write(acc);
         clk.tick().await;
-        clk.tick().await;
-    }
-}
-
-/// Consumer with a combinational (Mealy) `ready = !full || drain`, computed
-/// into a `let` temporary before the write. `full` is updated later in the
-/// same single-tick segment, so the write publishes its PRE-update value: the
-/// V8a divergence, one cycle, hardware leading. Measured in the sweep before
-/// the rule learned to see through the temporary; kept as the demonstration.
-#[hardware(sequential, allow_pretick_alignment)]
-async fn vr_sink_mealy(
-    clk: Clock<MainClk>,
-    valid: In<Logic, MainClk>,
-    data: In<Bits<8>, MainClk>,
-    drain: In<Logic, MainClk>,
-    ready: Out<Logic, MainClk>,
-    sum: RegOut<Bits<8>, MainClk>,
-) {
-    let mut full: Logic = Logic::Zero;
-    let mut held: Bits<8> = Bits::zero();
-    let mut acc: Bits<8> = Bits::zero();
-    loop {
-        let can_take: Logic = if full == Logic::Zero || drain.read() == Logic::One {
-            Logic::One
-        } else {
-            Logic::Zero
-        };
-        ready.write(can_take);
-        if full == Logic::One && drain.read() == Logic::One {
-            acc = acc + held;
-            full = Logic::Zero;
-        }
-        if can_take == Logic::One && valid.read() == Logic::One {
-            held = data.read();
-            full = Logic::One;
-        }
-        sum.write(acc);
-        clk.tick().await;
-    }
-}
-
-/// One-entry skid buffer: `out_valid`/`out_data` are written before any input
-/// read (the agreeing V8c position), while `in_ready = !full || out_ready`
-/// goes through a `let` temporary behind the `out_ready` read and ahead of the
-/// `full` update — the same V8a divergence as `vr_sink_mealy`.
-#[hardware(sequential, allow_pretick_alignment)]
-async fn vr_skid(
-    clk: Clock<MainClk>,
-    in_valid: In<Logic, MainClk>,
-    in_data: In<Bits<8>, MainClk>,
-    out_ready: In<Logic, MainClk>,
-    in_ready: Out<Logic, MainClk>,
-    out_valid: Out<Logic, MainClk>,
-    out_data: Out<Bits<8>, MainClk>,
-) {
-    let mut full: Logic = Logic::Zero;
-    let mut held: Bits<8> = Bits::zero();
-    loop {
-        out_valid.write(full);
-        out_data.write(held);
-        let ir: Logic = if full == Logic::Zero || out_ready.read() == Logic::One {
-            Logic::One
-        } else {
-            Logic::Zero
-        };
-        in_ready.write(ir);
-        if full == Logic::One && out_ready.read() == Logic::One {
-            full = Logic::Zero;
-        }
-        if ir == Logic::One && in_valid.read() == Logic::One {
-            held = in_data.read();
-            full = Logic::One;
-        }
         clk.tick().await;
     }
 }

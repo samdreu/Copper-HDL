@@ -9,14 +9,14 @@ async fn accumulator_en(
     clk: Clock<MainClk>,
     en: In<Logic, MainClk>,
     data: In<Bits<8>, MainClk>,
-    out: Out<Bits<8>, MainClk>,
+    out: RegOut<Bits<8>, MainClk>,
 ) {
     let mut acc: Bits<8> = Bits::zero();
     loop {
-        out.write(acc);
-        clk.tick().await;
         if en.read() == Logic::One {
             acc = acc + data.read();
         }
+        out.write(acc);
+        clk.tick().await;
     }
 }

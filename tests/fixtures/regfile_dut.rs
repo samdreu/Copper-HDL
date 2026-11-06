@@ -32,17 +32,17 @@ pub async fn regfile_read_first(
     waddr: In<Bits<3>, MainClk>,
     wdata: In<Bits<8>, MainClk>,
     raddr: In<Bits<3>, MainClk>,
-    o: Out<Bits<8>, MainClk>,
-    o3: Out<Bits<8>, MainClk>,
+    o: RegOut<Bits<8>, MainClk>,
+    o3: RegOut<Bits<8>, MainClk>,
 ) {
     let mut regs = [Bits::<8>::zero(); 8];
     loop {
-        clk.tick().await;
         o.write(regs[raddr.read().as_usize()]);
         o3.write(regs[3]);
         if wen.read() == Logic::One {
             regs[waddr.read().as_usize()] = wdata.read();
         }
+        clk.tick().await;
     }
 }
 
@@ -55,16 +55,16 @@ pub async fn regfile_write_through(
     waddr: In<Bits<3>, MainClk>,
     wdata: In<Bits<8>, MainClk>,
     raddr: In<Bits<3>, MainClk>,
-    o: Out<Bits<8>, MainClk>,
-    o3: Out<Bits<8>, MainClk>,
+    o: RegOut<Bits<8>, MainClk>,
+    o3: RegOut<Bits<8>, MainClk>,
 ) {
     let mut regs = [Bits::<8>::zero(); 8];
     loop {
-        clk.tick().await;
         o3.write(regs[3]);
         if wen.read() == Logic::One {
             regs[waddr.read().as_usize()] = wdata.read();
         }
         o.write(regs[raddr.read().as_usize()]);
+        clk.tick().await;
     }
 }

@@ -362,9 +362,9 @@ mod cpu_ex {
         let (ben_drv, ben_in) = wire::<Logic, MainClk>(Logic::Zero);
         let (baddr_drv, baddr_in) = wire::<Bits<32>, MainClk>(Bits::zero());
         let (bdata_drv, bdata_in) = wire::<Bits<32>, MainClk>(Bits::zero());
-        let (pc_out, pc_in) = wire::<Bits<32>, MainClk>(Bits::zero());
-        let (halt_out, _halt_in) = wire::<Logic, MainClk>(Logic::Zero);
-        let (a0_out, a0_in) = wire::<Bits<32>, MainClk>(Bits::zero());
+        let (pc_out, pc_in) = registered_wire::<Bits<32>, MainClk>(&clk, Bits::zero());
+        let (halt_out, _halt_in) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
+        let (a0_out, a0_in) = registered_wire::<Bits<32>, MainClk>(&clk, Bits::zero());
 
         let reads = vec![
             rstn_in.wire_id(), ben_in.wire_id(), baddr_in.wire_id(), bdata_in.wire_id(),

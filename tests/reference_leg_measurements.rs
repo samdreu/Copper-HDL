@@ -487,6 +487,10 @@ fn poison_run_for_the_register_proposition() {
             let tag = format!("{}::{name}", path.file_stem().unwrap().to_string_lossy());
             match poison_run(&src, &name, &ps, &targets) {
                 Ok(()) => clean.push(tag),
+                // The interpreter cannot run the module at all (a front-end gap
+                // with its own REF_SKIP row, e.g. `Self { .. }`): not eligible,
+                // not a register-inference finding.
+                Err(l) if l.starts_with("clean run:") => skipped += 1,
                 Err(l) => {
                     flagged.insert(tag, l);
                 }

@@ -17,11 +17,10 @@ pub async fn branch_local_counter(
     rst_i: In<Logic, MainClk>,
     up_i: In<Logic, MainClk>,
     dn_i: In<Logic, MainClk>,
-    count_o: Out<Bits<4>, MainClk>,
+    count_o: RegOut<Bits<4>, MainClk>,
 ) {
     let mut count = Bits::<4>::zero();
     loop {
-        clk.tick().await;
         if rst_i.read() == Logic::One {
             count = Bits::zero();
         } else {
@@ -35,5 +34,6 @@ pub async fn branch_local_counter(
             }
         }
         count_o.write(count);
+        clk.tick().await;
     }
 }

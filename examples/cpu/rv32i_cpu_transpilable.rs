@@ -58,7 +58,7 @@
 // corpus differential sweep.
 
 use copper_core::{Bits, Clock, ClockDomain, Logic, Memory};
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -190,9 +190,9 @@ async fn rv32i_cpu_transpilable(
     boot_data: In<Bits<32>, MainClk>,
     // A plain `Out`, and it has to be WRITTEN IN THE TRAILING SEGMENT — see the
     // note where it is written. Both halves were found by the sweep, in that order.
-    program_counter: Out<Bits<32>, MainClk>,
-    halted: Out<Logic, MainClk>,
-    a0_out: Out<Bits<32>, MainClk>,
+    program_counter: RegOut<Bits<32>, MainClk>,
+    halted: RegOut<Logic, MainClk>,
+    a0_out: RegOut<Bits<32>, MainClk>,
 ) {
     // Unified instruction/data memory. Read port 0 = fetch, read port 1 = load,
     // write port 0 = store (and the boot loader while `rstn` is low; the two are
@@ -292,7 +292,6 @@ async fn rv32i_cpu_transpilable(
     memory.read_port::<0>().read(0);
 
     loop {
-        clk.tick().await;
 
         let rst: bool = rstn.read() == Logic::Zero;
         let b_en: bool = boot_en.read() == Logic::One;
@@ -658,25 +657,13 @@ async fn rv32i_cpu_transpilable(
             }
         }
 
-        // ── Outputs, in the TRAILING segment ────────────────────────────────
-        // AFTER the commit, so each one reads the register it reports. This is not
-        // a style choice and the sweep found both halves of it:
-        //
-        //   written BEFORE the commit, a plain `Out` carries the value the register
-        //   held when the statement ran, while the emitted `assign` reads the
-        //   register itself — the hardware leads by a cycle (`Cycle 197
-        //   program_counter expected 4 got 8`). D1's guard does not catch it here,
-        //   because an `In` read precedes the write and that exempts the segment.
-        //
-        //   reaching for `RegOut` instead does NOT fix it, which is the part worth
-        //   knowing: in a single-tick loop the trailing statements share the head's
-        //   phase, so the transpiler folds a trailing `RegOut` write into THIS
-        //   edge while the simulator still commits it on the NEXT one. Same
-        //   one-cycle lead, opposite cause.
-        //
-        // A plain `Out` written after the commit is the shape where the two agree:
-        // continuous assignment from a register, and the simulator writes that same
-        // register's post-commit value in the same cycle.
+        // ── Outputs ─────────────────────────────────────────────────────────
+        // AFTER the commit, so each `RegOut` takes the value its register holds
+        // after this resumption's updates and shows it from the edge that commits
+        // them (D-8: one job per cycle, every clocked output a `RegOut`). Before
+        // Phase C step 3 these were plain `Out`s, whose position relative to the
+        // commit the sweep had to pin (`Cycle 197 program_counter expected 4 got
+        // 8` for a write before it).
         program_counter.write(pc);
         halted.write(if halted_r { Logic::One } else { Logic::Zero });
         a0_out.write(a0_r);
@@ -701,6 +688,7 @@ async fn rv32i_cpu_transpilable(
                 }
             }
         }
+        clk.tick().await;
     }
 }
 
@@ -725,9 +713,9 @@ pub fn run_program(program: Vec<u32>, max_cycles: usize) -> (u32, usize) {
     let (ben_drv,   ben_in)   = wire::<Logic, MainClk>(Logic::Zero);
     let (baddr_drv, baddr_in) = wire::<Bits<32>, MainClk>(Bits::zero());
     let (bdata_drv, bdata_in) = wire::<Bits<32>, MainClk>(Bits::zero());
-    let (pc_out,   _pc_in)    = wire::<Bits<32>, MainClk>(Bits::zero());
-    let (halt_out,  halt_in)  = wire::<Logic, MainClk>(Logic::Zero);
-    let (a0_out,    a0_in)    = wire::<Bits<32>, MainClk>(Bits::zero());
+    let (pc_out,   _pc_in)    = registered_wire::<Bits<32>, MainClk>(&clk, Bits::zero());
+    let (halt_out,  halt_in)  = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
+    let (a0_out,    a0_in)    = registered_wire::<Bits<32>, MainClk>(&clk, Bits::zero());
 
     let reads = vec![
         rstn_in.wire_id(),

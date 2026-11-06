@@ -11,7 +11,7 @@
 mod common;
 
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -31,7 +31,7 @@ fn accumulator_en_sim_matches_transpiled_verilog() {
 
     let (en_drv, en_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (data_drv, data_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (out_out, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_out, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = out_out.dirty_handle();
     let reads = vec![en_in.wire_id(), data_in.wire_id()];
     exec.spawn_wired(accumulator_en(clk.clone(), en_in, data_in, out_out), vec![dh], reads);

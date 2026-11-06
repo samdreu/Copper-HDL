@@ -17,7 +17,7 @@
 mod common;
 
 use common::{EquivalenceTest, Rng};
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -36,9 +36,9 @@ fn seq6_sim_matches_transpiled_verilog() {
     let mut exec = HardwareExecutor::new();
 
     let (en_drv, en_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (b0_out, b0_obs) = wire::<Logic, MainClk>(Logic::Zero);
-    let (b1_out, b1_obs) = wire::<Logic, MainClk>(Logic::Zero);
-    let (b2_out, b2_obs) = wire::<Logic, MainClk>(Logic::Zero);
+    let (b0_out, b0_obs) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
+    let (b1_out, b1_obs) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
+    let (b2_out, b2_obs) = registered_wire::<Logic, MainClk>(&clk, Logic::Zero);
     let dhs = vec![b0_out.dirty_handle(), b1_out.dirty_handle(), b2_out.dirty_handle()];
     let reads = vec![en_in.wire_id()];
     exec.spawn_wired(seq6(clk.clone(), en_in, b0_out, b1_out, b2_out), dhs, reads);

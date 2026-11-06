@@ -109,8 +109,6 @@ fn the_mixed_anchor_hold_form_set_is_exactly_the_declared_one() {
         eprintln!("  {k}");
     }
     let expected: BTreeSet<String> = [
-        "tests/fixtures/control_extraction_dut.rs::branch_merge::tail_o (1/1)",
-        "tests/fixtures/control_extraction_dut.rs::branch_merge_explicit::tail_o (1/1)",
         "tests/sequential_forwarding_divergence.rs::branch_merge::tail_o (1/1)",
         "tests/sequential_forwarding_divergence.rs::d2a_mixed_two_drives_hold::o (1/1)",
         "tests/sequential_forwarding_divergence.rs::d5a_const_opening_reg_closing::o (1/1)",

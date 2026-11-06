@@ -7,7 +7,7 @@
 //! sim sampled one cycle early on 2+-tick loops).
 mod common;
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain};
 use copper_macros::hardware;
@@ -32,7 +32,7 @@ fn sample_hold_2_sim_matches_verilog() {
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
     let (in_drv, in_port) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (out_drv, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_drv, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = out_drv.dirty_handle();
     let reads = vec![in_port.wire_id()];
     exec.spawn_wired(sample_hold_2(clk.clone(), in_port, out_drv), vec![dh], reads);
@@ -70,7 +70,7 @@ fn accum_2_sim_matches_verilog() {
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
     let (s_drv, s_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (out_drv, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_drv, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = out_drv.dirty_handle();
     let reads = vec![s_in.wire_id()];
     exec.spawn_wired(accum_2(clk.clone(), s_in, out_drv), vec![dh], reads);
@@ -100,7 +100,7 @@ fn sum_hold_2_sim_matches_verilog() {
     let mut exec = HardwareExecutor::new();
     let (a_drv, a_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (b_drv, b_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (out_drv, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_drv, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = out_drv.dirty_handle();
     let reads = vec![a_in.wire_id(), b_in.wire_id()];
     exec.spawn_wired(sum_hold_2(clk.clone(), a_in, b_in, out_drv), vec![dh], reads);

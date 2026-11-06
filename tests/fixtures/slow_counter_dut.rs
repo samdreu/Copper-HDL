@@ -5,12 +5,15 @@
 // within a single loop iteration (multiple FSM states between register updates) —
 // the "back-to-back tick awaits" corner case.
 #[hardware(sequential)]
-async fn slow_counter(clk: Clock<MainClk>, out: Out<Bits<8>, MainClk>) {
+async fn slow_counter(clk: Clock<MainClk>, out: RegOut<Bits<8>, MainClk>) {
     let mut count: Bits<8> = Bits::zero();
     loop {
-        out.write(count);
-        clk.tick().await;
+        // One job per cycle (D-8): the even phase does nothing; the odd phase
+        // bumps the count and registers it on `out`, which holds it through the
+        // next even phase.
         clk.tick().await;
         count = count + Bits::from_lit::<1>();
+        out.write(count);
+        clk.tick().await;
     }
 }

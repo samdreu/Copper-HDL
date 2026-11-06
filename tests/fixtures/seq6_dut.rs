@@ -19,14 +19,24 @@ enum St {
 async fn seq6(
     clk: Clock<MainClk>,
     en: In<Logic, MainClk>,
-    b0: Out<Logic, MainClk>,
-    b1: Out<Logic, MainClk>,
-    b2: Out<Logic, MainClk>,
+    b0: RegOut<Logic, MainClk>,
+    b1: RegOut<Logic, MainClk>,
+    b2: RegOut<Logic, MainClk>,
 ) {
     let mut st = St::S0;
     loop {
-        // Moore decode: b2 b1 b0 = binary of the state index (statement-position
-        // match writing Logic constants — combinational, not registered).
+        st = match (st, en.read()) {
+            (St::S0, Logic::One) => St::S1,
+            (St::S1, Logic::One) => St::S2,
+            (St::S2, Logic::One) => St::S3,
+            (St::S3, Logic::One) => St::S4,
+            (St::S4, Logic::One) => St::S5,
+            (St::S5, Logic::One) => St::S0,
+            (s, _) => s,
+        };
+        // Moore decode of the NEXT state: b2 b1 b0 = binary of the state index
+        // (statement-position match writing Logic constants), registered on the
+        // `RegOut`s at the edge that commits `st` (D-8).
         match st {
             St::S0 => {
                 b0.write(Logic::Zero);
@@ -59,17 +69,6 @@ async fn seq6(
                 b2.write(Logic::One);
             }
         }
-
         clk.tick().await;
-
-        st = match (st, en.read()) {
-            (St::S0, Logic::One) => St::S1,
-            (St::S1, Logic::One) => St::S2,
-            (St::S2, Logic::One) => St::S3,
-            (St::S3, Logic::One) => St::S4,
-            (St::S4, Logic::One) => St::S5,
-            (St::S5, Logic::One) => St::S0,
-            (s, _) => s,
-        };
     }
 }

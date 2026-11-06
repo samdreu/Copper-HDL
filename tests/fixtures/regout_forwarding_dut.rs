@@ -56,7 +56,7 @@ async fn conditional_plain_out(
     clk: Clock<MainClk>,
     step: In<Bits<8>, MainClk>,
     enable: In<Logic, MainClk>,
-    o: Out<Bits<8>, MainClk>,
+    o: RegOut<Bits<8>, MainClk>,
 ) {
     let mut n: Bits<8> = Bits::zero();
 

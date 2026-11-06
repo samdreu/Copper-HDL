@@ -12,14 +12,24 @@ enum Phase {
 async fn traffic_light(
     clk: Clock<MainClk>,
     request: In<Logic, MainClk>,
-    red: Out<Logic, MainClk>,
-    yellow: Out<Logic, MainClk>,
-    green_out: Out<Logic, MainClk>,
+    red: RegOut<Logic, MainClk>,
+    yellow: RegOut<Logic, MainClk>,
+    green_out: RegOut<Logic, MainClk>,
 ) {
     let mut phase = Phase::Green;
     let mut timer: u8 = 0;
 
     loop {
+
+        (phase, timer) = match (phase, timer, request.read()) {
+            (Phase::Green, _, Logic::One) => (Phase::Yellow, 0),
+            (Phase::Green, _, _) => (Phase::Green, 0),
+            (Phase::Yellow, t, _) if t < 1 => (Phase::Yellow, t + 1),
+            (Phase::Yellow, _, _) => (Phase::Red, 0),
+            (Phase::Red, t, _) if t < 3 => (Phase::Red, t + 1),
+            (Phase::Red, _, _) => (Phase::RedYellow, 0),
+            (Phase::RedYellow, _, _) => (Phase::Green, 0),
+        };
         match phase {
             Phase::Green => {
                 red.write(Logic::Zero);
@@ -42,17 +52,6 @@ async fn traffic_light(
                 green_out.write(Logic::Zero);
             }
         }
-
         clk.tick().await;
-
-        (phase, timer) = match (phase, timer, request.read()) {
-            (Phase::Green, _, Logic::One) => (Phase::Yellow, 0),
-            (Phase::Green, _, _) => (Phase::Green, 0),
-            (Phase::Yellow, t, _) if t < 1 => (Phase::Yellow, t + 1),
-            (Phase::Yellow, _, _) => (Phase::Red, 0),
-            (Phase::Red, t, _) if t < 3 => (Phase::Red, t + 1),
-            (Phase::Red, _, _) => (Phase::RedYellow, 0),
-            (Phase::RedYellow, _, _) => (Phase::Green, 0),
-        };
     }
 }

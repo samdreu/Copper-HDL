@@ -645,7 +645,6 @@ const EXPECTED_WRITE_BEFORE_UPDATE: &[&str] = &[
     // write/read/tick/update spelling. The two below are the demonstration
     // witnesses that remain: the claim-ledger pair's divergent half, and the
     // minimal stage shape.
-    "tests/fixtures/out_phase_dut.rs::out_from_reg_before_commit",
     "tests/sequential_forwarding_divergence.rs::v8t_stage_publish_then_load",
     // §10.7's trailing wire probe (2026-10-30): `let t = cnt + 2; o.write(t);
     // cnt = cnt + 1` after the last tick reads `cnt` through `t` before its
@@ -669,8 +668,6 @@ const EXPECTED_WRITE_BEFORE_UPDATE: &[&str] = &[
     // `write_before_update_via_bool_temp` ui/fail cases. No pre-existing
     // corpus module was newly flagged — the extension's catch is exactly the
     // two probes that motivated it.
-    "tests/fixtures/valid_ready_dut.rs::vr_sink_mealy",
-    "tests/fixtures/valid_ready_dut.rs::vr_skid",
     // The SINGLE-TICK TRAILING-UPDATE clause (§10.10, 2026-11-02): a write behind
     // a leading read of a register the trailing region of a one-tick loop updates
     // — the update commits at the edge the write lands at, so the every-path comb

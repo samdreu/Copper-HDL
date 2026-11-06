@@ -9,29 +9,6 @@
 // the trailing statements share the head's phase. Every existing member of the
 // pre-tick alignment family is about a body with two or more edges.
 
-/// **BROKEN.** A plain `Out` driven from a register, written BEFORE the register
-/// commits. The simulator carries the value the register held when the statement
-/// ran; the emitted `assign` reads the register itself, which has already moved on
-/// — so the hardware leads by a cycle. D1's guard exempts this segment because an
-/// `In` read precedes the write.
-// GUARDED 2026-08-27: the trailing clause of `pretick_out_write_before_update`
-// now refuses this shape; the opt-out keeps the demonstration compiling while
-// the detection still counts it (the family convention).
-#[hardware(sequential, allow_pretick_alignment)]
-pub async fn out_from_reg_before_commit(
-    clk: Clock<MainClk>,
-    step: In<Bits<8>, MainClk>,
-    q: Out<Bits<8>, MainClk>,
-) {
-    let mut acc: Bits<8> = Bits::zero();
-    loop {
-        clk.tick().await;
-        let d: Bits<8> = step.read();
-        q.write(acc);
-        acc = acc + d;
-    }
-}
-
 /// The `RegOut` spelling of the trailing write, and it AGREES (since 2026-10-23;
 /// it was the pinned `regout_trailing_single_tick` divergence before). A `RegOut`
 /// write takes effect at the first clock edge after it executes: this one runs
@@ -62,13 +39,13 @@ pub async fn regout_trailing_single_tick(
 pub async fn out_from_reg_after_commit(
     clk: Clock<MainClk>,
     step: In<Bits<8>, MainClk>,
-    q: Out<Bits<8>, MainClk>,
+    q: RegOut<Bits<8>, MainClk>,
 ) {
     let mut acc: Bits<8> = Bits::zero();
     loop {
-        clk.tick().await;
         let d: Bits<8> = step.read();
         acc = acc + d;
         q.write(acc);
+        clk.tick().await;
     }
 }

@@ -169,7 +169,7 @@ fn a_conditional_plain_out_sim_matches_transpiled_verilog() {
     let mut exec = HardwareExecutor::new();
     let (s_drv, s_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (e_drv, e_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (o_out, o_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (o_out, o_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = o_out.dirty_handle();
     exec.spawn_wired(
         conditional_plain_out(clk.clone(), s_in, e_in, o_out),

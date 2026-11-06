@@ -30,7 +30,7 @@
 async fn probe(
     clk: Clock<MainClk>,
     inp: In<Bits<8>, MainClk>,
-    out: Out<Bits<8>, MainClk>,
+    out: RegOut<Bits<8>, MainClk>,
 ) {
     loop {
         let x = inp.read(); // x lives across .await → a register
@@ -44,7 +44,7 @@ async fn probe(
 async fn probe_fsm(
     clk: Clock<MainClk>,
     inp: In<Bits<8>, MainClk>,
-    out: Out<Bits<8>, MainClk>,
+    out: RegOut<Bits<8>, MainClk>,
 ) {
     let mut phase: u8 = 0;
     let mut x: Bits<8> = Bits::from_lit::<0>();

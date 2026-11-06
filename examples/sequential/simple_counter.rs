@@ -20,7 +20,7 @@
 // that has to change for (1), and the model update moves relative to
 // `tick_clock` for (2).
 
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::{make_cycle, HardwareExecutor, HardwareTest, SimulationTrace};
@@ -33,7 +33,7 @@ async fn simple_counter(
     clk: Clock<MainClk>,
     reset_i: In<Logic, MainClk>,
     en_i: In<Logic, MainClk>,
-    count_o: Out<Bits<8>, MainClk>,
+    count_o: RegOut<Bits<8>, MainClk>,
 ) {
     let mut count = Bits::<8>::x();
     loop {
@@ -67,7 +67,7 @@ fn main() {
 
     let (reset_drv, reset_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (en_drv, en_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (count_drv, count_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (count_drv, count_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
 
     let dh = count_drv.dirty_handle();
     let reads = vec![reset_in.wire_id(), en_in.wire_id()];

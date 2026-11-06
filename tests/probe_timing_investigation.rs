@@ -10,7 +10,7 @@
 //! Run with:  cargo test --test probe_timing_investigation -- --nocapture
 mod common;
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain};
 use copper_macros::hardware;
@@ -28,7 +28,7 @@ macro_rules! sim_trace {
         let mut clk = Clock::<MainClk>::new();
         let mut exec = HardwareExecutor::new();
         let (inp_drv, inp_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-        let (out_drv, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+        let (out_drv, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
         let dh = out_drv.dirty_handle();
         let reads = vec![inp_in.wire_id()];
         exec.spawn_wired($module(clk.clone(), inp_in, out_drv), vec![dh], reads);
@@ -91,7 +91,7 @@ fn probe_fsm_sim_matches_verilog() {
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
     let (inp_drv, inp_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (out_drv, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_drv, out_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = out_drv.dirty_handle();
     let reads = vec![inp_in.wire_id()];
     exec.spawn_wired(probe_fsm(clk.clone(), inp_in, out_drv), vec![dh], reads);
@@ -107,7 +107,7 @@ fn probe_fsm_sim_matches_verilog() {
     let mut clk2 = Clock::<MainClk>::new();
     let mut exec2 = HardwareExecutor::new();
     let (inp_drv2, inp_in2) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (out_drv2, out_obs2) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_drv2, out_obs2) = registered_wire::<Bits<8>, MainClk>(&clk2, Bits::zero());
     let dh2 = out_drv2.dirty_handle();
     let reads2 = vec![inp_in2.wire_id()];
     exec2.spawn_wired(probe_fsm(clk2.clone(), inp_in2, out_drv2), vec![dh2], reads2);

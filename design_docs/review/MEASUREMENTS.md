@@ -858,3 +858,54 @@ for their own reason. Predicted: deleted counts within D-13's sizing.
 reference leg unchanged; `regout_trailing_single_tick` pinned sim=ref≠SV (its `REF_SKIP` row
 re-worded); the three sim=ref≠SV pins (f2)/(f3)/(f4) unchanged; `b_reg`'s never-ticked `Two`
 pin deleted; G-H merged into G-G.
+
+### G.1 (i) The anchored rewrites — predicted, then measured
+
+Every row was run under `COPPER_RESUMPTION=two` (the default at that commit) and `=one`.
+
+| module(s) | reference | predicted | measured |
+|---|---|---|---|
+| `sync_2ff`, `sync_2ff_concrete` (tick-last; `ff2` a wire) | `sync_2ff_ref.sv` (`independent_verilog_matches_sim`), transpiled twin | identical | **identical, both modes** (10/10 tests) |
+| same, G2 `NameExact` | `{ff1, ff2}` | FAIL (`{ff1}`) | **FAIL as predicted**: `left: {"ff1"}, right: {"ff1", "ff2"}`. Replaced by a storage check: inferred `{ff1}` + the `RegOut` `q` = 2 = the reference's flop count |
+| `sync_1ff` (negative control) | 2-FF trace | one cycle faster | **as predicted** |
+| `fast_counter`, `flag_sync`, `slow_consumer` (combinational) | `two_domain_hierarchy.sv`; transpiled `two_domain_top` under P, Q, R | identical; F.3's `One` lags become equalities | **identical, both modes, all three interleavings**; `two_clock_pins` (vi) now asserts `One` = SV |
+| `two_domain_counter`, `flag_crossing` (+ behavioural tests) | latency assertions | unchanged | **pass unchanged, both modes** |
+| `det_010` | `pattern_detector_010.sv` | identical | **identical, both modes**; G2 `StorageEquivalent` unchanged; frozen golden trace unchanged |
+| `bsg_dff_en`, `bsg_counter_up_down`, `sipo_block` | BaseJump | identical | **identical, both modes** (examples' self-checks and `*_equivalence`) |
+| `lfsr`, `shift_register`, `det_110101` | `lfsr.sv`, `shift_register.sv`, `pattern_detector.sv` | identical | **identical, both modes** (the lfsr initial-value text check had to admit `o = 32'd0;` in the same `initial` block) |
+| `counter`, `mac_pipeline` fixtures | frozen golden traces | unchanged | **unchanged, both modes**, after placing the write where the old post-edge write showed (counter: fold then publish; mac: register the sum at the end of stage 2) |
+| `dff`, `dff_after`, `enff`, `counter` (timing probes) | `timing_probe_sv/` | identical | dff/dff_after/enff **identical**; `counter` matches `counter_comb.sv`, not `counter_reg.sv`, **as before the rewrite** (the probe's own verdict); `dff_after`'s Verilator leg cannot run (its harness names top `dff_after`, the file defines `dff` — pre-existing) |
+| `stage_add_one`, `stage_double`, `counter_by` | sim-only assertions (`module_composition_hybrid`) | unchanged | **pass unchanged, both modes** |
+| **`ram_straddle`, `ram_prewrite` (`Memory`)** | `timing_probe_sv/ram1.sv` (`dob <= ram[a]`) | **one cycle late** (I.10.1 (d)) | **one cycle late, both spellings, both modes**: sim `[0,105,106,107,108,109]` vs reference `[105,106,…]`. **STOPPED** — see G.2 |
+
+Two transpiler/interpreter findings the rewrites exposed:
+- **Write-driven width inference ignored `RegOut`** (`chir_lower::build_write_inferred_types`
+  accepted only `Out<`): `shift_register`'s `Bits::x()` and `bsg_counter_up_down`'s
+  `Bits::<PTR_W>::zero()` lost their widths ("cannot infer bit width") the moment the port
+  kind changed. Fixed (one predicate); no plain-`Out` module's emission changes.
+- **The reference leg now reaches every module that becomes `RegOut`-only** (G-F 46 → 61
+  after part 1). Three interpreter gaps it found, each a `REF_SKIP` row with its sentence:
+  `shift_register`'s `const { assert!(…) }` (statement macro), `struct_latch`/
+  `struct_latch_cond`/`tuple_destructure`'s `Self { .. }` in an associated fn, and
+  `rv32i_cpu_transpilable`'s `Memory`.
+
+**Part 1 regression** (`d4483c0`, `--no-examples`, laptop under load): PARTIAL OK, 1444
+passed. G-G differential 1151 PASS / 108 EXCUSED / 0 DISAGREE (E.7: 1148 / 131); reference
+511 PASS (385). G-H 56 of 159 cases change under `One` (F.6: 66), 377 DISAGREE (428).
+
+### G.2 Stopped: a `Memory` read cannot drive a port at the edge that delivers it
+
+Under one job, a resumption that ends at edge N+1 observes what edge N delivered
+(I.10.1 (d)), and a `RegOut` write shows from obs_{N+1}. So `dob <= ram[addr]` — a
+latency-1 synchronous read whose output register *is* the port — has no `Memory`
+spelling: the word delivered at edge N can be written to a `RegOut` only in the next
+resumption, which shows it one observation later. Measured on `ram1.sv` above. This
+reaches the two anchored memory modules (`dual_port_ram` vs `dual_port_ram.sv`,
+`ram_read_first` vs its `REFERENCE` row) and every swept module whose plain `Out` shows a
+`Memory` result (`pipelined_ram_dut` ×3, `preloaded_rom_dut` ×2, `multiphase_rom_dut` ×2,
+`mem_address_width_dut` ×3, `write_first_ram_dut` ×3). They are left in their two-job
+spelling pending a decision (question sent to the coordinator 2026-11-06): (a) stop; (b)
+re-spell the two anchors with an array register (`dob.write(ram[addr])`, which is
+`dob <= ram[a]`) and accept +1 on the unanchored ones; (c) accept +1 everywhere and
+re-anchor. Until it is decided, R8 and the flip cannot land (each of these modules would be
+refused).

@@ -12,20 +12,22 @@ impl ClockDomain for MainClk {}
 
 // D flip-flop: sample d before the tick, drive q after. Hardware: q <= d.
 #[hardware(sequential)]
-async fn dff(clk: Clock<MainClk>, d: In<Bits<8>, MainClk>, q: Out<Bits<8>, MainClk>) {
+async fn dff(clk: Clock<MainClk>, d: In<Bits<8>, MainClk>, q: RegOut<Bits<8>, MainClk>) {
     loop {
         let x = d.read();
-        clk.tick().await;
         q.write(x);
+        clk.tick().await;
     }
 }
 
 // D flip-flop, the OTHER coding: read d AFTER the tick, then write. Also q <= d.
 #[hardware(sequential)]
-async fn dff_after(clk: Clock<MainClk>, d: In<Bits<8>, MainClk>, q: Out<Bits<8>, MainClk>) {
+async fn dff_after(clk: Clock<MainClk>, d: In<Bits<8>, MainClk>, q: RegOut<Bits<8>, MainClk>) {
+    // Under one job (D-8) "read after the tick" is the next resumption's head, so
+    // this coding and `dff` are the same program: write the sample, then tick.
     loop {
-        clk.tick().await;
         q.write(d.read());
+        clk.tick().await;
     }
 }
 
@@ -35,13 +37,13 @@ async fn enff(
     clk: Clock<MainClk>,
     sel: In<Bits<8>, MainClk>,
     d: In<Bits<8>, MainClk>,
-    q: Out<Bits<8>, MainClk>,
+    q: RegOut<Bits<8>, MainClk>,
 ) {
     loop {
-        clk.tick().await;
         if sel.read() == Bits::from_u8(1) {
             q.write(d.read());
         }
+        clk.tick().await;
     }
 }
 
@@ -74,12 +76,12 @@ async fn mac_fsm(
 // Counter, "write before tick then increment" — the shape the executor unit tests
 // re-baselined to [0,1,2].
 #[hardware(sequential)]
-async fn counter(clk: Clock<MainClk>, q: Out<Bits<8>, MainClk>) {
+async fn counter(clk: Clock<MainClk>, q: RegOut<Bits<8>, MainClk>) {
     let mut v: Bits<8> = Bits::zero();
     loop {
+        v = v + Bits::from_u8(1);
         q.write(v);
         clk.tick().await;
-        v = v + Bits::from_u8(1);
     }
 }
 
@@ -88,7 +90,7 @@ fn run_dff(sv: &str) -> bool {
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
     let (d_drv, d_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (q_drv, q_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (q_drv, q_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = q_drv.dirty_handle();
     let reads = vec![d_in.wire_id()];
     exec.spawn_wired(dff(clk.clone(), d_in, q_drv), vec![dh], reads);
@@ -112,7 +114,7 @@ fn run_dff_after(sv: &str) -> bool {
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
     let (d_drv, d_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (q_drv, q_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (q_drv, q_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = q_drv.dirty_handle();
     let reads = vec![d_in.wire_id()];
     exec.spawn_wired(dff_after(clk.clone(), d_in, q_drv), vec![dh], reads);
@@ -138,7 +140,7 @@ fn run_enff(sv: &str) -> bool {
     let mut exec = HardwareExecutor::new();
     let (sel_drv, sel_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (d_drv, d_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-    let (q_drv, q_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (q_drv, q_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = q_drv.dirty_handle();
     let reads = vec![sel_in.wire_id(), d_in.wire_id()];
     exec.spawn_wired(enff(clk.clone(), sel_in, d_in, q_drv), vec![dh], reads);
@@ -195,7 +197,7 @@ fn run_mac_fsm(sv: &str) -> bool {
 fn run_counter(sv: &str, name: &str) -> bool {
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
-    let (q_drv, q_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (q_drv, q_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = q_drv.dirty_handle();
     exec.spawn_wired(counter(clk.clone(), q_drv), vec![dh], vec![]);
     let mut test = HardwareTest::new(name).with_verilog(sv);

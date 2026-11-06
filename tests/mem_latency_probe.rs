@@ -3,7 +3,7 @@
 //! +1 come from the DUT straddling the tick (issue read pre-tick, drive dob
 //! post-tick)? Compare two DUT structures against the SAME 1-cycle block-RAM .sv,
 //! both preloaded with ram[i] = i + 100.
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_core::types::{Bits, Logic};
 use copper_core::{Clock, ClockDomain, Memory};
 use copper_macros::hardware;
@@ -22,7 +22,7 @@ async fn ram_straddle(
     clk: Clock<MainClk>,
     enb: In<Logic, MainClk>,
     addrb: In<Bits<8>, MainClk>,
-    dob: Out<Bits<16>, MainClk>,
+    dob: RegOut<Bits<16>, MainClk>,
 ) {
     let memory = preloaded(clk.clone());
     let mut data: Bits<16> = Bits::zero();
@@ -41,12 +41,12 @@ async fn ram_straddle(
 // OUTPUT-BEFORE-TICK: drive dob (from the previous read) BEFORE the tick, then
 // issue the next read. dob is a pre-tick write (like counter/mac_fsm → observed
 // same cycle). Hypothesis: this collapses to 1-cycle, matching the .sv.
-#[hardware(sequential, allow_pretick_alignment)]
+#[hardware(sequential)]
 async fn ram_prewrite(
     clk: Clock<MainClk>,
     enb: In<Logic, MainClk>,
     addrb: In<Bits<8>, MainClk>,
-    dob: Out<Bits<16>, MainClk>,
+    dob: RegOut<Bits<16>, MainClk>,
 ) {
     let memory = preloaded(clk.clone());
     let mut data: Bits<16> = Bits::zero();
@@ -71,7 +71,7 @@ fn probe_mem_latency() {
         let mut exec = HardwareExecutor::new();
         let (enb_drv, enb_in) = wire::<Logic, MainClk>(Logic::Zero);
         let (ad_drv, ad_in) = wire::<Bits<8>, MainClk>(Bits::zero());
-        let (o_drv, o_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
+        let (o_drv, o_obs) = registered_wire::<Bits<16>, MainClk>(&clk, Bits::zero());
         let dh = o_drv.dirty_handle();
         let reads = vec![enb_in.wire_id(), ad_in.wire_id()];
         if straddle {
