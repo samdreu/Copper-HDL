@@ -482,3 +482,27 @@ loop) fails the case instead of truncating it (`an_unrecognized_panic_is_a_failu
 | `trailing_fold` (f4) | `sim=ref≠SV` | `sim=ref≠SV` (cycle 0: sim 0 ref 0 SV 5) | pinned |
 | `regout_trailing_single_tick` (P12, `REF_SKIP`) | `sim=SV≠ref` | `sim=SV≠ref` (cycle 1: sim 215 ref 28 SV 215) | pinned; `REF_SKIP_PATTERN` names the pattern and G-G matches the two |
 | the 25 `obs_0` modules (E.1) | — (new) | `sim≠SV,no-ref` (131 sequences) | EXCUSED by class |
+
+### E.5 The `SKIP` rows re-checked (CLAUDE.md: a reason naming emitted text cannot detect its own staleness)
+
+Re-transpiled with the CLI, then run through the new harness with the row removed
+(temporary `build.rs` edit, restored; the tree is unchanged). Predicted before the run:
+`probe` PASS on every sequence (§A); `out_from_reg_before_commit`, `vr_sink_mealy`,
+`vr_skid` still DISAGREE at a later observation, pattern `sim≠SV,no-ref` (plain `Out`);
+`mod8` (combinational, `o = a % b`) OUTSIDE on the sequences that draw `b == 0` — the row
+names sequence 1 (cycle 59), sequence 2 (cycle 27) and the pattern list (sequence 4,
+cycle 0) — and PASS on the rest, never DISAGREE.
+
+Measured — **every row as predicted**:
+
+| Row | Re-transpiled | Measured under the relation | Status of the reason |
+|---|---|---|---|
+| `probe` | `assign out = x_r` | 6 PASS of 6 | **stale** (as §A found 2026-11-03): delete the row (Phase C housekeeping, not step 1) |
+| `out_from_reg_before_commit` | `assign q = acc` before `acc <= acc + d` | 6 DISAGREE of 6, `sim≠SV,no-ref`, first at obs_1 (sim 0, SV 52) | accurate; it cites `pretick_out_write_before_update`'s trailing clause, a rule D-8 retires in Phase C (still live in code) |
+| `vr_sink_mealy` | `assign ready = can_take` | 11 DISAGREE of 12, `ready` sim 1 SV 0 | accurate; cites the same rule (D-8 retires it) |
+| `vr_skid` | `assign in_ready = ir` | 12 DISAGREE of 12, `in_ready` sim 1 SV 0 | accurate; same |
+| `mod8` | `assign o = (a % b)` | 2 PASS, **3 OUTSIDE** — sequence 1 from cycle 59, sequence 2 from cycle 27, sequence 4 (pattern list) from cycle 0, exactly the row's points; 0 DISAGREE | the row's premise ("an X-aware comparison … would turn every X into a silent pass") no longer holds: the OUTSIDE verdict is counted, not silent. The module could sweep; not changed in step 1 (E.6) |
+| `rv32i_cpu_pipelined`, `two_domain_top` | — | not run (a `Memory` parameter; a structural two-clock parent) | accurate (III.2.6, III.2.7 preconditions) |
+
+No disagreement seen here at observation 0: all three demonstrations already disagree
+from obs_1 or later, so none of them depends on the E.1 excuse.
