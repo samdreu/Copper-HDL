@@ -506,3 +506,68 @@ Measured — **every row as predicted**:
 
 No disagreement seen here at observation 0: all three demonstrations already disagree
 from obs_1 or later, so none of them depends on the E.1 excuse.
+
+### E.6 What the SPEC must say that it does not (for the coordinator; SPEC files untouched, §III.3 left TBD)
+
+1. **III.2.10 lacks the excusing class step 1 needed.** Observation 0 of a plain `Out` on
+   a clocked module (25 modules / 131 sequences, E.1) is excused by a signature class
+   (`Module::obs0_excuse`). III.2.10 lists SKIP, REF_SKIP, RESET and `ref_skip_reason`'s
+   classes only. I.9.4 calls the plain-`Out` startup items vacuous under D-8, which is
+   true of the language but not of today's corpus. The row belongs beside "83 plain
+   `Out` (D-8's rewrite)", and it is deleted with that rewrite.
+2. **III.2.4's "same resumption" before P12 lands.** A failure in a statement after the
+   tick (`trunc_data`'s `data()`) runs in today's simulator at `t_{N+1}⁺`, inside
+   recorded cycle N. Under one job it is the head of resumption N+2. The harness counts
+   the simulator's position; the spec should say whose count the relation uses until the
+   second job is removed, or that such a failure is a P12 disagreement.
+3. **III.2.4's failure list is recognized by text.** The simulator has no error channel.
+   The harness reads the panic message (`runtime_failure_kind`), adds Rust's
+   `index out of bounds` (an array index, I.14.6(b)), and fails the case on any other
+   panic. The interpreter's `RefError::Runtime` mixes the coroutine's failures with its
+   own invariants, and the harness separates them by message. The spec should state
+   "any other panic is an implementation failure". A distinct interpreter error variant
+   is a Phase C item.
+4. **III.2.2 should say the cut is per environment.** The OUTSIDE cut applies per
+   stimulus sequence (III.2.0's unit), and sim ≡ ref keeps comparing past it. The
+   harness does both.
+5. **III.2.1 for a combinational module.** `obs_0` is the first evaluation (I.11.2(e)),
+   already compared as the first cycle; the harness adds nothing. III.2.1 should say so.
+6. **III.2.11 vs III.2.1: the anchors' `obs_0`.** A `REFERENCE` module's hand-written SV
+   is now compared at `obs_0` too, under the same X and truncation cuts. At `obs_0`,
+   `bit_not_bits`'s anchor sides with the SV against the simulator (E.1). The relation
+   does not say whether the anchors are held to `obs_0`. The harness holds them to it
+   and applies the plain-`Out` class excuse.
+7. **III.2.2 "from reset" vs sim ≡ ref.** Observation 0 of a `RESET` module is outside
+   the SV pair (42 sequences). The harness still compares it sim ≡ ref, X included. The
+   spec implies this; it should state it.
+8. **`mod8`'s `SKIP` (III.2.10 (b)) is now unnecessary.** Under the OUTSIDE verdict it
+   sweeps as 2 PASS / 3 OUTSIDE, exactly at the row's points. Deleting the row is a
+   one-line change, left to the coordinator; it changes G-D's counts by one.
+9. **`probe`'s `SKIP` is stale** (§A, re-measured E.5: 6/6 PASS). Delete it with the
+   Phase C housekeeping.
+10. **III.1 P16 is now MEASURED by the harness**, not only by probe: `obs_0 = init(q)`
+    on every `RegOut` of the corpus, on all three legs (46 modules on the reference leg,
+    every swept `RegOut` on the SV leg). The row's "never by the harness" is stale.
+11. **The ledger is a III.3 input.** Each run's per-sequence verdicts, patterns and pins
+    are the raw material of the conformance ledger. §III.3 is left TBD as instructed.
+
+### E.7 (v) The bare regression
+
+`tools/regression.sh`, bare, on 12c556d (the tree of this commit minus this section), on the
+laptop: **REGRESSION OK (395 s)** — most models were cache hits from the iteration runs; the
+first relation run, every model a miss, took the sweep binary 153 s of test time. 1424 passed,
+0 failed, 137 ignored across 142 binaries; G-C 116 test files (the 115 before plus
+`tests/agreement_relation.rs`); G-D 159 differential cases + 7 ignored; G-F 46 run, 120 skipped
+with a reason; G-E 5 anchored, 161 not; G-A/G-B 32/32 examples.
+
+**G-G — predicted** (after the `--no-examples` run, before this one): identical counts; **measured**:
+
+| Leg | PASS | OUTSIDE | TRUNCATED | EXCUSED | DISAGREE |
+|---|---|---|---|---|---|
+| differential (159 cases) | 1148 | 0 | 0 | 131 (`sim≠SV,no-ref`) | 0 |
+| reference (46 cases) | 385 | 0 | 0 | 0 | 0 |
+
+`obs_0` declared out by a `RESET` row: 42 sequences. Pinned disagreements: 4
+(`preloop_probe`, `preloop_linear`, `trailing_fold` `sim=ref≠SV`; `regout_trailing_single_tick`
+`sim=SV≠ref`, matched to its `REF_SKIP` row). As predicted, every count. E.0 (v)'s first
+prediction (DISAGREE 0 before any excuse) was wrong by the 131 `obs_0` sequences of E.1.
