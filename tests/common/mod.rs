@@ -709,8 +709,9 @@ pub struct EquivalenceTest {
     reset_row: bool,
     /// The sweep case's name, for the verdict ledger; `None` outside the sweep.
     case: Option<String>,
-    /// A table row excusing a disagreement AT OBSERVATION 0 only, with its sentence.
-    obs0_excuse: Option<String>,
+    /// The plain-`Out` ports whose disagreement AT OBSERVATION 0 the signature class
+    /// excuses (build.rs `obs0_excuse`), with the class's sentence.
+    obs0_excuse: Option<(Vec<String>, String)>,
 }
 
 /// The simulator's run-time failure at one resumption (SPEC §III.2.4).
@@ -908,11 +909,12 @@ impl EquivalenceTest {
         self
     }
 
-    /// A table row excuses a disagreement at observation 0 (and nowhere else): it is
-    /// reported EXCUSED with its pattern and the row's sentence. A row whose module
-    /// agrees at observation 0 on every sequence is stale and fails the case.
-    pub fn with_obs0_excuse(mut self, sentence: &str) -> Self {
-        self.obs0_excuse = Some(sentence.to_string());
+    /// A signature class excuses an SV disagreement at observation 0 — and nowhere
+    /// else — on the listed ports (emitted names): it is reported EXCUSED with its
+    /// pattern and the class's sentence. A mismatch on any other port, or at any
+    /// later observation, still fails the case.
+    pub fn with_obs0_excuse(mut self, ports: &[String], sentence: &str) -> Self {
+        self.obs0_excuse = Some((ports.to_vec(), sentence.to_string()));
         self
     }
 
@@ -1332,6 +1334,32 @@ impl EquivalenceTest {
         let reference = self.reference_sv.as_ref().map(|path| {
             println!("=== {} vs INDEPENDENT reference {path} ===", self.name);
             match run_sv(path) {
+                Ok(Some(r)) if !r.passed => {
+                    // The observation-0 class excuse reaches the anchor too: a mismatch
+                    // only at observation 0 on an excused port is the simulator's
+                    // plain-`Out` startup transient, which the anchor shares with the
+                    // transpiled SV or not — said, never silently passed.
+                    let fails: Vec<&str> = r.output.lines().filter(|l| l.starts_with("FAIL: ")).collect();
+                    let excused = self.obs0_excuse.as_ref().is_some_and(|(ports, _)| {
+                        !fails.is_empty()
+                            && fails.iter().all(|l| {
+                                l.split_whitespace()
+                                    .nth(3)
+                                    .and_then(|t| t.strip_suffix("@obs0"))
+                                    .is_some_and(|p| ports.iter().any(|q| q == p))
+                            })
+                    });
+                    if excused {
+                        println!(
+                            "  independent reference: {} observation-0 mismatch(es), all on excused \
+                             plain-Out ports — EXCUSED by the same class sentence",
+                            fails.len()
+                        );
+                        (true, r.output)
+                    } else {
+                        (false, r.output)
+                    }
+                }
                 Ok(Some(r)) => (r.passed, r.output),
                 Ok(None) => (true, String::new()),
                 Err(e) => (false, format!("Verilator error (independent reference): {e}")),
@@ -1346,9 +1374,9 @@ impl EquivalenceTest {
             let cut = cuts[k];
             let rseq = interpreter.as_ref().and_then(|v| v.seqs.get(k));
             let mut first: Option<(Pattern, String, bool)> = None; // (pattern, where, at obs_0)
-            // SV mismatches, wherever they fall: (at observation 0, later).
-            let mut sv_bad = (false, false);
-            let observe = |obs: &[(String, Vec<Logic>)], at: Option<usize>, compared: bool, first: &mut Option<(Pattern, String, bool)>, sv_bad: &mut (bool, bool)| {
+            // SV mismatches, wherever they fall: (the ports at observation 0, later).
+            let mut sv_bad: (Vec<String>, bool) = (Vec::new(), false);
+            let observe = |obs: &[(String, Vec<Logic>)], at: Option<usize>, compared: bool, first: &mut Option<(Pattern, String, bool)>, sv_bad: &mut (Vec<String>, bool)| {
                 for (port, s) in obs {
                     let r = match at {
                         None => rseq.and_then(|q| q.obs0.get(port)),
@@ -1363,7 +1391,7 @@ impl EquivalenceTest {
                     });
                     if v.is_some_and(|v| Some(v) != to_int(s)) {
                         if at.is_none() {
-                            sv_bad.0 = true;
+                            sv_bad.0.push(port.clone());
                         } else {
                             sv_bad.1 = true;
                         }
@@ -1416,7 +1444,12 @@ impl EquivalenceTest {
             let mut obs0_excused = false;
             if let Some((pat, wher, at0)) = first {
                 match &self.obs0_excuse {
-                    Some(why) if at0 && !sv_bad.1 && matches!(pat, Pattern::SimNeSvNoRef | Pattern::SimEqRefNeSv) => {
+                    Some((ports, why))
+                        if at0
+                            && !sv_bad.1
+                            && sv_bad.0.iter().all(|p| ports.contains(p))
+                            && matches!(pat, Pattern::SimNeSvNoRef | Pattern::SimEqRefNeSv) =>
+                    {
                         o.excused = Some((pat, format!("{wher} — {why}")));
                         excused_any = true;
                         obs0_excused = true;
@@ -1424,16 +1457,9 @@ impl EquivalenceTest {
                     _ => o.disagree = Some((pat, wher)),
                 }
             }
-            if sv_bad.1 || (sv_bad.0 && !obs0_excused) {
+            if sv_bad.1 || (!sv_bad.0.is_empty() && !obs0_excused) {
                 sv_unexcused = true;
             }
-        }
-        if self.obs0_excuse.is_some() && !excused_any {
-            hard.push(format!(
-                "'{}' has an observation-0 excuse row, but no sequence disagrees at observation 0 — \
-                 the row is stale; delete it",
-                self.name
-            ));
         }
         // An SV mismatch the per-observation walk did not attribute (it cannot
         // happen if the walk and the testbench agree on what was compared) is a
@@ -1700,9 +1726,9 @@ impl ReferenceLeg {
         self
     }
 
-    /// Accepted for symmetry with [`EquivalenceTest::with_obs0_excuse`]: such a row
+    /// Accepted for symmetry with [`EquivalenceTest::with_obs0_excuse`]: the class
     /// excuses an SV disagreement; the reference leg is not excused by it.
-    pub fn with_obs0_excuse(self, _sentence: &str) -> Self {
+    pub fn with_obs0_excuse(self, _ports: &[String], _sentence: &str) -> Self {
         self
     }
 

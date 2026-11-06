@@ -43,6 +43,12 @@
 #   G-F  the REFERENCE-INTERPRETER leg (copper-ref, the spec made executable —
 #        design_docs/SPEC_OVERVIEW.md §7) ran on every module it covers, and the
 #        modules it skips are skipped with a sentence (build.rs REF_SKIP)
+#   G-G  the AGREEMENT RELATION's verdicts (SPEC §III.2): every swept case wrote its
+#        per-sequence verdicts to the ledger, the counts of PASS, OUTSIDE (an X vs the
+#        SV), TRUNCATED (a run-time failure), EXCUSED (observation 0 of a plain `Out`)
+#        and each disagreement pattern are printed, no sweep disagreement survives,
+#        and every REF_SKIP row excusing a measured disagreement is matched by a pin
+#        that measured the same pattern this run
 #
 # and it prints the `#[ignore]`d tests every run, because a skipped check that prints
 # nothing is indistinguishable from a passing one.
@@ -123,6 +129,62 @@ registered_examples() {
   grep -A1 '^\[\[example\]\]' Cargo.toml | grep 'name =' | sed 's/.*"\(.*\)".*/\1/'
 }
 
+# G-G: read the verdict ledger. $1 the ledger dir, $2 the differential cases that
+# ran (0: none expected), $3 the reference-leg cases that ran, $4 whether the
+# pin/table checks apply (1 for a full `cargo test`, 0 for --quick's leg-only run).
+gg_relation() {
+  local L="$1" want_d="$2" want_r="$3" full="$4"
+  [ -d "$L" ] || fail "G-G: no verdict ledger at $L"
+  local all; all="$(cat "$L"/*.tsv 2>/dev/null)"
+  [ -n "$all" ] || fail "G-G: the verdict ledger is empty — no case reported a verdict"
+  local d_cases r_cases
+  d_cases=$(printf '%s\n' "$all" | awk -F'\t' '$1=="sweep-differential" && $2=="CASE"' | wc -l | tr -d ' ')
+  r_cases=$(printf '%s\n' "$all" | awk -F'\t' '$1=="sweep-reference" && $2=="CASE"' | wc -l | tr -d ' ')
+  [ "$d_cases" -eq "$want_d" ] || fail "G-G: $want_d differential case(s) ran but $d_cases wrote a verdict"
+  [ "$r_cases" -eq "$want_r" ] || fail "G-G: $want_r reference-leg case(s) ran but $r_cases wrote a verdict"
+  local origin v n line
+  for origin in sweep-differential sweep-reference; do
+    line=""
+    for v in PASS OUTSIDE TRUNCATED EXCUSED DISAGREE; do
+      n=$(printf '%s\n' "$all" | awk -F'\t' -v o="$origin" -v v="$v" '$1==o && $2==v' | wc -l | tr -d ' ')
+      line="$line $n $v,"
+    done
+    echo "  G-G ${origin#sweep-}: sequences —${line%,}"
+  done
+  local declared
+  declared=$(printf '%s\n' "$all" | awk -F'\t' '$1=="sweep-differential"' | grep -c "declared outside the SV pair" || true)
+  echo "       observation 0 declared outside the SV pair by a RESET row: $declared sequence(s)"
+  # Patterns: of the excused sequences, and of every disagreement (pinned or not).
+  local pats
+  pats=$(printf '%s\n' "$all" | awk -F'\t' '$1=="sweep-differential" && $2=="EXCUSED"' | grep -o 'excused pattern=[^ ]*' | sed 's/excused pattern=//' | sort | uniq -c | awk '{printf "%s%s %s", (NR>1?", ":""), $1, $2}')
+  echo "       excused by pattern: ${pats:-none}"
+  local nd
+  nd=$(printf '%s\n' "$all" | awk -F'\t' '($1=="sweep-differential" || $1=="sweep-reference") && $2=="DISAGREE"' | wc -l | tr -d ' ')
+  if [ "$nd" -gt 0 ]; then
+    printf '%s\n' "$all" | awk -F'\t' '($1=="sweep-differential" || $1=="sweep-reference") && $2=="DISAGREE"' | cut -c1-200 | head -10
+    fail "G-G: $nd swept sequence(s) DISAGREE — neither pinned nor excused"
+  fi
+  [ "$full" -eq 1 ] || return 0
+  grep -q "^test excused_disagreements_are_written_to_the_ledger \.\.\. ok" "$TMP/test.log" \
+    || fail "G-G: the excused-disagreement table was not written to the ledger"
+  local pins
+  pins=$(printf '%s\n' "$all" | awk -F'\t' '$1=="pin" && $2=="PINNED"{print $3" "$5}')
+  local npins; npins=$(printf '%s\n' "$pins" | grep -c . || true)
+  echo "       pinned disagreements: $npins"
+  printf '%s\n' "$pins" | grep . | sed 's/^/         /'
+  local row m p
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    m=$(echo "$row" | cut -f3); p=$(echo "$row" | cut -f5)
+    printf '%s\n' "$pins" | grep -qx "$m $p" \
+      || fail "G-G: REF_SKIP excuses '$m' as $p, but no pin measured that pattern this run"
+    echo "       REF_SKIP '$m' ($p) — matched by its pin"
+  done <<EOF_ROWS
+$(printf '%s\n' "$all" | awk -F'\t' '$1=="table" && $2=="ROW"')
+EOF_ROWS
+  echo "  G-G ok: every case's verdicts are counted; no unexcused, unpinned disagreement"
+}
+
 # ── 1. build ─────────────────────────────────────────────────────────────────
 step "1/4  build workspace"
 cargo build --workspace 2>&1 | tail -3
@@ -148,7 +210,10 @@ echo "  transpiled $(echo "$SV" | wc -l | tr -d ' ') lines of SystemVerilog — 
 # ── 3. every test target ─────────────────────────────────────────────────────
 if [ "$RUN_TEST" -eq 1 ]; then
   step "3/4  cargo test --workspace"
-  cargo test --workspace > "$TMP/test.log" 2>&1
+  # The verdict ledger G-G reads (tests/common/relation.rs): one file per case.
+  LEDGER="$TMP/ledger"
+  rm -rf "$LEDGER"; mkdir -p "$LEDGER"
+  COPPER_VERDICT_LEDGER="$LEDGER" cargo test --workspace > "$TMP/test.log" 2>&1
   TEST_RC=$?
 
   grep -E "^test result:" "$TMP/test.log" | awk '
@@ -212,6 +277,16 @@ if [ "$RUN_TEST" -eq 1 ]; then
   REF_LINE=$(grep -h "reference leg:" "$TMP"/*.log 2>/dev/null | grep "REF_SKIP" | tail -1 | sed 's/.*reference leg: //')
   [ -n "$REF_LINE" ] && echo "       coverage: $REF_LINE"
 
+  # G-G — the AGREEMENT RELATION (SPEC §III.2). A differential case no longer has
+  # two outcomes: a sequence can PASS, leave the relation OUTSIDE (an X observation
+  # against the 2-state SV, III.2.2 — never compared as 1), be TRUNCATED at a
+  # run-time failure both the simulator and the reference fail at (III.2.4), be
+  # EXCUSED by a signature class (a plain `Out` at observation 0, III.2.1), or
+  # DISAGREE by a pattern (III.2.8). Each verdict that is not a PASS is exactly the
+  # kind of thing that hides if nobody prints it, so every count is printed, zeros
+  # included, and the ledger must account for every case that ran.
+  gg_relation "$LEDGER" "$SWEPT" "$REF_RAN" 1
+
   # G-E — ANCHORING. The sweep checks the simulator against the SystemVerilog the
   # transpiler emitted: two implementations of one source, which proves CONSISTENCY.
   # A module additionally checked against an independent hand-written Verilog
@@ -248,7 +323,9 @@ fi
 if [ "$QUICK" -eq 1 ]; then
   step "3q   reference-interpreter leg (copper-ref vs simulator, no Verilator)"
   # Not `-q`: quiet mode drops the per-test lines the count below reads.
-  cargo test --test corpus_generated -- reference_leg > "$TMP/refleg.log" 2>&1
+  LEDGER="$TMP/ledger"
+  rm -rf "$LEDGER"; mkdir -p "$LEDGER"
+  COPPER_VERDICT_LEDGER="$LEDGER" cargo test --test corpus_generated -- reference_leg > "$TMP/refleg.log" 2>&1
   REF_RC=$?
   REF_RAN=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ok" "$TMP/refleg.log")
   REF_SKIPPED=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ignored" "$TMP/refleg.log")
@@ -258,6 +335,7 @@ if [ "$QUICK" -eq 1 ]; then
   fi
   [ "$REF_RAN" -gt 0 ] || fail "G-F: the reference-interpreter leg ran on zero modules"
   echo "  G-F ok: reference-interpreter leg ran on $REF_RAN module(s) ($REF_SKIPPED skipped with a reason)"
+  gg_relation "$LEDGER" 0 "$REF_RAN" 0
 fi
 
 # ── 4. examples: sim vs Verilator ────────────────────────────────────────────

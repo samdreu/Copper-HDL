@@ -227,14 +227,6 @@ const RESET: &[(&str, &str, bool)] = &[
     ("rv32i_cpu_transpilable", "rstn", true),
 ];
 
-/// Modules whose simulator and SystemVerilog are MEASURED to disagree at
-/// observation 0 (SPEC §III.2.1) and nowhere else, each with the reason: the SV
-/// pair's disagreement there is reported EXCUSED with its pattern rather than
-/// failing the case, and a disagreement at any later observation still fails it.
-/// A row whose module agrees at observation 0 on every sequence fails the case as
-/// stale. Filled from the 2026-11-06 measurement (MEASUREMENTS §E.1), not predicted.
-const OBS0_EXCUSE: &[(&str, &str)] = &[];
-
 /// Modules the **reference-interpreter leg** (`copper-ref`, the third leg of the
 /// sweep — `design_docs/SPEC_OVERVIEW.md` §7) must not run, each with the reason,
 /// by name. The classes the interpreter defers as a whole are computed from the
@@ -247,20 +239,27 @@ const OBS0_EXCUSE: &[(&str, &str)] = &[];
 const REF_SKIP: &[(&str, &str)] = &[
     (
         "rom_paced",
-        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC I.10, TBD \
-         (Round 2); the interpreter has no memory model yet",
+        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
     ),
     (
         "rom_gated",
-        "a `Memory` binding in the body (`Memory::from_fn`): SPEC I.10, TBD (Round 2)",
+        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
     ),
     (
         "ram_arms",
-        "a `Memory` binding in the body (`Memory::new`): SPEC I.10, TBD (Round 2)",
+        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
     ),
     (
         "mp_regout",
-        "a `Memory` binding in the body (`Memory::from_fn`): SPEC I.10, TBD (Round 2)",
+        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
     ),
     (
         "regout_trailing_single_tick",
@@ -276,6 +275,13 @@ const REF_SKIP: &[(&str, &str)] = &[
          Phase C lands",
     ),
 ];
+
+/// The PATTERN (SPEC §III.2.8) of every `REF_SKIP` row that excuses a MEASURED
+/// DISAGREEMENT, as the ledger spells it. G-G in `tools/regression.sh` requires a
+/// pin test to have measured the same pattern this run — a row that excuses a
+/// disagreement nobody still measures, or one measured under another reading, fails
+/// the regression. Validated at build time against `REF_SKIP`.
+const REF_SKIP_PATTERN: &[(&str, &str)] = &[("regout_trailing_single_tick", "sim=SV≠ref")];
 
 // ── The multi-sequence stimulus policy (2026-10-28) ────────────────────────────
 //
@@ -462,13 +468,25 @@ fn main() {
     {
         let leaves: Vec<&str> =
             covered.iter().map(|n| n.rsplit("::").next().unwrap_or(n)).collect();
-        for (module, _) in REF_SKIP {
+        for (module, why) in REF_SKIP {
             assert!(
                 leaves.contains(module),
                 "REF_SKIP names `{module}`, which is not a module the sweep covers — the row is \
                  dead. Delete it (or fix the name)"
             );
+            assert_eq!(
+                why.starts_with("MEASURED DISAGREEMENT"),
+                REF_SKIP_PATTERN.iter().any(|(m, _)| m == module),
+                "REF_SKIP row `{module}`: a MEASURED DISAGREEMENT row names its pattern in \
+                 REF_SKIP_PATTERN, and only such a row does"
+            );
         }
+        let _ = writeln!(
+            code,
+            "/// REF_SKIP rows excusing a measured disagreement, with its pattern (SPEC §III.2.8).\n\
+             pub const EXCUSED_BY_ROW: &[(&str, &str)] = &[{}];",
+            REF_SKIP_PATTERN.iter().map(|(m, p)| format!("(\"{m}\", \"{p}\")")).collect::<Vec<_>>().join(", ")
+        );
     }
 
     // The anchoring ledger. A module cross-checked only against the transpiler's own
@@ -732,6 +750,33 @@ impl Module {
 }
 
 impl Module {
+    /// The plain-`Out` ports of a clocked module, and the sentence that excuses a
+    /// simulator–SV disagreement at OBSERVATION 0 on them (SPEC §III.2.1) — a
+    /// signature class like `ref_skip_reason`'s plain-`Out` class, and for the same
+    /// reason. Under the one-job body a sequential module has no plain `Out` (D-8,
+    /// I.2.2) and `obs_0 = init(q)` for every port (I.9.4); the plain-`Out` startup
+    /// items D-11 routed away (the continuous-assign transient, `init(o)` at startup)
+    /// are vacuous there. Today's two-job simulator and the transpiler's plain-`Out`
+    /// forms read that instant differently, and the 2026-11-06 measurement
+    /// (MEASUREMENTS §E.1) found 25 modules / 131 sequences disagreeing there and
+    /// nowhere else. The excuse covers observation 0 on these ports only: a
+    /// disagreement at any later observation, or on a `RegOut`, still fails.
+    fn obs0_excuse(&self) -> Option<(Vec<&str>, &'static str)> {
+        if !matches!(self.mode.as_str(), "sequential" | "synchronizer") {
+            return None;
+        }
+        let plain: Vec<&str> =
+            self.ports.iter().filter(|p| p.kind == Kind::Out).map(|p| p.name.as_str()).collect();
+        (!plain.is_empty()).then_some((
+            plain,
+            "a plain `Out` at observation 0 on a clocked module: under the one-job body there is \
+             none and obs_0 = init(q) (D-8, SPEC I.2.2, I.9.4); today's two-job simulator shows \
+             the creation zero where the write runs at t_1+ and the SV's continuous assign shows \
+             the expression, or shows the head's pre-edge write where the SV shows the hold \
+             register — awaits the Phase C rewrite to RegOut (MEASUREMENTS §E.1)",
+        ))
+    }
+
     /// Why the reference-interpreter leg cannot run on this module, if it cannot —
     /// the classes `copper_ref::Module::new` defers, decided here from the
     /// signature so the generated case is `#[ignore]`d with the sentence rather
@@ -745,14 +790,17 @@ impl Module {
             "sequential" | "synchronizer" => {}
             "combinational" => {
                 return Some(
-                    "a `combinational` module: one evaluation per settle, SPEC I.11 (TBD, Round 3) \
-                     — the interpreter runs the clocked kernel only"
+                    "a `combinational` module: one evaluation per settle, SPEC §I.11 (written, D-14) \
+                     — the interpreter runs the clocked kernel only; its combinational leg is a \
+                     later Phase C step"
                         .to_string(),
                 )
             }
             "structural" => {
                 return Some(
-                    "a `structural` module: a wiring language, SPEC I.13 (TBD, Round 3)".to_string(),
+                    "a `structural` module: a wiring language, SPEC §I.13 (written, D-18); the \
+                     interpreter's design leg is a later Phase C step"
+                        .to_string(),
                 )
             }
             other => return Some(format!("unknown #[hardware] mode `{other}`")),
@@ -772,11 +820,17 @@ impl Module {
             ));
         }
         if self.ports.iter().any(|p| p.kind == Kind::Memory) {
-            return Some("a `Memory` parameter: memories are SPEC I.10 (TBD, Round 2)".to_string());
+            return Some(
+                "a `Memory` parameter: memories are SPEC §I.10, written (D-16); the interpreter's \
+                 memory model is a later Phase C step"
+                    .to_string(),
+            );
         }
         if self.ports.iter().filter(|p| p.kind == Kind::Clock).count() > 1 {
             return Some(
-                "more than one clock: per-domain gating is SPEC I.12 (TBD, Round 3)".to_string(),
+                "more than one clock: per-domain gating is SPEC §I.12 (written, D-17); the \
+                 interpreter defers a second clock (a later Phase C step)"
+                    .to_string(),
             );
         }
         None
@@ -1043,8 +1097,15 @@ fn emit_test(code: &mut String, m: &Module, body: bool, leg: Leg, wrapper: &str)
     if RESET.iter().any(|(n, _, _)| *n == m.name) {
         relation.push_str("\n            .with_reset_row()");
     }
-    if let Some((_, why)) = OBS0_EXCUSE.iter().find(|(n, _)| *n == m.name) {
-        let _ = write!(relation, "\n            .with_obs0_excuse(\"{}\")", escape(why));
+    if let Some((ports, why)) = m.obs0_excuse() {
+        let ports: Vec<String> =
+            ports.iter().map(|p| format!("copper_codegen::legalized_port_name(\"{p}\")")).collect();
+        let _ = write!(
+            relation,
+            "\n            .with_obs0_excuse(&[{}], \"{}\")",
+            ports.join(", "),
+            escape(why)
+        );
     }
     match leg {
         Leg::Differential => {

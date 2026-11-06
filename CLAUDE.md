@@ -30,14 +30,31 @@ It lives in `tools/` **because it must be in version control**: `.gitignore` exc
 and lost on a fresh clone. If a local `run-copper` skill wrapper exists, it should be
 nothing more than an `exec` of this script — `tools/regression.sh` is the driver.
 
-It also enforces five wiring guards, because "the check silently didn't run" has
+It also enforces seven wiring guards, because "the check silently didn't run" has
 been a recurring bug class here: **G-A** every `examples/**.rs` is registered as a
 `[[example]]`, **G-B** every registered example actually ran, **G-C** every
 `tests/*.rs` (root and per-crate) produced a test binary that ran, **G-D** the
 corpus differential sweep covered every `#[hardware]` module in `examples/` and
-`tests/fixtures/` and ran with Verilator present, and **G-E** (printed, not
+`tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
-hand-written Verilog reference. The sweep does not reach `src/` (the standard
+hand-written Verilog reference, **G-F** the reference-interpreter leg ran, and
+**G-G** every swept case wrote its per-sequence verdicts under the agreement
+relation of `design_docs/SPEC.md` §III.2 (`tests/common/relation.rs`, a ledger in
+`COPPER_VERDICT_LEDGER`) and each count is printed. Since 2026-11-06 observation 0
+(after the first settle, before edge 1) is compared on all three legs. **OUTSIDE**: a
+simulator X at an observation compared against the 2-state SV takes that sequence's
+SV pair out of the relation from there — reported, never compared as 1 (the old
+`logic_vec_to_int` behaviour) and never masked. **TRUNCATED**: a run-time failure (an
+undelivered `data()`, an out-of-range address, an X fed to a condition or `as_*`,
+integer overflow) ends the trace, the simulator and the interpreter must fail at the
+same resumption, and the SV is not compared beyond it; any other panic fails the case.
+**EXCUSED**: a plain `Out` on a clocked module may disagree with the SV at observation
+0 only (a signature class, vacuous under D-8; 25 modules measured), counted and
+printed with its pattern. **DISAGREE**: every disagreement prints its pattern —
+`sim≠ref,SV=ref` simulator/macro, `sim=ref≠SV` transpiler or II.3 row, `sim=SV≠ref`
+the reference or the two-job residue, `all-differ` spec gap or interpreter — and G-G
+fails on any swept disagreement and on a `REF_SKIP` measured-disagreement row whose
+pattern (`REF_SKIP_PATTERN`) no pin measured this run. The sweep does not reach `src/` (the standard
 library's `sync_2ff` is covered by its `tests/fixtures/` twin) or modules defined
 inline in a `tests/*.rs` file. That sweep
 (`build.rs` → `tests/corpus_generated.rs`, see

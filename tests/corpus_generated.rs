@@ -298,3 +298,16 @@ fn every_corpus_module_has_a_generated_case() {
         "generated cases for modules that no longer exist (stale OUT_DIR?): {extra:?}"
     );
 }
+
+/// The `REF_SKIP` rows that excuse a MEASURED DISAGREEMENT, with the pattern each
+/// names (build.rs `REF_SKIP_PATTERN`), written to the verdict ledger so G-G in
+/// `tools/regression.sh` can require a pin test to have measured that same pattern
+/// in this run (SPEC §III.2.8, §III.2.10). G-G requires this test's `ok` line.
+#[test]
+fn excused_disagreements_are_written_to_the_ledger() {
+    let lines: Vec<String> = EXCUSED_BY_ROW.iter().map(|(m, p)| format!("ROW\t{m}\tREF_SKIP\tpattern={p}")).collect();
+    common::ledger_write("table", "ref_skip_rows", &lines);
+    for (m, p) in EXCUSED_BY_ROW {
+        println!("REF_SKIP excuses a measured disagreement: {m} (pattern {p})");
+    }
+}

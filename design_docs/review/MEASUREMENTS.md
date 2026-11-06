@@ -382,3 +382,103 @@ written into this file before its measurement ran.
 - **(v) Bare regression.** 159 differential cases, every sequence PASS except the `obs_0`
   disagreements of (i) (excused by a row each once measured); OUTSIDE 0, TRUNCATED 0,
   DISAGREE 0; reference leg 46 cases, every sequence PASS.
+
+### E.1 (i) Observation 0 on the corpus — predicted, then measured
+
+Measured (`cargo test --test corpus_generated`, ledger `COPPER_VERDICT_LEDGER`, first run
+on the new harness): **25 modules / 131 sequences disagree, every one at observation 0,
+every one on a plain `Out` port, every one pattern `sim≠SV,no-ref`**; nothing disagrees at
+any later observation (the 1,148 other sequences pass as before), no `RegOut` port
+disagrees anywhere, and the reference leg agrees at `obs_0` on all 46 modules (385
+sequences). P15's probes: `obs_0` agrees on all three legs for (f2), (f3), (f4) — their
+divergences stay at obs_1 (f3, f4) and obs_7 (f2), as before.
+
+**Predicted vs measured.** RegOut ports agree on every leg — **as predicted** (0 of the 46
+reference-leg modules, 0 RegOut ports anywhere). The plain-`Out` class — **predicted 3–15
+modules, measured 25**, and the prediction named only one of the two mechanisms. The
+three named for certain (`bit_not_bits`, `bit_not_via_xor`, `bit_not_bool`) do disagree.
+By direction (sim value / SV value at `obs_0`):
+
+- **(A) sim 0, SV ≠ 0 — the continuous-assign transient** (predicted mechanism), 18
+  modules: `bit_not_bits`, `bit_not_bool`, `bit_not_via_xor`, `dynamic_shift`,
+  `lit_width_in_ternary`, `lit_width_via_locals`, `manual_sra` (bits_ops);
+  `sign_extend_via_cast`, `sign_extend_via_mask`, `signed_lt_after_sub`,
+  `signed_lt_via_bias`, `signed_lt_via_cast` (signedness); `held_temp_trap`,
+  `total_expr_temp` (aggregate_locals); `block_binding_shadow`, `sra_method`
+  (struct_pipeline); `regfile_write_through`; `late_constant_one_edge` (port `dv`). The
+  write follows the tick, so today's simulator runs it at `t_1⁺` and shows the wire's
+  creation zero at `t_1⁻`; the emitted `assign o = …` shows the expression from time 0
+  (`bit_not_bits`: `assign o = (~a)`, SV `obs_0 = ~x_1`).
+- **(B) sim ≠ 0, SV 0 — the head's pre-edge write** (NOT predicted), 5 modules:
+  `sipo_block` (`w0_dbg`, 19/20 sequences), `plain_out_multiphase` (`seen_o`, 19/20),
+  `branch_merge` and `branch_merge_explicit` (`mid_o`), `conditional_plain_out` (`o`).
+  The first resumption writes the port before its first tick with `x_1`, which today's
+  simulator shows at `t_1⁻`; the SV's hold register / flop shows 0. No later observation
+  can show this instant (each `obs_N`, N ≥ 1, is read at `t_N⁺`).
+- **(C) both ≠ 0** (NOT predicted), `lfsr` (both copies, 2 sequences each — the ones whose
+  first cycle has `yumi_i = 1`, `reset_i = 0`): the simulator shows the next state written
+  pre-edge, the SV `o = state` shows the register's `initial` 1 — (B) with a non-zero power-on.
+
+**The anchor's side.** `bit_not_bits` has an independent reference
+(`tests/fixtures/reference_sv/bit_not_bits.sv`, `assign o = ~a`): it **agrees with the
+transpiled SV** at `obs_0` (5 sequences, the same values). The only anchored reading of
+the instant sides with the SV; the simulator's zero is the two-job artifact.
+
+**Handled:** excused by a signature class, `Module::obs0_excuse` in `build.rs` (the
+analogue of `ref_skip_reason`'s plain-`Out` class): on a clocked module, a disagreement
+between the simulator and the SV (or the independent reference) **at observation 0, on a
+plain `Out` port, only**, is the verdict **EXCUSED** with its pattern and the sentence
+"under the one-job body there is none and obs_0 = init(q) (D-8, SPEC I.2.2, I.9.4) …
+awaits the Phase C rewrite to RegOut". A mismatch on a `RegOut`, or at any later
+observation, still fails. Not pinned per module: the class disappears with D-8's rewrite,
+and G-G prints the count (131) on every run.
+
+**`RESET` rows.** Observation 0 of a `RESET` module is declared outside the SV pair by its
+row (III.2.2, "from reset"); 42 sequences across the 4 swept copies (`shift_register` ×2,
+`simple_counter`, `rv32i_cpu_transpilable`), printed as such and not counted OUTSIDE. Its
+`obs_0` is still compared sim ≡ ref (none of the four is in the reference leg today). From
+`obs_1` on the rows are unchanged: the reset asserted on cycle 0 defines the state, and an
+X recorded after it would be OUTSIDE (none was).
+
+### E.2 (ii) OUTSIDE (X vs SV)
+
+**Corpus: predicted 0, measured 0** sequences (of 1,279). **Deliberate probe**
+(`tests/ref_probes/agreement_probes.rs::xp_rem`, `q <= a % b`, `b = 0` on cycle 3;
+`tests/agreement_relation.rs::an_x_observation_takes_the_sv_pair_outside`): **predicted
+OUTSIDE from recorded cycle 3, port `q`, the reference agreeing on all 12 cycles X
+included; measured exactly that** (`OUTSIDE (X vs SV, III.2.2) from cycle 3 (recorded
+cycle 3), port q`; `reference leg: 12 cycles agreed`; the SV compared and agreeing on
+`obs_0`–`obs_3`). The relation testbench refuses an X expected value outright
+(`the_relation_testbench_never_compares_an_x`): the legacy "compare X as 1" is unreachable
+under the relation. `mod8`'s `SKIP` row (a `% 0` X) is the corpus instance of this probe
+and could now sweep as OUTSIDE — listed in E.6, not changed.
+
+### E.3 (iii) TRUNCATED — the three failure kinds
+
+`tests/agreement_relation.rs`, each probe driven as a generated case drives a module
+(`run_step` around every step, observation 0 between the settle halves):
+
+| Probe | Stimulus | Predicted | Measured |
+|---|---|---|---|
+| `trunc_x_cond` (X into `as_bool`) | `b = 0` on cycle 5 | TRUNCATED at resumption 6, sim and ref fail together, SV agrees before | **as predicted**: "Cannot convert X to bool"; `reference leg: 5 cycles agreed … 1 sequence(s) truncated at an agreed run-time failure` |
+| `trunc_oob` (address ≥ 10 into a 10-entry ROM) | address 12 on cycle 7 | TRUNCATED at resumption 8, reference leg not run (`Memory`), SV agrees before | **as predicted**: "address 12 is out of range — this memory has 10 entries" |
+| `trunc_data` (undelivered `data()`) | `go = 0` on cycle 6 | TRUNCATED at resumption 7 by the simulator's count, reference leg not run | **as predicted**: "read pipeline output is not yet valid" |
+
+One probe defect on the way, not a verdict: the first `trunc_x_cond` used only bit 0 of
+`a % b`, and Verilator's `-Wall` refused the SV (`UNUSEDSIGNAL r[7:1]`) — the verdict was
+already TRUNCATED at resumption 6 with the reference agreeing; the probe now writes `r`
+in one arm. Under one job (D-8), `trunc_data`'s `data()` follows the tick, so it is the
+head of resumption 8, not 7: today's simulator runs it at `t_7⁺` inside cycle 6's
+`tick_clock`. The reference cannot say which (no memory model), so the resumption number
+is the simulator's. Also pinned: a panic that is not a III.2.4 failure (a combinational
+loop) fails the case instead of truncating it (`an_unrecognized_panic_is_a_failure_not_a_truncation`).
+
+### E.4 (iv) The pattern of every pinned or excused disagreement
+
+| Disagreement | Predicted | Measured | Handled |
+|---|---|---|---|
+| `preloop_probe` (II.3 (f2), P15) | `sim=ref≠SV` | `sim=ref≠SV` (first at cycle 6: sim 5 ref 5 SV 7) | pinned, `record_pin` |
+| `preloop_linear` (f3) | `sim=ref≠SV` | `sim=ref≠SV` (cycle 0: sim 7 ref 7 SV 0) | pinned |
+| `trailing_fold` (f4) | `sim=ref≠SV` | `sim=ref≠SV` (cycle 0: sim 0 ref 0 SV 5) | pinned |
+| `regout_trailing_single_tick` (P12, `REF_SKIP`) | `sim=SV≠ref` | `sim=SV≠ref` (cycle 1: sim 215 ref 28 SV 215) | pinned; `REF_SKIP_PATTERN` names the pattern and G-G matches the two |
+| the 25 `obs_0` modules (E.1) | — (new) | `sim≠SV,no-ref` (131 sequences) | EXCUSED by class |
