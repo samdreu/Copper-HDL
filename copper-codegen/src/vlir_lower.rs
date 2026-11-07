@@ -43,10 +43,6 @@ pub enum VLIRLowerError {
     /// does not flag this, so it is rejected until phase-muxed / registered outputs
     /// are decided (the conditional-output-semantics milestone).
     MultiplyDrivenOutput { port: String },
-    /// A plain `Out` is driven from a memory read result in a multi-phase module.
-    /// See `reject_memory_driven_comb_outputs` for why neither emitted form is
-    /// correct.
-    MemoryResultDrivesPlainOutput { port: String },
     /// A memory access reached the 1:1 statement lowering. It produces several
     /// statements, so it must go through `lower_comb_stmts`; reaching here means a
     /// new caller bypassed that.
@@ -64,14 +60,6 @@ impl std::fmt::Display for VLIRLowerError {
                 write!(f, "match-as-expression nested inside another expression is not yet implemented"),
             VLIRLowerError::SymbolicWidthUnsupported =>
                 write!(f, "parametric/symbolic bit widths are not yet implemented (M2)"),
-            VLIRLowerError::MemoryResultDrivesPlainOutput { port } => write!(
-                f,
-                "output port '{port}' is driven from a memory read result in a multi-phase \
-                 module. The read pipeline re-captures on every clock edge, so a plain `Out` \
-                 either tracks it into the phases that do not observe it, or holds one edge \
-                 late — neither matches the simulator. Declare the port `RegOut<T, D>`, or \
-                 latch the result into a register and drive the output from that"
-            ),
             VLIRLowerError::MemoryAccessOutOfLine =>
                 write!(f, "internal: a memory access was lowered outside `lower_comb_stmts`"),
             VLIRLowerError::LatchInferred { signals } =>
@@ -336,7 +324,6 @@ fn lower_seq(
     // (an unused port of a multi-port memory gets no nets), and — for read results
     // — whether each observation reads the combinational value or the registered
     // capture. See `MemPortUse`.
-    reject_memory_driven_comb_outputs(&s.phases, registered_outs, leg)?;
 
     let mut mem_use = MemPortUse::default();
     collect_phase_mem_use(&s.phases, &mut mem_use);
@@ -1448,73 +1435,6 @@ fn shir_port_drives(stmts: &[SHIRStmt], out: &mut Vec<(String, HashSet<String>)>
 /// wrong in the widening direction lags an output by a cycle — `mac_pipeline` is
 /// the measured witness, which is why the rule keys on the value and not merely on
 /// "written in some phases but not all".
-/// Reject a plain `Out` driven directly from a memory read result in a
-/// **multi-phase** module.
-///
-/// Neither available form is right, which is why this is an error rather than a
-/// choice. A module-level continuous assign tracks the read pipeline, which
-/// re-captures on every edge, so the output would change again in the phases that
-/// do not observe it. Converting it to the usual implicit-hold register latches it
-/// at the end of the observing phase, one edge after the capture the simulator
-/// reads — measured: `data` came out a full cycle late on every sampled value.
-///
-/// `RegOut` is the form that works, and it is the same `Out`/`RegOut` distinction
-/// the pre-tick alignment guardrail points at. A single-phase module is unaffected
-/// — there the post-tick segment shares the phase, and a plain `Out` driven from
-/// `data()` is correct and covered by `tests/multiphase_memory_equivalence.rs`.
-fn reject_memory_driven_comb_outputs(
-    phases: &[SHIRPhase],
-    registered_outs: &HashSet<String>,
-    leg: &Legalizer,
-) -> LowerResult<()> {
-    if phases.len() < 2 {
-        return Ok(());
-    }
-    for phase in phases {
-        let mut drives = Vec::new();
-        shir_port_drives_with_values(&phase.pre_edge, &mut drives);
-        for (port, value) in drives {
-            if registered_outs.contains(&leg.get(&port)) {
-                continue;
-            }
-            let (mut data, mut valid) = (HashSet::new(), HashSet::new());
-            collect_read_uses_expr(value, &mut data, &mut valid);
-            if !data.is_empty() || !valid.is_empty() {
-                return Err(VLIRLowerError::MemoryResultDrivesPlainOutput { port });
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Output-port drives paired with the expression driving them.
-fn shir_port_drives_with_values<'a>(
-    stmts: &'a [SHIRStmt],
-    out: &mut Vec<(String, &'a SHIRExpr)>,
-) {
-    for s in stmts {
-        match s {
-            SHIRStmt::PortDrive { port_name, value, .. } => out.push((port_name.clone(), value)),
-            SHIRStmt::If { then_stmts, else_stmts, .. } => {
-                shir_port_drives_with_values(then_stmts, out);
-                if let Some(e) = else_stmts {
-                    shir_port_drives_with_values(e, out);
-                }
-            }
-            SHIRStmt::Match { arms, .. } => {
-                for a in arms {
-                    shir_port_drives_with_values(&a.stmts, out);
-                }
-            }
-            SHIRStmt::ForLoop { body, .. } => shir_port_drives_with_values(body, out),
-            SHIRStmt::Wire { .. }
-            | SHIRStmt::IndexAssign { .. }
-            | SHIRStmt::MemRead { .. }
-            | SHIRStmt::MemWrite { .. } => {}
-        }
-    }
-}
-
 /// The ports driven inside a top-level `if`/`match`/`for` of `stmts` (any depth
 /// below it) — the drives that lower into `always_comb` whatever the port is.
 fn nested_port_drives(stmts: &[SHIRStmt]) -> HashSet<String> {
@@ -3900,7 +3820,7 @@ endmodule
             enum State { IDLE = 0, RUN = 1, DONE = 2 }
 
             #[hardware(sequential)]
-            async fn fsm(clk: Clock<MainClk>, o: Out<Logic, MainClk>) {
+            async fn fsm(clk: Clock<MainClk>, o: RegOut<Logic, MainClk>) {
                 let mut state = State::IDLE;
                 loop {
                     if state == State::DONE {
@@ -3917,6 +3837,8 @@ endmodule
                 }
             }
         "#;
+        // Since Phase C step 3 (D-8) `o` is a `RegOut`: the Moore decode is a
+        // flop beside `state` in the one `always_ff`, not an `always_comb` copy.
         let expected = "\
 module fsm (
     input  logic clk,
@@ -3927,18 +3849,16 @@ module fsm (
 
     initial begin
         state = 2'd0;
-    end
-
-    always_comb begin
-        if ((state == 2'd2)) begin
-            o = 1'b1;
-        end else begin
-            o = 1'b0;
-        end
+        o = 1'b0;
     end
 
     /* verilator lint_off MULTIDRIVEN */
     always_ff @(posedge clk) begin
+        if ((state == 2'd2)) begin
+            o <= 1'b1;
+        end else begin
+            o <= 1'b0;
+        end
         case (state)
             2'd0: begin
                 state <= 2'd1;
@@ -4014,7 +3934,7 @@ endmodule
             enum Stage { Load = 0, Mul = 1, Out = 2 }
 
             #[hardware(sequential)]
-            async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, out: Out<Bits<8>, MainClk>) {
+            async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, out: RegOut<Bits<8>, MainClk>) {
                 let mut stage = Stage::Load;
                 let mut acc: Bits<8> = Bits::from_lit::<0>();
                 loop {
@@ -4059,7 +3979,7 @@ endmodule
             enum P { A = 0, B = 1, C = 2, D = 3 }
 
             #[hardware(sequential)]
-            async fn m(clk: Clock<MainClk>, o: Out<Logic, MainClk>) {
+            async fn m(clk: Clock<MainClk>, o: RegOut<Logic, MainClk>) {
                 let mut p = P::A;
                 loop {
                     match p {
@@ -4080,7 +4000,8 @@ endmodule
         "#;
         let sv = crate::transpile_source(src, None, &EmitConfig::default())
             .expect("an exhaustive case assigns on every path");
-        assert!(sv.contains("always_comb"));
+        // A `RegOut` since Phase C step 3: the case lowers into the `always_ff`.
+        assert!(sv.contains("case (p)"), "{sv}");
     }
 
     /// The deferred-feature guards produce errors, not wrong Verilog.

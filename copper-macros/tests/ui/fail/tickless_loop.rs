@@ -1,5 +1,5 @@
 use copper_core::{Bits, Clock, ClockDomain};
-use copper_core::port::Out;
+use copper_core::port::RegOut;
 use copper_macros::hardware;
 
 struct MainClk;
@@ -9,7 +9,7 @@ impl ClockDomain for MainClk {}
 // in zero time — a combinational cycle. The macro rejects a tick-free sequential
 // body with a spanned error.
 #[hardware(sequential)]
-async fn spinner(clk: Clock<MainClk>, out: Out<Bits<8>, MainClk>) {
+async fn spinner(clk: Clock<MainClk>, out: RegOut<Bits<8>, MainClk>) {
     let mut n: Bits<8> = Bits::zero();
     loop {
         out.write(n);

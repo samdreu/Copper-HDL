@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use copper_core::port::{In, Out};
+use copper_core::port::{In, Out, RegOut};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 
@@ -12,7 +12,7 @@ async fn something_else() {}
 // Anything else has no hardware meaning; the transpiler always refused it and,
 // since 2026-10-23, so does the macro.
 #[hardware(sequential)]
-async fn foreign(clk: Clock<MainClk>, a: In<Logic, MainClk>, o: Out<Logic, MainClk>) {
+async fn foreign(clk: Clock<MainClk>, a: In<Logic, MainClk>, o: RegOut<Logic, MainClk>) {
     loop {
         something_else().await;
         o.write(a.read());

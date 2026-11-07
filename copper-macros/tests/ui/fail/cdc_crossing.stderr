@@ -1,7 +1,7 @@
 error: clock-domain crossing: input `d` is in domain `Fast`, but this module is clocked on `Slow`. A regular module may not cross clock domains — bring the signal across with a synchronizer (`copper::sync_2ff`, or your own `#[hardware(synchronizer)]` module), then use its output in this domain.
   --> tests/ui/fail/cdc_crossing.rs:14:36
    |
-14 | async fn crosser(clk: Clock<Slow>, d: In<Logic, Fast>, q: Out<Logic, Slow>) {
+14 | async fn crosser(clk: Clock<Slow>, d: In<Logic, Fast>, q: RegOut<Logic, Slow>) {
    |                                    ^^^^^^^^^^^^^^^^^^
 
 warning: unused imports: `Clock` and `Logic`
@@ -12,8 +12,8 @@ warning: unused imports: `Clock` and `Logic`
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-warning: unused imports: `In` and `Out`
+warning: unused imports: `In`, `Out`, and `RegOut`
  --> tests/ui/fail/cdc_crossing.rs:2:25
   |
-2 | use copper_core::port::{In, Out};
-  |                         ^^  ^^^
+2 | use copper_core::port::{In, Out, RegOut};
+  |                         ^^  ^^^  ^^^^^^

@@ -10,7 +10,7 @@
 
 use copper_analysis::{
     check_definite_assignment, check_reachability, classify_reads, infer_registers,
-    multi_write_collapse, reference_sv_registers, Cfg, ReadTiming, RegMatch,
+    reference_sv_registers, Cfg, ReadTiming, RegMatch,
 };
 use syn::ItemFn;
 
@@ -31,7 +31,7 @@ fn regs(src: &str) -> Vec<String> {
 fn counter_infers_its_accumulator() {
     let src = r#"
         #[hardware(sequential)]
-        async fn counter(clk: Clock<C>, step: In<Bits<8>, C>, out: Out<Bits<8>, C>) {
+        async fn counter(clk: Clock<C>, step: In<Bits<8>, C>, out: RegOut<Bits<8>, C>) {
             let mut count: Bits<8> = Bits::zero();
             loop {
                 out.write(count);
@@ -50,7 +50,7 @@ fn counter_infers_its_accumulator() {
 fn read_only_preloop_binding_is_not_a_register() {
     let src = r#"
         #[hardware(sequential)]
-        async fn lfsr(clk: Clock<C>, out: Out<Bits<8>, C>) {
+        async fn lfsr(clk: Clock<C>, out: RegOut<Bits<8>, C>) {
             let xor_mask: Bits<8> = Bits::from_lit::<0xB4>();
             let mut state: Bits<8> = Bits::from_lit::<1>();
             loop {
@@ -73,7 +73,7 @@ fn read_only_preloop_binding_is_not_a_register() {
 fn pipeline_infers_every_stage_register() {
     let src = r#"
         #[hardware(sequential)]
-        async fn mac_pipeline(clk: Clock<C>, a: In<Bits<8>, C>, b: In<Bits<8>, C>, c: In<Bits<8>, C>, out: Out<Bits<16>, C>) {
+        async fn mac_pipeline(clk: Clock<C>, a: In<Bits<8>, C>, b: In<Bits<8>, C>, c: In<Bits<8>, C>, out: RegOut<Bits<16>, C>) {
             loop {
                 let product = a.read() * b.read();
                 let c_s = c.read();
@@ -97,7 +97,7 @@ fn pipeline_infers_every_stage_register() {
 fn fsm_state_variable_is_a_register() {
     let src = r#"
         #[hardware(sequential)]
-        async fn det(clk: Clock<C>, in_i: In<Logic, C>, out_o: Out<Logic, C>) {
+        async fn det(clk: Clock<C>, in_i: In<Logic, C>, out_o: RegOut<Logic, C>) {
             let mut state = State::A;
             loop {
                 if matches!(state, State::D) { out_o.write(Logic::One); } else { out_o.write(Logic::Zero); }
@@ -129,7 +129,7 @@ fn combinational_module_has_no_registers() {
 fn well_formed_sequential_loop_passes_reachability() {
     let src = r#"
         #[hardware(sequential)]
-        async fn ok(clk: Clock<C>, out: Out<Bits<8>, C>) {
+        async fn ok(clk: Clock<C>, out: RegOut<Bits<8>, C>) {
             let mut n: Bits<8> = Bits::zero();
             loop {
                 out.write(n);
@@ -146,7 +146,7 @@ fn well_formed_sequential_loop_passes_reachability() {
 fn tickless_loop_is_rejected() {
     let src = r#"
         #[hardware(sequential)]
-        async fn bad(clk: Clock<C>, out: Out<Bits<8>, C>) {
+        async fn bad(clk: Clock<C>, out: RegOut<Bits<8>, C>) {
             let mut n: Bits<8> = Bits::zero();
             loop {
                 out.write(n);
@@ -167,7 +167,7 @@ fn tickless_loop_is_rejected() {
 fn partial_tickless_path_is_rejected() {
     let src = r#"
         #[hardware(sequential)]
-        async fn bad(clk: Clock<C>, sel: In<Logic, C>, out: Out<Bits<8>, C>) {
+        async fn bad(clk: Clock<C>, sel: In<Logic, C>, out: RegOut<Bits<8>, C>) {
             let mut n: Bits<8> = Bits::zero();
             loop {
                 if sel.read() == Logic::One {
@@ -188,7 +188,7 @@ fn partial_tickless_path_is_rejected() {
 fn uneven_but_nonzero_tick_counts_are_well_formed() {
     let src = r#"
         #[hardware(sequential)]
-        async fn ok(clk: Clock<C>, sel: In<Logic, C>, out: Out<Bits<8>, C>) {
+        async fn ok(clk: Clock<C>, sel: In<Logic, C>, out: RegOut<Bits<8>, C>) {
             let mut n: Bits<8> = Bits::zero();
             loop {
                 if sel.read() == Logic::One {
@@ -241,7 +241,7 @@ fn conditionally_driven_combinational_output_infers_latch() {
 fn sequential_partial_output_is_not_a_latch() {
     let src = r#"
         #[hardware(sequential)]
-        async fn dff_en(clk: Clock<C>, en: In<Logic, C>, d: In<Bits<8>, C>, q: Out<Bits<8>, C>) {
+        async fn dff_en(clk: Clock<C>, en: In<Logic, C>, d: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) {
             loop {
                 clk.tick().await;
                 if en.read() == Logic::One { q.write(d.read()); }
@@ -258,7 +258,7 @@ fn sequential_partial_output_is_not_a_latch() {
 fn pretick_reads_are_deferred() {
     let src = r#"
         #[hardware(sequential)]
-        async fn m(clk: Clock<C>, a: In<Bits<8>, C>, b: In<Bits<8>, C>, out: Out<Bits<8>, C>) {
+        async fn m(clk: Clock<C>, a: In<Bits<8>, C>, b: In<Bits<8>, C>, out: RegOut<Bits<8>, C>) {
             loop {
                 let s = a.read() + b.read();
                 clk.tick().await;
@@ -275,7 +275,7 @@ fn pretick_reads_are_deferred() {
 fn trailing_read_is_immediate() {
     let src = r#"
         #[hardware(sequential)]
-        async fn dff_en(clk: Clock<C>, en: In<Logic, C>, q: Out<Logic, C>) {
+        async fn dff_en(clk: Clock<C>, en: In<Logic, C>, q: RegOut<Logic, C>) {
             loop {
                 clk.tick().await;
                 if en.read() == Logic::One { q.write(Logic::One); }
@@ -331,7 +331,7 @@ fn reference_sv_excludes_output_reg_ports() {
 fn name_exact_match_against_faithful_reference() {
     let dut = r#"
         #[hardware(sequential)]
-        async fn counter(clk: Clock<C>, out: Out<Bits<8>, C>) {
+        async fn counter(clk: Clock<C>, out: RegOut<Bits<8>, C>) {
             let mut count: Bits<8> = Bits::zero();
             loop {
                 out.write(count);
@@ -356,7 +356,7 @@ fn name_exact_match_against_faithful_reference() {
 fn storage_equivalent_match_ignores_names() {
     let dut = r#"
         #[hardware(sequential)]
-        async fn counter(clk: Clock<C>, out: Out<Bits<8>, C>) {
+        async fn counter(clk: Clock<C>, out: RegOut<Bits<8>, C>) {
             let mut count: Bits<8> = Bits::zero();
             loop {
                 out.write(count);
@@ -382,7 +382,7 @@ fn storage_equivalent_match_ignores_names() {
 fn fsm_report_counts_tick_boundaries() {
     let src = r#"
         #[hardware(sequential)]
-        async fn three_stage(clk: Clock<C>, out: Out<Bits<8>, C>) {
+        async fn three_stage(clk: Clock<C>, out: RegOut<Bits<8>, C>) {
             let mut n: Bits<8> = Bits::zero();
             loop {
                 out.write(n);
@@ -407,95 +407,13 @@ fn fsm_report_counts_tick_boundaries() {
 // necessary; validated to flag exactly the genuine cases and NOTHING in the real
 // corpus (uart/rv32i/sipo_block/counter/serializers stay clean).
 
-/// The canonical collapse: `out.write(0); tick; out.write(1)` gated by a deferred read.
-#[test]
-fn multi_write_flags_if_tick() {
-    let src = "async fn if_tick(clk: Clock<C>, sel: In<Logic, C>, out_o: Out<Logic, C>) {
-        loop {
-            if sel.read() == Logic::One { out_o.write(Logic::One); clk.tick().await; }
-            else { out_o.write(Logic::Zero); clk.tick().await; out_o.write(Logic::One); clk.tick().await; }
-        }
-    }";
-    assert_eq!(multi_write_collapse(&f(src)), vec!["out_o".to_string()]);
-}
 
-/// Even an *unused* leading read triggers the collapse — it is the phase shift, not
-/// the read's value, that matters.
-#[test]
-fn multi_write_flags_unused_leading_read() {
-    let src = "async fn m(clk: Clock<C>, sel: In<Logic, C>, out: Out<Logic, C>) {
-        loop { let _s = sel.read(); out.write(Logic::Zero); clk.tick().await; out.write(Logic::One); clk.tick().await; }
-    }";
-    assert_eq!(multi_write_collapse(&f(src)), vec!["out".to_string()]);
-}
 
-/// The SAME straddle with NO leading read does not collapse (write lands post-edge).
-#[test]
-fn multi_write_clean_without_leading_read() {
-    let src = "async fn m(clk: Clock<C>, _sel: In<Logic, C>, out: Out<Logic, C>) {
-        loop { out.write(Logic::Zero); clk.tick().await; out.write(Logic::One); clk.tick().await; }
-    }";
-    assert!(multi_write_collapse(&f(src)).is_empty());
-}
 
-/// `RegOut` buffers and commits at the edge, so it is never the collapsing case —
-/// excluded by construction (not a combinational output).
-#[test]
-fn multi_write_clean_for_regout() {
-    let src = "async fn m(clk: Clock<C>, sel: In<Logic, C>, out_o: RegOut<Logic, C>) {
-        loop {
-            if sel.read() == Logic::One { out_o.write(Logic::One); clk.tick().await; }
-            else { out_o.write(Logic::Zero); clk.tick().await; out_o.write(Logic::One); clk.tick().await; }
-        }
-    }";
-    assert!(multi_write_collapse(&f(src)).is_empty());
-}
 
-/// A single write per cycle (`counter`) is fine even with a read — one write, no straddle.
-#[test]
-fn multi_write_clean_for_counter() {
-    let src = "async fn m(clk: Clock<C>, step: In<Bits<8>, C>, out: Out<Bits<8>, C>) {
-        let mut count: Bits<8> = Bits::zero();
-        loop { out.write(count); clk.tick().await; count = count + step.read(); }
-    }";
-    assert!(multi_write_collapse(&f(src)).is_empty());
-}
 
-/// A per-cycle serializer (`out.write(x); tick`) writes the output once per iteration.
-#[test]
-fn multi_write_clean_for_serializer() {
-    let src = "async fn m(clk: Clock<C>, d: In<Logic, C>, out: Out<Logic, C>) {
-        loop { out.write(d.read()); clk.tick().await; }
-    }";
-    assert!(multi_write_collapse(&f(src)).is_empty());
-}
 
-/// A collapse INSIDE a nested ticking loop is caught by recursion into the sub-CFG.
-#[test]
-fn multi_write_flags_nested_loop_collapse() {
-    let src = "async fn m(clk: Clock<C>, inp: In<Logic, C>, out: Out<Logic, C>) {
-        loop {
-            for _i in 0..4 {
-                let _x = inp.read();
-                out.write(Logic::Zero);
-                clk.tick().await;
-                out.write(Logic::One);
-                clk.tick().await;
-            }
-        }
-    }";
-    assert_eq!(multi_write_collapse(&f(src)), vec!["out".to_string()]);
-}
 
-/// A serializer nested in a ticking for-loop writes its output once per iteration —
-/// no straddle, stays clean (guards against the recursion over-flagging).
-#[test]
-fn multi_write_clean_for_nested_serializer() {
-    let src = "async fn m(clk: Clock<C>, d: In<Logic, C>, out: Out<Logic, C>) {
-        loop { for _i in 0..8 { out.write(d.read()); clk.tick().await; } }
-    }";
-    assert!(multi_write_collapse(&f(src)).is_empty());
-}
 
 // ── `continue` in the top-level hardware loop ────────────────────────────────
 
@@ -512,7 +430,7 @@ fn multi_write_clean_for_nested_serializer() {
 fn a_continue_that_skips_the_only_tick_is_a_zero_time_cycle() {
     let src = r#"
         #[hardware(sequential)]
-        async fn m(clk: Clock<C>, go: In<Logic, C>, o: Out<Logic, C>) {
+        async fn m(clk: Clock<C>, go: In<Logic, C>, o: RegOut<Logic, C>) {
             loop {
                 if go.read() == Logic::One {
                     continue;
@@ -536,7 +454,7 @@ fn a_continue_that_skips_the_only_tick_is_a_zero_time_cycle() {
 fn a_continue_after_a_guaranteed_tick_is_well_formed() {
     let src = r#"
         #[hardware(sequential)]
-        async fn m(clk: Clock<C>, go: In<Logic, C>, o: Out<Logic, C>) {
+        async fn m(clk: Clock<C>, go: In<Logic, C>, o: RegOut<Logic, C>) {
             loop {
                 for _ in 0..4 {
                     clk.tick().await;

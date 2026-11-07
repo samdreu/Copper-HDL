@@ -137,9 +137,8 @@ fn every_corpus_module_passes_the_rules_the_transpiler_alone_used_to_enforce() {
         if let Err(e) = copper_analysis::check_memory_staging(f) {
             why.push(format!("memory staging: {e}"));
         }
-        let mem = copper_analysis::memory_result_drives_plain_out(f);
-        if !mem.is_empty() {
-            why.push(format!("memory result drives plain Out: {mem:?}"));
+        if let Err(e) = copper_analysis::check_clocked_outputs(f) {
+            why.push(format!("R8 (plain Out on a clocked module): {e}"));
         }
         if !why.is_empty() {
             failing.insert(format!("{name} — {}", why.join("; ")));
@@ -154,42 +153,18 @@ fn every_corpus_module_passes_the_rules_the_transpiler_alone_used_to_enforce() {
     );
 }
 
+/// Phase C step 3 (D-8, 2026-11-06): the pre-tick alignment family and
+/// `multi_write_collapse` are retired (SPEC II.3.2), and with them the
+/// `allow_pretick_alignment` opt-out this test used to audit. What replaces it is
+/// R8, which test 1 runs over the corpus; this test pins that the opt-out is gone
+/// from every module in it.
 #[test]
-fn every_module_a_macro_rule_flags_carries_the_opt_out_the_transpiler_honours() {
+fn no_corpus_module_carries_the_retired_opt_out() {
     let mods = corpus();
-
-    let mut collapsing: BTreeSet<String> = BTreeSet::new();
-    let mut flagged_without_opt_out: BTreeSet<String> = BTreeSet::new();
-    for (name, f, opted_out) in &mods {
-        if !copper_analysis::multi_write_collapse(f).is_empty() {
-            collapsing.insert(name.clone());
-        }
-        let hits: Vec<&str> = [
-            ("D1", !copper_analysis::unprotected_pretick_out_write(f).is_empty()),
-            ("write-before-update", !copper_analysis::pretick_out_write_before_update(f).is_empty()),
-            ("multi-phase", !copper_analysis::multi_phase_out_write(f).is_empty()),
-            ("trailing RegOut from input", !copper_analysis::trailing_regout_reads_input(f).is_empty()),
-            ("trailing Out from input", !copper_analysis::trailing_out_reads_input(f).is_empty()),
-            ("late constant", !copper_analysis::out_first_driven_late(f).is_empty()),
-            ("linear anchor", !copper_analysis::linear_out_write_anchor_mismatch(f).is_empty()),
-        ]
-        .into_iter()
-        .filter(|(_, hit)| *hit)
-        .map(|(n, _)| n)
-        .collect();
-        if !hits.is_empty() && !opted_out {
-            flagged_without_opt_out.insert(format!("{name} — {}", hits.join(", ")));
-        }
-    }
+    let opted: Vec<&String> = mods.iter().filter(|(_, _, o)| *o).map(|(n, _, _)| n).collect();
     assert!(
-        collapsing.is_empty(),
-        "multi_write_collapse has no opt-out in either front-end, yet these corpus \
-         modules trip it — they could not have compiled through the macro: {collapsing:?}"
-    );
-    assert!(
-        flagged_without_opt_out.is_empty(),
-        "these corpus modules trip a pre-tick alignment rule without \
-         `allow_pretick_alignment`, so the macro would refuse them and so would the \
-         transpiler — they cannot be in the tree as written: {flagged_without_opt_out:#?}"
+        opted.is_empty(),
+        "`allow_pretick_alignment` was retired with the pre-tick alignment rules (D-8); \
+         the macro now refuses it, so these modules cannot compile: {opted:?}"
     );
 }

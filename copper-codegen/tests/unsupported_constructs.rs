@@ -905,3 +905,28 @@ async fn m(clk: Clock<MainClk>, go: In<Logic, MainClk>, o: RegOut<Bits<8>, MainC
         "the `continue` diagnostic must carry a span: {err}"
     );
 }
+
+/// SPEC II.1 R8 (D-8, Phase C step 3): the transpiler refuses a plain `Out` on a
+/// clocked module with the macro's message (`copper_analysis::clocked_out_message`;
+/// the macro's witnesses are `copper-macros/tests/ui/fail/plain_out_on_*.rs`).
+#[test]
+fn a_plain_out_on_a_clocked_module_is_refused_by_r8() {
+    for (attr, name) in [("sequential", "pass_seq"), ("synchronizer", "pass_sync")] {
+        let src = format!(
+            r#"
+#[hardware({attr})]
+async fn {name}(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<8>, MainClk>) {{
+    loop {{
+        o.write(a.read());
+        clk.tick().await;
+    }}
+}}
+"#
+        );
+        let err = transpile(&src).expect_err("R8: a plain Out on a clocked module must be refused");
+        assert!(
+            err.contains(&copper_analysis::clocked_out_message("o")),
+            "{attr}: expected R8's shared message, got: {err}"
+        );
+    }
+}

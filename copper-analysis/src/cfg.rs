@@ -110,12 +110,6 @@ struct Node {
     /// Combinational output ports (`Out<…>`, not `RegOut`) driven here via
     /// `port.write(…)` — the def/use of *ports* the definite-assignment check keys on.
     writes: BTreeSet<String>,
-    /// `RegOut` ports written here via `port.write(…)`. Kept apart from `writes`
-    /// because every pre-tick alignment rule is about plain `Out` and relies on
-    /// `writes` excluding registered ports; only
-    /// [`Cfg::trailing_regout_reads_input`] reads this. A folded nested loop
-    /// records none (its interior is the sub-CFG's business).
-    regout_writes: BTreeSet<String>,
     /// Memory-port access sites appearing in this node's own expression —
     /// `mem.read_port::<K>().read(a)` / `.data()` / `.is_ready()` and
     /// `mem.write_port::<K>().write(a, v)`. A *folded* nested loop node carries
@@ -145,12 +139,6 @@ struct Node {
     /// simulator exhibits (measured) while the transpiled FSM would happily run one
     /// cycle per iteration.
     may_exit_without_tick: bool,
-    /// True iff this node is a `port.write(<constant>)` of a combinational `Out` —
-    /// the operand is a literal, an enum unit variant / associated-const / `const`
-    /// path, or a constructor call over such operands (`Logic::One`, `Bits::zero()`,
-    /// `Bits::<8>::from_u8(9)`); see [`is_constant_expr`]. Read by
-    /// [`Cfg::out_first_driven_late`], whose boundary is exactly "constant-valued".
-    const_write: bool,
     /// Source span, for spanned diagnostics.
     span: Span,
 }
@@ -165,12 +153,10 @@ impl Node {
             tick_clock: None,
             succs: Vec::new(),
             writes: BTreeSet::new(),
-            regout_writes: BTreeSet::new(),
             mem: Vec::new(),
             folded: false,
             guards: Vec::new(),
             may_exit_without_tick: false,
-            const_write: false,
             span,
         }
     }
@@ -263,16 +249,6 @@ pub struct Cfg {
     /// 0-iteration exit never false-rejects the outer loop); its own body's
     /// tickless-cycle well-formedness is enforced here instead.
     nested_ticking_loops: Vec<Cfg>,
-    /// Some `clk.tick().await` of the top-level loop body sits **inside** a
-    /// statement — a branch, a `match` arm, or a nested loop — rather than being a
-    /// bare top-level statement. This is the source-level mirror of control
-    /// extraction's trigger (`control_extract::loop_needs_extraction`): such a body
-    /// is lowered as a single-tick `match pc` FSM, a body whose ticks are all
-    /// top-level goes down the **linear** multi-phase path. Read by
-    /// [`multi_phase_out_write`](Self::multi_phase_out_write), whose accepted class
-    /// exists only on the extracted route (phase C's emission form lives there).
-    /// `false` for a combinational body.
-    has_nested_tick: bool,
     /// The register set, computed once. The backward-liveness fixed point behind
     /// [`Cfg::registers`] is the expensive part of every analysis on this graph
     /// (≈375 ms on the transpilable CPU, measured 2026-09-03 against 0.8 ms to
@@ -304,11 +280,6 @@ impl Cfg {
         let body_entry = b.build_block(&loop_body, head);
         b.nodes[head].succs.push((body_entry, EdgeKind::Comb));
 
-        // A tick that is not itself a bare top-level statement of the loop body.
-        let has_nested_tick = loop_body.iter().any(|stmt| {
-            let bare = matches!(stmt, Stmt::Expr(e, _) if tick_clock(e).is_some());
-            !bare && stmt_has_tick(stmt)
-        });
 
         Some(Cfg {
             nodes: b.nodes,
@@ -318,7 +289,6 @@ impl Cfg {
             inputs: in_param_names(f),
             exit: None,
             nested_ticking_loops: b.nested,
-            has_nested_tick,
             registers_cache: std::cell::OnceCell::new(),
         })
     }
@@ -343,7 +313,6 @@ impl Cfg {
             inputs: in_param_names(f),
             exit: Some(exit),
             nested_ticking_loops: b.nested,
-            has_nested_tick: false,
             registers_cache: std::cell::OnceCell::new(),
         }
     }
@@ -414,94 +383,8 @@ impl Cfg {
             .collect()
     }
 
-    /// Combinational output ports (`Out<…>`, not `RegOut`) that hit the
-    /// **multi-write-around-a-tick collapse**: written on both sides of a *bare*
-    /// `clk.tick().await` within one iteration, where the pre-tick write is
-    /// phase-shifted into the pre-edge by a *leading (deferred) input read*. The
-    /// coroutine simulator then runs the post-tick write in the same `tick_clock`
-    /// and clobbers the pre-tick value before it is observed (silent sim ≠ synth).
-    /// Returns the offending ports, sorted, for a macro guardrail to reject.
-    ///
-    /// Precise by construction (validated empirically against the corpus): the three
-    /// necessary conditions are all required, so designs that merely straddle a tick
-    /// without the collapsing alignment are not flagged —
-    ///   * a *bare* tick (`is_tick` with no writes), not a folded multi-tick loop
-    ///     (whose ticks separate the writes into distinct `tick_clock`s — `uart_tx`);
-    ///   * the same `Out` written on both sides of that bare tick in one iteration;
-    ///   * a leading `In` read that comb-reaches the pre-tick write (what pushes it to
-    ///     the pre-edge). Its absence is why `counter` and `uart_rx`'s `rx_dv`
-    ///     (`write(1); tick; write(0)` with no leading read) do **not** collapse.
-    /// `RegOut` outputs are excluded by construction (they are not in `comb_outputs`).
-    ///
-    /// Recurses into nested ticking loops (`for`/`while` that await a tick): a
-    /// straddle *inside* such a loop is caught in its sub-CFG, which carries the same
-    /// port sets. So both a top-level and a nested-loop collapse are reported.
-    pub fn multi_write_collapse(&self) -> Vec<String> {
-        let mut flagged: BTreeSet<String> = self.multi_write_collapse_local().into_iter().collect();
-        for sub in &self.nested_ticking_loops {
-            flagged.extend(sub.multi_write_collapse());
-        }
-        flagged.into_iter().collect()
-    }
 
-    /// Collapse detection over this CFG's own nodes only (top-level of one loop);
-    /// [`multi_write_collapse`](Self::multi_write_collapse) adds the nested recursion.
-    fn multi_write_collapse_local(&self) -> Vec<String> {
-        let mut flagged = BTreeSet::new();
-        for (t, node) in self.nodes.iter().enumerate() {
-            if !(node.is_tick && node.writes.is_empty()) {
-                continue; // only a bare `clk.tick().await`
-            }
-            let after = self.post_tick_writes(t);
-            for p in &self.comb_outputs {
-                if flagged.contains(p) || !after.contains(p) {
-                    continue;
-                }
-                // A pre-tick write of `p` that this bare tick ends, with a leading
-                // input read reaching it. (Skip folded loops: their `writes` is a
-                // conservative all-outputs over-approximation, not a real write.)
-                for w1 in 0..self.nodes.len() {
-                    if self.nodes[w1].is_tick
-                        || self.nodes[w1].folded
-                        || !self.nodes[w1].writes.contains(p)
-                    {
-                        continue;
-                    }
-                    if self.comb_reaches(w1, t) && self.leading_read_reaches(w1) {
-                        flagged.insert(p.clone());
-                        break;
-                    }
-                }
-            }
-        }
-        flagged.into_iter().collect()
-    }
 
-    /// Ports explicitly written in the cycle-region *after* bare tick `t` (comb-
-    /// reachable from its tick-successor, within the same iteration).
-    fn post_tick_writes(&self, t: usize) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        let Some(&(start, _)) = self.nodes[t].succs.iter().find(|(_, k)| *k == EdgeKind::Tick)
-        else {
-            return out;
-        };
-        let mut stack = vec![start];
-        let mut seen = vec![false; self.nodes.len()];
-        while let Some(n) = stack.pop() {
-            if n == self.head || std::mem::replace(&mut seen[n], true) {
-                continue;
-            }
-            if !self.nodes[n].is_tick && !self.nodes[n].folded {
-                out.extend(self.nodes[n].writes.iter().cloned());
-            }
-            for &(s, k) in &self.nodes[n].succs {
-                if k == EdgeKind::Comb {
-                    stack.push(s);
-                }
-            }
-        }
-        out
-    }
 
     /// True iff `b` is reachable from `a` via comb-only edges (same cycle-region),
     /// not crossing a tick or the loop head.
@@ -524,804 +407,19 @@ impl Cfg {
         false
     }
 
-    /// True iff some node reading an `In` port comb-reaches `w1` (i.e. a leading
-    /// input read sits before the write in its region — including `w1`'s own reads).
-    fn leading_read_reaches(&self, w1: usize) -> bool {
-        (0..self.nodes.len()).any(|r| {
-            !self.nodes[r].uses.is_disjoint(&self.inputs) && self.comb_reaches(r, w1)
-        })
-    }
 
-    /// Nodes in the **pre-tick region**: reachable from the loop head over `Comb`
-    /// edges only, so traversal stops at every tick. This is the segment whose phase
-    /// alignment is decided incidentally — see
-    /// [`unprotected_pretick_out_write`](Self::unprotected_pretick_out_write).
-    fn pre_tick_region(&self) -> Vec<usize> {
-        let mut out = Vec::new();
-        let mut seen = vec![false; self.nodes.len()];
-        let mut stack: Vec<usize> = self.nodes[self.head]
-            .succs
-            .iter()
-            .filter(|(_, k)| *k == EdgeKind::Comb)
-            .map(|(s, _)| *s)
-            .collect();
-        while let Some(n) = stack.pop() {
-            if n == self.head || std::mem::replace(&mut seen[n], true) {
-                continue;
-            }
-            out.push(n);
-            for &(s, k) in &self.nodes[n].succs {
-                if k == EdgeKind::Comb {
-                    stack.push(s);
-                }
-            }
-        }
-        out
-    }
 
-    /// Plain combinational `Out` ports whose **pre-tick** (head-segment) drives the
-    /// emitted SystemVerilog cannot align with the simulator — the D1 rule of the
-    /// pre-tick alignment family, **re-derived 2026-10-28** against the arm-granular
-    /// opening walk and **narrowed 2026-10-30** to what the drive-level mux + hold
-    /// form leaves (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10, §10.4–10.5; the
-    /// probe battery is the `d*` tests in `tests/sequential_forwarding_divergence.rs`,
-    /// every trace pinned). Returns the offending ports, sorted; empty for a
-    /// combinational module, a module with no top-level loop, a module without
-    /// registers (its reads are immediate and belong to the D2 / trailing rules),
-    /// or one whose outputs are all `RegOut`. Exact corpus pin: `EXPECTED_FLAGGED`
-    /// in `copper-analysis/tests/pretick_alignment_corpus.rs`.
-    ///
-    /// # The model (two anchors, one drive at a time)
-    ///
-    /// In a body with registers every head-segment `In` read is deferred, so a
-    /// drive is **closing** on a path where a read precedes it (the read's barrier
-    /// parks the task; the write runs in the pre-edge settle and is visible at the
-    /// next observation) and **opening** on a path with no read before it (it runs
-    /// in the post-edge settle and is visible at the observation of the cycle it
-    /// opened). Codegen decides per drive, not per path: a drive is closing iff
-    /// some read comb-reaches it on *any* path (`shir_lower::lower_stmt_list`
-    /// seeds each arm from its own condition but carries a read from any arm past
-    /// the branch), and realizes that anchor per drive: driven on every path the
-    /// port is an `always_comb` assign or mux (guards in the committed form, no
-    /// hold register); driven on some paths it is the drive-level mux + hold form
-    /// when some drive is opening — the comb copy muxing the opening drives, the
-    /// hold register loaded by every drive (phase C, drive-level since
-    /// 2026-10-29) — and an edge-sampled register otherwise (guards in the edge
-    /// form). Two hazards follow, and nothing else in the head segment does:
-    ///
-    /// * **(A) a drive whose two anchors differ** (narrowed 2026-10-30; §10.4).
-    ///   A read reaches some drive of the port while some drive has a read-free
-    ///   path from the loop head — *mixed anchors* — **and** either (A1) one
-    ///   drive has both: a **path-dependent** drive, closing in codegen (a read
-    ///   reaches it on some path) and opening in the simulator on its read-free
-    ///   path, which the SV realizes one observation late or, for a continuous
-    ///   assign, with the committed register where the simulator forwarded one;
-    ///   or (A2) the port is written on **every path**: the every-path comb mux
-    ///   has no hold register, so a closing drive is shown through the
-    ///   committed-guard mux at the opening observation, where the simulator's
-    ///   closing write has not run yet and is overwritten by the next opening
-    ///   write before it is ever observed. (A1) is unobservable in exactly one
-    ///   case: a single drive on every path (a continuous assign) whose read-free
-    ///   path assigns no register the drive reads — the opening write then
-    ///   publishes the committed register, which is what the assign shows
-    ///   (`d3a`). Witnesses: `w4_mixed_alignment` (the register-reading assign),
-    ///   `d1f`/`d3c` (held, path-dependent), `d1g` (every path, path-dependent),
-    ///   `d2b` (two drives on every path, one behind its read). **Admitted since
-    ///   2026-10-30**: a *held* port whose drives each have a uniform anchor on
-    ///   both sides, whatever the mix — the drive-level form realizes each drive
-    ///   by its own anchor (`d2a`, `branch_merge_explicit`'s `tail_o`, and the
-    ///   `d5*` probes with a register in place of either constant, on the
-    ///   single-tick and the extraction route; all measured agreeing). Earlier
-    ///   flips: `d3a`, `d3b` (a read on every path), `d1b`/`d2c` (every drive
-    ///   behind the read), `probe_fsm`/`pc_arm_*` (the read in a sibling arm
-    ///   reaches nothing).
-    /// * **(B) forwarded guard** — an opening drive nested under a branch whose test
-    ///   reads a register assigned earlier on that path. The simulator tests the
-    ///   forwarded value; the comb copy of the mux (hold form or all-paths form)
-    ///   tests the committed register. Witnesses: `d4a` (held), `d4c` (every
-    ///   path). Flips: `d4b` (the update after the test), `d4d` (behind a read, so
-    ///   edge-sampled with the edge-form guard), `d1c`.
-    ///
-    /// # What the earlier rules got wrong, and why
-    ///
-    /// Until 2026-10-30 clause (A) refused every mixed-anchor port that was held or
-    /// had more than one drive — including `d2a` and `branch_merge_explicit`, which
-    /// the drive-level form of 2026-10-29 realizes (measured agreeing); the clause
-    /// was derived when the emission was port-wide, so "some drive closing"
-    /// edge-sampled every drive. The narrowing keeps exactly the shapes that still
-    /// diverge (§10.4: every one a drive whose anchors differ between the sides,
-    /// or the every-path mux) and admits nothing unmeasured.
-    ///
-    /// Until 2026-10-28 the rule refused any plain `Out` driven conditionally in a
-    /// segment with an "unprotected" register assignment (the constant-write
-    /// clause), plus register-reading writes a read reaches. The constant-write
-    /// witnesses (`pc_arm_write`, `pc_arm_toggle`, `probe_fsm`) diverged only
-    /// because codegen's opening walk was statement-granular; with the arm-granular
-    /// walk (2026-10-26) they agree, and the clause also refused agreeing shapes it
-    /// had never measured (`d1b`, `d1c`, `d3a`, `d4b`) while missing measured
-    /// divergent ones (`d1g`, `d2a`, `d2b`, `d4c`). The unprotected-assignment
-    /// conjunct was a proxy: it coincides with (B) when the assignment feeds the
-    /// guard and with (A)'s continuous-assign case when it feeds the value, and
-    /// with nothing otherwise.
-    ///
-    /// # Why it keys on the `Out` write, not on the register
-    ///
-    /// **`RegOut` is immune by construction** — it buffers and commits at the edge, so
-    /// the phase at which the write executes cannot be observed (measured by
-    /// changing only the port type: W8/W9). `Node::writes` holds only
-    /// combinational outputs, so `RegOut` is excluded here for free, exactly as it
-    /// is in [`multi_write_collapse`](Self::multi_write_collapse).
-    ///
-    /// # Scope
-    ///
-    /// Only the pre-tick segment is examined; the trailing and middle segments have
-    /// their own rules (`multi_phase_out_write`, `trailing_out_reads_input`,
-    /// `pretick_out_write_before_update`'s trailing clause). The CFG is
-    /// value-blind: a drive whose guard is false on the read-free path still counts
-    /// as mixed, which is the refusing direction for an unmeasured shape.
-    pub fn unprotected_pretick_out_write(&self) -> Vec<String> {
-        let regs: BTreeSet<String> = self.registers().into_iter().collect();
-        if regs.is_empty() {
-            return Vec::new();
-        }
-        let region = self.pre_tick_region();
-        let head_entries: Vec<usize> = self.nodes[self.head]
-            .succs
-            .iter()
-            .filter(|(_, k)| *k == EdgeKind::Comb)
-            .map(|&(s, _)| s)
-            .collect();
 
-        // The drives of each plain `Out` in the region. A `folded` node carries the
-        // conservative all-outputs over-approximation for a nested loop, not a real
-        // `port.write`, so it is not evidence either way.
-        let mut drives: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for &n in &region {
-            let node = &self.nodes[n];
-            if node.folded {
-                continue;
-            }
-            for w in &node.writes {
-                drives.entry(w.clone()).or_default().push(n);
-            }
-        }
 
-        let mut flagged = Vec::new();
-        for (port, ds) in &drives {
-            // (A) mixed anchors, narrowed 2026-10-30 to a drive whose anchors differ
-            // between the sides: (A1) one drive both reached by a read and
-            // reachable read-free (path-dependent), or (A2) the port written on
-            // every path (the every-path comb mux has no hold register). A held
-            // port whose drives each have a uniform anchor is realized by the
-            // drive-level mux + hold form and is admitted.
-            let some_closing = ds.iter().any(|&d| self.leading_read_reaches(d));
-            let some_opening = ds.iter().any(|&d| self.read_free_path_reaches(d, None));
-            let mixed = some_closing && some_opening;
-            let all_paths = self.written_on_all_paths(port, &head_entries);
-            let path_dependent = ds
-                .iter()
-                .any(|&d| self.leading_read_reaches(d) && self.read_free_path_reaches(d, None));
-            let observable = ds.len() > 1
-                || !all_paths
-                || ds.iter().any(|&d| {
-                    let used: BTreeSet<String> =
-                        self.nodes[d].uses.intersection(&regs).cloned().collect();
-                    !used.is_empty() && self.read_free_path_reaches(d, Some(&used))
-                });
-            // On the linear multi-tick route the every-path port takes the hold
-            // form too (2026-11-02, `CYCLE_DATAFLOW_SEMANTICS.md` §10.9 — `e16q`
-            // agrees), so (A2) does not apply there; (A1) is also that route's
-            // rule's clause C, and both refuse it.
-            let linear_multi_tick = !self.has_nested_tick && self.crosses_more_than_one_tick();
-            let mixed = mixed && (path_dependent || (all_paths && !linear_multi_tick));
-            // (B) forwarded guard on an opening drive.
-            let forwarded_guard = ds.iter().any(|&d| {
-                !self.leading_read_reaches(d)
-                    && self.nodes[d].guards.iter().any(|&b| {
-                        let tested: BTreeSet<String> =
-                            self.nodes[b].uses.intersection(&regs).cloned().collect();
-                        !tested.is_empty()
-                            && (0..self.nodes.len()).any(|a| {
-                                !self.nodes[a].defs.is_disjoint(&tested) && self.comb_reaches(a, b)
-                            })
-                    })
-            });
-            if (mixed && observable) || forwarded_guard {
-                flagged.push(port.clone());
-            }
-        }
-        flagged
-    }
 
-    /// Is there a path from the loop head to `n` over `Comb` edges on which no node
-    /// (including `n` itself) reads an `In` port — a path on which the simulator
-    /// runs `n` at the cycle's **opening**? With `assigning = Some(regs)`, the path
-    /// must additionally assign one of `regs` before reaching `n`, so that the
-    /// value `n` forwards differs from the committed register.
-    fn read_free_path_reaches(&self, n: usize, assigning: Option<&BTreeSet<String>>) -> bool {
-        let entries: Vec<usize> = self.nodes[self.head]
-            .succs
-            .iter()
-            .filter(|(_, k)| *k == EdgeKind::Comb)
-            .map(|&(s, _)| s)
-            .collect();
-        self.read_free_path_from(&entries, n, assigning)
-    }
 
-    /// [`read_free_path_reaches`](Self::read_free_path_reaches) from the entry of
-    /// **any** clock phase: the loop head's successors (the head segment) and the
-    /// target of every `Tick` edge (the segment each edge opens). A walk never
-    /// crosses a tick or re-enters the head, so it stays inside `n`'s own phase.
-    /// Read by [`multi_phase_out_write`](Self::multi_phase_out_write)'s
-    /// path-dependent clause.
-    fn read_free_path_from_phase_entry(&self, n: usize) -> bool {
-        let mut entries: Vec<usize> = self.nodes[self.head]
-            .succs
-            .iter()
-            .filter(|(_, k)| *k == EdgeKind::Comb)
-            .map(|&(s, _)| s)
-            .collect();
-        for node in &self.nodes {
-            for &(s, k) in &node.succs {
-                if k == EdgeKind::Tick && s != self.head {
-                    entries.push(s);
-                }
-            }
-        }
-        self.read_free_path_from(&entries, n, None)
-    }
 
-    /// The walk behind the two functions above, from the given entry nodes.
-    fn read_free_path_from(&self, entries: &[usize], n: usize, assigning: Option<&BTreeSet<String>>) -> bool {
-        // State = (node, "assigned one of `regs` so far"); the region is acyclic
-        // apart from the head, which the walk never re-enters.
-        let mut seen = vec![[false; 2]; self.nodes.len()];
-        let mut stack: Vec<(usize, bool)> = entries.iter().map(|&s| (s, false)).collect();
-        while let Some((cur, assigned)) = stack.pop() {
-            if cur == self.head || std::mem::replace(&mut seen[cur][usize::from(assigned)], true) {
-                continue;
-            }
-            let node = &self.nodes[cur];
-            if !node.uses.is_disjoint(&self.inputs) {
-                continue;
-            }
-            let assigned = assigned || assigning.is_some_and(|r| !node.defs.is_disjoint(r));
-            if cur == n {
-                if assigning.is_none() || assigned {
-                    return true;
-                }
-                continue;
-            }
-            for &(s, k) in &node.succs {
-                if k == EdgeKind::Comb {
-                    stack.push((s, assigned));
-                }
-            }
-        }
-        false
-    }
 
-    /// Does every path from the loop head to a clock edge drive `port`?
-    ///
-    /// A port left unwritten on some path HOLDS its previous value there — the
-    /// enabled-register idiom, which is legitimate — and that is exactly what makes
-    /// the pre-tick phase shift observable for a constant write: the port's value
-    /// then depends on WHEN the write ran, not only on what it wrote.
-    ///
-    /// The region is acyclic (a tickless cycle is rejected by `check_reachability`),
-    /// so the memoized recursion terminates. A path that reaches a tick, or returns
-    /// to the head, without writing counts as not-written.
-    ///
-    /// `entries` is the region being asked about — the head's successors for the
-    /// pre-tick rule, the tick-edge targets that reach the head for the trailing one.
-    /// Asking the wrong region is a false positive: a port written unconditionally in
-    /// the TRAILING segment is never written on a path through the HEAD region, and
-    /// reads as conditional if the head's entries are used (measured on a fixture,
-    /// 2026-08-25).
-    fn written_on_all_paths(&self, port: &str, entries: &[usize]) -> bool {
-        fn go(
-            cfg: &Cfg,
-            n: usize,
-            port: &str,
-            memo: &mut std::collections::HashMap<usize, bool>,
-        ) -> bool {
-            if let Some(v) = memo.get(&n) {
-                return *v;
-            }
-            let node = &cfg.nodes[n];
-            if !node.folded && node.writes.contains(port) {
-                memo.insert(n, true);
-                return true;
-            }
-            // Guard against a cycle the reachability check would have rejected
-            // anyway: assume not-written while this node is in progress.
-            memo.insert(n, false);
-            let comb: Vec<usize> = node
-                .succs
-                .iter()
-                .filter(|(s, k)| *k == EdgeKind::Comb && *s != cfg.head)
-                .map(|&(s, _)| s)
-                .collect();
-            let all = !comb.is_empty() && comb.iter().all(|&s| go(cfg, s, port, memo));
-            memo.insert(n, all);
-            all
-        }
 
-        let mut memo = std::collections::HashMap::new();
-        !entries.is_empty() && entries.iter().all(|&e| go(self, e, port, &mut memo))
-    }
 
-    /// Plain combinational `Out` ports written **between a leading `In` read and
-    /// the update of a register the write reads** — the fifth member of the
-    /// pre-tick alignment family, and the first derived from the cycle-dataflow
-    /// model *before* its controlled measurement existed
-    /// (`design_docs/DERIVATION_TABLE.md` F2 / m1, 2026-08-26).
-    ///
-    /// # The hazard
-    ///
-    /// A leading read's `pre_edge_barrier` parks the task **at the read site**, so
-    /// everything after it — including this write — executes in the pre-edge
-    /// settle of the closing tick. A write placed there that reads a register
-    /// updated *later* in the segment captures the register's **pre-update**
-    /// value, one generation behind what the emitted `assign o = r` (the
-    /// flip-flop's Q) shows at every observation instant. Measured (the V8 battery
-    /// in `tests/sequential_forwarding_divergence.rs`, position of the write the
-    /// only variable, every trace predicted before the run):
-    ///
-    /// ```text
-    /// let s = step.read(); o.write(r); r = r + s;   // V8a: sim [0,1,2,…], SV [1,2,3,…]
-    /// let s = step.read(); r = r + s; o.write(r);   // V8b: agree — forwarded ≡ committing ≡ Q
-    /// o.write(r); r = r + step.read();              // V8c: agree — write precedes the barrier
-    /// ```
-    ///
-    /// The in-vivo instance is `rv32i_cpu_transpilable`'s `program_counter`
-    /// (`TODO` cause Q, divergence #1), since rewritten to the post-commit form.
-    ///
-    /// # Why D1 does not catch it
-    ///
-    /// [`unprotected_pretick_out_write`](Self::unprotected_pretick_out_write)'s
-    /// clause (i) requires a register assigned with **no** leading read reaching
-    /// it — the read is the *protection* in D1's shapes, because their writes come
-    /// after the update and the barrier gives them the forwarded (committing)
-    /// value. Here the read is what *creates* the exposure, by dragging a
-    /// write-before-update to the pre-edge. Complementary triggers, like every
-    /// pair in this family.
-    ///
-    /// # Clauses, each with a flipping witness
-    ///
-    /// 1. a leading `In` read comb-reaches the write (V8c flips it: write before
-    ///    the read executes at the cycle's opening on committed state — agrees);
-    /// 2. the write reads a register (a constant is generation-free);
-    /// 3. the write comb-reaches an update of a register it reads (V8b flips it:
-    ///    update first, the write captures the committing value — agrees).
-    ///
-    /// `RegOut` is excluded for free (`Node::writes` holds only combinational
-    /// outputs), as everywhere in the family.
-    ///
-    /// # The trailing clause (added 2026-08-27)
-    ///
-    /// The same mixed-generation hazard exists in the TRAILING segment without
-    /// any read involved: trailing statements execute at the cycle's opening and
-    /// their register updates commit at that same edge, so a write that precedes
-    /// the update publishes the previous generation for the whole cycle.
-    /// Flipping pair: `out_from_reg_before_commit` / `out_from_reg_after_commit`
-    /// (the claim-ledger entries), minimal-measured as
-    /// `v8t_stage_publish_then_load`. Its landing-day catch was three real
-    /// modules with sim-only tests (`module_composition_hybrid`'s stages),
-    /// since migrated to the canonical write/read/tick/update spelling.
-    ///
-    /// # Through `let` temporaries (added 2026-10-20)
-    ///
-    /// Clause 2 asks what the write's value *reads*, and a value routed through a
-    /// same-segment temporary reads whatever the temporary's definition reads:
-    ///
-    /// ```text
-    /// let can_take: Logic = if full == Logic::Zero || drain.read() == Logic::One { One } else { Zero };
-    /// ready.write(can_take);            // reads `full` — through `can_take`
-    /// … full = Logic::One; …            // updated later in the segment
-    /// clk.tick().await;
-    /// ```
-    ///
-    /// is V8a with one rename, and it diverges exactly like V8a (measured in the
-    /// corpus sweep as `vr_sink_mealy` / `vr_skid` in
-    /// `tests/fixtures/valid_ready_dut.rs`: one cycle, hardware leading — the
-    /// emitted RTL is `assign ready = can_take` with `can_take` a wire of `full`'s
-    /// Q). The syntactic `uses ∩ registers` saw only `can_take` and passed it. The
-    /// clause now follows **reaching definitions** within the segment
-    /// ([`value_registers`](Self::value_registers)): every non-register local the
-    /// write uses is replaced by the uses of the definitions that reach it, to a
-    /// fixpoint. The walk stops at registers (their own generation is the thing
-    /// being tested) and at inputs (which have no definition), so the rule's
-    /// meaning is unchanged — only the spelling it sees through is.
-    ///
-    /// # Honest scope (R6)
-    ///
-    /// Pre-tick and trailing regions. A middle segment of a multi-tick loop was
-    /// unexamined until 2026-10-30: on the extraction route the V8a shape there
-    /// AGREES (`e10`, the drive is edge-sampled and samples the pre-update value
-    /// the barrier-parked write reads), and on the linear route it DIVERGES
-    /// (`e14j`, `assign o = r` shows the committed value) and is refused by
-    /// [`linear_out_write_anchor_mismatch`](Self::linear_out_write_anchor_mismatch)
-    /// as a register assigned after the drive (§10.7) — so this rule keeps its
-    /// two regions. A conditional write's GUARD counts on the single-tick route
-    /// only, for a port written on every path of the head (the comb mux tests the
-    /// guard against Q; §10.11, the guard edition below). The value clause is not
-    /// scoped by port form: a held port under it is the edge-sampled flop and
-    /// agrees (`e18j`) — an over-refusal, measured and recorded, not narrowed.
-    pub fn pretick_out_write_before_update(&self) -> Vec<String> {
-        let region = self.pre_tick_region();
-        let regs: BTreeSet<String> = self.registers().into_iter().collect();
-        let mut flagged: BTreeSet<String> = BTreeSet::new();
-        // One top-level tick and no nested one: the single-tick route, whose
-        // every-path port is the comb mux. Both single-tick clauses below are
-        // scoped to it.
-        let single_tick = self.nodes.iter().filter(|n| n.is_tick).count() == 1
-            && !self.has_nested_tick
-            && !self.crosses_more_than_one_tick();
-        let head_entries: Vec<usize> = self.nodes[self.head]
-            .succs
-            .iter()
-            .filter(|(_, k)| *k == EdgeKind::Comb)
-            .map(|&(s, _)| s)
-            .collect();
-        for &w in &region {
-            let wn = &self.nodes[w];
-            if wn.folded || wn.writes.is_empty() {
-                continue;
-            }
-            // (1) barrier-dragged: a leading `In` read comb-reaches the write.
-            if !self.leading_read_reaches(w) {
-                continue;
-            }
-            // The GUARD edition (added 2026-11-02, `CYCLE_DATAFLOW_SEMANTICS.md`
-            // §10.11). On the single-tick route the every-path port is the comb
-            // mux, which tests a guard against the register's Q: a guard that read
-            // a register before its update later in the segment tested the
-            // pre-update value, the mux tests the post-update one from the
-            // observation the write lands at (`e18b`, `e18c`). A held port is the
-            // edge-sampled flop and the multi-tick and extraction routes sample at
-            // the edge as well — all agree (`e18a`, `e18f`–`e18i`). An update
-            // before the guard is the committing value the mux shows (`e18d`).
-            if single_tick {
-                let guard_updated_after = wn.guards.iter().any(|&g| {
-                    let tested = self.value_registers(g, &region, &regs);
-                    region.iter().any(|&a| {
-                        a != g && !self.nodes[a].defs.is_disjoint(&tested) && self.comb_reaches(g, a)
-                    })
-                });
-                if guard_updated_after {
-                    for port in &wn.writes {
-                        if self.written_on_all_paths(port, &head_entries) {
-                            flagged.insert(port.clone());
-                        }
-                    }
-                }
-            }
-            // (2) the write reads a register — otherwise its value is
-            // generation-free and the phase it executes in is unobservable.
-            // Seen through same-segment temporaries (reaching definitions).
-            let read_regs = self.value_registers(w, &region, &regs);
-            if read_regs.is_empty() {
-                continue;
-            }
-            // (3) the update comes after: some later node in the region assigns a
-            // register this write reads.
-            let updated_after = region.iter().any(|&a| {
-                a != w
-                    && !self.nodes[a].defs.is_disjoint(&read_regs)
-                    && self.comb_reaches(w, a)
-            });
-            if updated_after {
-                flagged.extend(wn.writes.iter().cloned());
-            }
-        }
 
-        // The TRAILING-region edition (added 2026-08-27, closing the
-        // `out_from_reg_before_commit` claim-ledger entry — the CPU sweep's
-        // `program_counter` divergence #1 in its trailing spelling). Trailing
-        // statements execute at the cycle's OPENING and their register updates
-        // commit at that same opening edge, so a plain-`Out` write that
-        // precedes the update of a register it reads publishes the PREVIOUS
-        // generation for the whole cycle while `assign o = r` shows the
-        // committed one — the identical mixed-generation window as the pre-tick
-        // clause, without needing a read to drag the write anywhere. The
-        // flipping witness pair is in `tests/fixtures/out_phase_dut.rs`:
-        // `out_from_reg_before_commit` (write first) measured DIVERGING,
-        // `out_from_reg_after_commit` (update first) measured AGREEING.
-        let trailing: Vec<usize> = (0..self.nodes.len())
-            .filter(|&n| n != self.head && self.tick_free_reaches(n, self.head))
-            .collect();
-        for &w in &trailing {
-            let wn = &self.nodes[w];
-            if wn.folded || wn.writes.is_empty() {
-                continue;
-            }
-            let read_regs = self.value_registers(w, &trailing, &regs);
-            if read_regs.is_empty() {
-                continue;
-            }
-            let updated_after = trailing.iter().any(|&a| {
-                a != w
-                    && !self.nodes[a].defs.is_disjoint(&read_regs)
-                    && self.comb_reaches(w, a)
-            });
-            if updated_after {
-                flagged.extend(wn.writes.iter().cloned());
-            }
-        }
 
-        // The SINGLE-TICK TRAILING-UPDATE edition (added 2026-11-02,
-        // `CYCLE_DATAFLOW_SEMANTICS.md` §10.10). In a loop with one top-level tick
-        // the trailing statements run right after the edge that CLOSES the head
-        // segment, so a register they update commits at the very edge a
-        // barrier-dragged head write lands at: the write captured the pre-update
-        // value at the pre-edge settle, the every-path comb form (a continuous
-        // assign or an `always_comb` mux) shows the post-update one from that
-        // observation on — one generation ahead, the pre-tick clause's hazard with
-        // the update across the tick (`e17h`, the single-tick twin of the linear
-        // route's `e14n`). The register may feed the guard as well as the value
-        // (`e17j`). Scoped to a port written on every path of the head: a held
-        // port is the edge-sampled flop (or the hold form, whose closing drives
-        // load at the edge), which samples the pre-update value as the simulator
-        // does (`e17k` agrees). Until §10.10 the single-tick route was outside
-        // every rule of this kind on `d3b`'s evidence, whose update is in the head.
-        if single_tick {
-            let trailing_defs: BTreeSet<String> = trailing
-                .iter()
-                .flat_map(|&n| self.nodes[n].defs.iter())
-                .filter(|d| regs.contains(*d))
-                .cloned()
-                .collect();
-            for &w in &region {
-                let wn = &self.nodes[w];
-                if trailing_defs.is_empty() || wn.folded || wn.writes.is_empty() || !self.leading_read_reaches(w) {
-                    continue;
-                }
-                let mut read_regs = self.value_registers(w, &region, &regs);
-                for &g in &wn.guards {
-                    read_regs.extend(self.value_registers(g, &region, &regs));
-                }
-                if read_regs.is_disjoint(&trailing_defs) {
-                    continue;
-                }
-                for port in &wn.writes {
-                    if self.written_on_all_paths(port, &head_entries) {
-                        flagged.insert(port.clone());
-                    }
-                }
-            }
-        }
 
-        flagged.into_iter().collect()
-    }
-
-    /// The registers the **value** written at node `w` depends on, seen through
-    /// the same-segment temporaries it is routed through.
-    ///
-    /// `w.uses ∩ registers` is the direct answer; a name in `w.uses` that is
-    /// neither a register nor an input is a local temporary, and its value is
-    /// whatever the definitions that *reach* `w` computed — so those definitions'
-    /// uses are folded in, to a fixpoint. A definition reaches `w` iff it sits in
-    /// `region` and a comb-only path leads from it to `w` with no intervening
-    /// re-definition of the same name (classic reaching definitions, so
-    /// `let a = r; let a = i.read(); o.write(a);` attributes `a` to the second
-    /// `let` only).
-    ///
-    /// The walk stops at a register on purpose: a register the write reads is the
-    /// generation the rule tests, and following *its* definition would conflate a
-    /// committed value with the expression that produced it (not measured; see the
-    /// family's standing rule). It also stops at inputs, which have no definition.
-    fn value_registers(
-        &self,
-        w: usize,
-        region: &[usize],
-        regs: &BTreeSet<String>,
-    ) -> BTreeSet<String> {
-        self.value_sources(w, region, regs).0
-    }
-
-    /// The registers a write's value reads (as [`Self::value_registers`]) together
-    /// with the `In` ports it reads *directly* — not through a register — each
-    /// paired with the node the read happens in (the write itself, or the
-    /// definition of the temporary that carried it). The node matters because a
-    /// read is deferred to the closing edge iff a tick is comb-reachable from it.
-    fn value_sources(
-        &self,
-        w: usize,
-        region: &[usize],
-        regs: &BTreeSet<String>,
-    ) -> (BTreeSet<String>, Vec<(String, usize)>) {
-        let mut found: BTreeSet<String> = BTreeSet::new();
-        let mut input_sites: Vec<(String, usize)> = Vec::new();
-        let mut visited: BTreeSet<String> = BTreeSet::new();
-        // (name, the node whose expression mentions it)
-        let mut pending: Vec<(String, usize)> =
-            self.nodes[w].uses.iter().map(|u| (u.clone(), w)).collect();
-        while let Some((name, at)) = pending.pop() {
-            if !visited.insert(name.clone()) {
-                continue;
-            }
-            if regs.contains(&name) {
-                found.insert(name);
-                continue;
-            }
-            if self.inputs.contains(&name) {
-                input_sites.push((name, at));
-                continue;
-            }
-            for &d in region {
-                if d == w || self.nodes[d].folded || !self.nodes[d].defs.contains(&name) {
-                    continue;
-                }
-                if self.comb_reaches_without_redef(d, w, &name) {
-                    pending.extend(self.nodes[d].uses.iter().map(|u| (u.clone(), d)));
-                }
-            }
-        }
-        (found, input_sites)
-    }
-
-    /// True iff a tick node is comb-reachable from `n` (not through the loop head):
-    /// an `In` read at `n` is then *deferred* — the macro parks it at the pre-edge
-    /// settle of that tick — rather than *immediate*.
-    fn comb_reaches_tick(&self, n: usize) -> bool {
-        let mut stack: Vec<usize> = self.nodes[n]
-            .succs
-            .iter()
-            .filter(|(_, k)| *k == EdgeKind::Comb)
-            .map(|&(s, _)| s)
-            .collect();
-        let mut seen = vec![false; self.nodes.len()];
-        while let Some(m) = stack.pop() {
-            if m == self.head || std::mem::replace(&mut seen[m], true) {
-                continue;
-            }
-            if self.nodes[m].is_tick {
-                return true;
-            }
-            for &(s, k) in &self.nodes[m].succs {
-                if k == EdgeKind::Comb {
-                    stack.push(s);
-                }
-            }
-        }
-        false
-    }
-
-    /// `RegOut` ports written in the **trailing region** (after the last top-level
-    /// tick: a tick-free path leads back to the loop head) whose value reads an
-    /// `In` port **directly** — not through a register — at an *immediate* read
-    /// site (no tick is comb-reachable from it). Returns the ports, sorted.
-    ///
-    /// A `RegOut` write takes effect at the first clock edge after it executes. A
-    /// trailing write executes after the edge that opened its cycle and commits at
-    /// the next one, so the transpiler emits it as a non-blocking assignment at
-    /// that next edge from the **committed** registers (`q <= acc`, see
-    /// `shir_lower`'s `trailing_reg_outs`). Anything that write reads through a
-    /// register is therefore the value the simulator saw: the register committed at
-    /// the opening edge and holds through the cycle. An `In` port is not held: the
-    /// simulator's immediate read sampled the value present after the opening edge,
-    /// while a non-blocking assign at the next edge samples the value present
-    /// before *that* edge — one drive later under the harness convention. Realizing
-    /// the simulator's reading would need a staging flop (the simulator's `pending`
-    /// made real); the shape is refused instead, with the remedies: read the input
-    /// before the tick, or latch it into a register the write reads.
-    ///
-    /// A read with a tick comb-reachable from it is *deferred* (the macro parks it
-    /// at that tick's pre-edge settle), so both sides sample the same edge and the
-    /// write is fine — `ex_regfile`'s trailing reads before its halt loop are that
-    /// shape and agree. The check is per read site for exactly that reason.
-    pub fn trailing_regout_reads_input(&self) -> Vec<String> {
-        let trailing: Vec<usize> = (0..self.nodes.len())
-            .filter(|&n| {
-                n != self.head && !self.nodes[n].folded && self.tick_free_reaches(n, self.head)
-            })
-            .collect();
-        let regs: BTreeSet<String> = self.registers().into_iter().collect();
-        let mut flagged: BTreeSet<String> = BTreeSet::new();
-        for &w in &trailing {
-            if self.nodes[w].regout_writes.is_empty() {
-                continue;
-            }
-            let (_, input_sites) = self.value_sources(w, &trailing, &regs);
-            if input_sites.iter().any(|(_, at)| !self.comb_reaches_tick(*at)) {
-                flagged.extend(self.nodes[w].regout_writes.iter().cloned());
-            }
-        }
-        flagged.into_iter().collect()
-    }
-
-    /// Plain `Out` ports written in the **trailing region** (after the last
-    /// top-level tick) whose value reads an `In` port **directly** at an
-    /// *immediate* read site — or, since 2026-11-02 (§10.8), whose **guard** (an
-    /// enclosing `if`/`match` test) does — in a body that crosses **more than one
-    /// clock edge** (`crosses_more_than_one_tick`). Returns the ports, sorted.
-    /// The e8 class, 2026-10-26; the plain-`Out` sibling of
-    /// [`trailing_regout_reads_input`](Self::trailing_regout_reads_input), which
-    /// does not look at guards (unmeasured there, recorded in §10.8).
-    ///
-    /// The simulator reads the input the instant the write executes (an immediate
-    /// read: no tick is comb-reachable from it) and shows the result at the opening
-    /// observation of that cycle. Neither emitted form for a trailing drive in a
-    /// multi-edge body samples the input then: on the extraction route the drive
-    /// is edge-sampled (a closing drive — the read precedes it in its own arm — so
-    /// phase C's opening mux does not apply) and publishes one observation late
-    /// (`e8_single_phase_trailing_immediate_read`, `e8p_extracted_passthrough`);
-    /// on the linear multi-tick route the drive is a continuous assign over the
-    /// input, ungated by the phase, so it tracks the input every cycle where the
-    /// simulator holds the value for the rest of the loop (`e8m_linear_two_ticks`).
-    /// All three are measured in `tests/sequential_forwarding_divergence.rs`.
-    ///
-    /// The single-tick linear body is exempt and measured agreeing
-    /// (`e8l_linear_passthrough`, `e8lr_linear_with_register`): its trailing region
-    /// is the whole phase, the drive is a continuous assign that is live every
-    /// cycle, and the immediate read and the assign see the same input — the D2
-    /// passthrough form. Through a register the input is held and the write agrees
-    /// (the same clause as the `RegOut` rule); a deferred read (a tick
-    /// comb-reachable from the site) samples the closing edge on both sides and
-    /// is fine. Remedies in the message: read the input before the tick, or latch
-    /// it into a register the write reads. `RegOut` is **not** a remedy here — a
-    /// `RegOut` written from a trailing immediate read is the sibling rule's shape.
-    pub fn trailing_out_reads_input(&self) -> Vec<String> {
-        if !self.crosses_more_than_one_tick() {
-            return Vec::new();
-        }
-        let trailing: Vec<usize> = (0..self.nodes.len())
-            .filter(|&n| {
-                n != self.head && !self.nodes[n].folded && self.tick_free_reaches(n, self.head)
-            })
-            .collect();
-        let regs: BTreeSet<String> = self.registers().into_iter().collect();
-        let mut flagged: BTreeSet<String> = BTreeSet::new();
-        for &w in &trailing {
-            if self.nodes[w].writes.is_empty() {
-                continue;
-            }
-            let (_, input_sites) = self.value_sources(w, &trailing, &regs);
-            // The drive's guards count as well (since 2026-11-02, §10.8): an
-            // immediate read in an enclosing `if` decides WHEN the drive fires,
-            // and the edge-sampled form tests it one edge later than the
-            // simulator did (`e15ai` on the extraction route; `e15aa`, `e15ab`,
-            // `e15u` on the linear route).
-            let guard_reads_now = self.nodes[w].guards.iter().any(|&b| {
-                !self.nodes[b].uses.is_disjoint(&self.inputs) && !self.comb_reaches_tick(b)
-            });
-            if guard_reads_now || input_sites.iter().any(|(_, at)| !self.comb_reaches_tick(*at)) {
-                flagged.extend(self.nodes[w].writes.iter().cloned());
-            }
-        }
-        flagged.into_iter().collect()
-    }
-
-    /// [`comb_reaches`](Self::comb_reaches) from `a` to `b`, except that a path
-    /// through a node (other than `a` itself) that re-defines `name` does not
-    /// count: the definition at `a` is killed there.
-    fn comb_reaches_without_redef(&self, a: usize, b: usize, name: &str) -> bool {
-        let mut stack: Vec<usize> = self.nodes[a]
-            .succs
-            .iter()
-            .filter(|(_, k)| *k == EdgeKind::Comb)
-            .map(|&(s, _)| s)
-            .collect();
-        let mut seen = vec![false; self.nodes.len()];
-        while let Some(n) = stack.pop() {
-            if n == b {
-                return true;
-            }
-            if n == self.head
-                || std::mem::replace(&mut seen[n], true)
-                || self.nodes[n].defs.contains(name)
-            {
-                continue;
-            }
-            for &(s, k) in &self.nodes[n].succs {
-                if k == EdgeKind::Comb {
-                    stack.push(s);
-                }
-            }
-        }
-        false
-    }
 
     /// Does one iteration of the loop cross **more than one clock edge**?
     ///
@@ -1336,695 +434,11 @@ impl Cfg {
         ticks >= 2 || self.nodes.iter().any(|n| n.is_tick && n.folded)
     }
 
-    /// Plain combinational `Out` ports driven in **more than one clock phase**
-    /// (**narrowed again 2026-10-30**: clause 4 is per drive — see the end of the
-    /// derivation below and `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10.4–10.5)
-    /// whose emitted form cannot show the simulator's trace — **narrowed 2026-10-23
-    /// (cycle-dataflow phase E)** from "every port written in two phases" to the
-    /// measured divergent class. Returns the offending ports, sorted.
-    ///
-    /// Since 2026-10-30 (§10.6) the name is one phase too narrow: the
-    /// path-dependent half of clause 4 also applies to a port written in **one**
-    /// phase, when that phase is not the head's and the body takes the extraction
-    /// route — the shape §10.5 left unmeasured, measured diverging as `e12`. The
-    /// other clauses stay gated on two or more phases.
-    ///
-    /// # What a "phase" is here
-    ///
-    /// A Comb-connected component of the CFG. A tick is the only edge that separates
-    /// two of them, and the trailing segment merges with the head — correctly, since
-    /// falling off the end of the body and re-entering it costs no cycle, so they
-    /// run in the same one. `RegOut` is excluded for free: `Node::writes` holds only
-    /// combinational outputs, the same way `multi_write_collapse` gets its exclusion.
-    ///
-    /// # The derivation (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md`, "Phase E")
-    ///
-    /// A plain `Out` written in several phases is a mux over FSM state, and the
-    /// question is whether the mux the transpiler emits shows each write at the
-    /// instant the simulator shows it. Each write has an **anchor**: *opening* when
-    /// the simulator executes it at the opening instant of its cycle (no deferred
-    /// `In` read parks the task before it), *closing* when a deferred read's barrier
-    /// moves it to the pre-edge settle of the closing edge. The emission has a
-    /// predicate of its own (`vlir_lower::opening_hold_outputs`): a conditionally
-    /// driven port whose every drive is an opening drive **as codegen sees it** —
-    /// no `In` read precedes the drive in its own arm's walk (arm-granular since
-    /// 2026-10-26; until then the walk was the whole `match pc`, so any input read
-    /// in the module demoted every drive) — becomes a forwarded combinational mux
-    /// with a hold register (visible from the opening observation); any other port
-    /// is an edge-sampled register under `pc` guards (visible from the closing one).
-    /// Codegen's anchor is control-flow, not dataflow: a read that comb-reaches the
-    /// drive in its segment — the drive's own operand, the condition of an
-    /// enclosing branch, the exit test of a wait loop the write is duplicated into
-    /// — counts whether the simulator treats that read as deferred or immediate.
-    ///
-    /// Predicted on paper, then measured on the probes in
-    /// `tests/sequential_forwarding_divergence.rs` (one `#[test]` per row, traces
-    /// pinned):
-    ///
-    /// | shape | sim anchors | emission | verdict |
-    /// |---|---|---|---|
-    /// | two constants, no input (`pulse_plain`) | opening, opening | mux + hold | **agree** |
-    /// | two committed registers, no input (`e2_two_registers`) | opening, opening | mux + hold | **agree** |
-    /// | forwarded next-state then committed (`e3_forwarded_then_committed`) | opening, opening | mux + hold | **agree** |
-    /// | both writes behind a deferred read, module has registers (`e5d_two_closing_deferred`) | closing, closing | edge-sampled | **agree** |
-    /// | register-valued writes plus an unrelated read in another state (`e2x_…`) | opening, opening | mux + hold (arm-granular, 2026-10-26) | **agree** |
-    /// | deferred read then a constant (`e4_…`), via a wire (`e6_…`), a register (`e4r_…`), a forwarded register (`e4f_…`) | closing, opening | edge-sampled until 2026-10-29; drive-level mux + hold since | DIVERGE until 2026-10-29, the opening drive one late; **agree** since (admitted 2026-10-30) |
-    /// | one deferred, one trailing *immediate* read (`e5_two_closing`) | closing, opening | edge-sampled | DIVERGE (one tick moved flips it to `e5d`) |
-    /// | a path-dependent write in a middle phase — the read in a branch, the write after the merge — beside an opening constant (`e11_…`) or a closing read-fed write (`e11b_…`) | opening on the read-free path, closing on the other; the other write opening / closing | mux + hold / edge-sampled | DIVERGE, the read-free executions one late |
-    /// | the same path-dependent write as the port's ONLY write, in one non-head phase (`e12_…`, §10.6, 2026-10-30) | opening on the read-free path, closing on the other | edge-sampled | DIVERGE, the read-free executions one late — the §10.5 gap, closed |
-    /// | its uniform controls: the read on every path (`e12a_…`), on none (`e12b_…`) | closing / opening | edge-sampled / mux + hold | **agree** |
-    /// | the single-write shape on the LINEAR route (`e13_…`) and its every-path control (`e13a_…`) | opening on even `cnt`, closing on odd / closing on every path | `assign o = cnt` — the route has no closing form for a register-valued drive | DIVERGE, the closing executions one late in the SIMULATOR; `e13a` diverges with no branch, so this is not the path-dependent mechanism and not this rule's (§10.6, recorded) |
-    /// | register-free module, reads feeding the writes (`e4i_…`, `e5f_…`) | opening (passthrough-immediate) | edge-sampled | DIVERGE |
-    /// | linear route, register values (`e7_…`) | opening, opening | **refused** by `vlir_lower` (multiply driven) | refused one IR late |
-    /// | linear route, phase-local wires (`e7w_…`) | opening, opening | phase-guarded hold register | DIVERGE, one late |
-    ///
-    /// So a port on the **extracted** route agrees iff **every drive has the same
-    /// anchor on both sides** — the criterion is per drive since the drive-level
-    /// mux + hold form (2026-10-29): a drive no read reaches is opening on both
-    /// sides and the comb mux shows it (`e2`, `e2x`, whatever the module reads in
-    /// other states), a drive every path to which carries a deferred read is
-    /// closing on both sides and the hold register or edge-sampled flop shows it
-    /// (`e5d`), and a port mixing the two is realized drive by drive (`e4`, `e6`,
-    /// `e4r`, `e4f`, admitted 2026-10-30). What is refused is a drive whose
-    /// anchors **differ between the sides** (clause 4, narrowed 2026-10-30 from
-    /// "some write opening while a read reaches some write"): an input read
-    /// comb-reaches the drive in its phase, so codegen holds it to the edge,
-    /// while the simulator runs it at the opening on some path — because every
-    /// read reaching it is *immediate* (a trailing read, `e5`; the `e8` mechanism
-    /// inside a multi-phase port), or because the read sits on one path to the
-    /// drive and not on another (**path-dependent**, `e11`, `e11b` — D1's clause
-    /// (A1) in a non-head phase; `e11b` was admitted by the pre-narrowing clause,
-    /// an unmeasured gap it closed); the register-free class (a read feeding a
-    /// plain `Out` in a register-free body is an *immediate* passthrough read in
-    /// the simulator, `classify_reads`, so the write is opening however it is
-    /// spelled — `e4i`, `e5f`); and the linear route, where no mux form exists and
-    /// the lowering refuses or edge-samples one IR later — the macro must refuse
-    /// it too, or a module compiles that does not transpile (front-end parity).
-    /// Until 2026-10-26 a further clause refused any input read anywhere in the
-    /// body while a write of the port was opening, because codegen's walk was
-    /// statement-granular; the arm-granular walk retired it (`e2x` flipped to
-    /// agreement, and the single-phase `e9` with it).
-    ///
-    /// Unmeasured shapes land on the refusing side by construction: a write after a
-    /// folded tick-bearing loop that reads an input (a wait loop) is not reached by
-    /// that read over Comb edges, so the simulator side counts it as opening, while
-    /// control extraction duplicates that write into the loop's exit arm under the
-    /// read's condition, where codegen sees a read before it — so an opening write
-    /// of a multi-phase port in a body with such a loop is refused outright (the
-    /// folded clause; no witness measured); and a body extraction handles only
-    /// because of a `continue` has no nested tick, so it counts as linear. Both can
-    /// be measured and admitted later; neither is admitted by guess.
-    ///
-    /// # Why not widen the D1 rule instead
-    ///
-    /// Tried and measured in 2026-08-25. `unprotected_pretick_out_write` examines only head →
-    /// first tick (plan Q5). Widening it to every post-tick segment flags **36 of
-    /// 120** corpus modules, ~30 of which have passing equivalence tests
-    /// (`det_010`, `mac_pipeline`, `dual_port_ram`, `bsg_dff_en`, every memory
-    /// fixture). Writing a plain `Out` after a tick is the ORDINARY multi-phase
-    /// pattern and is correct. On landing (commit `99290da`) this rule flagged its
-    /// synthetic witnesses and three real modules (`uart_tx`, `uart_rx`, the CPU's
-    /// program counter), which were migrated to `RegOut`; `RegOut` remains the
-    /// universal remedy, since the phase at which a write executes is unobservable
-    /// through a port that commits at the edge. The exact-set corpus pin is
-    /// `EXPECTED_MULTI_PHASE` in `copper-analysis/tests/pretick_alignment_corpus.rs`.
-    pub fn multi_phase_out_write(&self) -> Vec<String> {
-        let n = self.nodes.len();
-        let mut parent: Vec<usize> = (0..n).collect();
-        fn find(p: &mut Vec<usize>, mut x: usize) -> usize {
-            while p[x] != x {
-                p[x] = p[p[x]];
-                x = p[x];
-            }
-            x
-        }
-        for i in 0..n {
-            let succs: Vec<usize> = self.nodes[i]
-                .succs
-                .iter()
-                .filter(|(_, k)| *k == EdgeKind::Comb)
-                .map(|&(s, _)| s)
-                .collect();
-            for s in succs {
-                let (a, b) = (find(&mut parent, i), find(&mut parent, s));
-                if a != b {
-                    parent[a] = b;
-                }
-            }
-        }
-        // port -> (phases it is written in, the nodes that write it)
-        let mut phases: BTreeMap<String, (BTreeSet<usize>, Vec<usize>)> = BTreeMap::new();
-        for i in 0..n {
-            // A `folded` node carries the conservative all-outputs over-approximation
-            // for a nested loop, not a real `port.write` — counting it as evidence
-            // would flag every output of every module with a nested loop.
-            if self.nodes[i].folded || self.nodes[i].writes.is_empty() {
-                continue;
-            }
-            let r = find(&mut parent, i);
-            for w in &self.nodes[i].writes {
-                let e = phases.entry(w.clone()).or_default();
-                e.0.insert(r);
-                e.1.push(i);
-            }
-        }
-        let reads_input = self.reads_any_input();
-        let register_free = self.registers().is_empty();
-        let folded_input_read = self
-            .nodes
-            .iter()
-            .any(|n| n.folded && n.is_tick && !n.uses.is_disjoint(&self.inputs));
-        // The head's phase: the component the loop head's successors and the
-        // trailing segment share. A port written only there is D1's business
-        // (`unprotected_pretick_out_write`), never this rule's.
-        let head_phase = find(&mut parent, self.head);
-        phases
-            .into_iter()
-            .filter(|(_, (p, writes))| {
-                if p.len() == 1 {
-                    // A port written in ONE phase (since 2026-10-30, §10.6): only
-                    // the path-dependent half of clause 4 applies, and only in a
-                    // non-head phase on the extraction route, in a body with
-                    // registers. The head phase is D1's domain; the linear route
-                    // realizes every register-valued drive as a continuous
-                    // assign, so a read before the write is unrealizable there
-                    // whether or not a branch skips it — a different mechanism
-                    // (`e13a` diverges with no branch), recorded in §10.6 and not
-                    // this clause's; an immediate (trailing) read is
-                    // `trailing_out_reads_input`'s (`e8`); a register-free body
-                    // is the passthrough class. `e12` is the witness, `e12a` /
-                    // `e12b` the uniform controls, `d1f` the head-phase boundary.
-                    let phase = *p.iter().next().expect("one phase");
-                    if phase == head_phase || !self.has_nested_tick || register_free {
-                        return false;
-                    }
-                    return writes
-                        .iter()
-                        .any(|&w| self.leading_read_reaches(w) && self.read_free_path_from_phase_entry(w));
-                }
-                // Linear route: no mux form; the lowering refuses or edge-samples.
-                if !self.has_nested_tick {
-                    return true;
-                }
-                // Register-free with reads: the reads feeding the writes are
-                // immediate passthroughs, so the writes are opening in the
-                // simulator while codegen sees a read before them.
-                if register_free && reads_input {
-                    return true;
-                }
-                // A drive whose anchors differ between the sides (narrowed
-                // 2026-10-30): an input read comb-reaches it, so codegen holds it
-                // to the edge, while the simulator runs it at the opening on some
-                // path — every read reaching it is immediate (`e5`), or it has a
-                // read-free path from its phase's entry (`e11`, `e11b`). A drive
-                // every path to which carries a deferred read, or that no read
-                // reaches, is realized by the drive-level form beside drives of
-                // the other kind (`e4`, `e6`, `e4r`, `e4f`).
-                let mismatch = writes.iter().any(|&w| {
-                    self.leading_read_reaches(w)
-                        && (!self.deferred_read_reaches(w) || self.read_free_path_from_phase_entry(w))
-                });
-                if mismatch {
-                    return true;
-                }
-                let any_opening = writes.iter().any(|&w| !self.deferred_read_reaches(w));
-                // Unmeasured, refused by construction: a wait loop's read is no
-                // Comb predecessor of the write after it, but the extracted form
-                // duplicates that write into the exit arm behind the read.
-                any_opening && folded_input_read
-            })
-            .map(|(port, _)| port)
-            .collect()
-    }
 
-    /// Plain combinational `Out` ports driven on the **linear multi-tick route**
-    /// (every tick a bare top-level statement, more than one edge per iteration)
-    /// by a write whose anchor the emitted form cannot show, or whose emitted
-    /// form has two drivers — the §10.7 rule (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md`,
-    /// derived and measured 2026-10-30), **restated by form and freed of its
-    /// register requirement 2026-11-02 (§10.8)**, and **narrowed to the residue
-    /// the same day when the latch §10.8 read off the transpiler was fixed
-    /// (§10.9)**. Returns the offending ports, sorted; empty for a body with a
-    /// nested tick (the extraction route has its own forms and rules), a
-    /// single-tick body (one observation per iteration, measured agreeing in
-    /// every class — `e8l`, `e15y`, `e15ah`), or all-`RegOut` outputs.
-    ///
-    /// # The forms (read off the transpiler, §10.7–10.9)
-    ///
-    /// On this route the lowering picks a drive's form by its **shape** and its
-    /// **operand's kind**, never by the simulator's anchor:
-    ///
-    /// | drive | form |
-    /// |---|---|
-    /// | unconditional, register / input / constant operand | `assign o = v` — the continuous assign, the committed value at every observation |
-    /// | unconditional, same-segment wire operand | `if (phase_r == p) o <= t` — the phase-guarded flop, sampled at the segment's closing edge (a trailing drive is hoisted into phase 0) |
-    /// | conditional, some drive of the port in its segment reads a same-segment wire | the same flop under the phase and the guards, for EVERY drive of the port (a phase-scoped hold port) |
-    /// | conditional, otherwise, some drive of the port with no input read before it in its arm's walk | the drive-level mux + hold form (§9.4): `o = o_hold` at the top of the block outside every phase guard, the opening drives in the comb copy under the phase, every drive loading `o_hold` at the edge |
-    /// | conditional, otherwise, every drive behind an input read | the flop under the phase and the guards |
-    /// | conditional, after the last tick | hoisted into phase 0's flop, closing — the trailing walk forwards nothing |
-    /// | a port written unconditionally AND conditionally in one segment | the assign beside the conditional form's driver: two drivers |
-    ///
-    /// Until 2026-11-02 the two conditional forms without a wire were a
-    /// phase-gated `always_comb` assigned nowhere outside the phase — a latch
-    /// Verilator refuses — and §10.8 refused every such drive for the form; §10.9
-    /// moved the default outside the guards and gave the every-path port the same
-    /// two forms, so the clause is gone and the residue below is what is left.
-    ///
-    /// The simulator anchors each execution by its path: closing where a deferred
-    /// `In` read parks the task before the write, opening otherwise (§9.1; in a
-    /// register-free body the write's own operand reads are the immediate
-    /// passthrough; after the last tick every read is immediate). The comb copy
-    /// of the hold form tests a guard against the COMMITTED register (D1's
-    /// forwarded-guard mechanism).
-    ///
-    /// # The clauses, per drive `w` (§10.9, every cell measured first)
-    ///
-    /// A. **two drivers** — the port is written both unconditionally and
-    ///    conditionally in `w`'s segment: refused (`e16g`, `e16i`, `e16k`;
-    ///    Verilator refuses two of the three, the third builds with the drivers
-    ///    fighting).
-    /// B. **trailing conditional** — `w` is conditional and after the last tick:
-    ///    refused; the hoisted flop loads one observation after the trailing
-    ///    instant (`e16d`, `e16e`; through an immediate read `e15u`, `e15z`,
-    ///    `e15aa`, `e15ab`, the trailing rule's as well).
-    /// C. **conditional, pre-tick segment** — with a wire-valued drive on the
-    ///    port, the flop: refused iff some path reaches `w` with no deferred read
-    ///    (`e16m`; admitted `e15v`). Otherwise the hold form or the flop realizes
-    ///    `w` at the anchor the lowering gives it, and `w` is refused iff an input
-    ///    read reaches it while the simulator runs it at the opening on some path
-    ///    — no deferred read on that path (the register-free passthrough under a
-    ///    guard that reads no input, `e16f`, admitted by every rule until §10.9)
-    ///    or a read-free path from the segment's entry (`e16l`) — or no read
-    ///    reaches it and its guard tests a register assigned earlier in the
-    ///    segment (`e16n`, `e16o`). Admitted: `e15t`, `e15w`, `e15x`, `e15wr`,
-    ///    `e15ac`, `e15ad`, `e15r`, `e15s`, `e15af`, `e15ag`, `e16a`, `e16b`,
-    ///    `e16c`, `e16h`, `e16p`, `e16q`.
-    /// 2. **unconditional wire** — the flop: refused iff some path from its
-    ///    segment's entry reaches it with no deferred read (`e14a`, `e14h`,
-    ///    `e14k`, `e14m`, `e7w`; `e15l`, `e15q`), **except** a constant-valued
-    ///    wire in the head segment, whose first load is edge 0 and whose value
-    ///    never changes (`e15f`, `e15fr`). Admitted: `e14b`, `e14l`, `e15e`,
-    ///    `e15k`, `e15m`.
-    /// 3. **continuous assign** — unconditional, register / input / constant
-    ///    operand: refused iff the operand reads an input (the assign tracks the
-    ///    input at every observation, the simulator publishes the one value the
-    ///    write sampled, once per iteration — deferred, `e14c`, `e15b`, `e15h`;
-    ///    immediate passthrough, `e15a`, `e15g`; trailing, `e15n` and `e8m`,
-    ///    which `trailing_out_reads_input` refuses as well), or a deferred read
-    ///    reaches `w` and the operand is a register assigned outside `w`'s
-    ///    segment or after `w` (`e13`, `e13a`, `e14e`, `e14n`, `e14j`) or a
-    ///    constant outside the head segment (`e14d`, `e15j`). Admitted: `e13b`,
-    ///    `e14f`, `e14g`, `e14i`, `e15c`, `e15d`, `e15i`; `e15p` is
-    ///    `out_first_driven_late`'s.
-    ///
-    /// "Segment" is the Comb-component with the loop head cut out: the head
-    /// segment and the trailing statements run in one cycle but commit at
-    /// different edges (the trailing update is committed at the last tick's edge
-    /// by the shared-map lowering), which `e14n` measures.
-    ///
-    /// Overlaps: `e14k` is also `pretick_out_write_before_update`'s, `e7w` also
-    /// `multi_phase_out_write`'s clause 1, the trailing cells also
-    /// `trailing_out_reads_input`'s or `out_first_driven_late`'s; the
-    /// path-dependent and forwarded-guard drives of the HEAD segment are also
-    /// D1's (`unprotected_pretick_out_write`, whose every-path clause does not
-    /// apply on this route since §10.9); both front-ends run every rule, so a
-    /// shape two rules refuse is refused once. Exact-set pins:
-    /// `pretick_alignment_corpus.rs::EXPECTED_LINEAR_ANCHOR` (zero live modules
-    /// when it landed, when it was restated, and when it was narrowed), the
-    /// `linear_*` unit tests below, and the three verdict-table tests in the
-    /// battery (`linear_the_rule_flags_exactly_the_diverging_probes`,
-    /// `regfree_linear_the_rule_flags_exactly_the_probes_of_section_10_8`,
-    /// `latch_fix_the_rule_flags_exactly_the_probes_of_section_10_9`).
-    pub fn linear_out_write_anchor_mismatch(&self) -> Vec<String> {
-        if self.has_nested_tick || !self.crosses_more_than_one_tick() {
-            return Vec::new();
-        }
-        // Since 2026-11-02 (§10.8) the register set is consulted, never required:
-        // a register-free body takes the same forms.
-        let regs: BTreeSet<String> = self.registers().into_iter().collect();
-        // Segments: Comb-components with the loop head cut out, so the head
-        // segment and the trailing statements are distinct.
-        let n = self.nodes.len();
-        let mut parent: Vec<usize> = (0..n).collect();
-        fn find(p: &mut Vec<usize>, mut x: usize) -> usize {
-            while p[x] != x {
-                p[x] = p[p[x]];
-                x = p[x];
-            }
-            x
-        }
-        for i in 0..n {
-            if i == self.head {
-                continue;
-            }
-            let succs: Vec<usize> = self.nodes[i]
-                .succs
-                .iter()
-                .filter(|(s, k)| *k == EdgeKind::Comb && *s != self.head)
-                .map(|&(s, _)| s)
-                .collect();
-            for s in succs {
-                let (a, b) = (find(&mut parent, i), find(&mut parent, s));
-                if a != b {
-                    parent[a] = b;
-                }
-            }
-        }
-        let head_entries: Vec<usize> = self.nodes[self.head]
-            .succs
-            .iter()
-            .filter(|(_, k)| *k == EdgeKind::Comb)
-            .map(|&(s, _)| s)
-            .collect();
-        let head_segment: BTreeSet<usize> =
-            head_entries.iter().map(|&s| find(&mut parent, s)).collect();
-        // The entry nodes of each segment: the head's successors for the head
-        // segment, the target of a `Tick` edge for the segment that edge opens.
-        let mut entries_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for &s in &head_entries {
-            entries_of.entry(find(&mut parent, s)).or_default().push(s);
-        }
-        for i in 0..n {
-            for &(s, k) in &self.nodes[i].succs {
-                if k == EdgeKind::Tick && s != self.head {
-                    entries_of.entry(find(&mut parent, s)).or_default().push(s);
-                }
-            }
-        }
-        let all: Vec<usize> = (0..n).collect();
-        let mut flagged: BTreeSet<String> = BTreeSet::new();
-        for w in 0..n {
-            let node = &self.nodes[w];
-            if node.folded || node.writes.is_empty() {
-                continue;
-            }
-            let segment = find(&mut parent, w);
-            let conditional = !node.guards.is_empty();
-            // A same-segment wire is a local DEFINED IN THE LOOP that is neither a
-            // register nor an input. A pre-loop binding (`lfsr`'s `xor_mask`, a
-            // `Memory` local such as `mp_rom`'s `rom`) is not a wire: it is a
-            // constant or committed state, and a drive from a memory read result
-            // is `memory_result_drives_plain_out`'s to refuse.
-            let wire_valued = node.uses.iter().any(|u| {
-                self.defined_in_loop.contains(u)
-                    && !regs.contains(u)
-                    && !self.inputs.contains(u)
-                    && !node.writes.contains(u)
-                    && !node.regout_writes.contains(u)
-            });
-            // Any input read before the drive in its arm's walk — the guard's
-            // and the operand's included, deferred or immediate — is what makes
-            // the lowering count the drive closing (§9.1).
-            let read_before = self.leading_read_reaches(w);
-            // A deferred read before the drive on its path. In a register-free
-            // body the drive's OWN operand reads are the immediate passthrough
-            // (`classify_reads`), so they do not count (`e16f`, §10.9).
-            let deferred = (0..n).any(|r| {
-                !self.nodes[r].uses.is_disjoint(&self.inputs)
-                    && !self.nodes[r].folded
-                    && !(regs.is_empty() && r == w)
-                    && self.comb_reaches(r, w)
-                    && self.comb_reaches_tick(r)
-            });
-            // The trailing region: no tick is comb-reachable from the drive, so it
-            // runs at the post-edge instant of the last tick and its reads are
-            // immediate; the lowering hoists it into phase 0 as a CLOSING drive.
-            let trailing = !self.comb_reaches_tick(w);
-            // D1's forwarded-guard clause, on this segment: an opening drive
-            // nested under a test of a register assigned earlier in the segment —
-            // the comb copy of the mux + hold form tests the committed value.
-            let forwarded_guard = node.guards.iter().any(|&b| {
-                let tested: BTreeSet<String> = self.nodes[b].uses.intersection(&regs).cloned().collect();
-                !tested.is_empty()
-                    && (0..n).any(|a| !self.nodes[a].defs.is_disjoint(&tested) && self.comb_reaches(a, b))
-            });
-            let (vregs, inputs) = self.value_sources(w, &all, &regs);
-            for port in &node.writes {
-                // A port written both unconditionally and conditionally in one
-                // segment: the unconditional write is a module-level continuous
-                // assign beside the conditional form's driver — two drivers,
-                // which Verilator refuses (`MULTIDRIVEN`): `e16g`, `e16i`, `e16k`.
-                let two_drivers = (0..n).any(|d| {
-                    d != w
-                        && !self.nodes[d].folded
-                        && self.nodes[d].writes.contains(port)
-                        && find(&mut parent, d) == segment
-                        && self.nodes[d].guards.is_empty() == conditional
-                });
-                // A port one of whose drives in this segment reads a same-segment
-                // wire is a phase-scoped hold port in the lowering: every drive of
-                // it is the phase-guarded flop, conditional or not (`e16m`, §10.9 —
-                // the one §10.9 prediction that missed: the hold form does not
-                // reach it).
-                let port_wire_valued = wire_valued
-                    || (0..n).any(|d| {
-                        d != w
-                            && !self.nodes[d].folded
-                            && self.nodes[d].writes.contains(port)
-                            && find(&mut parent, d) == segment
-                            && self.nodes[d].uses.iter().any(|u| {
-                                self.defined_in_loop.contains(u)
-                                    && !regs.contains(u)
-                                    && !self.inputs.contains(u)
-                                    && !self.nodes[d].writes.contains(u)
-                                    && !self.nodes[d].regout_writes.contains(u)
-                            })
-                    });
-                let hazard = if two_drivers {
-                    true
-                } else if conditional && trailing {
-                    // Clause B — a conditional trailing drive is hoisted into phase
-                    // 0's edge-sampled flop, one observation after the trailing
-                    // instant the simulator runs it at (`e16d`, `e16e`; through an
-                    // immediate read, `e15u`, `e15z`, `e15aa`, `e15ab`).
-                    true
-                } else if conditional && port_wire_valued {
-                    // Clause C, the flop of a wire-valued port: sampled at the
-                    // segment's closing edge, one observation late for an execution
-                    // no deferred read precedes (`e16m`); admitted behind a
-                    // deferred read on every path (`e15v`).
-                    !deferred || self.read_free_path_from_phase_entry(w)
-                } else if conditional {
-                    // Clause C — the hold form or the flop realizes each drive at
-                    // the anchor the lowering gives it: the opening with no input
-                    // read before it, the edge otherwise. Refused when the
-                    // simulator's anchor differs on some path: an input read
-                    // reaches the drive while no deferred read does (the
-                    // register-free passthrough, `e16f`) or a read-free path
-                    // reaches it (`e16l`); or no read reaches it and its guard is
-                    // forwarded (`e16n`, `e16o`).
-                    (read_before && (!deferred || self.read_free_path_from_phase_entry(w)))
-                        || (!read_before && forwarded_guard)
-                } else if wire_valued {
-                    // Clause 2 — the edge-sampled flop of a wire-valued drive:
-                    // samples at the segment's closing edge, so an execution no
-                    // deferred read precedes (written at the opening) lands one
-                    // observation late (`e14a`, `e14h`, `e14k`, `e14m`; `e15l`,
-                    // `e15q`). Unobservable for a constant-valued wire in the head
-                    // segment: its first load is edge 0 and its value never changes
-                    // (`e15f`, `e15fr`).
-                    let opening_on_some_path = !deferred || self.read_free_path_from_phase_entry(w);
-                    let constant_head_wire =
-                        vregs.is_empty() && inputs.is_empty() && head_segment.contains(&segment);
-                    opening_on_some_path && !constant_head_wire
-                } else if !inputs.is_empty() {
-                    // Clause 3a — the continuous assign of an input operand
-                    // tracks the input at every observation; the simulator
-                    // publishes the one value the write sampled, once per
-                    // iteration, whether its read is deferred (`e14c`, `e15b`,
-                    // `e15h`) or an immediate passthrough (`e15a`, `e15g`;
-                    // `e15n` / `e8m` in the trailing region, which
-                    // `trailing_out_reads_input` refuses as well).
-                    true
-                } else if !deferred {
-                    false
-                } else {
-                    // Clause 3b — the continuous assign of a register or a
-                    // constant behind a deferred read, when the assign can show
-                    // a value the write did not publish (§10.7).
-                    let register_elsewhere = vregs.iter().any(|r| {
-                        (0..n).any(|d| {
-                            !self.nodes[d].folded
-                                && self.nodes[d].defs.contains(r)
-                                && (find(&mut parent, d) != segment || self.comb_reaches(w, d))
-                        })
-                    });
-                    let late_constant = node.const_write && !head_segment.contains(&segment);
-                    register_elsewhere || late_constant
-                };
-                if hazard {
-                    flagged.insert(port.clone());
-                }
-            }
-        }
-        flagged.into_iter().collect()
-    }
 
-    /// Some node of the loop body — a folded nested loop included, since its
-    /// `uses` carry its interior — reads an `In` port.
-    fn reads_any_input(&self) -> bool {
-        self.nodes.iter().any(|n| !n.uses.is_disjoint(&self.inputs))
-    }
 
-    /// True iff a **deferred** `In` read comb-reaches `w`: some node reading an
-    /// input both reaches `w` over Comb edges (the write's own operand included) and
-    /// reaches a tick over Comb edges — the condition under which `classify_reads`
-    /// makes the read `Deferred`, parking the task at the read site until the
-    /// pre-edge settle. A read whose only continuation is the loop head (a trailing
-    /// read) is immediate and does not count; neither does a read inside a folded
-    /// tick-bearing loop, which reaches nothing past itself over Comb edges.
-    fn deferred_read_reaches(&self, w: usize) -> bool {
-        (0..self.nodes.len()).any(|r| {
-            !self.nodes[r].uses.is_disjoint(&self.inputs)
-                && !self.nodes[r].folded
-                && self.comb_reaches(r, w)
-                && (0..self.nodes.len()).any(|t| self.nodes[t].is_tick && self.comb_reaches(r, t))
-        })
-    }
 
-    /// Plain combinational `Out` ports that are **first driven late**: the loop
-    /// crosses more than one clock edge per iteration, **every** write of the port
-    /// is a constant, and **no** write of it lies in the first two segments — the
-    /// head segment (head → first tick) or the segment entered by the first tick —
-    /// so its first write executes only after the **second** clock edge. Returns
-    /// the offending ports, sorted; empty for a combinational module, one with no
-    /// top-level loop, a single-tick loop, or a module whose outputs are all
-    /// `RegOut`.
-    ///
-    /// # The transient
-    ///
-    /// The simulator drives a port at the instant its `write` *executes*, and
-    /// observes after each edge's post-edge settle. The head segment runs before
-    /// edge 0; the segment after the first tick runs in edge 0's post-edge settle,
-    /// so both are visible at the first observation. A write that sits only past
-    /// the **second** tick first executes after edge 1, so the first observation
-    /// shows the port's **initial** value. The transpiler has no such instant for a
-    /// constant: every write of the port carries the same value, so the emission is
-    /// an unconditional `assign dv = 1'b1`, which drives from time 0. Measured on
-    /// `trailing_constant`
-    /// (`loop { r = a.read(); tick; o.write(r); tick; dv.write(Logic::One); }`): the
-    /// two disagree at the first observation and agree from the next one on — a
-    /// one-cycle **startup transient**, not a steady-state divergence, which is why
-    /// it lived as a `SKIP` row ("STARTUP TRANSIENT") in `build.rs` rather than as a
-    /// pinned divergence. A continuous assign has no notion of "not yet written", so
-    /// there is no emitted form that shows the transient; the shape is refused
-    /// instead (restrict-don't-grow, decided 2026-10-23). The fixture is now
-    /// `copper-macros/tests/ui/fail/out_first_driven_late.rs`.
-    ///
-    /// # The flipping witness for "second edge"
-    ///
-    /// The plan's first cut keyed clause (b) on the head segment alone. Measured
-    /// before landing (2026-10-23, `late_constant_one_edge` in
-    /// `tests/fixtures/trailing_statements_dut.rs`, the same differential harness):
-    /// the identical body with `dv.write(Logic::One)` moved to the segment after the
-    /// FIRST tick **agrees** — that segment runs in edge 0's post-edge settle and is
-    /// visible at the first observation, exactly when the `assign` is. One statement
-    /// moved across one tick flips the verdict, so the boundary is the second edge,
-    /// and the witness sweeps as a positive case to keep it measured.
-    ///
-    /// A folded tick-bearing nested loop (`for _ in 0..3 { tick }`, a wait loop)
-    /// crosses an unknown number of edges, so a write past it is treated as past
-    /// the second edge — the refusing direction. `pulse_plain` is the instance, and
-    /// it is a measured transient.
-    ///
-    /// # The boundary: constant-valued writes only
-    ///
-    /// A late write **from a register** has the same first-execution instant, but
-    /// its emitted drive is `assign o = r` over a flop, and the flop's zero initial
-    /// equals the wire's initial under the differential sweep — so the two traces
-    /// agree today: `mac_pipeline`'s `out.write(sum)` and `trailing_out`'s `mid`
-    /// (`tests/fixtures/trailing_statements_dut.rs`) both sweep green. That agreement
-    /// rests on the initial values coinciding, not on the instants coinciding; the
-    /// rule records the boundary rather than widening past it, and a
-    /// register-valued (or input-valued) late write is **not** flagged. "Constant"
-    /// is decided syntactically by [`is_constant_expr`], on the write's operand.
-    ///
-    /// # Why a head-segment write clears it
-    ///
-    /// (And why the segment the first tick enters does: it runs in edge 0's
-    /// post-edge settle — when the write there is *opening*. Behind a deferred
-    /// read it is closing and lands at the second edge, a transient this rule
-    /// does not see (`e14d`, measured 2026-10-30) and
-    /// [`linear_out_write_anchor_mismatch`](Self::linear_out_write_anchor_mismatch)
-    /// refuses as a constant outside the head segment; on the extraction route
-    /// the shape is unmeasured.)
-    ///
-    /// A write in the head segment executes in the first cycle, before any edge, so
-    /// the port is driven from the first observation — the same instant the `assign`
-    /// starts — and every later write of the same constant is idempotent. The
-    /// opted-out corpus witness is `pulse_plain`
-    /// (`tests/sequential_forwarding_divergence.rs`): both its writes are constants
-    /// and both are late (after a folded tick-bearing `for`, and trailing).
-    ///
-    /// A single-tick loop is exempt by the same discriminator as
-    /// [`unprotected_trailing_out_write`](Self::unprotected_trailing_out_write): its
-    /// trailing statements share the head's phase. `RegOut` is excluded for free
-    /// (`Node::writes` holds only combinational outputs), and it is the remedy — a
-    /// registered port's first drive is an edge the hardware has as well
-    /// (`pulse_registered`, sweeping green). A `folded` node's `writes` is the
-    /// all-outputs over-approximation, not a real write, so it is not evidence
-    /// either way — exactly as in every other rule of the family.
-    pub fn out_first_driven_late(&self) -> Vec<String> {
-        if !self.crosses_more_than_one_tick() {
-            return Vec::new();
-        }
-        let early: BTreeSet<usize> = self.early_region();
-        let mut written_early: BTreeSet<String> = BTreeSet::new();
-        // port -> every late write of it is a constant
-        let mut late: BTreeMap<String, bool> = BTreeMap::new();
-        for (n, node) in self.nodes.iter().enumerate() {
-            if node.folded || node.writes.is_empty() {
-                continue;
-            }
-            for w in &node.writes {
-                if early.contains(&n) {
-                    written_early.insert(w.clone());
-                } else {
-                    late.entry(w.clone())
-                        .and_modify(|all_const| *all_const &= node.const_write)
-                        .or_insert(node.const_write);
-                }
-            }
-        }
-        late.into_iter()
-            .filter(|(port, all_const)| *all_const && !written_early.contains(port))
-            .map(|(port, _)| port)
-            .collect()
-    }
 
-    /// Nodes that execute **before the first observation** of an iteration started
-    /// at the loop head: reachable from the head over `Comb` edges and at most one
-    /// `Tick` edge out of a *bare* tick. The head segment runs before edge 0 and the
-    /// segment the first tick enters runs in edge 0's post-edge settle; both are
-    /// visible at the first observation (measured, see
-    /// [`out_first_driven_late`](Self::out_first_driven_late)). A folded
-    /// tick-bearing nested loop crosses an unknown number of edges, so traversal
-    /// stops at it: what follows it counts as late.
-    fn early_region(&self) -> BTreeSet<usize> {
-        let mut out = BTreeSet::new();
-        // (node, ticks crossed so far)
-        let mut seen = vec![[false; 2]; self.nodes.len()];
-        let mut stack: Vec<(usize, usize)> = vec![(self.head, 0)];
-        while let Some((n, crossed)) = stack.pop() {
-            if std::mem::replace(&mut seen[n][crossed], true) {
-                continue;
-            }
-            if n != self.head {
-                out.insert(n);
-            }
-            let node = &self.nodes[n];
-            for &(s, k) in &node.succs {
-                match k {
-                    EdgeKind::Comb if s != self.head => stack.push((s, crossed)),
-                    EdgeKind::Tick if crossed == 0 && !node.folded && s != self.head => {
-                        stack.push((s, 1))
-                    }
-                    _ => {}
-                }
-            }
-        }
-        out
-    }
 
     /// Enforce the memory-port rules **on the source**, where the clock edges are
     /// still visible.
@@ -2207,75 +621,6 @@ impl Cfg {
         Ok(())
     }
 
-    /// Plain combinational `Out` ports driven from a **memory read result** in a
-    /// module with more than one clock phase.
-    ///
-    /// The read pipeline re-captures on every clock edge, so a plain `Out` wired to
-    /// it either tracks it into the phases that do not observe it, or — once the
-    /// implicit-hold conversion takes over — latches one edge after the capture the
-    /// simulator reads. Measured: a full cycle late on every sampled value. `RegOut`
-    /// is the form that works, or a register between the result and the port.
-    ///
-    /// `vlir_lower::reject_memory_driven_comb_outputs` states the same rule over the
-    /// lowered phases, and cannot see this case: it gives up on `phases.len() < 2`,
-    /// and an extracted module has exactly one lowered phase no matter how many
-    /// clock phases the source has. That blind spot was harmless only for as long as
-    /// the memory staging rules happened to reject every extracted memory design
-    /// before it could matter — measured the day they stopped:
-    /// `loop { rom.read(a); tick; o.write(rom.data()); for _ in 0..2 { tick } }`
-    /// diverges by exactly one cycle, uniformly. Hence this copy, on the source,
-    /// where the phases are still countable.
-    ///
-    /// A **single-phase** module is unaffected and deliberately so: there the
-    /// post-tick segment shares the head's phase and a plain `Out` driven from
-    /// `data()` is correct (`rom_direct`, pinned in
-    /// `tests/multiphase_memory_equivalence.rs`).
-    ///
-    /// The drive is followed through same-cycle locals: a value that survives a
-    /// clock edge is a register by construction, so excluding registers from the
-    /// taint is what keeps it within one phase.
-    pub fn memory_result_drives_plain_out(&self) -> Vec<String> {
-        let phases = self.comb_phases();
-        if phases.iter().collect::<BTreeSet<_>>().len() < 2 {
-            return Vec::new();
-        }
-        let observes = |n: &Node| n.mem.iter().any(|a| matches!(a.kind, MemAccessKind::Observe(_)));
-        if !self.nodes.iter().any(observes) {
-            return Vec::new();
-        }
-
-        let regs: BTreeSet<String> = self.registers().into_iter().collect();
-        let mut tainted: BTreeSet<String> = BTreeSet::new();
-        loop {
-            let mut changed = false;
-            for node in &self.nodes {
-                if !(observes(node) || node.uses.iter().any(|u| tainted.contains(u))) {
-                    continue;
-                }
-                for d in &node.defs {
-                    if !regs.contains(d) && tainted.insert(d.clone()) {
-                        changed = true;
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        let mut out = BTreeSet::new();
-        for node in &self.nodes {
-            // A folded node's `writes` is the conservative all-outputs
-            // over-approximation, not a real `port.write`.
-            if node.folded || node.writes.is_empty() {
-                continue;
-            }
-            if observes(node) || node.uses.iter().any(|u| tainted.contains(u)) {
-                out.extend(node.writes.iter().cloned());
-            }
-        }
-        out.into_iter().collect()
-    }
 
     /// How many **clock phases** the source has: the number of Comb-connected
     /// components reachable in the loop, i.e. the number of distinct cycles one
@@ -2912,7 +1257,6 @@ impl Builder {
             exit: None,
             nested_ticking_loops: b.nested,
             // Not consulted on a sub-CFG (the multi-phase rule runs on the top level).
-            has_nested_tick: false,
             registers_cache: std::cell::OnceCell::new(),
         }
     }
@@ -3124,18 +1468,12 @@ impl Builder {
                 let writes: BTreeSet<String> = output_write_target(expr, &self.outputs)
                     .into_iter()
                     .collect();
-                let regout_writes = output_write_target(expr, &self.reg_outputs)
-                    .into_iter()
-                    .collect();
-                let const_write = !writes.is_empty() && write_operand_is_constant(expr);
                 self.new_node(Node {
                     defs,
                     uses,
                     mem: mem_accesses(expr, &self.mems),
                     succs: vec![(next, EdgeKind::Comb)],
                     writes,
-                    regout_writes,
-                    const_write,
                     ..Node::empty(expr.span())
                 })
             }
@@ -3498,11 +1836,6 @@ fn output_write_target(expr: &Expr, outputs: &BTreeSet<String>) -> Option<String
     simple_ident(&mc.receiver).filter(|r| outputs.contains(r))
 }
 
-/// Is the operand of this `port.write(v)` a constant ([`is_constant_expr`])?
-fn write_operand_is_constant(expr: &Expr) -> bool {
-    let Expr::MethodCall(mc) = expr else { return false };
-    mc.args.len() == 1 && is_constant_expr(&mc.args[0])
-}
 
 /// A **syntactic** constant: a value that cannot differ between two executions of
 /// the expression. Literals; a multi-segment path (an enum unit variant such as
@@ -4139,7 +2472,7 @@ mod tests {
     fn mac_pipeline_interior_await_registers() {
         let src = r#"
             #[hardware(sequential)]
-            async fn mac_pipeline(clk: Clock<C>, a: In<Bits<8>, C>, b: In<Bits<8>, C>, c: In<Bits<8>, C>, out: Out<Bits<8>, C>) {
+            async fn mac_pipeline(clk: Clock<C>, a: In<Bits<8>, C>, b: In<Bits<8>, C>, c: In<Bits<8>, C>, out: RegOut<Bits<8>, C>) {
                 loop {
                     let product = a.read() * b.read();
                     let c_s = c.read();
@@ -4161,7 +2494,7 @@ mod tests {
     fn constant_excluded() {
         let src = r#"
             #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: Out<Bits<32>, C>) {
+            async fn m(clk: Clock<C>, o: RegOut<Bits<32>, C>) {
                 let mask = Bits::from_u32(7);
                 let mut state = Bits::from_u32(1);
                 loop {
@@ -4180,7 +2513,7 @@ mod tests {
     fn combinational_temp_excluded() {
         let src = r#"
             #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {
                 let mut acc = Bits::from_u32(0);
                 loop {
                     let t = a.read() + acc;
@@ -4196,2309 +2529,152 @@ mod tests {
 
     // ── pre-tick alignment hazard (PRETICK_ALIGNMENT_GUARDRAIL.md) ──────────
 
-    /// Every case below cites a variant that was **measured** — run in the simulator
-    /// and independently under Verilator on its own transpiled SV. `flag` mirrors the
-    /// measured verdict, so this table is the rule's evidence, not its restatement.
-    fn hazard(src: &str) -> Vec<String> {
-        Cfg::build(&parse(src)).map(|c| c.unprotected_pretick_out_write()).unwrap_or_default()
-    }
 
 
-    /// Trailing publish-then-load: the write precedes the update of the register
-    /// it reads, in the trailing segment. Measured DIVERGING
-    /// (`v8t_stage_publish_then_load`; the `out_from_reg_before_commit` ledger
-    /// entry) — flagged.
-    #[test]
-    fn v8t_trailing_write_before_update_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { clk.tick().await; o.write(r); r = i.read() + Bits::from_lit::<1>(); }
-            }
-        "#;
-        assert_eq!(v8(src), ["o"]);
-    }
 
-    /// The flip: update first, then publish — the write reads the value
-    /// committing at the opening edge, which is what `assign o = r` shows.
-    /// Measured AGREEING (`out_from_reg_after_commit` sweeps) — not flagged.
-    #[test]
-    fn v8t_trailing_write_after_update_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { clk.tick().await; r = i.read() + Bits::from_lit::<1>(); o.write(r); }
-            }
-        "#;
-        assert!(v8(src).is_empty());
-    }
 
     // ── write between a leading read and the update (V8 battery, m1) ────────
 
-    fn v8(src: &str) -> Vec<String> {
-        Cfg::build(&parse(src)).map(|c| c.pretick_out_write_before_update()).unwrap_or_default()
-    }
 
-    /// V8a — read; write; update. Measured to DIVERGE (sim `[0,1,…]`, SV `[1,2,…]`):
-    /// the barrier drags the write to the pre-edge, where it captures the
-    /// register's pre-update value.
-    #[test]
-    fn v8a_write_between_read_and_update_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { let s = step.read(); o.write(r); r = r + s; clk.tick().await; }
-            }
-        "#;
-        assert_eq!(v8(src), ["o"]);
-    }
 
-    /// V8b — read; update; write. Measured to AGREE: the write captures the
-    /// forwarded (committing) value, which is Q from the next observation on.
-    /// Flips clause 3 (the write no longer comb-reaches the update).
-    #[test]
-    fn v8b_write_after_update_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { let s = step.read(); r = r + s; o.write(r); clk.tick().await; }
-            }
-        "#;
-        assert!(v8(src).is_empty());
-    }
 
-    /// V8c — write; read; update. Measured to AGREE: the write precedes the
-    /// barrier point, so it executes at the cycle's opening on committed state.
-    /// Flips clause 1 (no leading read comb-reaches the write).
-    #[test]
-    fn v8c_write_before_read_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { o.write(r); r = r + step.read(); clk.tick().await; }
-            }
-        "#;
-        assert!(v8(src).is_empty());
-    }
 
-    /// A constant write in V8a's position is generation-free — clause 2. (No
-    /// measured divergent conditional/constant variant exists; scope note on the
-    /// rule.)
-    #[test]
-    fn v8_constant_write_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { let s = step.read(); o.write(Bits::zero()); r = r + s; clk.tick().await; }
-            }
-        "#;
-        assert!(v8(src).is_empty());
-    }
 
-    /// V8a with the port declared `RegOut` — immune by construction, excluded the
-    /// same way the whole family excludes it (`Node::writes` is comb-only).
-    #[test]
-    fn v8_regout_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { let s = step.read(); o.write(r); r = r + s; clk.tick().await; }
-            }
-        "#;
-        assert!(v8(src).is_empty());
-    }
 
-    /// The write reads register `a` but only `b` is updated after it — the value
-    /// the write captures is `a`'s committed one, which the assign shows too.
-    /// Clause 3 keys on a register THE WRITE READS, not any register. (`a` is
-    /// updated BEFORE the read since 2026-11-02: the fixture used to update it
-    /// after the tick, which is the single-tick trailing-update clause's shape —
-    /// `e17h` — and is flagged by that clause, below.)
-    #[test]
-    fn v8_unrelated_update_after_write_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut a: Bits<8> = Bits::zero();
-                let mut b: Bits<8> = Bits::zero();
-                loop { a = a + b; let s = step.read(); o.write(a); b = b + s; clk.tick().await; }
-            }
-        "#;
-        assert!(v8(src).is_empty());
-    }
 
-    /// The single-tick trailing-update clause (§10.10): a barrier-dragged write
-    /// of a register the trailing region updates — the update commits at the edge
-    /// the write lands at, so the every-path comb form shows the next generation
-    /// (`e17h` measured: sim `[0, 1, …]`, SV `[1, 2, …]`). The register in the
-    /// guard only counts too (`e17j`). Not flagged: the held port (the
-    /// edge-sampled flop samples the pre-update value — `e17k` agrees), the
-    /// write before the read (opening — `e16j`), the update in the head
-    /// (`d3b`'s shape), and the two-tick body (the linear rule's — `e14n`).
-    #[test]
-    fn v8_single_tick_trailing_update_flagged_held_and_opening_not() {
-        let m = |body: &str| {
-            format!(
-                r#"#[hardware(sequential)]
-                async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {{
-                    let mut cnt: Bits<8> = Bits::zero();
-                    loop {{ {body} }}
-                }}"#
-            )
-        };
-        let flagged = |body: &str| v8(&m(body));
-        let tail = "clk.tick().await; cnt = cnt + Bits::from_lit::<1>();";
-        assert_eq!(flagged(&format!("let _ = x.read(); o.write(cnt); {tail}")), ["o"]);
-        assert_eq!(flagged(&format!("o.write(x.read()); if cnt[0] == Logic::One {{ o.write(cnt); }} {tail}")), ["o"]);
-        assert_eq!(flagged(&format!("o.write(x.read()); if cnt[0] == Logic::One {{ o.write(Bits::from_lit::<7>()); }} {tail}")), ["o"]);
-        // the unrelated-update fixture's original spelling
-        let unrelated = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut a: Bits<8> = Bits::zero();
-                let mut b: Bits<8> = Bits::zero();
-                loop { let s = step.read(); o.write(a); b = b + s; clk.tick().await; a = a + b; }
-            }
-        "#;
-        assert_eq!(v8(unrelated), ["o"]);
-        assert!(flagged(&format!("let _ = x.read(); if cnt[0] == Logic::One {{ o.write(cnt); }} {tail}")).is_empty());
-        assert!(flagged(&format!("o.write(Bits::from_lit::<3>()); if cnt[0] == Logic::One {{ o.write(cnt); }} {tail}")).is_empty());
-        assert!(flagged("cnt = cnt + Bits::from_lit::<1>(); let _ = x.read(); o.write(cnt); clk.tick().await;").is_empty());
-        assert!(flagged(&format!("let _ = x.read(); o.write(cnt); clk.tick().await; {tail}")).is_empty());
-    }
 
-    /// The guard edition of the pre-tick clause (§10.11): on the single-tick
-    /// route, an every-path write behind a read under a guard on a register the
-    /// segment updates after the guard — directly (`e18b`), through a temporary,
-    /// or with the update inside the arm. Not flagged: the held port (`e18a`), the
-    /// update before the guard (`e18d`), no read (`e18e`), two ticks (`e18f`), the
-    /// ticks inside a `for` (`e18h`).
-    #[test]
-    fn v8_pretick_guard_flagged_every_path_single_tick_only() {
-        let m = |body: &str| {
-            format!(
-                r#"#[hardware(sequential)]
-                async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {{
-                    let mut cnt: Bits<8> = Bits::zero();
-                    loop {{ {body} }}
-                }}"#
-            )
-        };
-        let flagged = |body: &str| v8(&m(body));
-        let ep = "if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }";
-        let upd = "cnt = cnt + Bits::from_lit::<1>();";
-        assert_eq!(flagged(&format!("let _ = x.read(); {ep} {upd} clk.tick().await;")), ["o"]);
-        assert_eq!(
-            flagged(&format!("let _ = x.read(); let b = cnt[0]; if b == Logic::One {{ o.write(Bits::from_lit::<7>()); }} else {{ o.write(Bits::from_lit::<3>()); }} {upd} clk.tick().await;")),
-            ["o"]
-        );
-        assert_eq!(
-            flagged(&format!("let _ = x.read(); if cnt[0] == Logic::One {{ {upd} o.write(Bits::from_lit::<7>()); }} else {{ o.write(Bits::from_lit::<3>()); }} clk.tick().await;")),
-            ["o"]
-        );
-        assert!(flagged(&format!("let v = x.read(); if cnt[0] == Logic::One {{ o.write(v); }} {upd} clk.tick().await;")).is_empty());
-        assert!(flagged(&format!("let _ = x.read(); {upd} {ep} clk.tick().await;")).is_empty());
-        assert!(flagged(&format!("{ep} {upd} clk.tick().await;")).is_empty());
-        assert!(flagged(&format!("let _ = x.read(); {ep} {upd} clk.tick().await; clk.tick().await;")).is_empty());
-        assert!(flagged(&format!("let _ = x.read(); {ep} {upd} for _ in 0..2 {{ clk.tick().await; }}")).is_empty());
-    }
 
     // ── through `let` temporaries (2026-10-20) ──────────────────────────────
 
-    /// V8a with the value routed through a same-segment `Logic` temporary — the
-    /// Mealy-ready spelling that evaded the rule (`vr_sink_mealy`, measured: one
-    /// cycle, hardware leading). The temporary's definition reads `full` and the
-    /// input `drain`; `full` is updated after the write.
-    #[test]
-    fn v8e_logic_temp_sees_through_to_register() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, drain: In<Logic, C>, ready: Out<Logic, C>) {
-                let mut full: Logic = Logic::Zero;
-                loop {
-                    let can_take: Logic = if full == Logic::Zero || drain.read() == Logic::One { Logic::One } else { Logic::Zero };
-                    ready.write(can_take);
-                    if can_take == Logic::One { full = Logic::One; } else { full = Logic::Zero; }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert_eq!(v8(src), ["ready"]);
-    }
 
-    /// The same shape through a `bool` temporary (`let ok: bool = …; ready.write(if ok …)`).
-    #[test]
-    fn v8e_bool_temp_sees_through_to_register() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, drain: In<Logic, C>, ready: Out<Logic, C>) {
-                let mut full: Logic = Logic::Zero;
-                loop {
-                    let ok: bool = full == Logic::Zero || drain.read() == Logic::One;
-                    ready.write(if ok { Logic::One } else { Logic::Zero });
-                    if ok { full = Logic::One; } else { full = Logic::Zero; }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert_eq!(v8(src), ["ready"]);
-    }
 
-    /// Two temporaries deep: `let a = full …; let b = a; ready.write(b)`. The
-    /// walk is transitive within the segment.
-    #[test]
-    fn v8e_temp_chain_is_transitive() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, drain: In<Logic, C>, ready: Out<Logic, C>) {
-                let mut full: Logic = Logic::Zero;
-                loop {
-                    let a: Logic = if full == Logic::Zero || drain.read() == Logic::One { Logic::One } else { Logic::Zero };
-                    let b: Logic = a;
-                    ready.write(b);
-                    full = a;
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert_eq!(v8(src), ["ready"]);
-    }
 
-    /// The V8b flip survives the temporary: the register is updated BEFORE the
-    /// temporary is computed, so the write captures the committing value.
-    #[test]
-    fn v8e_temp_after_update_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, drain: In<Logic, C>, ready: Out<Logic, C>) {
-                let mut full: Logic = Logic::Zero;
-                loop {
-                    if drain.read() == Logic::One { full = Logic::One; }
-                    let can_take: Logic = if full == Logic::Zero { Logic::One } else { Logic::Zero };
-                    ready.write(can_take);
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(v8(src).is_empty());
-    }
 
-    /// Reaching definitions, not "any definition in the segment": the temporary
-    /// is re-bound from an input before the write, so the register it first held
-    /// is not what the write reads.
-    #[test]
-    fn v8e_redefined_temp_uses_the_reaching_definition() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop {
-                    let a = r;
-                    let a = step.read();
-                    o.write(a);
-                    r = r + a;
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(v8(src).is_empty());
-    }
 
-    /// A temporary that reads only inputs and constants is generation-free, so
-    /// the register updated after the write is irrelevant (clause 2 still holds).
-    #[test]
-    fn v8e_input_only_temp_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop {
-                    let s = step.read() + Bits::from_lit::<1>();
-                    o.write(s);
-                    r = r + s;
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(v8(src).is_empty());
-    }
 
-    /// The trailing clause sees through a temporary too.
-    #[test]
-    fn v8e_trailing_temp_sees_through_to_register() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop {
-                    clk.tick().await;
-                    let v = r;
-                    o.write(v);
-                    r = i.read();
-                }
-            }
-        "#;
-        assert_eq!(v8(src), ["o"]);
-    }
 
     // ── trailing plain `Out` written from an immediate input read (e8) ──────────
 
-    fn trailing_out(src: &str) -> Vec<String> {
-        Cfg::build(&parse(src)).map(|c| c.trailing_out_reads_input()).unwrap_or_default()
-    }
 
-    /// The refused shape (`e8`): a trailing write from an inline immediate read
-    /// past a folded tick-bearing loop. The extraction route edge-samples it one
-    /// observation late.
-    #[test]
-    fn trailing_out_from_immediate_input_past_folded_loop_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop {
-                    cnt = cnt + Bits::from_lit::<1>();
-                    for _ in 0..2 { clk.tick().await; }
-                    o.write(x.read() + cnt);
-                }
-            }
-        "#;
-        assert_eq!(trailing_out(src), ["o"]);
-    }
 
-    /// The linear two-tick route (`e8m`) is flagged too: its continuous assign is
-    /// ungated by the phase, a different emission with the same disagreement.
-    #[test]
-    fn trailing_out_from_immediate_input_linear_two_ticks_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop {
-                    clk.tick().await;
-                    clk.tick().await;
-                    let v = x.read();
-                    o.write(v);
-                }
-            }
-        "#;
-        assert_eq!(trailing_out(src), ["o"]);
-    }
 
-    /// A single-tick body is one phase: the trailing region is the whole cycle
-    /// and the continuous assign sees the same input the immediate read did
-    /// (`e8l`, `e8lr` agree). Not flagged.
-    #[test]
-    fn trailing_out_single_tick_passthrough_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop {
-                    cnt = cnt + Bits::from_lit::<1>();
-                    clk.tick().await;
-                    o.write(x.read() + cnt);
-                }
-            }
-        "#;
-        assert!(trailing_out(src).is_empty());
-    }
 
-    /// Through a register the input is held, and a held value is the same on
-    /// both sides (`trailing_update`'s agreeing shape).
-    #[test]
-    fn trailing_out_from_register_fed_by_input_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop {
-                    for _ in 0..2 { clk.tick().await; }
-                    r = x.read();
-                    for _ in 0..2 { clk.tick().await; }
-                    o.write(r);
-                }
-            }
-        "#;
-        assert!(trailing_out(src).is_empty());
-    }
 
-    /// A pre-tick write is not trailing: the read is deferred to the closing
-    /// edge and the drive samples that edge on both sides.
-    #[test]
-    fn pretick_out_from_input_not_flagged_by_the_trailing_rule() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop {
-                    o.write(x.read());
-                    clk.tick().await;
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(trailing_out(src).is_empty());
-    }
 
-    /// A trailing read with a tick comb-reachable from it is deferred, so both
-    /// sides sample the closing edge.
-    #[test]
-    fn trailing_out_from_deferred_input_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, halt: In<Logic, C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop {
-                    clk.tick().await;
-                    clk.tick().await;
-                    let h = halt.read();
-                    let v = x.read();
-                    if h == Logic::One { loop { clk.tick().await; } }
-                    o.write(v);
-                }
-            }
-        "#;
-        assert!(trailing_out(src).is_empty());
-    }
 
     // ── trailing `RegOut` written from an immediate input read ────────────────
 
-    fn trailing_regout(src: &str) -> Vec<String> {
-        Cfg::build(&parse(src)).map(|c| c.trailing_regout_reads_input()).unwrap_or_default()
-    }
 
-    /// The refused shape: the trailing `RegOut` write reads the input through a
-    /// same-segment temporary. The simulator parks `x_k`; the next-edge
-    /// non-blocking assign samples `x_{k+1}`.
-    #[test]
-    fn trailing_regout_from_immediate_input_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) {
-                loop {
-                    clk.tick().await;
-                    let d = step.read();
-                    q.write(d);
-                }
-            }
-        "#;
-        assert_eq!(trailing_regout(src), ["q"]);
-    }
 
-    /// Through a register the input is held: `acc` committed at the opening edge,
-    /// `q <= acc` at the next edge reads exactly it (`regout_trailing_single_tick`).
-    #[test]
-    fn trailing_regout_from_register_fed_by_input_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) {
-                let mut acc: Bits<8> = Bits::zero();
-                loop {
-                    clk.tick().await;
-                    let d = step.read();
-                    acc = acc + d;
-                    q.write(acc);
-                }
-            }
-        "#;
-        assert!(trailing_regout(src).is_empty());
-    }
 
-    /// A pre-tick write is not trailing: it commits at the closing edge, where
-    /// the deferred read and the non-blocking assign sample the same edge.
-    #[test]
-    fn pretick_regout_from_input_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, step: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) {
-                loop {
-                    let d = step.read();
-                    q.write(d);
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(trailing_regout(src).is_empty());
-    }
 
-    /// A trailing read with a tick comb-reachable from it is DEFERRED (the halt
-    /// loop makes `ex_regfile`'s reads this shape), so both sides sample the
-    /// closing edge and the write agrees.
-    #[test]
-    fn trailing_regout_from_deferred_input_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, halt: In<Logic, C>, step: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) {
-                loop {
-                    clk.tick().await;
-                    let h = halt.read();
-                    let d = step.read();
-                    if h == Logic::One { loop { clk.tick().await; } }
-                    q.write(d);
-                }
-            }
-        "#;
-        assert!(trailing_regout(src).is_empty());
-    }
 
-    /// V1 — no `In` read anywhere; register assigned pre-tick; plain `Out`.
-    /// RE-BLESSED 2026-08-26 (phase D): DISSOLVED by forwarded emission — the
-    /// opening-prefix drive now means `assign o = r + 1`, measured agreeing
-    /// (`pre_tick_update_forwarding_agrees_end_to_end`). Not flagged.
-    #[test]
-    fn hazard_v1_assign_then_write_dissolved() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { r = r + Bits::from_lit::<1>(); o.write(r); clk.tick().await; }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// V7 — the assigned register escapes across the tick through `s = r`.
-    /// RE-BLESSED 2026-08-26 (phase D): AGREES — its 2026-08-21 verdict was stale
-    /// even before phase B (the 2026-08-25 shared trailing-forwarding map already
-    /// emits `s <= r + 1`), re-measured in `d_narrowing_battery_verdicts`. The
-    /// write is not read-preceded, so the narrowed rule does not flag it.
-    #[test]
-    fn hazard_v7_escape_across_tick_dissolved() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                let mut s: Bits<8> = Bits::zero();
-                loop { r = r + Bits::from_lit::<1>(); o.write(s); clk.tick().await; s = r; }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// V4 — an `In` read PRECEDES the assignment, installing the barrier. AGREES.
-    #[test]
-    fn hazard_v4_leading_read_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { r = r + i.read(); o.write(r); clk.tick().await; }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// V5 — the read comes AFTER the write, so the write is an opening-prefix
-    /// drive. RE-BLESSED 2026-08-26 (phase D): DISSOLVED by forwarded emission,
-    /// re-measured agreeing in `d_narrowing_battery_verdicts`. The read-preceded
-    /// clause is per-WRITE comb-reach, so a trailing read does not retain it.
-    #[test]
-    fn hazard_v5_trailing_read_dissolved() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop {
-                    r = r + Bits::from_lit::<1>();
-                    o.write(r);
-                    let _late = i.read();
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// V6 — the safe order: the register is assigned POST-tick. AGREES.
-    #[test]
-    fn hazard_v6_post_tick_assign_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { o.write(r); clk.tick().await; r = r + Bits::from_lit::<1>(); }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// W4 — MIXED anchors on a continuous assign: a read on one arm, and on the
-    /// other an assignment to the register the shared write reads, so the opening
-    /// write forwards `r + 1` where `assign o = r` shows the committed register.
-    /// Measured to DIVERGE (sim holds `i + 1`, SV alternates); its flip is
-    /// `d3a_w4_unrelated_register_not_flagged`.
-    #[test]
-    fn hazard_w4_mixed_alignment_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut phase: u8 = 0;
-                let mut r: Bits<8> = Bits::zero();
-                loop {
-                    if phase == 0 { r = i.read(); phase = 1; }
-                    else { r = r + Bits::from_lit::<1>(); phase = 0; }
-                    o.write(r);
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert_eq!(hazard(src), ["o"]);
-    }
 
-    /// W8 — EXACTLY W4 with the output declared `RegOut`. Measured to AGREE. This
-    /// pair is the whole reason the rule keys on the output write: `RegOut` commits
-    /// at the edge, so the write's phase is unobservable.
-    #[test]
-    fn hazard_w8_regout_immunises_mixed_alignment() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {
-                let mut phase: u8 = 0;
-                let mut r: Bits<8> = Bits::zero();
-                loop {
-                    if phase == 0 { r = i.read(); phase = 1; }
-                    else { r = r + Bits::from_lit::<1>(); phase = 0; }
-                    o.write(r);
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty(), "RegOut must be exempt — it commits at the edge");
-    }
 
-    /// W9 — EXACTLY V1 with the output declared `RegOut`. Measured to AGREE.
-    #[test]
-    fn hazard_w9_regout_immunises_the_minimal_case() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, i: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { r = r + Bits::from_lit::<1>(); o.write(r); clk.tick().await; }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// `probe_fsm` — the write sits in the arm WITHOUT the read, which reaches it
-    /// on no path: opening on both sides, phase C's mux + hold. Measured AGREEING
-    /// since the arm-granular opening walk (2026-10-26, `probe_fsm_sim_matches_verilog`,
-    /// and it sweeps); admitted by the re-derived rule (2026-10-28). It was the W4
-    /// witness of the old rule only because that rule keyed on an unprotected
-    /// register assignment anywhere in the segment.
-    #[test]
-    fn hazard_probe_fsm_sibling_arm_read_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, inp: In<Bits<8>, C>, out: Out<Bits<8>, C>) {
-                let mut phase: u8 = 0;
-                let mut x: Bits<8> = Bits::from_lit::<0>();
-                loop {
-                    if phase == 0 { x = inp.read(); phase = 1; }
-                    else { out.write(x.clone()); phase = 0; }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// `lfsr`-shaped: the guard reads inputs before every assignment, so the whole
-    /// segment is barrier-pinned. AGREES — and it must, it is an equivalence-tested
-    /// corpus module.
-    #[test]
-    fn hazard_lfsr_shape_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, reset_i: In<Logic, C>, yumi_i: In<Logic, C>, o: Out<Bits<32>, C>) {
-                let mut state = Bits::from_u32(1);
-                loop {
-                    if reset_i.read().as_bool() { state = Bits::from_u32(1); }
-                    else if yumi_i.read().as_bool() { state = state >> 1; }
-                    o.write(state);
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// `branch_merge_explicit` — `tail_o` has MIXED anchors: written behind the
-    /// deferred `sel` read in the `pc == 0` arm (closing on both sides) and in the
-    /// `pc == 1` arm with no read before it (opening on both sides). Held, so it
-    /// takes the drive-level mux + hold form, which realizes each drive by its own
-    /// anchor — measured agreeing on both first cycles and on every sweep sequence
-    /// since 2026-10-29. Refused by clause (A) until 2026-10-30 (it was edge-sampled
-    /// under the port-wide form and led its SV by one when the first cycle took
-    /// `sel == 1`); ADMITTED by the narrowed clause: neither drive is
-    /// path-dependent and the port is not written on every path. `head_o` and
-    /// `mid_o` were always clean. The minimal pair is `d2a`.
-    #[test]
-    fn branch_merge_explicit_tail_o_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, sel: In<Logic, C>, head_o: Out<Logic, C>, mid_o: Out<Logic, C>, tail_o: Out<Logic, C>) {
-                let mut pc: u8 = 0;
-                loop {
-                    match pc {
-                        0u8 => {
-                            head_o.write(Logic::One);
-                            if sel.read() == Logic::One { pc = 1; }
-                            else { mid_o.write(Logic::One); tail_o.write(Logic::One); pc = 0; }
-                        }
-                        1u8 => { tail_o.write(Logic::One); pc = 0; }
-                        _ => {}
-                    }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty(), "a held mixed-anchor port with uniform per-drive anchors is realized by the drive-level form");
-    }
 
     // ── the re-derived clauses (2026-10-28): one flipping pair per clause ──────
     //
     // Each source below is a probe measured in tests/sequential_forwarding_divergence.rs
     // (the `d*` tests pin both traces); the verdict is in the test name.
 
-    /// (A, held, path-dependent) `d1f`: the read on one arm only, the constant
-    /// written after the merge on the read-free path. DIVERGES — flagged.
-    #[test]
-    fn d1f_path_dependent_constant_held_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut phase: u8 = 0;
-                loop {
-                    if phase == 0 { let _ = x.read(); phase = 1; } else { phase = 0; }
-                    if phase == 0 { o.write(Bits::from_lit::<7>()); }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert_eq!(hazard(src), ["o"]);
-    }
 
-    /// (A flip) `d1b`: the constant behind the read in its own arm — closing on
-    /// both sides, edge-sampled. AGREES — not flagged, although a register is
-    /// assigned unprotected (the old constant-write clause refused this).
-    #[test]
-    fn d1b_constant_behind_its_read_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop {
-                    cnt = cnt + Bits::from_lit::<1>();
-                    if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// (A flip) `d1c` / `pc_arm_write`: constants in arms no read reaches, the
-    /// state register assigned unprotected. All opening, mux + hold. AGREES.
-    #[test]
-    fn d1c_state_arm_constants_no_read_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
-                let mut pc: u8 = 0;
-                loop {
-                    match pc {
-                        0u8 => { pc = 1; }
-                        1u8 => { o.write(Bits::from_lit::<7>()); pc = 2; }
-                        2u8 => { o.write(Bits::from_lit::<3>()); pc = 0; }
-                        _ => {}
-                    }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-        let pc_arm = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, sel: In<Logic, C>, o: Out<Logic, C>) {
-                let mut pc: u8 = 0;
-                loop {
-                    match pc {
-                        0u8 => { if sel.read() == Logic::One { pc = 1; } }
-                        1u8 => { o.write(Logic::One); pc = 0; }
-                        _ => {}
-                    }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(pc_arm).is_empty(), "pc_arm_write agrees since 2026-10-26");
-    }
 
-    /// (A, two drives, held) `d2a`: an opening drive on committed state, then a
-    /// closing one behind the read. Each drive's anchor is uniform on both sides
-    /// and the port is held, so the drive-level mux + hold form realizes it —
-    /// AGREES since 2026-10-29, ADMITTED since 2026-10-30. (Flagged 2026-10-28 to
-    /// 2026-10-30, when the emission was port-wide; the pre-2026-10-28 rule had
-    /// missed it.) The flipping pair against `d1f` (held, path-dependent) and
-    /// `d2b` (every path).
-    #[test]
-    fn d2a_mixed_two_drives_held_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut pc: u8 = 0;
-                loop {
-                    if pc == 1 { o.write(Bits::from_lit::<5>()); }
-                    if x.read()[0] == Logic::One { o.write(Bits::from_lit::<9>()); pc = 1; } else { pc = 0; }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// (A, admitted 2026-10-30) `d5a`: `d2a` with the closing drive register-valued
-    /// and the state update keyed off another bit, so the closing value reaches the
-    /// output through the hold register. Measured AGREEING — not flagged.
-    #[test]
-    fn d5a_const_opening_reg_closing_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut st: u8 = 0;
-                let mut cnt: Bits<8> = Bits::zero();
-                loop {
-                    cnt = cnt + Bits::from_lit::<1>();
-                    if st == 1 { o.write(Bits::from_lit::<5>()); }
-                    let xv = x.read();
-                    if xv[0] == Logic::One { o.write(cnt); }
-                    if xv[1] == Logic::One { st = 1; } else { st = 0; }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// (A, admitted 2026-10-30) `d5f`: both drives register-valued and forwarding,
-    /// on the EXTRACTION route (the tick is a 2-cycle `for`). Measured AGREEING —
-    /// not flagged.
-    #[test]
-    fn d5f_reg_opening_reg_closing_extracted_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut st: u8 = 0;
-                let mut a: Bits<8> = Bits::zero();
-                let mut b: Bits<8> = Bits::zero();
-                loop {
-                    a = a + Bits::from_lit::<1>();
-                    b = b + Bits::from_lit::<3>();
-                    if st == 1 { o.write(a); }
-                    let xv = x.read();
-                    if xv[1] == Logic::One { o.write(b); }
-                    if xv[2] == Logic::One { st = 1; } else { st = 0; }
-                    for _ in 0..2 { clk.tick().await; }
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// (A flip) `d2c`: `d2a` with the committed-state drive moved behind the read.
-    /// All closing. AGREES — not flagged.
-    #[test]
-    fn d2c_two_closing_drives_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut pc: u8 = 0;
-                loop {
-                    if x.read()[0] == Logic::One { o.write(Bits::from_lit::<9>()); pc = 1; } else { pc = 0; }
-                    if pc == 1 { o.write(Bits::from_lit::<5>()); }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// (A2, two drives on every path) `d2b`: a comb mux with one arm behind its read
-    /// and one not. Each drive's anchor is uniform, but the every-path comb mux has
-    /// no hold register and shows the closing `1` at the opening observation.
-    /// DIVERGES — flagged (the pre-2026-10-28 rule exempted every-path writes); the
-    /// flipping pair of `d2a` by route.
-    #[test]
-    fn d2b_mixed_two_drives_every_path_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut phase: u8 = 0;
-                loop {
-                    if phase == 0 { let _ = x.read(); o.write(Bits::from_lit::<1>()); phase = 1; }
-                    else { o.write(Bits::from_lit::<2>()); phase = 0; }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert_eq!(hazard(src), ["o"]);
-    }
 
-    /// (A flip) `d1d`: both arms of the mux behind the read in its condition.
-    /// AGREES — not flagged.
-    #[test]
-    fn d1d_mux_behind_read_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop {
-                    cnt = cnt + Bits::from_lit::<1>();
-                    if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// (A, continuous assign) `d3a`: W4 with the read-free arm assigning only a
-    /// register the write does NOT read — the opening write publishes the
-    /// committed register, which is what `assign o = r` shows. AGREES — not
-    /// flagged (the old register-reading clause refused it). The flip of
-    /// `hazard_w4_mixed_alignment_flagged`, one assignment apart.
-    #[test]
-    fn d3a_w4_unrelated_register_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut phase: u8 = 0;
-                let mut r: Bits<8> = Bits::zero();
-                loop {
-                    if phase == 0 { r = x.read(); phase = 1; } else { phase = 0; }
-                    o.write(r);
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// (A flip) `d3b`: W4 with a read on EVERY path — all closing. AGREES.
-    #[test]
-    fn d3b_w4_read_on_every_path_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut phase: u8 = 0;
-                let mut r: Bits<8> = Bits::zero();
-                loop {
-                    if phase == 0 { r = x.read(); phase = 1; } else { let _ = x.read(); r = r + Bits::from_lit::<1>(); phase = 0; }
-                    o.write(r);
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// (B, held) `d4a`: an opening drive whose guard tests a register assigned
-    /// just before it — the comb copy tests the committed value. DIVERGES — flagged.
-    #[test]
-    fn d4a_forwarded_guard_held_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop {
-                    cnt = cnt + Bits::from_lit::<1>();
-                    if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert_eq!(hazard(src), ["o"]);
-    }
 
-    /// (B flip) `d4b`: the same pulse with the update AFTER the test — the guard
-    /// reads the committed register. AGREES — not flagged.
-    #[test]
-    fn d4b_committed_guard_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop {
-                    if cnt == Bits::from_lit::<2>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
-                    else { cnt = cnt + Bits::from_lit::<1>(); }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// (B, every path) `d4c`: the forwarded guard over a comb mux. DIVERGES —
-    /// flagged (the old rule exempted every-path writes).
-    #[test]
-    fn d4c_forwarded_guard_every_path_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop {
-                    cnt = cnt + Bits::from_lit::<1>();
-                    if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
-                    else { o.write(Bits::from_lit::<3>()); }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert_eq!(hazard(src), ["o"]);
-    }
 
-    /// (B flip) `d4d`: the forwarded guard behind a read on every path — the
-    /// drive is closing, edge-sampled with the edge-form guard. AGREES — not flagged.
-    #[test]
-    fn d4d_forwarded_guard_behind_read_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop {
-                    let _ = x.read();
-                    cnt = cnt + Bits::from_lit::<1>();
-                    if cnt == Bits::from_lit::<3>() { o.write(Bits::from_lit::<7>()); cnt = Bits::zero(); }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
-    /// An UNCONDITIONAL constant write stays exempt, which is what keeps the rule off
-    /// the corpus: the value is the same in either phase, so the shift is unobservable.
-    #[test]
-    fn an_unconditional_constant_write_is_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, sel: In<Logic, C>, o: Out<Logic, C>) {
-                let mut pc: u8 = 0;
-                loop {
-                    o.write(Logic::One);
-                    if sel.read() == Logic::One { pc = 1; } else { pc = 0; }
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert!(
-            hazard(src).is_empty(),
-            "an unconditional constant write is idempotent across the phase shift — \
-             flagging it would reject a correct design"
-        );
-    }
 
     // ── the multi-phase rule, narrowed (phase E, 2026-10-23) ───────────────────
     //
     // One unit test per clause, each the source of a probe measured in
     // tests/sequential_forwarding_divergence.rs (verdict named in the test name).
 
-    fn mphase(src: &str) -> Vec<String> {
-        Cfg::build(&parse(src)).map(|c| c.multi_phase_out_write()).unwrap_or_default()
-    }
 
-    /// `pulse_plain`: two constants, no input, extracted. AGREES under phase C's
-    /// mux + hold emission — no longer flagged.
-    #[test]
-    fn mphase_constant_pulse_no_input_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, dv: Out<Logic, C>) {
-                loop { for _ in 0..3 { clk.tick().await; } dv.write(Logic::One); clk.tick().await; dv.write(Logic::Zero); }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-    }
 
-    /// `e2_two_registers`: committed registers in two phases, no input. AGREES.
-    #[test]
-    fn mphase_two_registers_no_input_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
-                let mut a: Bits<8> = Bits::zero();
-                let mut b: Bits<8> = Bits::zero();
-                loop { a = a + Bits::from_lit::<1>(); b = b + Bits::from_lit::<3>(); for _ in 0..2 { clk.tick().await; } o.write(a); clk.tick().await; o.write(b); }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-    }
 
-    /// `e2x_two_registers_plus_unrelated_read`: the same, plus one input read in
-    /// the head, which no write of `o` is reached by. Flagged until 2026-10-26,
-    /// when codegen's opening walk was statement-granular over the whole extracted
-    /// `match pc`; arm-granular, the read in another state demotes nothing and
-    /// phase C's mux shows both drives. AGREES — not flagged.
-    #[test]
-    fn mphase_two_registers_plus_unrelated_read_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut a: Bits<8> = Bits::zero();
-                let mut b: Bits<8> = Bits::zero();
-                loop { a = x.read(); b = b + Bits::from_lit::<3>(); for _ in 0..2 { clk.tick().await; } o.write(a); clk.tick().await; o.write(b); }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-    }
 
-    /// An opening write from a register, then a trailing write whose own operand
-    /// reads the input: every write is opening in the simulator (a trailing read
-    /// is immediate), but the read reaching the second write edge-samples the
-    /// whole port, so the first lands one observation late. Flagged — the
-    /// `e8` mechanism inside a multi-phase port (derived; `e5` is the measured
-    /// neighbour with a deferred first read).
-    #[test]
-    fn mphase_opening_write_then_trailing_immediate_read_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut a: Bits<8> = Bits::zero();
-                loop { a = a + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(a); for _ in 0..2 { clk.tick().await; } o.write(x.read() + a); }
-            }
-        "#;
-        assert_eq!(mphase(src), vec!["o".to_string()]);
-    }
 
-    /// A wait loop (`while x.read() == 0 { tick }`) before two opening writes:
-    /// the folded read is no Comb predecessor of either write, yet control
-    /// extraction duplicates the first write into the loop's exit arm behind the
-    /// read's condition. Unmeasured — refused by construction (the folded clause).
-    #[test]
-    fn mphase_wait_loop_read_before_opening_writes_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut a: Bits<8> = Bits::zero();
-                let mut b: Bits<8> = Bits::zero();
-                loop { a = a + Bits::from_lit::<1>(); b = b + Bits::from_lit::<3>(); while x.read() == Bits::zero() { clk.tick().await; } o.write(a); clk.tick().await; o.write(b); }
-            }
-        "#;
-        assert_eq!(mphase(src), vec!["o".to_string()]);
-    }
 
-    /// `e5d_two_closing_deferred`: both writes behind a deferred read (a tick
-    /// follows each), module has a register. Both closing on both sides. AGREES.
-    #[test]
-    fn mphase_two_closing_deferred_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read()); for _ in 0..2 { clk.tick().await; } o.write(x.read() + cnt); clk.tick().await; }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-    }
 
-    /// `e5_two_closing`: the trailing tick removed, so the second read has no tick
-    /// after it — immediate in the simulator, the write opening. DIVERGES — flagged.
-    /// The flipping pair for clause (ii): one tick moved.
-    #[test]
-    fn mphase_trailing_immediate_read_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read()); for _ in 0..2 { clk.tick().await; } o.write(x.read() + cnt); }
-            }
-        "#;
-        assert_eq!(mphase(src), vec!["o".to_string()]);
-    }
 
-    /// `e5f_two_closing_register_free`: `e5d` without its register. The reads are
-    /// immediate passthroughs in a register-free body. DIVERGES — flagged. The
-    /// flipping pair for the register-free clause.
-    #[test]
-    fn mphase_register_free_passthrough_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { for _ in 0..2 { clk.tick().await; } o.write(x.read()); for _ in 0..2 { clk.tick().await; } o.write(x.read() + Bits::from_lit::<1>()); clk.tick().await; }
-            }
-        "#;
-        assert_eq!(mphase(src), vec!["o".to_string()]);
-    }
 
-    /// `e4_closing_then_opening`: a deferred read feeds one write, a constant the
-    /// other. Mixed anchors, uniform per drive on both sides: the drive-level mux +
-    /// hold form realizes it — AGREES since 2026-10-29, ADMITTED since 2026-10-30
-    /// (flagged by clause 4 before, when the emission was port-wide).
-    #[test]
-    fn mphase_mixed_closing_and_opening_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read()); for _ in 0..2 { clk.tick().await; } o.write(Bits::zero()); }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-    }
 
-    /// `e4r_closing_then_register_opening`: `e4` with the opening drive from a
-    /// committed register. Measured AGREEING — not flagged (admitted 2026-10-30).
-    #[test]
-    fn mphase_register_opening_beside_closing_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read()); for _ in 0..2 { clk.tick().await; } o.write(cnt); }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-    }
 
-    /// `e11_path_dependent_write_in_a_middle_phase`: the read sits in a branch of
-    /// the write's phase and the write follows the merge, so the simulator runs it
-    /// at the opening on the read-free path while codegen holds it to the edge —
-    /// a drive whose anchors differ between the sides (clause 4, narrowed
-    /// 2026-10-30). DIVERGES — flagged (also by the pre-narrowing clause, since the
-    /// other write is an opening constant).
-    #[test]
-    fn mphase_path_dependent_middle_phase_write_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } if cnt[0] == Logic::One { let _ = x.read(); } o.write(cnt); for _ in 0..2 { clk.tick().await; } o.write(Bits::zero()); }
-            }
-        "#;
-        assert_eq!(mphase(src), vec!["o".to_string()]);
-    }
 
-    /// `e11b_path_dependent_write_then_closing`: `e11` with the other write behind a
-    /// deferred read. No write of the port is opening in the simulator on every
-    /// path, so the pre-narrowing clause ADMITTED it — an unmeasured gap; the
-    /// path-dependent first write still lands one late on its read-free path.
-    /// DIVERGES — flagged since 2026-10-30.
-    #[test]
-    fn mphase_path_dependent_write_then_closing_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } if cnt[0] == Logic::One { let _ = x.read(); } o.write(cnt); for _ in 0..2 { clk.tick().await; } o.write(x.read()); clk.tick().await; }
-            }
-        "#;
-        assert_eq!(mphase(src), vec!["o".to_string()]);
-    }
 
-    /// `e7_linear_two_registers`: the linear route (every tick a bare top-level
-    /// statement). No mux form exists; `vlir_lower` refuses it as multiply driven,
-    /// so the source rule must refuse it too. Flagged.
-    #[test]
-    fn mphase_linear_route_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: Out<Bits<8>, C>) {
-                let mut a: Bits<8> = Bits::zero();
-                let mut b: Bits<8> = Bits::zero();
-                loop { a = a + Bits::from_lit::<1>(); b = b + Bits::from_lit::<3>(); clk.tick().await; o.write(a); clk.tick().await; o.write(b); clk.tick().await; }
-            }
-        "#;
-        assert_eq!(mphase(src), vec!["o".to_string()]);
-    }
 
-    /// `RegOut` is exempt by construction, whatever the shape.
-    #[test]
-    fn mphase_regout_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read()); for _ in 0..2 { clk.tick().await; } o.write(Bits::zero()); }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-    }
 
-    /// A port written in ONE phase with a trailing immediate read (`e8`) is never
-    /// this rule's business: the trailing segment is the head's phase, and the
-    /// immediate-read half of clause 4 stays gated on two phases
-    /// (`trailing_out_reads_input` owns it). `e9` likewise. Since 2026-10-30 the
-    /// path-dependent half does reach a single NON-head phase — the tests below.
-    #[test]
-    fn mphase_single_phase_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(x.read() + cnt); }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-    }
 
     // ── §10.6 (2026-10-30): the path-dependent drive in a SINGLE non-head phase ──
 
-    /// `e12_path_dependent_single_phase_extracted`: `e11` with its constant write
-    /// removed — the port's only write, in the `pc == 2` arm, reached by the read
-    /// on the odd path and read-free on the even one. Edge-sampled on the codegen
-    /// side, opening on the even path in the simulator. Measured DIVERGING
-    /// (§10.6) — flagged; compiled with no opt-out before this clause.
-    #[test]
-    fn mphase_single_phase_path_dependent_non_head_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } if cnt[0] == Logic::One { let _ = x.read(); } o.write(cnt); for _ in 0..2 { clk.tick().await; } }
-            }
-        "#;
-        assert_eq!(mphase(src), vec!["o".to_string()]);
-    }
 
-    /// `e12a_read_on_every_path_extracted`: both arms read, so every path to the
-    /// write carries a deferred read — closing on both sides. Measured AGREEING —
-    /// not flagged. One `else { let _ = x.read(); }` flips `e12`.
-    #[test]
-    fn mphase_single_phase_read_on_every_path_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } if cnt[0] == Logic::One { let _ = x.read(); } else { let _ = x.read(); } o.write(cnt); for _ in 0..2 { clk.tick().await; } }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-    }
 
-    /// `e12b_read_on_no_path_extracted`: no read in the write's phase — opening on
-    /// both sides, phase C's mux + hold form. Measured AGREEING — not flagged.
-    #[test]
-    fn mphase_single_phase_no_read_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } o.write(cnt); for _ in 0..2 { clk.tick().await; } }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-    }
 
-    /// The head-phase boundary: `d1f`'s shape — the same path-dependent drive in
-    /// the HEAD segment of a single-tick body. D1's clause (A1) refuses it; this
-    /// rule leaves the head phase alone (the two are complementary, never
-    /// overlapping on the head). Not flagged here.
-    #[test]
-    fn mphase_single_phase_head_segment_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut phase: u8 = 0;
-                loop { if phase == 0 { let _ = x.read(); phase = 1; } else { phase = 0; } if phase == 0 { o.write(Bits::from_lit::<7>()); } clk.tick().await; }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-        assert_eq!(
-            Cfg::build(&parse(src)).map(|c| c.unprotected_pretick_out_write()).unwrap_or_default(),
-            vec!["o".to_string()],
-            "the head-phase shape is D1's"
-        );
-    }
 
-    /// The route boundary: `e13_path_dependent_single_phase_linear` — the same
-    /// write in the middle segment of a two-tick LINEAR body. Measured DIVERGING
-    /// (§10.6), but by a different mechanism: the linear route emits
-    /// `assign o = cnt` whatever reads precede the write, so the control with the
-    /// read on EVERY path (`e13a`) diverges too, and a clause keyed on the branch
-    /// would be a proxy. Not flagged by this clause; recorded, with the
-    /// mechanism, in §10.6 — an unguarded gap, pinned in the battery.
-    #[test]
-    fn mphase_single_phase_linear_route_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { let _ = x.read(); } o.write(cnt); clk.tick().await; }
-            }
-        "#;
-        assert!(mphase(src).is_empty());
-    }
 
     // ── the linear-route anchor rule (`linear_out_write_anchor_mismatch`, §10.7, 2026-10-30) ──
 
-    fn lin(src: &str) -> Vec<String> {
-        Cfg::build(&parse(src)).map(|c| c.linear_out_write_anchor_mismatch()).unwrap_or_default()
-    }
 
-    /// `e14a`: a wire with no read in a middle segment — the flop samples at the
-    /// closing edge, the simulator wrote at the opening. DIVERGES — flagged.
-    #[test]
-    fn linear_wire_no_read_middle_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; let t = cnt + Bits::from_lit::<2>(); o.write(t); clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(src), vec!["o".to_string()]);
-    }
 
-    /// `e14b`: the same wire behind a deferred read — closing on both sides.
-    /// AGREES — not flagged. One `let _ = x.read();` flips `e14a`.
-    #[test]
-    fn linear_wire_behind_read_middle_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; let _ = x.read(); let t = cnt + Bits::from_lit::<2>(); o.write(t); clk.tick().await; }
-            }
-        "#;
-        assert!(lin(src).is_empty());
-    }
 
-    /// `e14c`: a direct input operand in a middle segment — `assign o = x` tracks
-    /// the input, the simulator publishes it at the closing edge. Flagged.
-    #[test]
-    fn linear_input_operand_middle_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; o.write(x.read()); clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(src), vec!["o".to_string()]);
-    }
 
-    /// `e14d` / `e14i`: a constant behind a deferred read is a startup transient
-    /// in a segment after the first (flagged) and nothing in the head segment,
-    /// whose closing edge is edge 0 (not flagged).
-    #[test]
-    fn linear_constant_behind_read_middle_flagged_head_not() {
-        let middle = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; let _ = x.read(); o.write(Bits::from_lit::<7>()); clk.tick().await; }
-            }
-        "#;
-        let head = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { let _ = x.read(); o.write(Bits::from_lit::<7>()); clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(middle), vec!["o".to_string()]);
-        assert!(lin(head).is_empty());
-    }
 
-    /// `e14e` / `e14f`: a head closing write of a register committed at the OTHER
-    /// edge (flagged) against one forwarding an in-segment update before it
-    /// (not flagged) — the update moved across one tick flips the verdict.
-    #[test]
-    fn linear_head_closing_other_edge_flagged_in_segment_not() {
-        let other = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { let _ = x.read(); o.write(cnt); clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; }
-            }
-        "#;
-        let in_segment = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { let _ = x.read(); cnt = cnt + Bits::from_lit::<1>(); o.write(cnt); clk.tick().await; clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(other), vec!["o".to_string()]);
-        assert!(lin(in_segment).is_empty());
-    }
 
-    /// `e13a` / `e14g`: the middle-segment closing write of a register committed
-    /// at the other edge (flagged; `e13`, the read on one path only, likewise)
-    /// against one forwarding an in-segment update before it (not flagged).
-    #[test]
-    fn linear_middle_closing_other_edge_flagged_in_segment_not() {
-        let other = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { let _ = x.read(); } else { let _ = x.read(); } o.write(cnt); clk.tick().await; }
-            }
-        "#;
-        let path_dependent = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { let _ = x.read(); } o.write(cnt); clk.tick().await; }
-            }
-        "#;
-        let in_segment = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { clk.tick().await; let _ = x.read(); cnt = cnt + Bits::from_lit::<1>(); o.write(cnt); clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(other), vec!["o".to_string()]);
-        assert_eq!(lin(path_dependent), vec!["o".to_string()]);
-        assert!(lin(in_segment).is_empty());
-    }
 
-    /// `e14j`: write-before-update behind a read in a MIDDLE segment — the write
-    /// forwards the pre-update value, the assign shows the committed one. Flagged
-    /// here (`pretick_out_write_before_update` stops at the head and trailing).
-    #[test]
-    fn linear_middle_write_before_update_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { clk.tick().await; let s = x.read(); o.write(r); r = r + s; clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(src), vec!["o".to_string()]);
-        assert!(Cfg::build(&parse(src)).unwrap().pretick_out_write_before_update().is_empty(), "V8 is head + trailing");
-    }
 
-    /// `e14h` / `e14l`: a head wire with no read (flagged) against the same wire
-    /// behind a read (not flagged).
-    #[test]
-    fn linear_head_wire_no_read_flagged_behind_read_not() {
-        let no_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { let t = cnt + Bits::from_lit::<2>(); o.write(t); clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; }
-            }
-        "#;
-        let behind = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { let _ = x.read(); let t = cnt + Bits::from_lit::<2>(); o.write(t); clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(no_read), vec!["o".to_string()]);
-        assert!(lin(behind).is_empty());
-    }
 
-    /// `e14m`: a trailing wire (after its register's update, so V8 has no claim)
-    /// — hoisted into the head's phase and sampled at its edge, written at the
-    /// opening by the simulator. Flagged. `linear_trailing`'s register-valued
-    /// trailing write (no read, continuous assign) is not.
-    #[test]
-    fn linear_trailing_wire_flagged_register_not() {
-        let wire = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { clk.tick().await; clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); let t = cnt + Bits::from_lit::<2>(); o.write(t); }
-            }
-        "#;
-        let register = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { clk.tick().await; clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); o.write(cnt); }
-            }
-        "#;
-        assert_eq!(lin(wire), vec!["o".to_string()]);
-        assert!(lin(register).is_empty());
-    }
 
-    /// `e14n`: the head closing write of a register updated in the TRAILING
-    /// region — the same cycle, but the update commits at the last tick's edge.
-    /// Flagged: "in-segment" is the segment, not the merged head phase.
-    #[test]
-    fn linear_head_closing_trailing_update_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { let _ = x.read(); o.write(cnt); clk.tick().await; clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); }
-            }
-        "#;
-        assert_eq!(lin(src), vec!["o".to_string()]);
-    }
 
-    /// Boundaries by construction: the extraction route (`e12`'s shape, clause 4's),
-    /// a single-tick body (`d3b`'s shape, one observation per iteration), an
-    /// agreeing register-free body, and `RegOut` are never this rule's.
-    #[test]
-    fn linear_route_boundaries_not_flagged() {
-        let extracted = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } if cnt[0] == Logic::One { let _ = x.read(); } o.write(cnt); for _ in 0..2 { clk.tick().await; } }
-            }
-        "#;
-        let single_tick = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut phase: u8 = 0;
-                let mut r: Bits<8> = Bits::zero();
-                loop { if phase == 0 { r = x.read(); phase = 1; } else { let _ = x.read(); r = r + Bits::from_lit::<1>(); phase = 0; } o.write(r); clk.tick().await; }
-            }
-        "#;
-        // (a register-free body is examined since 2026-11-02, §10.8: this one
-        // is `e15k`, a wire behind its own deferred read — admitted)
-        let register_free = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; let t = x.read() + Bits::from_lit::<1>(); o.write(t); clk.tick().await; }
-            }
-        "#;
-        let regout = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; let _ = x.read(); o.write(cnt); clk.tick().await; }
-            }
-        "#;
-        for src in [extracted, single_tick, register_free, regout] {
-            assert!(lin(src).is_empty());
-        }
-    }
 
 
     // ── §10.8 (2026-11-02): the register-free class, and the forms by SHAPE ──
 
-    /// `e15g` / `e8l`: an input-valued continuous assign in a register-free
-    /// two-tick body — the passthrough is immediate and samples once per
-    /// iteration where the assign tracks (flagged); the single-tick body is one
-    /// observation per iteration (not flagged). One tick flips it.
-    #[test]
-    fn linear_regfree_input_operand_flagged_single_tick_not() {
-        let two_ticks = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; o.write(x.read()); clk.tick().await; }
-            }
-        "#;
-        let behind_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { let _ = x.read(); o.write(x.read()); clk.tick().await; clk.tick().await; }
-            }
-        "#;
-        let single_tick = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; o.write(x.read()); }
-            }
-        "#;
-        assert_eq!(lin(two_ticks), vec!["o".to_string()]);
-        assert_eq!(lin(behind_read), vec!["o".to_string()]);
-        assert!(lin(single_tick).is_empty());
-    }
 
-    /// `e15j` / `e15d`: a register-free constant behind a deferred read is the
-    /// startup transient in a middle segment (flagged) and nothing in the head
-    /// (not flagged) — the registered pair above, without the register.
-    #[test]
-    fn linear_regfree_constant_behind_read_middle_flagged_head_not() {
-        let middle = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; let _ = x.read(); o.write(Bits::from_lit::<7>()); clk.tick().await; }
-            }
-        "#;
-        let head = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { let _ = x.read(); o.write(Bits::from_lit::<7>()); clk.tick().await; clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(middle), vec!["o".to_string()]);
-        assert!(lin(head).is_empty());
-    }
 
-    /// `e15l` / `e15f` / `e15fr`: an opening constant-valued wire loads one
-    /// observation late — a transient visible in a middle segment (flagged) and
-    /// unobservable in the head, whose first load is edge 0, with or without a
-    /// register in the body (not flagged; `e15fr` was refused until 2026-11-02).
-    /// `e15q`, the trailing one, is hoisted to phase 0 and flagged.
-    #[test]
-    fn linear_constant_wire_opening_middle_flagged_head_not() {
-        let middle = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; let t: Bits<8> = Bits::from_lit::<7>(); o.write(t); clk.tick().await; }
-            }
-        "#;
-        let trailing = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; clk.tick().await; let t: Bits<8> = Bits::from_lit::<7>(); o.write(t); }
-            }
-        "#;
-        let head = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { let t: Bits<8> = Bits::from_lit::<7>(); o.write(t); clk.tick().await; clk.tick().await; }
-            }
-        "#;
-        let head_registered = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { let t: Bits<8> = Bits::from_lit::<7>(); o.write(t); clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(middle), vec!["o".to_string()]);
-        assert_eq!(lin(trailing), vec!["o".to_string()]);
-        assert!(lin(head).is_empty());
-        assert!(lin(head_registered).is_empty());
-    }
 
-    /// `e15t` / `e15w` / `e15ac` / `e15y`: an every-path conditional drive is the
-    /// edge-sampled flop under its phase when every drive is behind a read, and
-    /// the mux + hold form when one is not — both realize it since 2026-11-02
-    /// (§10.9), in a middle or the head segment, with or without registers (not
-    /// flagged); until then the form was a phase-gated comb mux, a latch, and
-    /// every one was refused. The single-tick body never was.
-    #[test]
-    fn linear_every_path_conditional_not_flagged() {
-        let middle = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; if x.read()[1] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); } clk.tick().await; }
-            }
-        "#;
-        let head = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); } clk.tick().await; clk.tick().await; }
-            }
-        "#;
-        let registered_no_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); } clk.tick().await; }
-            }
-        "#;
-        let single_tick = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { if x.read()[0] == Logic::One { o.write(Bits::from_lit::<7>()); } else { o.write(Bits::from_lit::<3>()); } clk.tick().await; }
-            }
-        "#;
-        for src in [middle, head, registered_no_read, single_tick] {
-            assert!(lin(src).is_empty());
-        }
-    }
 
-    /// `e15ad` / `e15af` / `e15ag` / `e15r`: a held conditional drive with no read
-    /// before it is the mux + hold form (its default outside the phase guards
-    /// since 2026-11-02, §10.9 — not flagged; refused as a latch until then);
-    /// behind a read it is the edge-sampled flop under the phase and its guards,
-    /// closing on both sides (not flagged).
-    #[test]
-    fn linear_held_conditional_not_flagged_with_or_without_read() {
-        let no_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; }
-            }
-        "#;
-        let constant_behind_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; let _ = x.read(); if cnt[0] == Logic::One { o.write(Bits::from_lit::<7>()); } clk.tick().await; }
-            }
-        "#;
-        let register_behind_guard_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if x.read()[1] == Logic::One { o.write(cnt); } clk.tick().await; }
-            }
-        "#;
-        let regfree_behind_guard_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { if x.read()[1] == Logic::One { o.write(x.read()); } clk.tick().await; clk.tick().await; }
-            }
-        "#;
-        for src in [no_read, constant_behind_read, register_behind_guard_read, regfree_behind_guard_read] {
-            assert!(lin(src).is_empty());
-        }
-    }
 
     // ── §10.9 (2026-11-02): the latch fixed, the residue of the conditional forms ──
 
-    /// `e16a` / `e16h` / `e16l`: a mixed-anchor middle-segment port is realized
-    /// drive by drive — a read in the drive's own operand or its own arm parks
-    /// it at the edge, the read-free arm runs at the opening (not flagged) —
-    /// while a read in a PRECEDING branch's arm reaches the drive on one path
-    /// and not on another: the lowering counts it closing, the simulator runs
-    /// it at the opening on the read-free path (flagged, clause C).
-    #[test]
-    fn linear_mixed_anchor_middle_not_flagged_path_dependent_flagged() {
-        let operand_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } else { o.write(x.read()); } clk.tick().await; }
-            }
-        "#;
-        let arm_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { let _ = x.read(); o.write(Bits::from_lit::<7>()); } else { o.write(cnt); } clk.tick().await; }
-            }
-        "#;
-        let path_dependent = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { let _ = x.read(); } if cnt[1] == Logic::One { o.write(cnt); } clk.tick().await; }
-            }
-        "#;
-        assert!(lin(operand_read).is_empty());
-        assert!(lin(arm_read).is_empty());
-        assert_eq!(lin(path_dependent), vec!["o".to_string()]);
-    }
 
-    /// `e16m` / `e15v`: a port with a wire-valued drive is a phase-scoped hold
-    /// port — the phase-guarded flop for every drive, which the hold form does
-    /// not reach — so a held wire-valued drive with no read is one late
-    /// (flagged; the §10.9 prediction that missed) and the same drive behind
-    /// its wire's deferred read agrees (not flagged).
-    #[test]
-    fn linear_held_wire_no_read_flagged_behind_read_not() {
-        let no_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; let t = cnt + Bits::from_lit::<2>(); if cnt[0] == Logic::One { o.write(t); } clk.tick().await; }
-            }
-        "#;
-        let behind_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; let t = x.read() + Bits::from_lit::<1>(); if t[1] == Logic::One { o.write(t); } clk.tick().await; }
-            }
-        "#;
-        let sibling_wire = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; let t = cnt + Bits::from_lit::<2>(); if cnt[0] == Logic::One { o.write(t); } else { o.write(cnt); } clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(no_read), vec!["o".to_string()]);
-        assert!(lin(behind_read).is_empty());
-        assert_eq!(lin(sibling_wire), vec!["o".to_string()], "the register-valued arm is flopped with its wire-valued sibling");
-    }
 
-    /// `e16d` / `e16e` / `e15ad`: a conditional drive in the TRAILING region is
-    /// hoisted into phase 0's edge-sampled flop, one observation after the
-    /// trailing instant the simulator runs it at (flagged, clause B); the same
-    /// held drive in a middle segment is the hold form (not flagged).
-    #[test]
-    fn linear_trailing_conditional_flagged_middle_not() {
-        let held = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } }
-            }
-        "#;
-        let every_path = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); } }
-            }
-        "#;
-        let middle = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(held), vec!["o".to_string()]);
-        assert_eq!(lin(every_path), vec!["o".to_string()]);
-        assert!(lin(middle).is_empty());
-        assert!(trailing_out(held).is_empty(), "no input read: the trailing rule has no claim");
-    }
 
-    /// `e16f` / `e15r`: in a register-free body the drive's own `x.read()` is the
-    /// immediate passthrough, so a held drive under a guard that reads no input
-    /// runs at the opening while the flop samples at the edge (flagged, clause
-    /// C); the same drive under the guard's deferred read is parked at that edge
-    /// (not flagged). The registered body defers the operand's read (not flagged).
-    #[test]
-    fn linear_regfree_passthrough_under_constant_guard_flagged_deferred_guard_not() {
-        let constant_guard = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; let t: Bits<8> = Bits::from_lit::<7>(); if t[0] == Logic::One { o.write(x.read()); } clk.tick().await; }
-            }
-        "#;
-        let deferred_guard = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; if x.read()[1] == Logic::One { o.write(x.read()); } clk.tick().await; }
-            }
-        "#;
-        let registered = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; if cnt[0] == Logic::One { o.write(x.read()); } clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(constant_guard), vec!["o".to_string()]);
-        assert!(lin(deferred_guard).is_empty());
-        assert!(lin(registered).is_empty());
-    }
 
-    /// `e16n` / `e16o` / `e16p`: an opening drive under a guard that tests a
-    /// register assigned earlier in its segment — the comb copy of the hold form
-    /// tests the committed value, D1's forwarded-guard mechanism in a middle
-    /// segment (flagged, clause C), held or every-path; the forwarded VALUE
-    /// under a committed guard is realized (not flagged).
-    #[test]
-    fn linear_forwarded_guard_middle_flagged_forwarded_value_not() {
-        let held = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; }
-            }
-        "#;
-        let every_path = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); if cnt[0] == Logic::One { o.write(cnt); } else { o.write(Bits::from_lit::<3>()); } clk.tick().await; }
-            }
-        "#;
-        let forwarded_value = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                let mut sel: Bits<8> = Bits::zero();
-                loop { sel = sel + Bits::from_lit::<1>(); clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); if sel[0] == Logic::One { o.write(cnt); } clk.tick().await; }
-            }
-        "#;
-        assert_eq!(lin(held), vec!["o".to_string()]);
-        assert_eq!(lin(every_path), vec!["o".to_string()]);
-        assert!(lin(forwarded_value).is_empty());
-    }
 
-    /// `e16g` / `e16i` / `e16k` / `e16j`: a port written unconditionally AND
-    /// conditionally in one segment is a continuous assign beside the
-    /// conditional form's driver — two drivers, which Verilator refuses
-    /// (flagged, whatever reads precede the writes). The single-tick body is
-    /// outside this rule and emits the same two drivers unrefused (§10.9, found).
-    #[test]
-    fn linear_default_then_conditional_write_flagged() {
-        let no_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; o.write(Bits::from_lit::<3>()); if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; }
-            }
-        "#;
-        let head_behind_read = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { let _ = x.read(); o.write(Bits::from_lit::<3>()); if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; }
-            }
-        "#;
-        let single_tick = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { o.write(Bits::from_lit::<3>()); if cnt[0] == Logic::One { o.write(cnt); } clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); }
-            }
-        "#;
-        assert_eq!(lin(no_read), vec!["o".to_string()]);
-        assert_eq!(lin(head_behind_read), vec!["o".to_string()]);
-        assert!(lin(single_tick).is_empty());
-    }
 
-    /// `e16q` / `d2b`: D1's every-path clause (A2) on the linear multi-tick
-    /// route — the head's every-path mixed-anchor port takes the hold form
-    /// there since 2026-11-02 and agrees (not flagged by D1); the single-tick
-    /// body keeps the ungated comb mux with no hold register (flagged, as ever).
-    #[test]
-    fn d1_every_path_mixed_not_flagged_on_the_linear_multi_tick_route() {
-        let two_ticks = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { if cnt[0] == Logic::One { o.write(cnt); } else { o.write(x.read()); } clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); clk.tick().await; }
-            }
-        "#;
-        let single_tick = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { if cnt[0] == Logic::One { o.write(cnt); } else { o.write(x.read()); } clk.tick().await; cnt = cnt + Bits::from_lit::<1>(); }
-            }
-        "#;
-        let d1 = |src: &str| Cfg::build(&parse(src)).unwrap().unprotected_pretick_out_write();
-        assert!(d1(two_ticks).is_empty());
-        assert!(lin(two_ticks).is_empty());
-        assert_eq!(d1(single_tick), vec!["o".to_string()]);
-    }
 
-    /// `e15ab` / `e15u`: a held trailing drive whose guard reads the input
-    /// immediately is hoisted into phase 0's flop, which tests the guard at the
-    /// other edge — flagged here (no deferred read on its path) and by the
-    /// trailing rule's guard clause.
-    #[test]
-    fn linear_trailing_held_guard_read_flagged() {
-        let wire = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; clk.tick().await; if x.read()[0] == Logic::One { let t: Bits<8> = Bits::from_lit::<7>(); o.write(t); } }
-            }
-        "#;
-        let input = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; clk.tick().await; if x.read()[1] == Logic::One { o.write(x.read()); } }
-            }
-        "#;
-        assert_eq!(lin(wire), vec!["o".to_string()]);
-        assert_eq!(lin(input), vec!["o".to_string()]);
-        assert_eq!(trailing_out(wire), vec!["o".to_string()], "the guard clause of trailing_out_reads_input");
-    }
 
-    /// `e15ai` / `e15ah`: `trailing_out_reads_input`'s guard clause on the
-    /// extraction route (flagged — the arm's edge-sampled drive tests the input
-    /// one edge later than the simulator's immediate read) and the single-tick
-    /// exemption, which holds for a guarded drive too (not flagged).
-    #[test]
-    fn trailing_out_guard_immediate_read_flagged_single_tick_not() {
-        let extracted = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut cnt: Bits<8> = Bits::zero();
-                loop { cnt = cnt + Bits::from_lit::<1>(); for _ in 0..2 { clk.tick().await; } if x.read()[0] == Logic::One { o.write(cnt); } }
-            }
-        "#;
-        let single_tick = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; if x.read()[0] == Logic::One { o.write(x.read()); } }
-            }
-        "#;
-        let deferred_guard = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; if x.read()[1] == Logic::One { o.write(x.read()); } clk.tick().await; }
-            }
-        "#;
-        assert_eq!(trailing_out(extracted), vec!["o".to_string()]);
-        assert!(trailing_out(single_tick).is_empty());
-        assert!(trailing_out(deferred_guard).is_empty(), "a guard read with a tick after it is deferred, not trailing");
-    }
 
-    /// A pre-loop binding is not a same-segment wire: `mp_rom`'s `data.write(
-    /// rom.read_port::<0>().data())` reads a `Memory` local defined before the
-    /// loop (committed state, `memory_result_drives_plain_out`'s to refuse) and a
-    /// pre-loop constant local is a constant — neither is this rule's, while the
-    /// same write through a `let` inside the loop is (`e15q`'s shape).
-    #[test]
-    fn linear_pre_loop_binding_is_not_a_wire() {
-        let memory = r#"
-            #[hardware(sequential)]
-            async fn mp_rom(clk: Clock<C>, addr: In<Bits<4>, C>, data: Out<Bits<16>, C>) {
-                let rom = Memory::<Bits<16>, 1, 0, C, 1, 1>::from_fn(clk.clone(), 16, |i| { Bits::from_usize(i * 3 + 7) });
-                loop { rom.read_port::<0>().read(addr.read().as_usize()); clk.tick().await; data.write(rom.read_port::<0>().data()); clk.tick().await; }
-            }
-        "#;
-        let pre_loop_constant = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let k: Bits<8> = Bits::from_lit::<7>();
-                loop { clk.tick().await; o.write(k); clk.tick().await; }
-            }
-        "#;
-        let in_loop_wire = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                loop { clk.tick().await; let k: Bits<8> = Bits::from_lit::<7>(); o.write(k); clk.tick().await; }
-            }
-        "#;
-        assert!(lin(memory).is_empty());
-        assert!(lin(pre_loop_constant).is_empty());
-        assert_eq!(lin(in_loop_wire), vec!["o".to_string()]);
-    }
 
     // ── the late-constant startup rule (`out_first_driven_late`, 2026-10-23) ──
 
-    fn late(src: &str) -> Vec<String> {
-        Cfg::build(&parse(src)).map(|c| c.out_first_driven_late()).unwrap_or_default()
-    }
 
-    /// `trailing_constant`'s shape (now `ui/fail/out_first_driven_late.rs`): `dv` is
-    /// written only with a constant, and only past the second edge. The simulator
-    /// shows its initial value at the first observation; `assign dv = 1'b1` never
-    /// does. Flagged — and `o`, register-valued, is not.
-    #[test]
-    fn late_constant_write_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, dv: Out<Logic, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { r = a.read(); clk.tick().await; o.write(r); clk.tick().await; dv.write(Logic::One); }
-            }
-        "#;
-        assert_eq!(late(src), vec!["dv".to_string()]);
-    }
 
-    /// `pulse_plain`'s shape: both writes constant, both past a folded tick-bearing
-    /// `for`. Flagged (it is the opted-out corpus witness).
-    #[test]
-    fn late_constant_after_folded_loop_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, dv: Out<Logic, C>) {
-                loop { for _ in 0..3 { clk.tick().await; } dv.write(Logic::One); clk.tick().await; dv.write(Logic::Zero); }
-            }
-        "#;
-        assert_eq!(late(src), vec!["dv".to_string()]);
-    }
 
-    /// The flipping witness (`late_constant_one_edge`, measured AGREEING): the same
-    /// constant moved to the segment after the FIRST tick runs in edge 0's post-edge
-    /// settle and is visible at the first observation. Not flagged.
-    #[test]
-    fn constant_one_edge_late_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, dv: Out<Logic, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { r = a.read(); clk.tick().await; dv.write(Logic::One); o.write(r); clk.tick().await; }
-            }
-        "#;
-        assert!(late(src).is_empty());
-    }
 
-    /// Three bare ticks, the constant after the third: past the second edge on the
-    /// linear path too, not only past a folded loop. Flagged.
-    #[test]
-    fn constant_two_edges_late_linear_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, dv: Out<Logic, C>) {
-                loop { clk.tick().await; clk.tick().await; dv.write(Logic::One); clk.tick().await; }
-            }
-        "#;
-        assert_eq!(late(src), vec!["dv".to_string()]);
-    }
 
-    /// The same body with `dv` also written in the head segment: it is driven from
-    /// the first cycle, so there is nothing for the first observation to miss. Not
-    /// flagged.
-    #[test]
-    fn late_constant_also_written_in_head_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, dv: Out<Logic, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { dv.write(Logic::Zero); r = a.read(); clk.tick().await; o.write(r); clk.tick().await; dv.write(Logic::One); }
-            }
-        "#;
-        assert!(late(src).is_empty());
-    }
 
-    /// A register-valued late write (`trailing_out`'s `mid`, `mac_pipeline`'s
-    /// `out`): outside the rule by its recorded boundary — the flop's zero initial
-    /// equals the wire's, so the traces agree today. Not flagged.
-    #[test]
-    fn late_register_write_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, mid: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { r = a.read(); clk.tick().await; mid.write(r); clk.tick().await; }
-            }
-        "#;
-        assert!(late(src).is_empty());
-    }
 
-    /// A single-tick loop: the trailing statements share the head's phase, so the
-    /// write executes before the first observation. Not flagged.
-    #[test]
-    fn single_tick_late_constant_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, dv: Out<Logic, C>) {
-                loop { clk.tick().await; dv.write(Logic::One); }
-            }
-        "#;
-        assert!(late(src).is_empty());
-    }
 
-    /// A constant that is written late on one path and from a register on another
-    /// is not "every write constant". Not flagged (the boundary is per port, over
-    /// all of its writes).
-    #[test]
-    fn late_mixed_constant_and_register_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { r = a.read(); clk.tick().await; if r == Bits::zero() { o.write(Bits::zero()); } else { o.write(r); } clk.tick().await; }
-            }
-        "#;
-        assert!(late(src).is_empty());
-    }
 
-    /// `RegOut` is excluded for free: `Node::writes` holds only combinational outputs.
-    #[test]
-    fn late_constant_regout_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, dv: RegOut<Logic, C>) {
-                loop { clk.tick().await; clk.tick().await; dv.write(Logic::One); }
-            }
-        "#;
-        assert!(late(src).is_empty());
-    }
 
-    /// A module with no `Out` at all cannot expose the hazard.
-    #[test]
-    fn hazard_regout_only_module_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: RegOut<Bits<8>, C>) {
-                let mut r: Bits<8> = Bits::zero();
-                loop { r = r + Bits::from_lit::<1>(); o.write(r); clk.tick().await; }
-            }
-        "#;
-        assert!(hazard(src).is_empty());
-    }
 
     /// The **back-edge clause** (added 2026-08-21). A local defined *post*-tick and
     /// read *pre*-tick is a flip-flop even though its live range crosses no tick: it
@@ -6511,7 +2687,7 @@ mod tests {
     fn post_tick_def_read_pre_tick_is_a_register() {
         let src = r#"
             #[hardware(synchronizer)]
-            async fn sync_2ff(clk: Clock<D>, d: In<Logic, S>, q: Out<Logic, D>) {
+            async fn sync_2ff(clk: Clock<D>, d: In<Logic, S>, q: RegOut<Logic, D>) {
                 let mut ff1 = Logic::Zero;
                 let mut ff2 = Logic::Zero;
                 loop {
@@ -6532,7 +2708,7 @@ mod tests {
     fn post_tick_temp_dying_in_its_own_segment_is_not_a_register() {
         let src = r#"
             #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {
                 let mut acc = Bits::from_u32(0);
                 loop {
                     o.write(acc);
@@ -6552,7 +2728,7 @@ mod tests {
     fn tuple_assign_targets_are_registers() {
         let src = r#"
             #[hardware(sequential)]
-            async fn tl(clk: Clock<C>, req: In<Logic, C>, r: Out<Logic, C>) {
+            async fn tl(clk: Clock<C>, req: In<Logic, C>, r: RegOut<Logic, C>) {
                 let mut phase = Phase::Green;
                 let mut timer: u8 = 0;
                 loop {
@@ -6575,7 +2751,7 @@ mod tests {
     fn branch_tick_state_register() {
         let src = r#"
             #[hardware(sequential)]
-            async fn det(clk: Clock<C>, rstn: In<Logic, C>, in_i: In<Logic, C>, out_o: Out<Logic, C>) {
+            async fn det(clk: Clock<C>, rstn: In<Logic, C>, in_i: In<Logic, C>, out_o: RegOut<Logic, C>) {
                 let mut state = State::A;
                 loop {
                     if rstn.read() == Logic::Zero { state = State::A; }
@@ -6646,7 +2822,7 @@ mod tests {
     fn trailing_tick_after_branch_accepted() {
         let src = r#"
             #[hardware(sequential)]
-            async fn ok(clk: Clock<C>, cond: In<Logic, C>, o: Out<Logic, C>) {
+            async fn ok(clk: Clock<C>, cond: In<Logic, C>, o: RegOut<Logic, C>) {
                 loop {
                     if cond.read() == Logic::One { o.write(Logic::One); }
                     else { o.write(Logic::Zero); }
@@ -6701,7 +2877,7 @@ mod tests {
     fn nested_loop_tick_then_break_accepted() {
         let src = r#"
             #[hardware(sequential)]
-            async fn ok(clk: Clock<C>, ready: In<Logic, C>, o: Out<Logic, C>) {
+            async fn ok(clk: Clock<C>, ready: In<Logic, C>, o: RegOut<Logic, C>) {
                 loop {
                     loop {
                         clk.tick().await;
@@ -6721,7 +2897,7 @@ mod tests {
     fn nested_loop_break_before_tick_accepted() {
         let src = r#"
             #[hardware(sequential)]
-            async fn ok(clk: Clock<C>, r: In<Logic, C>, o: Out<Logic, C>) {
+            async fn ok(clk: Clock<C>, r: In<Logic, C>, o: RegOut<Logic, C>) {
                 loop {
                     loop {
                         if r.read() == Logic::One { break; }
@@ -6815,7 +2991,7 @@ mod tests {
     fn a_counted_for_is_still_a_clock_boundary() {
         let src = r#"
             #[hardware(sequential)]
-            async fn ok(clk: Clock<C>, o: Out<Logic, C>) {
+            async fn ok(clk: Clock<C>, o: RegOut<Logic, C>) {
                 loop {
                     o.write(Logic::One);
                     for _ in 0..8 {
@@ -6838,7 +3014,7 @@ mod tests {
     fn an_early_exiting_wait_is_fine_when_the_outer_loop_ticks_too() {
         let src = r#"
             #[hardware(sequential)]
-            async fn ok(clk: Clock<C>, go: In<Logic, C>, o: Out<Logic, C>) {
+            async fn ok(clk: Clock<C>, go: In<Logic, C>, o: RegOut<Logic, C>) {
                 loop {
                     loop {
                         if go.read() == Logic::One { break; }
@@ -6893,7 +3069,7 @@ mod tests {
     fn tick_free_nested_loop_accepted() {
         let src = r#"
             #[hardware(sequential)]
-            async fn ok(clk: Clock<C>, o: Out<Bits<8>, C>) {
+            async fn ok(clk: Clock<C>, o: RegOut<Bits<8>, C>) {
                 loop {
                     let mut acc = Bits::from_u32(0);
                     for i in 0..8 { acc = acc + Bits::from_u32(1); }
@@ -6986,7 +3162,7 @@ mod tests {
     fn sequential_conditional_output_not_flagged() {
         let src = r#"
             #[hardware(sequential)]
-            async fn dff_en(clk: Clock<C>, d: In<Bits<8>, C>, en: In<Logic, C>, q: Out<Bits<8>, C>) {
+            async fn dff_en(clk: Clock<C>, d: In<Bits<8>, C>, en: In<Logic, C>, q: RegOut<Bits<8>, C>) {
                 loop {
                     clk.tick().await;
                     if en.read() == Logic::One { q.write(d.read()); }
@@ -7012,7 +3188,7 @@ mod tests {
     fn trailing_reads_are_immediate() {
         let src = r#"
             #[hardware(sequential)]
-            async fn dff_en(clk: Clock<C>, d: In<Bits<8>, C>, en: In<Logic, C>, q: Out<Bits<8>, C>) {
+            async fn dff_en(clk: Clock<C>, d: In<Bits<8>, C>, en: In<Logic, C>, q: RegOut<Bits<8>, C>) {
                 loop {
                     clk.tick().await;
                     if en.read() == Logic::One { q.write(d.read()); }
@@ -7029,7 +3205,7 @@ mod tests {
     fn loop_top_reads_are_deferred() {
         let src = r#"
             #[hardware(sequential)]
-            async fn mac_pipeline(clk: Clock<C>, a: In<Bits<8>, C>, b: In<Bits<8>, C>, c: In<Bits<8>, C>, out: Out<Bits<8>, C>) {
+            async fn mac_pipeline(clk: Clock<C>, a: In<Bits<8>, C>, b: In<Bits<8>, C>, c: In<Bits<8>, C>, out: RegOut<Bits<8>, C>) {
                 loop {
                     let product = a.read() * b.read();
                     let c_s = c.read();
@@ -7050,7 +3226,7 @@ mod tests {
     fn traffic_light_request_is_immediate() {
         let src = r#"
             #[hardware(sequential)]
-            async fn tl(clk: Clock<C>, request: In<Logic, C>, r: Out<Logic, C>) {
+            async fn tl(clk: Clock<C>, request: In<Logic, C>, r: RegOut<Logic, C>) {
                 let mut phase = Phase::Green;
                 let mut timer: u8 = 0;
                 loop {
@@ -7071,7 +3247,7 @@ mod tests {
     fn det_010_canonical_reads_deferred() {
         let src = r#"
             #[hardware(sequential)]
-            async fn det_010(clk: Clock<C>, rstn: In<Logic, C>, in_i: In<Logic, C>, out_o: Out<Logic, C>) {
+            async fn det_010(clk: Clock<C>, rstn: In<Logic, C>, in_i: In<Logic, C>, out_o: RegOut<Logic, C>) {
                 let mut state = State::A;
                 loop {
                     if rstn.read() == Logic::Zero { state = State::A; }
@@ -7094,7 +3270,7 @@ mod tests {
     fn det_010_awaits_all_reads_deferred() {
         let src = r#"
             #[hardware(sequential)]
-            async fn det_010_awaits(clk: Clock<C>, rstn: In<Logic, C>, in_i: In<Logic, C>, out_o: Out<Logic, C>) {
+            async fn det_010_awaits(clk: Clock<C>, rstn: In<Logic, C>, in_i: In<Logic, C>, out_o: RegOut<Logic, C>) {
                 loop {
                     out_o.write(Logic::Zero);
                     if rstn.read() == Logic::Zero {
@@ -7151,7 +3327,7 @@ mod tests {
     fn multiple_reads_same_port_before_tick() {
         let src = r#"
             #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {
                 loop {
                     let x = a.read();
                     let y = a.read();
@@ -7168,7 +3344,7 @@ mod tests {
     fn no_in_params_empty() {
         let src = r#"
             #[hardware(sequential)]
-            async fn free(clk: Clock<C>, o: Out<Bits<8>, C>) {
+            async fn free(clk: Clock<C>, o: RegOut<Bits<8>, C>) {
                 let mut v = Bits::from_u32(0);
                 loop { o.write(v); clk.tick().await; v = v + Bits::from_u32(1); }
             }
@@ -7419,91 +3595,10 @@ mod tests {
         assert!(err.contains("is read before the `clk.tick().await`"), "{err}");
     }
 
-    fn plain_out_ports(src: &str) -> Vec<String> {
-        Cfg::build(&parse(src))
-            .expect("has a loop")
-            .memory_result_drives_plain_out()
-    }
 
-    /// The measured divergence: an extracted module's plain `Out` wired straight to
-    /// a read result lands a cycle late in SystemVerilog. `vlir_lower`'s copy of
-    /// this rule counts LOWERED phases and an extracted module has one, so it sees
-    /// nothing.
-    #[test]
-    fn a_plain_out_from_a_read_result_across_phases_is_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: Out<Bits<16>, C>) {
-                let rom = Memory::<Bits<16>, 1, 0, C, 1, 1>::new(clk.clone(), 256);
-                loop {
-                    rom.read_port::<0>().read(a.read().as_usize());
-                    clk.tick().await;
-                    o.write(rom.read_port::<0>().data());
-                    for _ in 0..2 { clk.tick().await; }
-                }
-            }
-        "#;
-        assert_eq!(plain_out_ports(src), ["o"]);
-    }
 
-    /// Through a same-cycle local, which is the same net wearing a name.
-    #[test]
-    fn the_drive_is_followed_through_a_same_cycle_local() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: Out<Bits<16>, C>) {
-                let rom = Memory::<Bits<16>, 1, 0, C, 1, 1>::new(clk.clone(), 256);
-                loop {
-                    rom.read_port::<0>().read(a.read().as_usize());
-                    clk.tick().await;
-                    let w = rom.read_port::<0>().data();
-                    o.write(w);
-                    for _ in 0..2 { clk.tick().await; }
-                }
-            }
-        "#;
-        assert_eq!(plain_out_ports(src), ["o"]);
-    }
 
-    /// A register between the result and the port is the supported form (`mp_reg`),
-    /// and a register is exactly what a value that survives an edge is.
-    #[test]
-    fn a_register_between_the_result_and_the_port_is_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: Out<Bits<16>, C>) {
-                let rom = Memory::<Bits<16>, 1, 0, C, 1, 1>::new(clk.clone(), 256);
-                let mut q: Bits<16> = Bits::zero();
-                loop {
-                    o.write(q);
-                    rom.read_port::<0>().read(a.read().as_usize());
-                    clk.tick().await;
-                    q = rom.read_port::<0>().data();
-                    clk.tick().await;
-                }
-            }
-        "#;
-        assert_eq!(plain_out_ports(src), Vec::<String>::new());
-    }
 
-    /// A single-phase module: the post-tick segment shares the head's phase, so the
-    /// port is driven from the captured word in the cycle it was captured — correct,
-    /// and pinned behaviourally as `rom_direct`.
-    #[test]
-    fn a_single_phase_module_is_not_flagged() {
-        let src = r#"
-            #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: Out<Bits<16>, C>) {
-                let rom = Memory::<Bits<16>, 1, 0, C, 1, 1>::new(clk.clone(), 256);
-                loop {
-                    rom.read_port::<0>().read(a.read().as_usize());
-                    clk.tick().await;
-                    o.write(rom.read_port::<0>().data());
-                }
-            }
-        "#;
-        assert_eq!(plain_out_ports(src), Vec::<String>::new());
-    }
 
     /// A module with no `Memory` local has nothing to check — and a `read_port`
     /// method on something else is not a memory access.
@@ -7511,7 +3606,7 @@ mod tests {
     fn a_module_without_a_memory_is_unaffected() {
         let src = r#"
             #[hardware(sequential)]
-            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
+            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {
                 loop {
                     o.write(a.read());
                     clk.tick().await;

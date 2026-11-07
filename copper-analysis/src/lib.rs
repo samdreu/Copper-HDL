@@ -41,6 +41,68 @@ pub use init::{
 };
 pub use shape::{check_awaits, check_nested_loop_shape};
 
+/// SPEC II.1 **R8** (D-8, Phase C step 3, 2026-11-06): a `sequential` or
+/// `synchronizer` module has no plain `Out<T, D>`. Under the one-job body every
+/// output of a clocked module is a register — a `RegOut<T, D>` written in the
+/// resumption that ends at edge N+1 shows from `obs_{N+1}` — and a value that must
+/// follow an input within one cycle (a passthrough, a Mealy output) is a
+/// `#[hardware(combinational)]` module wired to the clocked module's `RegOut`s.
+///
+/// Reads the mode from the first token of the `#[hardware(...)]` attribute list
+/// (CLAUDE.md: a flag after the mode must not drop the module from the check);
+/// `Ok` for any other mode or for a function with no such attribute, so both
+/// front-ends can call it on every target. The error is spanned at the port's
+/// type; both front-ends report the same message.
+pub fn check_clocked_outputs(f: &ItemFn) -> Result<(), syn::Error> {
+    let clocked = f.attrs.iter().any(|a| {
+        a.path().segments.last().is_some_and(|s| s.ident == "hardware")
+            && a
+                .meta
+                .require_list()
+                .ok()
+                .and_then(|l| l.tokens.clone().into_iter().next())
+                .is_some_and(|t| {
+                    let t = t.to_string();
+                    t == "sequential" || t == "synchronizer"
+                })
+    });
+    if !clocked {
+        return Ok(());
+    }
+    check_no_plain_out(f)
+}
+
+/// R8's core, for a caller that already knows `f` is a clocked module — the
+/// macro, whose input fn no longer carries the `#[hardware]` attribute being
+/// expanded. [`check_clocked_outputs`] is the attribute-reading wrapper the
+/// transpiler and the corpus audit call.
+pub fn check_no_plain_out(f: &ItemFn) -> Result<(), syn::Error> {
+    for arg in &f.sig.inputs {
+        let syn::FnArg::Typed(pt) = arg else { continue };
+        let syn::Type::Path(tp) = &*pt.ty else { continue };
+        let Some(last) = tp.path.segments.last() else { continue };
+        if last.ident == "Out" {
+            let name = match &*pt.pat {
+                syn::Pat::Ident(i) => i.ident.to_string(),
+                _ => "?".to_string(),
+            };
+            return Err(syn::Error::new_spanned(&pt.ty, clocked_out_message(&name)));
+        }
+    }
+    Ok(())
+}
+
+/// The one message of R8, shared by both front-ends.
+pub fn clocked_out_message(port: &str) -> String {
+    format!(
+        "output port `{port}` is a plain `Out` on a clocked module: under the one-job body \
+         (D-8, SPEC II.1 R8) every output of a `sequential` or `synchronizer` module is a \
+         register. Declare it `RegOut<T, D>` (written before the tick, it shows from the next \
+         edge), or compute it in a `#[hardware(combinational)]` module wired to this module's \
+         `RegOut`s if it must follow an input within the cycle"
+    )
+}
+
 /// The register power-on rule (`init`, 2026-10-29): every pre-loop `let mut` the
 /// liveness inference calls a register must be initialized from a constant
 /// ([`is_constant_expr`]) or from `Bits::x()`. The initializer is the flip-flop's
@@ -55,21 +117,6 @@ pub fn check_register_initializers(f: &ItemFn) -> Result<(), syn::Error> {
     }
 }
 
-/// Plain combinational `Out` ports written **between a leading `In` read and the
-/// update of a register the write reads** — the read's pre-edge barrier drags the
-/// write to the pre-edge settle, where it captures the register's *pre-update*
-/// value; the emitted `assign` (the flip-flop's Q) never shows that value at any
-/// observation instant, so the hardware leads the simulator by one cycle,
-/// silently. The fifth member of the pre-tick alignment family, derived from the
-/// cycle-dataflow model before its controlled measurement
-/// (`design_docs/DERIVATION_TABLE.md` F2; the V8 battery in
-/// `tests/sequential_forwarding_divergence.rs`). Returns the offending ports,
-/// sorted; empty for a combinational module or one with no top-level loop. See
-/// [`Cfg::pretick_out_write_before_update`] for the three clauses and their
-/// flipping witnesses.
-pub fn pretick_out_write_before_update(f: &ItemFn) -> Vec<String> {
-    Cfg::build(f).map(|c| c.pretick_out_write_before_update()).unwrap_or_default()
-}
 
 /// Per-phase facts for the cycle-dataflow derivation table
 /// (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md` phase 1). Reporting only — no rule
@@ -96,115 +143,12 @@ pub fn infer_registers(f: &ItemFn) -> Vec<String> {
     Cfg::build(f).map(|c| c.registers()).unwrap_or_default()
 }
 
-/// Combinational output ports (`Out<…>`, not `RegOut`) that hit the
-/// multi-write-around-a-tick **collapse**: written on both sides of a bare
-/// `clk.tick().await` within one iteration, with a leading (deferred) input read
-/// shifting the pre-tick write into the pre-edge — where the coroutine simulator
-/// clobbers it with the post-tick write before observation (silent sim ≠ synth; see
-/// the paper's contribution 5). Returns the offending ports, sorted; empty for a
-/// combinational module or one with no top-level loop. Intended for a macro
-/// guardrail that rejects the pattern (directing the author to `RegOut`, or to
-/// explicit per-state writes). See [`Cfg::multi_write_collapse`] for the precise
-/// three-part condition and why it does not flag `uart`/`counter`/serializers.
-pub fn multi_write_collapse(f: &ItemFn) -> Vec<String> {
-    Cfg::build(f).map(|c| c.multi_write_collapse()).unwrap_or_default()
-}
 
-/// Combinational `Out` ports exposed to the **pre-tick alignment hazard** (D1,
-/// re-derived 2026-10-28): before the first tick the port's drives have **mixed
-/// anchors** — an `In` read comb-reaches some drive while some drive has a read-free
-/// path from the loop head — or a drive no read reaches sits under a branch testing
-/// a register assigned earlier in the segment (a **forwarded guard**). Returns the
-/// offending ports, sorted; empty for a combinational module, one with no top-level
-/// loop, one without registers, or one whose outputs are all `RegOut`.
-///
-/// The fix to point an author at is `RegOut`, which is immune by construction — the
-/// same remedy [`multi_write_collapse`] points at — or a uniform anchor (read the
-/// input before every write of the port, or before none) and committed-state
-/// guards. See [`Cfg::unprotected_pretick_out_write`] for the derivation, and
-/// `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10 for the measured verdict table.
-pub fn unprotected_pretick_out_write(f: &ItemFn) -> Vec<String> {
-    Cfg::build(f)
-        .map(|c| c.unprotected_pretick_out_write())
-        .unwrap_or_default()
-}
 
-/// `RegOut` ports written in the trailing region from an *immediate* `In` read
-/// (directly, not through a register). A `RegOut` write takes effect at the first
-/// clock edge after it executes; for a trailing write that is the next edge, where
-/// a non-blocking assign samples the input one drive later than the simulator's
-/// immediate read did. See [`Cfg::trailing_regout_reads_input`]. Returns the
-/// offending ports, sorted.
-pub fn trailing_regout_reads_input(f: &ItemFn) -> Vec<String> {
-    Cfg::build(f).map(|c| c.trailing_regout_reads_input()).unwrap_or_default()
-}
 
-/// Plain `Out` ports written in the trailing region from an *immediate* `In` read
-/// (directly, not through a register) in a body that crosses more than one clock
-/// edge: the simulator shows the result at the opening observation, and neither
-/// emitted trailing drive form samples the input then (the e8 class, 2026-10-26).
-/// A single-tick body is exempt and agrees. See
-/// [`Cfg::trailing_out_reads_input`]. Returns the offending ports, sorted.
-pub fn trailing_out_reads_input(f: &ItemFn) -> Vec<String> {
-    Cfg::build(f).map(|c| c.trailing_out_reads_input()).unwrap_or_default()
-}
 
-/// Plain combinational `Out` ports driven in **more than one clock phase** whose
-/// emitted form cannot show the simulator's trace — narrowed 2026-10-23 (phase E)
-/// to the measured divergent classes, and again 2026-10-26 when codegen's opening
-/// walk became arm-granular: a write anchored differently on the two sides (an
-/// input read reaching some write of the port edge-samples every drive of it; a
-/// trailing or register-free read is immediate in the simulator), a wait loop's
-/// read before an opening write (unmeasured, refused by construction), and the
-/// linear route, which has no mux form. An extracted module none of whose writes
-/// of the port is reached by an input read (whatever it reads elsewhere), and
-/// one whose every write of the port sits behind a deferred read, are accepted
-/// and measured agreeing. Returns the offending ports, sorted; empty for a
-/// combinational module, one with no top-level loop, or one whose outputs are all
-/// `RegOut`.
-///
-/// The remedy is `RegOut`, which is immune by construction. See
-/// [`Cfg::multi_phase_out_write`] for the derivation, the verdict table, and why
-/// widening the D1 rule instead was rejected with corpus evidence.
-pub fn multi_phase_out_write(f: &ItemFn) -> Vec<String> {
-    Cfg::build(f).map(|c| c.multi_phase_out_write()).unwrap_or_default()
-}
 
-/// Plain combinational `Out` ports **first driven late**: every write of the port
-/// is a constant and none of them executes before the second clock edge of a loop
-/// that crosses more than one edge per iteration. The simulator shows the port's
-/// initial value at the first observation while the emitted `assign` drives the
-/// constant from time 0 — a one-cycle startup transient no continuous assign can
-/// reproduce. Returns the offending ports, sorted; empty for a combinational module,
-/// one with no top-level loop, a single-tick loop, or all-`RegOut` outputs.
-///
-/// The remedies are to write the port in the head segment too, or to declare it
-/// `RegOut`. See [`Cfg::out_first_driven_late`] for the measurement, the flipping
-/// witness that fixes the boundary at the second edge, and why register-valued late
-/// writes are deliberately outside it.
-pub fn out_first_driven_late(f: &ItemFn) -> Vec<String> {
-    Cfg::build(f).map(|c| c.out_first_driven_late()).unwrap_or_default()
-}
 
-/// Plain combinational `Out` ports driven on the **linear multi-tick route** by a
-/// write whose anchor the emitted form cannot show, or whose emitted form is a
-/// latch (§10.7, 2026-10-30; restated by form 2026-11-02, §10.8): on that route
-/// the form follows the write's shape and operand — a conditional write on every
-/// path of its segment, or preceded by no input read, is a phase-gated comb mux
-/// assigned only inside its phase (a latch, refused); a same-segment `let` wire,
-/// or a held conditional write behind a read, is the phase-guarded flop
-/// (closing); an unconditional register, input or constant is a continuous
-/// assign (opening) — while the simulator anchors each execution by whether a
-/// deferred input read precedes it. A sampled write with no such read on some
-/// path, an input through the assign, or a register or constant behind such a
-/// read when the assign can change at another edge, diverges. Returns the
-/// offending ports, sorted; empty on the extraction route, in a single-tick
-/// body, or for `RegOut`; a register-free body is examined. See
-/// [`Cfg::linear_out_write_anchor_mismatch`] for the derivation and the fifty
-/// measured cells.
-pub fn linear_out_write_anchor_mismatch(f: &ItemFn) -> Vec<String> {
-    Cfg::build(f).map(|c| c.linear_out_write_anchor_mismatch()).unwrap_or_default()
-}
 
 /// How many **clock phases** `f`'s top-level loop occupies — the number of distinct
 /// cycles one iteration runs in. `None` for a module with no loop.
@@ -225,17 +169,6 @@ pub fn check_reachability(f: &ItemFn) -> Result<(), syn::Error> {
     }
 }
 
-/// Plain combinational `Out` ports driven from a **memory read result** in a
-/// multi-phase module — a shape with no correct emitted form (measured: a full
-/// cycle late). Returns the offending ports, sorted; the remedy is `RegOut`, or a
-/// register between the result and the port.
-///
-/// `vlir_lower` states the same rule over the *lowered* phases and structurally
-/// cannot see an extracted module, which has one lowered phase however many clock
-/// phases its source has. See [`Cfg::memory_result_drives_plain_out`].
-pub fn memory_result_drives_plain_out(f: &ItemFn) -> Vec<String> {
-    Cfg::build(f).map(|c| c.memory_result_drives_plain_out()).unwrap_or_default()
-}
 
 /// Enforce the **memory-port staging rules** — one access per bus per cycle, a read
 /// result observed only after the clock edge that produces it, and never observed on
@@ -648,7 +581,7 @@ endmodule
     fn constant_not_counted_as_register() {
         let src = r#"
             #[hardware(sequential)]
-            async fn m(clk: Clock<C>, o: Out<Bits<32>, C>) {
+            async fn m(clk: Clock<C>, o: RegOut<Bits<32>, C>) {
                 let mask = Bits::from_u32(7);
                 let mut state = Bits::from_u32(1);
                 loop {
@@ -708,7 +641,7 @@ endmodule
     fn det_010_reference_is_storage_equivalent_not_name_exact() {
         let det_010_src = r#"
             #[hardware(sequential)]
-            async fn det_010(clk: Clock<C>, rstn: In<Logic, C>, in_i: In<Logic, C>, out_o: Out<Logic, C>) {
+            async fn det_010(clk: Clock<C>, rstn: In<Logic, C>, in_i: In<Logic, C>, out_o: RegOut<Logic, C>) {
                 let mut state = State::A;
                 loop {
                     if rstn.read() == Logic::Zero { state = State::A; }

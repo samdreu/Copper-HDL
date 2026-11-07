@@ -1,5 +1,5 @@
 use copper_core::{Bits, Clock, Logic, ClockDomain};
-use copper_core::port::{In, Out};
+use copper_core::port::{In, Out, RegOut};
 use copper_macros::hardware;
 
 struct MainClk;
@@ -11,7 +11,7 @@ impl ClockDomain for MainClk {}
 // CFG-based reachability check exists to catch (a tick-free *path*, not a
 // tick-free *body*), enforced in the macro.
 #[hardware(sequential)]
-async fn partial(clk: Clock<MainClk>, sel: In<Logic, MainClk>, out: Out<Bits<8>, MainClk>) {
+async fn partial(clk: Clock<MainClk>, sel: In<Logic, MainClk>, out: RegOut<Bits<8>, MainClk>) {
     let mut n: Bits<8> = Bits::zero();
     loop {
         if sel.read() == Logic::One {

@@ -1,7 +1,7 @@
 error: hardware function parameters must be Clock<D>, In<T>, Out<T>, RegOut<T>, or Memory<T, R, W, D, RL, WL>
   --> tests/ui/fail/function_typed_mut_input.rs:10:46
    |
-10 | async fn counter(clk: Clock<MainClk>, input: u8, out: Out<u8>) {
+10 | async fn counter(clk: Clock<MainClk>, input: u8, out: RegOut<u8>) {
    |                                              ^^
 
 warning: unused import: `Clock`
@@ -12,8 +12,8 @@ warning: unused import: `Clock`
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-warning: unused imports: `In` and `Out`
+warning: unused imports: `In`, `Out`, and `RegOut`
  --> tests/ui/fail/function_typed_mut_input.rs:2:25
   |
-2 | use copper_core::port::{In, Out};
-  |                         ^^  ^^^
+2 | use copper_core::port::{In, Out, RegOut};
+  |                         ^^  ^^^  ^^^^^^

@@ -11,14 +11,14 @@
 //! "Gap 2"). This is rejected at compile time:
 //!
 //! ```compile_fail
-//! use copper_core::port::Out;
+//! use copper_core::port::RegOut;
 //! use copper_core::{Clock, ClockDomain, Logic};
 //! use copper_macros::hardware;
 //! struct Slow; impl ClockDomain for Slow {}
 //! struct Fast; impl ClockDomain for Fast {}
 //!
 //! #[hardware(sequential)]
-//! async fn m(clk: Clock<Slow>, q: Out<Logic, Slow>) {
+//! async fn m(clk: Clock<Slow>, q: RegOut<Logic, Slow>) {
 //!     let f = Clock::<Fast>::new();   // rejected: a module may not create a clock
 //!     loop { q.write(Logic::Zero); clk.tick().await; let _ = &f; }
 //! }
@@ -28,13 +28,13 @@
 //! the same real clock:
 //!
 //! ```
-//! use copper_core::port::Out;
+//! use copper_core::port::RegOut;
 //! use copper_core::{Clock, ClockDomain, Logic};
 //! use copper_macros::hardware;
 //! struct Slow; impl ClockDomain for Slow {}
 //!
 //! #[hardware(sequential)]
-//! async fn m(clk: Clock<Slow>, q: Out<Logic, Slow>) {
+//! async fn m(clk: Clock<Slow>, q: RegOut<Logic, Slow>) {
 //!     let child_clk = clk.clone();
 //!     loop { q.write(Logic::Zero); clk.tick().await; let _ = &child_clk; }
 //! }

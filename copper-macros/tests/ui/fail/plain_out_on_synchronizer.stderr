@@ -1,0 +1,19 @@
+error: output port `q` is a plain `Out` on a clocked module: under the one-job body (D-8, SPEC II.1 R8) every output of a `sequential` or `synchronizer` module is a register. Declare it `RegOut<T, D>` (written before the tick, it shows from the next edge), or compute it in a `#[hardware(combinational)]` module wired to this module's `RegOut`s if it must follow an input within the cycle
+  --> tests/ui/fail/plain_out_on_synchronizer.rs:13:60
+   |
+13 | async fn sync_plain(clk: Clock<Dst>, d: In<Logic, Src>, q: Out<Logic, Dst>) {
+   |                                                            ^^^^^^^^^^^^^^^
+
+warning: unused imports: `In` and `Out`
+ --> tests/ui/fail/plain_out_on_synchronizer.rs:1:25
+  |
+1 | use copper_core::port::{In, Out};
+  |                         ^^  ^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Clock` and `Logic`
+ --> tests/ui/fail/plain_out_on_synchronizer.rs:2:19
+  |
+2 | use copper_core::{Clock, ClockDomain, Logic};
+  |                   ^^^^^               ^^^^^

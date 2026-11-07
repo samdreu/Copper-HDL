@@ -1,0 +1,21 @@
+error: Unsupported #[hardware(...)] flag `allow_pretick_alignment`; the attribute takes a mode only — `allow_pretick_alignment` was retired with the pre-tick alignment rules by D-8 (SPEC II.3.2): a clocked module has no plain `Out`, so there is nothing to opt out of
+  --> tests/ui/fail/retired_pretick_opt_out.rs:11:1
+   |
+11 | #[hardware(sequential, allow_pretick_alignment)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `hardware` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/retired_pretick_opt_out.rs:1:25
+  |
+1 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Bits` and `Clock`
+ --> tests/ui/fail/retired_pretick_opt_out.rs:2:19
+  |
+2 | use copper_core::{Bits, Clock, ClockDomain};
+  |                   ^^^^  ^^^^^

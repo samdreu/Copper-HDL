@@ -1,5 +1,5 @@
 use copper_core::{Bits, Clock, ClockDomain};
-use copper_core::port::{In, Out};
+use copper_core::port::{In, RegOut};
 use copper_macros::hardware;
 
 struct MainClk;
@@ -19,7 +19,7 @@ impl ClockDomain for MainClk {}
 // precedes the read (V8c's measured-agreeing form), which preserves everything this
 // fixture exists to exercise.
 #[hardware(sequential)]
-async fn accum(clk: Clock<MainClk>, step: In<Bits<8>, MainClk>, out: Out<Bits<8>, MainClk>) {
+async fn accum(clk: Clock<MainClk>, step: In<Bits<8>, MainClk>, out: RegOut<Bits<8>, MainClk>) {
     let mut count: Bits<8> = Bits::zero();
     loop {
         out.write(count);

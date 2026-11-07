@@ -319,21 +319,6 @@ impl PreparedSource {
     }
 }
 
-/// Does this module carry `#[hardware(sequential, allow_pretick_alignment)]`?
-///
-/// Read from the first token of the attribute list rather than parsed as an ident
-/// list: `parse_args::<syn::Ident>()` fails outright once a flag is present, which
-/// is how modules carrying one have silently vanished from corpus scans before.
-fn opts_out_of_pretick_alignment(f: &syn::ItemFn) -> bool {
-    f.attrs.iter().any(|a| {
-        a.path().segments.last().is_some_and(|s| s.ident == "hardware")
-            && a.meta
-                .require_list()
-                .ok()
-                .is_some_and(|l| l.tokens.to_string().contains("allow_pretick_alignment"))
-    })
-}
-
 /// Run the per-module transpile: the shared reachability well-formedness check,
 /// register inference (logged), then FIR → SV.
 fn transpile_target(
@@ -375,153 +360,11 @@ fn vlir_for_target(
     // register's `initial` assignment; what it cannot fold is an error there, never
     // a dropped value.
     copper_analysis::check_register_initializers(target).map_err(|e| e.to_string())?;
-    // A plain `Out` driven in more than one clock phase, in a class whose emitted
-    // form cannot show the simulator's trace (narrowed 2026-10-23, phase E).
-    // `vlir_lower` refuses the linear-path instance as multiply driven, but control
-    // extraction rewrites the body into a single-tick `match pc` FSM first — so by
-    // the time that check runs, the phases it counts are gone. Check the SOURCE,
-    // where the ticks are still visible.
-    //
-    // `allow_pretick_alignment` opts out here exactly as it does in the macro: the
-    // flag silences the ERROR, not the detection, and a module that exists to
-    // DEMONSTRATE the divergence has to be transpilable or there is nothing to
-    // measure it against.
-    if !opts_out_of_pretick_alignment(target) {
-        if let Some(port) = copper_analysis::multi_phase_out_write(target).first() {
-            return Err(format!(
-                "output port '{port}' is driven in a shape whose emitted form shows one of \
-                 its writes a cycle after the simulator — in more than one clock phase \
-                 (across clk.tick().await boundaries), or in a single phase after the first \
-                 by a write an input read reaches on one control path and not on another: \
-                 a write preceded by an input read in its phase that the simulator \
-                 nonetheless runs at the cycle's opening (the read has no clk.tick().await \
-                 after it, the body has no register, or a control path skips the read), a \
-                 wait loop's read before an opening write, or the linear multi-tick path \
-                 for a two-phase port. Declare it as RegOut<…>, drive it in exactly one \
-                 phase that no input read reaches, or make each write's anchor uniform \
-                 (behind an input read that a clk.tick().await follows on every path to \
-                 it, or behind none)"
-            ));
-        }
-        // A plain `Out` on the linear multi-tick route whose write's anchor the
-        // emitted form cannot show, or whose form has two drivers: an unconditional
-        // register/input/constant is a continuous assign, an unconditional
-        // same-segment wire the phase-guarded flop, a conditional drive the drive-
-        // level mux + hold form (an opening drive — no input read before it — in
-        // the comb copy, every drive loading the hold register at the edge) or
-        // the flop when no drive is opening; the simulator anchors each execution
-        // by the deferred read before it (`Cfg::linear_out_write_anchor_mismatch`,
-        // §10.7, 2026-10-30; §10.8 and §10.9, 2026-11-02). Same rule, same
-        // opt-out, as the macro.
-        if let Some(port) = copper_analysis::linear_out_write_anchor_mismatch(target).first() {
-            return Err(format!(
-                "output port '{port}' is driven on the linear multi-tick path by a write whose \
-                 timing the emitted form cannot show, or whose emitted form has two drivers. A \
-                 conditional write is realized at the opening when no input read precedes it in \
-                 its arm and at the segment's closing edge otherwise (always at the closing edge \
-                 when a write of the port in the segment goes through a same-segment wire); an unconditional \
-                 same-segment wire is sampled at the closing edge; an unconditional register, \
-                 input or constant is a continuous assign — whatever reads precede the write; a \
-                 conditional write after the last clk.tick().await is sampled at the next edge. \
-                 So a conditional write lands late where the simulator runs it at the opening \
-                 behind an input read that no clk.tick().await follows (its own operand in a \
-                 register-free body, a read on one path to it only, or after the last tick), \
-                 early where its guard tests a register updated earlier in the segment, a \
-                 sampled wire with no deferred input read on some path lands one observation \
-                 late, an input through the assign is tracked where the simulator sampled it \
-                 once per iteration, a register or constant behind a deferred read lands one \
-                 observation early whenever it can change at another edge, and a port written \
-                 both unconditionally and conditionally in one segment has two drivers. Read an \
-                 input before every write of a sampled port in its segment, update a register \
-                 in the same segment before writing it (or read the input after the tick), move \
-                 a conditional write before the last tick, write a port either unconditionally \
-                 or conditionally in a segment, or declare it as RegOut<…>"
-            ));
-        }
-        // A plain `Out` FIRST DRIVEN LATE — every write a constant, none before the
-        // second clock edge of a multi-tick body. The emitted `assign` drives the
-        // constant from time 0 while the simulator shows the initial value at the
-        // first observation: a one-cycle startup transient with no emitted form.
-        // Same rule, same opt-out, as the macro (`Cfg::out_first_driven_late`).
-        if let Some(port) = copper_analysis::out_first_driven_late(target).first() {
-            return Err(format!(
-                "output port '{port}' is first driven late: every write of it is a constant \
-                 and none executes before the second clock edge of a loop that crosses more \
-                 than one clk.tick().await per iteration, so the simulator shows its initial \
-                 value at the first observation while the emitted assign drives the constant \
-                 from time 0 (a one-cycle startup transient). Write it in the head segment \
-                 too, or declare it as RegOut<…>"
-            ));
-        }
-    }
-
-    // Front-end parity (2026-10-23): the pre-tick alignment rules the macro
-    // enforces, run here too so the standalone CLI refuses what the macro refuses.
-    // `multi_write_collapse` has no opt-out in either front-end; the other two
-    // honour `allow_pretick_alignment` exactly as `multi_phase_out_write` does.
-    if let Some(port) = copper_analysis::multi_write_collapse(target).first() {
-        return Err(format!(
-            "output port '{port}' is written on both sides of a clk.tick().await within one \
-             iteration, after a leading input read — the simulator collapses this \
-             multi-write-around-a-tick to the last write and disagrees with the synthesized \
-             hardware. Declare it as RegOut<…>, or split the writes into distinct FSM states"
-        ));
-    }
-    if !opts_out_of_pretick_alignment(target) {
-        if let Some(port) = copper_analysis::unprotected_pretick_out_write(target).first() {
-            return Err(format!(
-                "output port '{port}' is driven before the first clk.tick().await by a write \
-                 an input read reaches on one control path and not on another, or on every \
-                 path with an input read before some write and not another (the every-path \
-                 mux has no hold register), or under a test of a register assigned earlier in \
-                 the segment (a forwarded guard), so the emitted form shows it one observation \
-                 off from the simulator. Make each write's anchor uniform (an input read before \
-                 it on every path, or on none), test only committed state, or declare it as \
-                 RegOut<…>"
-            ));
-        }
-        if let Some(port) = copper_analysis::pretick_out_write_before_update(target).first() {
-            return Err(format!(
-                "output port '{port}' is written before the update of a register the write \
-                 reads (or, written on every path behind an input read in a loop with one \
-                 clk.tick().await, tests or reads a register updated after that tick, or tests \
-                 a register updated later in the pre-tick segment), so it \
-                 publishes the register's pre-update value, which the emitted \
-                 assign never shows — the hardware leads the simulator by one cycle. Move the \
-                 write after the update or before the tick/input read, or declare it as RegOut<…>"
-            ));
-        }
-    }
-
-    // A `RegOut` written in the trailing region from an immediate input read: the
-    // emitted next-edge non-blocking assign samples the input one drive later than
-    // the simulator's read (`Cfg::trailing_regout_reads_input`). Same opt-out as
-    // above, for the same reason.
-    if !opts_out_of_pretick_alignment(target) {
-        if let Some(port) = copper_analysis::trailing_regout_reads_input(target).first() {
-            return Err(format!(
-                "registered output '{port}' is written after the last clk.tick().await from \
-                 an input read in that same region — the write commits at the next edge, \
-                 where the flip-flop samples the input one drive later than the simulator's \
-                 immediate read. Read the input before the tick, or latch it into a register \
-                 and write the port from the register"
-            ));
-        }
-        // …and its plain-`Out` sibling (the e8 class): a trailing plain `Out` from an
-        // immediate input read in a multi-edge body. Neither trailing drive form
-        // samples the input when the simulator's immediate read did
-        // (`Cfg::trailing_out_reads_input`); a single-tick body is exempt.
-        if let Some(port) = copper_analysis::trailing_out_reads_input(target).first() {
-            return Err(format!(
-                "output port '{port}' is written after the last clk.tick().await from an \
-                 input read in that same region (in its value, or in an enclosing if/match \
-                 test), in a body that crosses more than one clock edge — the emitted drive \
-                 samples the input one observation later than the simulator's immediate \
-                 read. Read the input before the tick, or latch it into a register and write \
-                 the port from the register"
-            ));
-        }
-    }
+    // SPEC II.1 R8 (D-8, Phase C step 3, 2026-11-06): a clocked module has no
+    // plain `Out` — the macro's rule, same function, same message. The pre-tick
+    // alignment family (rules 9–15) and `multi_write_collapse` (rule 8), which
+    // reasoned about the plain `Out` this refuses, are retired (SPEC II.3.2).
+    copper_analysis::check_clocked_outputs(target).map_err(|e| e.to_string())?;
 
     // The memory-port staging rules, for the same reason and from the same place:
     // they are questions about clock EDGES, and control extraction rewrites the
@@ -529,20 +372,8 @@ fn vlir_for_target(
     // the lowered body's tick-delimited segments, which made an ordinary memory
     // design fail the moment anything else in the module needed extraction.
     copper_analysis::check_memory_staging(target).map_err(|e| e.to_string())?;
-    // …and the plain-`Out`-from-a-read-result rule, for the same reason:
-    // `vlir_lower::reject_memory_driven_comb_outputs` gives up on `phases.len() < 2`,
-    // and an extracted module always has exactly one lowered phase. That check was
-    // unreachable-by-accident while the staging rules rejected every extracted
-    // memory design; it must not become unreachable-in-fact now they do not.
-    if let Some(port) = copper_analysis::memory_result_drives_plain_out(target).first() {
-        return Err(format!(
-            "output port '{port}' is driven from a memory read result in a multi-phase \
-             module. The read pipeline re-captures on every clock edge, so a plain `Out` \
-             either tracks it into the phases that do not observe it, or holds one edge \
-             late — neither matches the simulator. Declare the port `RegOut<T, D>`, or \
-             latch the result into a register and drive the output from that"
-        ));
-    }
+    // (`memory_result_drives_plain_out`, rule 7, was checked here: retired as
+    // vacuous under D-8 — SPEC II.3.2.)
 
     // c2 (gate G6): the transpiler consumes the SAME shared analysis, on the SAME
     // input (`&syn::ItemFn`), that the sim macro consumes — one authoritative

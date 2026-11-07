@@ -9,8 +9,9 @@
 //! every disagreement is an extracted module whose lowered count is **1**. So any
 //! decision made in codegen by counting ticks or phases sees one where there are
 //! several, and three such checks have already had to be moved to `copper-analysis`,
-//! where they run on the source: `multi_phase_out_write`, `check_memory_staging`,
-//! `memory_result_drives_plain_out`.
+//! where they run on the source: `check_memory_staging` (the plain-`Out` phase
+//! rules `multi_phase_out_write` and `memory_result_drives_plain_out` lived here
+//! until D-8 retired them, Phase C step 3).
 //!
 //! Nothing stopped a fourth from being written. This is that stop: it pins every
 //! function in the transpiler that both **reasons about clock phases** and **can
@@ -100,13 +101,6 @@ const EXPECTED: &[(&str, &str)] = &[
         "vlir_lower.rs::lower_seq",
         "lowering: emits the phase-guarded `always_comb`/`always_ff`. The phase count \
          is the thing being emitted here, not a premise being tested.",
-    ),
-    (
-        "vlir_lower.rs::reject_memory_driven_comb_outputs",
-        "RULE, kept deliberately: it gives up on `phases.len() < 2` and so cannot see \
-         an extracted module, which is why the same rule now also runs on the source \
-         as `copper_analysis::memory_result_drives_plain_out`. Retained for the \
-         non-extracted path it can see; the source copy is the authority.",
     ),
 ];
 

@@ -73,10 +73,6 @@ fn one_run(tokens: &str, mode: &str) {
             let cfg = copper_analysis::Cfg::build(&f);
             if let Some(c) = cfg.as_ref() {
                 let _ = c.check_reachability();
-                let _ = c.multi_write_collapse();
-                let _ = c.unprotected_pretick_out_write();
-                let _ = c.pretick_out_write_before_update();
-                let _ = c.multi_phase_out_write();
                 let _ = c.registers();
             }
             let _ = copper_analysis::classify_reads_with(&f, cfg.as_ref());
@@ -103,10 +99,7 @@ fn breakdown(tokens: &str, mode: &str) {
         return;
     }
     timed!("check_reachability", copper_analysis::check_reachability(&f));
-    timed!("multi_write_collapse", copper_analysis::multi_write_collapse(&f));
-    timed!("unprotected_pretick_out_write", copper_analysis::unprotected_pretick_out_write(&f));
-    timed!("pretick_out_write_before_update", copper_analysis::pretick_out_write_before_update(&f));
-    timed!("multi_phase_out_write", copper_analysis::multi_phase_out_write(&f));
+    timed!("check_clocked_outputs", copper_analysis::check_clocked_outputs(&f));
     timed!("infer_registers", copper_analysis::infer_registers(&f));
     timed!("classify_reads", copper_analysis::classify_reads(&f));
     // The same work with one graph: how much of the above is rebuilding it.
@@ -116,8 +109,6 @@ fn breakdown(tokens: &str, mode: &str) {
     if let Some(cfg) = cfg {
         timed!("  registers() on the built graph", cfg.registers());
         timed!("  registers() again", cfg.registers());
-        timed!("  unprotected_pretick_out_write on the built graph", cfg.unprotected_pretick_out_write());
-        timed!("  pretick_out_write_before_update on the built graph", cfg.pretick_out_write_before_update());
         timed!("  check_reachability on the built graph", cfg.check_reachability());
     }
 }

@@ -164,19 +164,10 @@ fn main() {
                 continue;
             };
 
-            let mut guards = Vec::new();
-            if !copper_analysis::unprotected_pretick_out_write(f).is_empty() {
-                guards.push("D1");
-            }
-            if !copper_analysis::multi_phase_out_write(f).is_empty() {
-                guards.push("mphase");
-            }
-            if !copper_analysis::multi_write_collapse(f).is_empty() {
-                guards.push("mwrite");
-            }
-            if !copper_analysis::pretick_out_write_before_update(f).is_empty() {
-                guards.push("V8");
-            }
+            // The guards this column reported (D1, mphase, mwrite, V8) were the
+            // pre-tick alignment family, retired by D-8 (Phase C step 3, SPEC
+            // II.3.2): a clocked module has no plain `Out` for them to flag.
+            let guards: Vec<&str> = Vec::new();
 
             // Per-phase summary + disposition. With the V8 rule landed, the §4
             // commit-frontier taxonomy clears closing-phase writes mechanically:

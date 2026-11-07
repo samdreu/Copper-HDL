@@ -12,8 +12,8 @@ warning: unused imports: `Bits` and `Clock`
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-warning: unused import: `copper_core::port::Out`
+warning: unused import: `copper_core::port::RegOut`
  --> tests/ui/fail/clock_construction.rs:2:5
   |
-2 | use copper_core::port::Out;
-  |     ^^^^^^^^^^^^^^^^^^^^^^
+2 | use copper_core::port::RegOut;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^

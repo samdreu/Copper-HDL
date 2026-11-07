@@ -1,7 +1,7 @@
 error: #[hardware(sequential)] body must contain `clk.tick().await`
   --> tests/ui/fail/tickless_loop.rs:12:18
    |
-12 | async fn spinner(clk: Clock<MainClk>, out: Out<Bits<8>, MainClk>) {
+12 | async fn spinner(clk: Clock<MainClk>, out: RegOut<Bits<8>, MainClk>) {
    |                  ^^^^^^^^^^^^^^^^^^^
 
 warning: unused imports: `Bits` and `Clock`
@@ -12,8 +12,8 @@ warning: unused imports: `Bits` and `Clock`
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-warning: unused import: `copper_core::port::Out`
+warning: unused import: `copper_core::port::RegOut`
  --> tests/ui/fail/tickless_loop.rs:2:5
   |
-2 | use copper_core::port::Out;
-  |     ^^^^^^^^^^^^^^^^^^^^^^
+2 | use copper_core::port::RegOut;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
