@@ -261,6 +261,91 @@ fn is_single_phase(sv: &str) -> bool {
     !sv.contains("phase_r")
 }
 
+/// One module's reconciliation: `(checked, missing, extra)` — `None` when the
+/// transpiler refuses the module (this test is about agreement where codegen
+/// produces output). `missing` = inferred registers codegen has no storage for;
+/// `extra` = non-synthetic codegen flops the inference does not name.
+struct Rec {
+    missing: Vec<String>,
+    extra: Vec<String>,
+    inferred: BTreeSet<String>,
+    codegen: BTreeSet<String>,
+}
+
+fn reconcile(src: &str, file: &syn::File, f: &ItemFn, multi: bool) -> Option<Rec> {
+    let name = f.sig.ident.to_string();
+    let module = if multi { Some(name.as_str()) } else { None };
+    let sv = match copper_codegen::transpile_source(&src, module, &copper_codegen::EmitConfig::default()) {
+        Ok(sv) => sv,
+        // Some fixtures exercise not-yet-transpilable shapes; skip — this
+        // test is about *agreement where codegen produces output*.
+        Err(_) => return None,
+    };
+
+    let inferred: BTreeSet<String> = copper_analysis::infer_registers(f).into_iter().collect();
+    let codegen: BTreeSet<String> = copper_analysis::reference_sv_registers(&sv)
+        .iter()
+        .map(|n| strip_r(n))
+        .collect();
+
+    // Struct-typed registers: an inferred name is satisfied by its
+    // complete flattened field set, and those flops are accounted for.
+    let mut struct_fields_of: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for n in &inferred {
+        if let Some(fields) = struct_register_fields(f, &file, n) {
+            struct_fields_of.insert(n.clone(), fields);
+        }
+    }
+    let accounted: BTreeSet<String> = struct_fields_of
+        .iter()
+        .flat_map(|(n, fields)| fields.iter().map(move |fl| format!("{n}_{fl}")))
+        .collect();
+    // Single-tick absorption — see the header.
+    let comb: BTreeSet<String> = if is_single_phase(&sv) {
+        sv_declared_nets(&sv).difference(&codegen).cloned().collect()
+    } else {
+        BTreeSet::new()
+    };
+
+    let arrays = sv_array_nets(&sv);
+    let missing: Vec<_> = inferred
+        .difference(&codegen)
+        .filter(|n| {
+            if arrays.contains(*n) {
+                return false;
+            }
+            if let Some(fields) = struct_fields_of.get(*n) {
+                if fields.iter().all(|fl| codegen.contains(&format!("{n}_{fl}"))) {
+                    return false;
+                }
+            }
+            if comb.contains(*n)
+                || comb.iter().any(|c| c.ends_with(&format!("_{n}")))
+            {
+                return false;
+            }
+            true
+        })
+        .cloned()
+        .collect();
+    let extra: Vec<_> = codegen
+        .difference(&inferred)
+        .filter(|r| !is_synthetic(r) && !accounted.contains(*r))
+        // Two spellings of an inferred name (found by the corpus run, §K.5): a source
+        // local that already ends in `_r` (`a0_r`), which `strip_r` above turned into
+        // `a0`; and a name the legalizer renamed because it is reserved in SV
+        // (`byte` → `byte_sig`).
+        .filter(|r| {
+            !inferred.contains(&format!("{r}_r"))
+                && !r.strip_suffix("_sig").is_some_and(|b| inferred.contains(b))
+        })
+        .cloned()
+        .collect();
+
+    Some(Rec { missing, extra, inferred, codegen })
+}
+
 #[test]
 fn codegen_registers_match_shared_inference() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -292,68 +377,8 @@ fn codegen_registers_match_shared_inference() {
                 continue;
             }
             let name = f.sig.ident.to_string();
-            let module = if multi { Some(name.as_str()) } else { None };
-            let sv = match copper_codegen::transpile_source(&src, module, &copper_codegen::EmitConfig::default()) {
-                Ok(sv) => sv,
-                // Some fixtures exercise not-yet-transpilable shapes; skip — this
-                // test is about *agreement where codegen produces output*.
-                Err(_) => continue,
-            };
+            let Some(Rec { missing, extra, inferred, codegen }) = reconcile(&src, &file, f, multi) else { continue };
             checked += 1;
-
-            let inferred: BTreeSet<String> = copper_analysis::infer_registers(f).into_iter().collect();
-            let codegen: BTreeSet<String> = copper_analysis::reference_sv_registers(&sv)
-                .iter()
-                .map(|n| strip_r(n))
-                .collect();
-
-            // Struct-typed registers: an inferred name is satisfied by its
-            // complete flattened field set, and those flops are accounted for.
-            let mut struct_fields_of: std::collections::HashMap<String, Vec<String>> =
-                std::collections::HashMap::new();
-            for n in &inferred {
-                if let Some(fields) = struct_register_fields(f, &file, n) {
-                    struct_fields_of.insert(n.clone(), fields);
-                }
-            }
-            let accounted: BTreeSet<String> = struct_fields_of
-                .iter()
-                .flat_map(|(n, fields)| fields.iter().map(move |fl| format!("{n}_{fl}")))
-                .collect();
-            // Single-tick absorption — see the header.
-            let comb: BTreeSet<String> = if is_single_phase(&sv) {
-                sv_declared_nets(&sv).difference(&codegen).cloned().collect()
-            } else {
-                BTreeSet::new()
-            };
-
-            let arrays = sv_array_nets(&sv);
-            let missing: Vec<_> = inferred
-                .difference(&codegen)
-                .filter(|n| {
-                    if arrays.contains(*n) {
-                        return false;
-                    }
-                    if let Some(fields) = struct_fields_of.get(*n) {
-                        if fields.iter().all(|fl| codegen.contains(&format!("{n}_{fl}"))) {
-                            return false;
-                        }
-                    }
-                    if comb.contains(*n)
-                        || comb.iter().any(|c| c.ends_with(&format!("_{n}")))
-                    {
-                        return false;
-                    }
-                    true
-                })
-                .cloned()
-                .collect();
-            let extra: Vec<_> = codegen
-                .difference(&inferred)
-                .filter(|r| !is_synthetic(r) && !accounted.contains(*r))
-                .cloned()
-                .collect();
-
             let where_ = format!("{}::{name}", path.file_name().unwrap().to_string_lossy());
             if let Some((_, why)) = WITNESSES.iter().find(|(n, _)| *n == name) {
                 // Assert the witness still diverges. A witness that quietly started
@@ -389,4 +414,78 @@ fn codegen_registers_match_shared_inference() {
         violations.join("\n")
     );
     eprintln!("register reconciliation: {checked} clocked modules — codegen ≡ shared inference (+ synthetic phase/pc)");
+}
+
+/// P13 (SPEC III.1; MEASUREMENTS §K.4–K.5): the transpiler's own register state —
+/// hoisted cross-state locals (`control_extract::hoist_cross_state_locals`) and
+/// promoted wires (`shir_lower::find_promoted_wires`, the `<name>_r` flops) — is a
+/// subset of the inferred registers, over the WHOLE corpus rather than the fixtures:
+/// `examples/`, `tests/fixtures/`, `tests/ref_probes/`, `src/`. Same reconciliation as
+/// above; this one reports and pins the `extra` side only, by mechanism, and states
+/// the `missing` side (inferred registers realized as absorbed comb wires or not at
+/// all) as a count.
+#[test]
+fn corpus_realized_registers_are_inferred() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if !p.file_name().is_some_and(|n| n == "old" || n == "target" || n == "obj_dir") {
+                    walk(&p, out);
+                }
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    for d in ["examples", "tests/fixtures", "tests/ref_probes", "src"] {
+        walk(&root.join(d), &mut files);
+    }
+    files.sort();
+
+    let (mut checked, mut refused) = (0usize, 0usize);
+    let mut surplus: Vec<String> = Vec::new();
+    let mut missing_total = 0usize;
+    for path in &files {
+        let src = fs::read_to_string(path).unwrap();
+        let Ok(file) = syn::parse_file(&src) else { continue };
+        let hw: Vec<&ItemFn> = file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Fn(f) if is_hardware(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let multi = hw.len() > 1;
+        for f in hw {
+            if !is_clocked(f) {
+                continue;
+            }
+            let Some(rec) = reconcile(&src, &file, f, multi) else {
+                refused += 1;
+                continue;
+            };
+            checked += 1;
+            missing_total += rec.missing.len();
+            let key = format!("{}::{}", path.strip_prefix(root).unwrap().display(), f.sig.ident);
+            for x in &rec.extra {
+                surplus.push(format!("{key}: `{x}` (inferred {:?})", rec.inferred));
+            }
+        }
+    }
+    eprintln!(
+        "P13 corpus: {checked} clocked modules transpiled ({refused} refused), {} surplus flop(s), \
+         {missing_total} inferred register(s) with no flop of their own (absorbed / array / struct-mapped)",
+        surplus.len()
+    );
+    for s in &surplus {
+        eprintln!("  SURPLUS {s}");
+    }
+    assert!(checked > 120, "the corpus walk stopped reaching the corpus: {checked}");
+    let expected: Vec<String> = Vec::new();
+    assert_eq!(surplus, expected, "P13: a realized register outside the inferred set");
 }

@@ -464,7 +464,10 @@ fn lower_seq_body(
         .collect();
 
     // Step 7: Find wires that need promotion (used in a different phase than declared)
-    let promoted_wires = find_promoted_wires(&segments, &wire_segment);
+    let promoted_wires: Vec<_> = find_promoted_wires(&segments, &wire_segment)
+        .into_iter()
+        .filter(|(name, _, _)| !seq.pre_loop_constants.contains(name))
+        .collect();
 
     // Step 8: Lower registers (from CHIR register declarations)
     let mut registers: Vec<SHIRReg> = seq.registers.iter()

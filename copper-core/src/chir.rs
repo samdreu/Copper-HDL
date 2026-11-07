@@ -185,6 +185,11 @@ pub struct CHIRSeqBody {
     /// The loop body's segment 0 reads [`STARTED_REG`] to run the pre-loop
     /// statements in the first resumption only (SPEC I.9.2's entry).
     pub entry_guard: bool,
+    /// The pre-loop non-`mut` `let`s — constants of the kernel (SPEC I.7.2(b)): each is
+    /// a segment-0 wire never assigned in the loop, so it has one value in every
+    /// segment and `shir_lower::find_promoted_wires` gives it no carrier (Phase C
+    /// step 6, P13; until then `trailing_fold`'s `r` became a flop `r_r`).
+    pub pre_loop_constants: Vec<String>,
 }
 
 /// The one-bit carrier that is 0 during exactly the first resumption and 1 after

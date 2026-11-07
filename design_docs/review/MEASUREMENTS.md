@@ -2020,3 +2020,103 @@ against today's sets:
   `ex_regfile`/`ex_reg_then_wire` are).
 - `copper-codegen/tests/register_reconciliation.rs`: 110 clocked fixtures, no violation (the
   `ex_*` locals were absorbed comb wires before and still are).
+
+### K.4 Predictions — (3) the two fixtures, (4) P13 on the corpus
+
+Fixtures, `tests/fixtures/nested_loop_registers_dut.rs` (swept like every fixture):
+`nested_loop_missed` (I.7.5's missed shape, the swept twin of `fold_defect`) and
+`nested_loop_added` (the added shape: `w` assigned inside a nested `loop` and read only after it,
+dead at every tick). The added shape could not be written as I.7.5 words it with a counted
+`for` (`for _ in 0..3 { tick; w = x.read() }`): the transpiler refuses a counted body whose tick
+is not last, and a wait loop whose tick is not last — so it is `loop { w = x.read(); if w[0] {
+break } tick }`, where the value assigned before the interior tick is reassigned after it before
+any read. Inferred (measured while writing them, so not a prediction): {i, v} and {} — the fold
+would have given {i} and {w}.
+
+**Observed while writing them (before the corpus run): `nested_loop_added`'s SV keeps a flop
+`w`** (`w <= x` in both FSM states, never read: `q <= x + 8'd1` reads the forwarded value).
+Control extraction hoists `w` because it is mentioned in two states, and the hoist appends it to
+`fir.registers` itself. So P13 fails on this fixture by one unobservable flop, and the
+reconciliation test, which allows no non-synthetic flop the inference does not name, fails on it.
+
+P13 corpus measurement (`copper-codegen/tests/register_reconciliation.rs::corpus_realized_registers_are_inferred`,
+new: the reconciliation over `examples/`, `tests/fixtures/`, `tests/ref_probes/`, `src/` — every
+clocked module the transpiler accepts — reporting each codegen flop that is neither inferred nor
+synthetic, by mechanism: a `<name>_r` flop is a promoted wire (`find_promoted_wires`), a bare name
+a hoisted cross-state local (a pre-loop `let mut` the inference does not name lowers as a wire)):
+
+- Predicted surplus: **`nested_loop_added`'s `w`, and nothing else.** The fixtures were already
+  clean (110 modules); in `examples/` and `src/` I expect the extraction-route modules' hoisted
+  locals to be live at a tick (they are read in a state other than the one that assigns them,
+  which needs a tick between unless the transfer is a same-cycle `pc` transition — the
+  `nested_loop_added` shape, which I know of nowhere else). The pipelined CPU's `fetched` /
+  `mem_load` (no longer inferred, K.3) are read in the state that assigns them, so not hoisted.
+- Promoted wires: predicted **none** outside the inferred set (a wire read in a later segment
+  crosses a tick in the linear route by construction).
+
+### K.5 (4) P13 on the corpus — measured
+
+`corpus_realized_registers_are_inferred`: **146 clocked modules** of `examples/`, `tests/fixtures/`,
+`tests/ref_probes/`, `src/`, every one transpiled. First run: 5 surplus entries. **Three are
+artifacts of the matcher**, not flops outside the set: `rv32i_cpu_transpilable`'s `a0` and
+`halted` (the source names its locals `a0_r` and `halted_r`, and the extractor's `_r`-stripping
+turned the codegen flops `a0_r`/`halted_r` into `a0`/`halted`), and `uart_tx`'s `byte_sig` (the
+legalizer's rename of the SV keyword `byte`; `byte` is inferred). The matcher now accepts both
+spellings (shared with the fixture test). **Two are real surplus flops — P13 fails on the
+corpus by two:**
+
+| module | flop | mechanism | observable? |
+|---|---|---|---|
+| `tests/fixtures/nested_loop_registers_dut.rs::nested_loop_added` | `w` | hoisted: `hoist_cross_state_locals` moves `w` (mentioned in two FSM states) to a pre-loop `let mut`, appended to `fir.registers` by `transpile_fir` | **no** — `w <= x` in both states; nothing reads the flop (`q <= x + 8'd1` reads the forwarded value) |
+| `tests/ref_probes/startup_probes.rs::trailing_fold` | `r_r` | promoted: `let r = Bits::from_u8(5)` (a pre-loop constant, I.7.2(b)) is a segment-0 wire; the trailing segment reads it, so `find_promoted_wires` gives it a carrier | **no** — `r_r <= r` (= 5) at every edge including the first, and its one reader `q <= r_r` is under `__copper_started`, i.e. after at least one edge |
+
+Prediction against measurement: `w` predicted; **`r_r` missed** — I predicted no promoted wire
+outside the set because a wire read in a later segment crosses a tick, and forgot that a
+pre-loop constant is a wire of segment 0 that is never assigned in the loop (I.7.2(b) makes it a
+constant, not a register, whatever it crosses). The promotion has been there since the trailing
+segment became the next resumption's head (step 4: "trailing_fold's `r` becomes `r_r`", §H).
+`missing` side (stated, not pinned): 6 inferred registers have no flop of their own — the
+single-phase absorptions, array and struct mappings the fixture test already allows.
+
+### K.6 Predictions — the two transpiler fixes (P13 made true)
+
+(a) **Hoist by liveness.** `transpile_fir` stops appending a hoisted cross-state local to
+`fir.registers` when the inference does not name it; `chir_lower` lowers such a pre-loop `let mut`
+as a wire whose pre-loop value is a zero literal of its type (the initializer is kept for the type
+only, as before; as a wire it is read, if at all, only before an assignment of the same
+resumption, which the inference says never happens). The FSM states' assignments to it forward
+within the state, as any wire's do. Predicted: SV changes for **`nested_loop_added` only** (the
+only hoisted local outside the set, K.5): the `w` flop and its `case` disappear, `q`'s drive is
+unchanged; it agrees on all legs.
+
+(b) **No carrier for a pre-loop constant.** A pre-loop non-`mut` `let` is a constant (never
+assigned in the loop; Rust forbids it), so its comb wire has the same value in every segment;
+`find_promoted_wires` skips it (a new `CHIRSeqBody::pre_loop_constants`). Predicted: SV changes for
+**`trailing_fold` only** — every promoted pre-loop constant is outside the inferred set (a
+constant is never `defined_in_loop`), so K.5 lists them all and lists one; its `r_r` flop
+disappears and `q <= r` (= 8'd5) under `__copper_started`; it agrees on all legs.
+After both: P13 holds on the corpus (0 surplus) and the fixture reconciliation passes with
+`nested_loop_added` in it.
+
+### K.7 The two transpiler fixes — measured
+
+- **First attempt, a miss that would have been a defect:** demoting every hoisted local outside
+  the inferred set also demoted the counted-`for` desugar's `__copper_ctr*` counters (declared in
+  the loop by `desugar_counted_loops_in`, hoisted with the same marker, and outside the
+  inference's domain — they have no source name). sv-baseline caught it: `uart_rx_dut` and
+  `pulse_registered` changed, their counters turned into `always_comb` wires (a broken FSM). The
+  demotion is now restricted to a **source** local (one the pre-desugar FIR mentions,
+  `control_extract::stmts_mention`); the passes' own state stays a register.
+- **sv-baseline after both (against the post-(2) snapshot): 1 changed + 2 new of 247** —
+  `trailing_fold` (CHANGED: `r_r` and its update gone, `q <= r` under `__copper_started`) and the
+  two new fixtures, as predicted. `nested_loop_added` emits no `w` at all (the wire is dead once
+  its reads are forwarded; an empty `always_comb case (pc)` is left behind, cosmetic).
+- **P13 on the corpus: 146 modules, 0 surplus** — `corpus_realized_registers_are_inferred` pins the
+  empty set. Fixture reconciliation: **112** clocked modules, no violation (the two new ones in).
+- **Verdicts:** `nested_loop_missed`, `nested_loop_added` 6 / 6 PASS, reference leg 864 cycles
+  agreed each; `trailing_fold` (startup probe, `tests/reference_leg_measurements.rs`) PASS, the
+  interpreter agrees over 16 cycles.
+- One more miss while writing the fixtures: `nested_loop_missed` first used `fold_defect`'s
+  `v + Bits::from_usize(i)`, and Verilator refused it (WIDTHEXPAND/WIDTHTRUNC — `from_usize(i)` is
+  32 bits): the open `as_usize`/`usize` width class (I.14.7 (3), left alone by step 5). The swept
+  twin reads `i` in a comparison instead; `fold_defect` keeps the verbatim I.7.5 spelling.

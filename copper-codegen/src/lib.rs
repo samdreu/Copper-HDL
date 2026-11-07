@@ -50,6 +50,7 @@ pub fn lower_fir_to_vlir(
     // Control extraction (FIR→FIR): flatten async control-flow loops whose ticks
     // live inside branches into an explicit single-tick `match pc` FSM — the shape
     // the pipeline below already lowers correctly. No-op for linear modules.
+    let source = fir;
     let mut fir = fir.clone();
     // `while <cond> { … tick; }` is sugar for the repeating wait extraction
     // already handles; rewrite it before the gate looks at the body.
@@ -84,8 +85,25 @@ pub fn lower_fir_to_vlir(
     // pre-loop `let mut` declarations. Append the diff to the FIR's register
     // authority so `chir_lower` classifies them without a second heuristic; a
     // future pass that introduces register state is covered automatically.
+    //
+    // A hoisted cross-state local is appended only when the inference names it
+    // (Phase C step 6, P13: hoist by liveness, MEASUREMENTS §K.6). The hoist moves a
+    // local mentioned in two states by NAME; one the inference does not name is dead
+    // at every tick (I.7.1) — its states pass it within a resumption, never across an
+    // edge — so `chir_lower` gives it a wire, not a flop nobody reads
+    // (`nested_loop_added`'s `w` was one).
+    // Only a SOURCE local is the inference's to judge: the passes' own state
+    // (`__copper_ctr*`, which the counted-`for` desugar declares in the loop and the
+    // hoist then moves out) is not in its domain and stays a register.
+    let hoisted: std::collections::BTreeSet<String> = hoisted_names(&fir)
+        .into_iter()
+        .filter(|n| control_extract::stmts_mention(&source.raw_statements, n))
+        .collect();
     for name in preloop_mut_names(&fir) {
-        if !preloop_muts_before.contains(&name) && !fir.registers.contains(&name) {
+        if !preloop_muts_before.contains(&name)
+            && !fir.registers.contains(&name)
+            && !hoisted.contains(&name)
+        {
             fir.registers.push(name);
         }
     }
@@ -110,6 +128,21 @@ pub fn lower_fir_to_vlir(
 
 /// The pre-loop `let mut` names of a FIR body — the declarations the FIR→FIR
 /// passes add register state through (see the diff in [`transpile_fir`]).
+/// The pre-loop `let mut`s control extraction hoisted out of a state
+/// (`HOISTED_CROSS_STATE_ATTR`).
+fn hoisted_names(fir: &copper_core::FrontendModuleIR) -> std::collections::BTreeSet<String> {
+    use copper_core::frontend_ir::RawStmtKind;
+    fir.raw_statements
+        .iter()
+        .filter_map(|s| match &s.kind {
+            RawStmtKind::Local(l) if l.attrs.iter().any(|a| a == control_extract::HOISTED_CROSS_STATE_ATTR) => {
+                Some(l.name.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn preloop_mut_names(fir: &copper_core::FrontendModuleIR) -> std::collections::BTreeSet<String> {
     use copper_core::frontend_ir::RawStmtKind;
     fir.raw_statements

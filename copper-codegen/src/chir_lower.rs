@@ -1791,6 +1791,10 @@ fn lower_seq_body(
     // loop body. Collected here, lowered once the context exists, and prepended
     // to the loop body. Stored as (name, type, init expr, span).
     let mut pre_loop_wires: Vec<(String, CHIRType, &ExprType, SourceSpan)> = Vec::new();
+    let mut hoisted_wires: Vec<(String, CHIRType, SourceSpan)> = Vec::new();
+    // Pre-loop non-`mut` `let`s — constants (I.7.2(b)): never assigned in the loop,
+    // so their wire has one value in every segment and needs no carrier.
+    let mut pre_loop_constants: Vec<String> = Vec::new();
     // Pre-loop expression statements — a `RegOut` write, a memory staging, an
     // assignment (SPEC I.9.3): statements of the FIRST resumption, executed once,
     // in program order before the head. Lowered once the context exists, behind
@@ -2028,6 +2032,18 @@ fn lower_seq_body(
                         init_param,
                         span: local.span,
                     });
+                } else if local
+                    .attrs
+                    .iter()
+                    .any(|a| a == crate::control_extract::HOISTED_CROSS_STATE_ATTR)
+                {
+                    // A hoisted cross-state local the register authority does not
+                    // name (P13, MEASUREMENTS §K.6): a wire of each resumption. Its
+                    // initializer is kept for the type only and may name in-loop
+                    // locals that do not exist before the loop, so its pre-loop value
+                    // is zero — read, if ever, only before an assignment of the same
+                    // resumption, which the inference says no execution does.
+                    hoisted_wires.push((local.name.clone(), ty, local.span));
                 } else if let Some(init) = &local.init {
                     pre_loop_wires.push((local.name.clone(), ty, init, local.span));
                 }
@@ -2074,6 +2090,7 @@ fn lower_seq_body(
                         },
                     };
                     symbols.insert(local.name.clone(), ty.clone());
+                    pre_loop_constants.push(local.name.clone());
                     pre_loop_wires.push((local.name.clone(), ty, init, local.span));
                 }
             }
@@ -2205,6 +2222,14 @@ fn lower_seq_body(
     // Emit pre-loop wires first so they are declared before any use, then the
     // loop body itself.
     let mut loop_body = Vec::new();
+    for (name, ty, span) in &hoisted_wires {
+        loop_body.push(CHIRStmt::Wire {
+            name: name.clone(),
+            ty: ty.clone(),
+            value: CHIRExpr::Lit(CHIRLit { ty: ty.clone(), value: 0 }),
+            span: *span,
+        });
+    }
     for (name, ty, init, span) in &pre_loop_wires {
         // As for an in-loop `let` (`lower_local`): a context-width literal
         // (`Bits::zero()`) takes the binding's declared width, and a value of
@@ -2277,6 +2302,7 @@ fn lower_seq_body(
         submodules: ctx.submodules,
         loop_body,
         entry_guard,
+        pre_loop_constants,
     })
 }
 

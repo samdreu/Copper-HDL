@@ -1158,7 +1158,7 @@ fn convert_locals_in_expr(e: &mut ExprType, names: &std::collections::HashSet<St
 }
 
 /// Whether `name` appears as an identifier anywhere in `stmts`.
-fn stmts_mention(stmts: &[RawStmt], name: &str) -> bool {
+pub(crate) fn stmts_mention(stmts: &[RawStmt], name: &str) -> bool {
     stmts.iter().any(|s| match &s.kind {
         RawStmtKind::Local(l) => l.init.as_ref().is_some_and(|i| expr_mentions(i, name)),
         RawStmtKind::Expr(es) => expr_mentions(&es.expr, name),
