@@ -51,18 +51,6 @@ use quote::ToTokens;
 /// fail" is a claim that should have an author and a sentence.
 const SKIP: &[(&str, &str)] = &[
     (
-        "regout_trailing_single_tick",
-        "OUTSIDE THE AGREEMENT RELATION (SPEC III.2.8, II.3 row (f4), ADMITTED-AND-DIVERGENT): \
-         `tick; let d = step.read(); acc = acc + d; q.write(acc)` reads after its only tick. \
-         The simulator and the reference interpreter read x_{N+1} there (the trailing region is \
-         the next resumption's head, SPEC I.0.2) and agree (obs_{N+1} = Σ x_2..x_{N+1}); the \
-         linear route's trailing fold still realizes the two-job reading, so sim = ref ≠ SV — \
-         pinned by tests/reference_leg_measurements.rs::regout_trailing_single_tick_is_the_\
-         trailing_fold. Became a SKIP row at the flip (Phase C step 3, 2026-11-06): before it, \
-         the two-job simulator agreed with the SV (sim = SV ≠ ref, a REF_SKIP row). Delete \
-         this row when the fold is fixed (D-20 step 4, the entry of I.9.2)",
-    ),
-    (
         "rv32i_cpu_pipelined",
         "ANCHORED OUTSIDE THIS SWEEP as of 2026-08-27: tests/rv32i_pipelined_verilator.rs \
          runs all 13 architectural programs on the simulator AND on the transpiled core \

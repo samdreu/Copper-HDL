@@ -142,6 +142,13 @@ pub struct SHIRPhase {
     /// Combinational statements before the clock edge.
     /// Includes Wire (intermediate values) and PortDrive (output port drives).
     pub pre_edge: Vec<SHIRStmt>,
+    /// The trailing region's register updates (phase 0 only): emitted in
+    /// `always_ff` under `if (<guard>)` AHEAD of `post_edge`, the guard being the
+    /// one-bit register that is 0 until the first edge — the first resumption runs
+    /// the head only (SPEC I.0.2). `post_edge` reads these registers through the
+    /// guarded value (`guard ? update : register`), so a later update of the same
+    /// register overrides as the program order says.
+    pub guarded_post_edge: Option<(SHIRExpr, Vec<SHIRRegUpdate>)>,
     /// Register next-value updates — take effect at the clock edge.
     pub post_edge: Vec<SHIRRegUpdate>,
 }

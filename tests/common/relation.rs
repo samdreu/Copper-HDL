@@ -36,7 +36,8 @@ pub enum Pattern {
     /// sim = ref ≠ SV: a transpiler bug, or an ADMITTED-AND-DIVERGENT row of II.3.3.
     SimEqRefNeSv,
     /// sim = SV ≠ ref: both implementations share a reading Part I does not give —
-    /// the reference, or the two-job residue (`regout_trailing_single_tick`).
+    /// the reference, or a two-job residue (the one found, `regout_trailing_single_tick`,
+    /// agrees on all three legs since Phase C step 4).
     SimEqSvNeRef,
     /// All three differ: a spec gap or an interpreter bug.
     AllDiffer,

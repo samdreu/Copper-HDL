@@ -4,8 +4,10 @@
 //!
 //! (i)   the pre-loop re-execution probe of §B and the two linear-route defects of
 //!       SPEC I.9.4: interpreter ≡ simulator ≠ SV — "sim vs transpiler" becomes
-//!       "spec vs transpiler"; and the one corpus disagreement the leg found,
-//!       `regout_trailing_single_tick`: sim = SV ≠ interpreter (the two-job residue);
+//!       "spec vs transpiler" (the pre-loop pair, still pinned: D-20 step 5); the
+//!       trailing fold at edge 1 and the one corpus disagreement the leg found,
+//!       `regout_trailing_single_tick` — both AGREE on all three legs since Phase C
+//!       step 4 removed the fold (2026-11-06, MEASUREMENTS §H);
 //! (ii)  `pc` states of the extraction route vs the interpreter's tick sites, per
 //!       corpus module — the many-to-one ratio of I.0.4;
 //! (iii) the poison run for the register proposition (I.0.5(a), I.7.7): every local
@@ -108,9 +110,13 @@ fn preloop_statement_is_spec_vs_transpiler_on_both_routes() {
     }
 }
 
-/// D-11's (iv), II.3 row (f4): PREDICTED sim = ref ≠ SV at obs_1 only.
+/// D-11's (iv), II.3 row (f4): `let r = 5; loop { tick; q.write(r) }`. Pinned
+/// sim = ref ≠ SV at obs_1 only while the linear route folded the trailing region
+/// into phase 0 at edge 1 (SV `obs_1 = 5`); since Phase C step 4 the trailing region
+/// is the next resumption's head, guarded off at edge 1, and all three legs agree —
+/// PREDICTED and measured (MEASUREMENTS §H).
 #[test]
-fn trailing_fold_at_edge_1_is_spec_vs_transpiler() {
+fn trailing_fold_at_edge_1_agrees_on_three_legs() {
     if !verilator_available() {
         panic!("Verilator is absent: this measurement needs the SV leg and cannot be skipped silently");
     }
@@ -141,12 +147,8 @@ fn trailing_fold_at_edge_1_is_spec_vs_transpiler() {
     let v = eq.finish_report();
     println!("trailing_fold: transpiled {} interpreter {:?}", v.transpiled, v.interpreter);
     assert!(matches!(v.interpreter, Some(Ok(16))), "{:?}", v.interpreter);
-    assert!(!v.transpiled, "the linear route's phase-0 fold shows 5 at obs_1 (II.3 row (f4))");
-    let fails: Vec<&str> = v.report.lines().filter(|l| l.starts_with("FAIL: Cycle")).collect();
-    assert_eq!(fails.len(), 1, "the divergence is at obs_1 only:\n{}", v.report);
-    assert!(fails[0].starts_with("FAIL: Cycle 0 "), "the divergence is at obs_1 (recorded cycle 0):\n{}", v.report);
-    assert_eq!(v.pattern, Some(Pattern::SimEqRefNeSv), "{}", v.report);
-    v.record_pin("trailing_fold: II.3 row (f4) (P15), D-11's trailing fold at edge 1");
+    assert!(v.transpiled, "the SV shows init(q) at obs_1, as the coroutine does:\n{}", v.report);
+    assert_eq!(v.pattern, None, "no disagreement:\n{}", v.report);
 }
 
 /// `regout_trailing_single_tick` (`loop { tick; q.write(acc + step.read()) … }`)
@@ -188,14 +190,14 @@ fn prefix_sums(xs: &[u8], from: usize, through: impl Fn(usize) -> usize) -> Vec<
         .collect()
 }
 
-/// P12 (its `REF_SKIP` row in build.rs): the simulator reads the trailing
-/// `step.read()` at t_{N+1}⁻ (obs_{N+1} = Σ x_2..x_{N+1}) and agrees with the
-/// reference interpreter; the transpiled SV still realizes the two-job reading
-/// (the linear route's trailing fold, II.3 row (f4), step 4 of D-20's list), so
-/// the pattern is sim = ref ≠ SV. Measured 2026-11-06 (Phase C step 2), the pin
-/// since the flip (step 3), when the two-job arm (sim = SV ≠ ref) was deleted.
+/// P12: the simulator reads the trailing `step.read()` at t_{N+1}⁻
+/// (obs_{N+1} = Σ x_2..x_{N+1}) and agrees with the reference interpreter. The
+/// transpiled SV realized the two-job reading (the linear route's trailing fold)
+/// until Phase C step 4 — pinned sim = ref ≠ SV from the flip (step 3), a `SKIP`
+/// row in the sweep — and agrees since the trailing region lowers as the next
+/// resumption's head (2026-11-06, MEASUREMENTS §H; the module now sweeps).
 #[test]
-fn regout_trailing_single_tick_is_the_trailing_fold() {
+fn regout_trailing_single_tick_agrees_on_three_legs() {
     if !verilator_available() {
         panic!("Verilator is absent: this measurement needs the SV leg and cannot be skipped silently");
     }
@@ -205,9 +207,8 @@ fn regout_trailing_single_tick_is_the_trailing_fold() {
     assert_eq!(qs, prefix_sums(&xs, 1, |n| n + 1), "the one-job simulator shows Σ x_2..x_{{N+1}} at obs_{{N+1}}");
     println!("regout_trailing_single_tick (One): transpiled {} interpreter {:?}", v.transpiled, v.interpreter);
     assert!(matches!(v.interpreter, Some(Ok(48))), "sim ≡ ref under One: {:?}", v.interpreter);
-    assert!(!v.transpiled, "sim ≠ SV under One: the SV keeps the two-job reading");
-    assert_eq!(v.pattern, Some(Pattern::SimEqRefNeSv), "{}", v.report);
-    v.record_pin("regout_trailing_single_tick: II.3 row (f4), the trailing fold (P12), REF_SKIP row");
+    assert!(v.transpiled, "sim ≡ SV: the trailing region is the next resumption's head:\n{}", v.report);
+    assert_eq!(v.pattern, None, "no disagreement:\n{}", v.report);
 }
 
 // ── corpus walk shared by (ii) and (iii) ───────────────────────────────────

@@ -54,7 +54,7 @@ forwarding) is interpreted by its Part I meaning — which is the point.
 |------------------------------|-------------------------------------------------------------------------|
 | sim ≠ ref, SV = ref          | a **simulator or macro bug** (or a Phase C obligation not yet landed)   |
 | sim = ref ≠ SV               | a **transpiler bug**, or a II.3 row                                     |
-| sim = SV ≠ ref               | both implementations share a reading the spec does not give — the two-job residue (the one case found: `regout_trailing_single_tick`, its `REF_SKIP` row states the measurement) |
+| sim = SV ≠ ref               | both implementations share a reading the spec does not give — a two-job residue (the one case found, `regout_trailing_single_tick`, became sim = ref ≠ SV at Phase C step 3 and agrees on all three legs since step 4) |
 | all three differ             | a **spec gap or an interpreter bug** — read the interpreter's first disagreement first |
 
 Agreement of the three is consistency, not correctness: only an independent anchor

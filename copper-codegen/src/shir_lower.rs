@@ -24,16 +24,7 @@ pub fn lower_to_shir(chir: &CHIRModule) -> Result<SHIRModule, SHIRLowerError> {
             SHIRBody::Combinational(lower_comb_body(comb)?)
         }
         CHIRBody::Sequential(seq) => {
-            // `RegOut` ports: a trailing write to one is emitted from the committed
-            // register, not the forwarded next-state (see `Forwarding::trailing_reg_outs`).
-            let reg_out_ports: std::rc::Rc<HashSet<String>> = std::rc::Rc::new(
-                chir.ports
-                    .iter()
-                    .filter(|p| p.registered)
-                    .map(|p| p.name.clone())
-                    .collect(),
-            );
-            SHIRBody::Sequential(lower_seq_body(seq, reg_out_ports, chir.span)?)
+            SHIRBody::Sequential(lower_seq_body(seq, chir.span)?)
         }
         CHIRBody::Structural(st) => {
             SHIRBody::Structural(lower_structural_body(st)?)
@@ -163,19 +154,6 @@ struct Forwarding {
     map: Option<HashMap<String, SHIRExpr>>,
     reg_names: HashSet<String>,
     span: SourceSpan,
-    /// The module's `RegOut` ports, **only** when this is a TRAILING segment
-    /// (empty otherwise). A `RegOut` write takes effect at the first clock edge
-    /// after it executes. A trailing write executes after the edge that opened
-    /// its cycle, so it commits at the NEXT edge — by which time the trailing
-    /// segment's own register updates have already committed (the linear paths
-    /// fold them into the opening edge). Its non-blocking assign must therefore
-    /// read the COMMITTED register, not the forwarded next-state: `q <= acc` at
-    /// the next edge yields the value the simulator parked from `q.write(acc)`,
-    /// while the forwarded `q <= acc + d` would publish it one edge early
-    /// (`regout_trailing_single_tick`, measured). Pre-tick writes commit at the
-    /// closing edge together with the segment's updates, where the forwarded
-    /// form is the right one, which is why this is keyed on the segment.
-    trailing_reg_outs: std::rc::Rc<HashSet<String>>,
 }
 
 impl Forwarding {
@@ -185,7 +163,6 @@ impl Forwarding {
             map: None,
             reg_names: HashSet::new(),
             span: SourceSpan::default(),
-            trailing_reg_outs: std::rc::Rc::new(HashSet::new()),
         }
     }
 
@@ -194,14 +171,12 @@ impl Forwarding {
     /// the register itself, not the expression that fed it.
     fn for_segment(
         reg_names: HashSet<String>,
-        trailing_reg_outs: std::rc::Rc<HashSet<String>>,
         span: SourceSpan,
     ) -> Self {
         Forwarding {
             map: Some(HashMap::new()),
             reg_names,
             span,
-            trailing_reg_outs,
         }
     }
 
@@ -290,14 +265,8 @@ fn lower_stmt_list(
             }
             CHIRStmt::PortWrite { port_name, value, .. } => {
                 let value = rename_vars(lower_expr(value)?, renames);
-                // A trailing `RegOut` write commits at the NEXT edge, after this
-                // segment's updates have committed: its edge form is the committed
-                // register (see `Forwarding::trailing_reg_outs`).
-                let value = if fwd.trailing_reg_outs.contains(port_name) {
-                    value
-                } else {
-                    fwd.at_edge(&value)
-                };
+                // The drive is sampled at the edge: its forwarded value.
+                let value = fwd.at_edge(&value);
                 out.push(SHIRStmt::PortDrive { port_name: port_name.clone(), value });
             }
             CHIRStmt::If { condition, then_body, else_body, .. } => {
@@ -449,14 +418,15 @@ fn lower_structural_body(st: &CHIRStructuralBody) -> Result<SHIRStructuralBody, 
 
 // ── Sequential body ───────────────────────────────────────────────────────────
 
+/// The guard register of the trailing region (`lower_seq_body`, step 10): 0 until
+/// the first edge, 1 after it. A synthesized name, like the extraction route's
+/// `__copper_ctr*` counters.
+const STARTED_REG: &str = "__copper_started";
+
 fn lower_seq_body(
     seq: &CHIRSeqBody,
-    reg_out_ports: std::rc::Rc<HashSet<String>>,
     module_span: SourceSpan,
 ) -> Result<SHIRSeqBody, SHIRLowerError> {
-    // Handed to the two TRAILING-segment lowerings only; every other segment gets
-    // the empty set, so its `RegOut` drives keep the forwarded edge form.
-    let no_reg_outs: std::rc::Rc<HashSet<String>> = std::rc::Rc::new(HashSet::new());
     // Step 1: Validate CHIR preconditions
     validate_seq_chir(seq, module_span)?;
 
@@ -483,7 +453,7 @@ fn lower_seq_body(
         .collect();
 
     // Step 7: Find wires that need promotion (used in a different phase than declared)
-    let promoted_wires = find_promoted_wires(&segments, &wire_segment, n_ticks);
+    let promoted_wires = find_promoted_wires(&segments, &wire_segment);
 
     // Step 8: Lower registers (from CHIR register declarations)
     let mut registers: Vec<SHIRReg> = seq.registers.iter()
@@ -514,179 +484,124 @@ fn lower_seq_body(
         .map(lower_submodule)
         .collect::<Result<_, _>>()?;
 
-    // Step 10: Build phases
+    // Step 10: Build phases.
+    //
+    // One phase per tick: phase k runs segment k, the statements between tick k-1
+    // and tick k, and its updates commit at the edge tick k awaits. The TRAILING
+    // region T (segment n_ticks, after the last tick) is the HEAD of the next
+    // resumption (SPEC I.0.2, D-8): the resumption that ends at the edge closing
+    // phase 0 runs T and then segment 0, reading the inputs of that cycle, so T
+    // lowers into phase 0 AHEAD of segment 0, with one forwarding walk across both
+    // (T's register updates forwarded into segment 0's reads and drives), and every
+    // drive takes its forwarded value. The FIRST resumption runs the pre-loop
+    // statements and segment 0 only, so T is guarded by `__copper_started`, a
+    // one-bit register powered on at 0 and set at phase 0's edge.
+    //
+    // Until Phase C step 4 (2026-11-06) T was FOLDED: its register updates went to
+    // the last phase's edge (one edge early — so the memory read it observed had to
+    // be the combinational one), its `RegOut` drives read the committed register
+    // instead of the forwarded value, and nothing guarded edge 1. That encoded the
+    // two-job reading, where T ran after the edge that opened its cycle; under one
+    // job it is wrong whenever T reads an input (`regout_trailing_single_tick`,
+    // P12) and at edge 1 whenever T has an effect (`trailing_fold`, II.3 (f4)).
+    // MEASUREMENTS §H.
+    let trailing = &segments[n_ticks];
+    let has_trailing = !trailing.is_empty();
+    let started_ty = CHIRType::UInt { width: Width::Concrete(1) };
     let mut phases: Vec<SHIRPhase> = Vec::new();
+    // `__copper_started` is read (never assigned) by the walks below; the
+    // register-name set only matters for assigned names.
+    let reg_names = reg_name_set(&seq.registers, &promoted_names);
 
-    // Single-tick: no cross-phase promoted wires, so renames is always empty.
-    let no_renames: HashMap<String, String> = HashMap::new();
-
-    if n_ticks == 1 {
-        // ── Single-tick: one phase.
-        // pre_edge = wires from seg_0 (before tick).
-        // post_edge = reg_assigns from seg_0 (captured at clock edge) +
-        //             reg_assigns from seg_1 / trailing (same edge, next iteration wraps here).
-        // Both segments share a forwarding map so seg_1 sees seg_0's register assignments.
-        // Execution order within the cycle, which is what the emitted `always_comb`
-        // must reproduce: the TRAILING statements run first (in the post-edge settle
-        // of the tick that opens this cycle) and the head's run after (in the
-        // pre-edge settle of the tick that closes it). Both are one cycle — "a clock
-        // cycle is a maximal tick-free region of an execution"
-        // (design_docs/SYNCHRONOUS_SEMANTICS.md) — and the back edge costs no time.
-        //
-        // Unobservable for ports, since `multi_write_collapse` rejects a port written
-        // on both sides of a tick; observable for a plain local flowing from the
-        // trailing statements into the head, which is why the order is stated rather
-        // than left to whichever segment happened to be lowered first.
-        let trailing_pre_edge = lower_pre_edge_stmts(
-            &segments[1],
-            &promoted_names,
-            &no_renames,
-            &seq.registers,
-            &reg_out_ports,
-            module_span,
-        )?;
-        // …then the head segment's own combinational logic. Register reassignments
-        // are dropped from both (`extract_reg_updates` below turns them into this
-        // edge's post_edge updates). Head statements defining names the trailing
-        // ones read are hoisted ahead — see `merge_trailing_before_head`.
-        let head_pre_edge = lower_pre_edge_stmts(
-            &segments[0],
-            &promoted_names,
-            &no_renames,
-            &seq.registers,
-            &no_reg_outs,
-            module_span,
-        )?;
-        let pre_edge = merge_trailing_before_head(trailing_pre_edge, head_pre_edge);
-        // One forwarding map across both: they commit at the same edge, and the
-        // trailing segment runs after it.
-        let mut fwd: HashMap<String, SHIRExpr> = HashMap::new();
-        let mut all_post_edge = extract_reg_updates_shared(
-            &segments[0],
-            &seq.registers,
-            &promoted_names,
-            module_span,
-            &no_renames,
-            &mut fwd,
-        )?;
-        let trailing_updates = extract_reg_updates_shared(
-            &segments[1],
-            &seq.registers,
-            &promoted_names,
-            module_span,
-            &no_renames,
-            &mut fwd,
-        )?;
-        all_post_edge.extend(trailing_updates);
-
-        phases.push(SHIRPhase {
-            phase_idx: 0,
-            pre_edge,
-            post_edge: all_post_edge,
-        });
-    } else {
-        // ── Multi-tick: N phases
-        //
-        // Mapping:
-        //   seg_k (for k < n_ticks) → phase_k pre_edge + post_edge
-        //   seg_n_ticks (trailing)  → phase_{n_ticks-1} post_edge
-        //
-        // Phase renames: promoted wires declared in earlier phases are renamed
-        // from `x` to `x_r` in the phase where they are consumed.
-
-        // The trailing segment's combinational statements, lowered in the last
-        // phase's rename scope and destined for phase 0 (see below).
-        let mut trailing_comb: Vec<SHIRStmt> = Vec::new();
-
-        for phase_idx in 0..n_ticks {
-            let seg_idx = phase_idx; // seg_k → phase_k
-
-            // Build rename map: promoted wires from phases < phase_idx
-            let phase_renames: HashMap<String, String> = promoted_wires.iter()
-                .filter(|(wire_name, _, _)| {
-                    let decl_seg = *wire_segment.get(wire_name.as_str()).unwrap();
-                    phase_for_segment(decl_seg, n_ticks) < phase_idx
-                })
+    for phase_idx in 0..n_ticks {
+        // Renames: a promoted wire is read through its register in every segment
+        // after the one that declares it.
+        let renames_for = |seg_idx: usize| -> HashMap<String, String> {
+            promoted_wires.iter()
+                .filter(|(wire_name, _, _)| wire_segment[wire_name.as_str()] < seg_idx)
                 .map(|(wire_name, _, _)| (wire_name.clone(), format!("{}_r", wire_name)))
-                .collect();
+                .collect()
+        };
 
-            let pre_edge = lower_pre_edge_stmts(
-            &segments[seg_idx],
-            &promoted_names,
-            &phase_renames,
-            &seq.registers,
-            &no_reg_outs,
-            module_span,
-        )?;
+        // The resumption's statements in execution order, each with its rename
+        // scope: T (guarded) then segment 0 in phase 0, segment k alone otherwise.
+        let mut parts: Vec<(Vec<CHIRStmt>, HashMap<String, String>)> = Vec::new();
+        if phase_idx == 0 && has_trailing {
+            parts.push((
+                vec![CHIRStmt::If {
+                    condition: CHIRExpr::Var(STARTED_REG.to_string()),
+                    then_body: trailing.clone(),
+                    else_body: None,
+                    span: module_span,
+                }],
+                renames_for(n_ticks),
+            ));
+        }
+        parts.push((segments[phase_idx].clone(), renames_for(phase_idx)));
 
-            // Shared with the trailing segment below when this is the last phase:
-            // both commit at this edge, and the trailing statements run after it.
-            let mut fwd: HashMap<String, SHIRExpr> = HashMap::new();
-            let mut post_edge = extract_reg_updates_shared(
-                &segments[seg_idx],
+        let mut fwd = Forwarding::for_segment(reg_names.clone(), module_span);
+        let mut fwd_map: HashMap<String, SHIRExpr> = HashMap::new();
+        let mut pre_edge = Vec::new();
+        let mut post_edge = Vec::new();
+        // The trailing region's own updates, emitted under the guard rather than
+        // as `guard ? v : r` muxes, so a `match` next-state keeps its `case`
+        // (`lower_reg_updates` lifts only a top-level one). The walk above over
+        // the guarded `if` supplies the forwarding segment 0 reads; this walk
+        // over the unguarded region supplies the values, from the same function.
+        let guarded_post_edge = if phase_idx == 0 && has_trailing {
+            let renames = renames_for(n_ticks);
+            Some((
+                SHIRExpr::Var(STARTED_REG.to_string()),
+                extract_reg_updates_shared(
+                    trailing,
+                    &seq.registers,
+                    &promoted_names,
+                    module_span,
+                    &renames,
+                    &mut HashMap::new(),
+                )?,
+            ))
+        } else {
+            None
+        };
+        for (i, (stmts, renames)) in parts.iter().enumerate() {
+            let is_guarded_trailing = guarded_post_edge.is_some() && i == 0;
+            let mut wire_types = HashMap::new();
+            collect_wire_types(stmts, &mut wire_types);
+            pre_edge.extend(lower_stmt_list(stmts, &promoted_names, renames, &wire_types, &mut fwd)?);
+            let updates = extract_reg_updates_shared(
+                stmts,
                 &seq.registers,
                 &promoted_names,
                 module_span,
-                &phase_renames,
-                &mut fwd,
+                renames,
+                &mut fwd_map,
             )?;
-
-            if phase_idx == n_ticks - 1 {
-                // The trailing segment's REGISTER updates map to this phase. Its
-                // combinational statements have no home in the multi-tick model
-                // (only the single-tick path hoists them, where the trailing
-                // segment shares the one phase) and used to be dropped SILENTLY —
-                // an output written after the last tick simply vanished, leaving
-                // an undriven port. Fail loudly instead; deciding which phase they
-                // belong to is a semantics question, not a lowering detail.
-                // The trailing segment's COMBINATIONAL statements belong to the
-                // cycle that follows this edge — which is PHASE 0's, because "a
-                // clock cycle is a maximal tick-free region of an execution"
-                // (design_docs/SYNCHRONOUS_SEMANTICS.md) and falling off the end of
-                // the body back to its head costs no time. They are collected here,
-                // where the last phase's renames are in scope, and prepended to
-                // phase 0 below — before phase 0's own statements, since the
-                // simulator runs them first (post-edge settle of this edge) and the
-                // head's after (pre-edge settle of the next).
-                //
-                // They used to be REFUSED on this path — "an output written there
-                // would be silently dropped" — while the single-tick path hoisted
-                // them and `control_extract`'s path accepted them and agreed with
-                // its SystemVerilog (`uart/rx`'s trailing `rx_dv.write(Zero)`,
-                // verified). So the same source was accepted or rejected depending
-                // on whether an unrelated part of the module triggered extraction.
-                // Decided 2026-08-25, from the semantics doc rather than by default.
-                trailing_comb = lower_pre_edge_stmts(
-                    &segments[n_ticks],
-                    &promoted_names,
-                    &phase_renames,
-                    &seq.registers,
-                    &reg_out_ports,
-                    module_span,
-                )?;
-                // Trailing segment maps to the same phase — same renames apply
-                let trailing_updates = extract_reg_updates_shared(
-                    &segments[n_ticks],
-                    &seq.registers,
-                    &promoted_names,
-                    module_span,
-                    &phase_renames,
-                    &mut fwd,
-                )?;
-                post_edge.extend(trailing_updates);
+            // The guarded trailing region's updates are `guarded_post_edge`; this
+            // walk only advanced the forwarding map past them.
+            if !is_guarded_trailing {
+                post_edge.extend(updates);
             }
+        }
 
-            // Capture promoted wires into their registers at this phase's clock edge
-            for (wire_name, _ty, _init) in &promoted_wires {
-                let decl_seg = wire_segment[wire_name.as_str()];
-                if phase_for_segment(decl_seg, n_ticks) == phase_idx {
-                    post_edge.push(SHIRRegUpdate {
-                        target: format!("{}_r", wire_name),
-                        next_value: SHIRExpr::Var(wire_name.clone()),
-                    });
-                }
+        // Capture promoted wires into their registers at this phase's clock edge
+        for (wire_name, _ty, _init) in &promoted_wires {
+            if wire_segment[wire_name.as_str()] == phase_idx {
+                post_edge.push(SHIRRegUpdate {
+                    target: format!("{}_r", wire_name),
+                    next_value: SHIRExpr::Var(wire_name.clone()),
+                });
             }
+        }
 
+        if phase_idx == 0 && has_trailing {
+            post_edge.push(SHIRRegUpdate {
+                target: STARTED_REG.to_string(),
+                next_value: SHIRExpr::Lit(SHIRLit { ty: started_ty.clone(), value: 1 }),
+            });
+        }
+
+        if n_ticks > 1 {
             // Phase advance (wraps back to 0 from N-1)
             let next_phase = (phase_idx + 1) % n_ticks;
             let phase_width = phase_register_width(n_ticks);
@@ -697,18 +612,19 @@ fn lower_seq_body(
                     value: next_phase as u128,
                 }),
             });
-
-            phases.push(SHIRPhase { phase_idx, pre_edge, post_edge });
         }
 
-        // Phase 0 opens with the trailing segment: same cycle, and the simulator runs
-        // it first. `pre_edge` is a plain statement list, so "before" is a splice.
-        if !trailing_comb.is_empty() {
-            let head = std::mem::take(&mut phases[0].pre_edge);
-            phases[0].pre_edge = merge_trailing_before_head(trailing_comb, head);
-        }
+        phases.push(SHIRPhase { phase_idx, pre_edge, guarded_post_edge, post_edge });
+    }
 
-        // Add phase_r register
+    if has_trailing {
+        registers.push(SHIRReg {
+            name: STARTED_REG.to_string(),
+            ty: started_ty.clone(),
+            init: Some(SHIRLit { ty: started_ty, value: 0 }),
+        });
+    }
+    if n_ticks > 1 {
         let phase_width = phase_register_width(n_ticks);
         registers.push(SHIRReg {
             name: "phase_r".to_string(),
@@ -755,19 +671,6 @@ fn split_at_ticks(stmts: &[CHIRStmt]) -> Vec<Vec<CHIRStmt>> {
         }
     }
     segments
-}
-
-/// Returns the hardware phase index for a given source segment index.
-///
-/// Mapping (N = n_ticks):
-/// - seg_k for k < N  → phase_k
-/// - seg_N (trailing) → phase_{N-1}
-fn phase_for_segment(seg_idx: usize, n_ticks: usize) -> usize {
-    if seg_idx >= n_ticks {
-        n_ticks - 1
-    } else {
-        seg_idx
-    }
 }
 
 /// Minimum bit width needed to hold values 0..n_ticks-1.
@@ -830,239 +733,7 @@ fn check_no_tick_in_branch(stmt: &CHIRStmt, span: SourceSpan) -> Result<(), SHIR
     }
 }
 
-// ── Helpers: pre-edge statement lowering ──────────────────────────────────────
-
-/// Lower the wire/port-drive/conditional statements from a segment into `SHIRStmt`s for `pre_edge`.
-/// Register assigns and AwaitTick are skipped (they go to post_edge).
-/// PortWrite → PortDrive (output port drives are allowed here, including inside branches).
-///
-/// A register assign emits nothing here but is not *ignored*: it advances the
-/// segment's [`Forwarding`], so a later read in the same segment gets the value the
-/// assignment produced rather than the register's pre-edge value. Skipping that
-/// step made `n = n + step; acc.write(n);` and `acc.write(n); n = n + step;` emit
-/// identical SystemVerilog — `TODO` cause L.
-/// Names a comb statement DEFINES (wires it drives, ports, index-assign bases),
-/// recursing into branches. Memory stagings define implicit nets, so a
-/// statement touching them is treated as opaque by the merge below.
-fn shir_stmt_defs(stmt: &SHIRStmt, out: &mut HashSet<String>) {
-    match stmt {
-        SHIRStmt::Wire { name, .. } => {
-            out.insert(name.clone());
-        }
-        SHIRStmt::PortDrive { port_name, .. } => {
-            out.insert(port_name.clone());
-        }
-        SHIRStmt::IndexAssign { base, .. } => {
-            out.insert(base.clone());
-        }
-        SHIRStmt::If { then_stmts, else_stmts, .. } => {
-            for st in then_stmts {
-                shir_stmt_defs(st, out);
-            }
-            if let Some(els) = else_stmts {
-                for st in els {
-                    shir_stmt_defs(st, out);
-                }
-            }
-        }
-        SHIRStmt::Match { arms, .. } => {
-            for arm in arms {
-                for st in &arm.stmts {
-                    shir_stmt_defs(st, out);
-                }
-            }
-        }
-        SHIRStmt::ForLoop { body, .. } => {
-            for st in body {
-                shir_stmt_defs(st, out);
-            }
-        }
-        SHIRStmt::MemRead { .. } | SHIRStmt::MemWrite { .. } => {}
-    }
-}
-
-/// Names a comb statement READS, both value and edge forms (conservative).
-fn shir_stmt_uses(stmt: &SHIRStmt, out: &mut HashSet<String>) {
-    use crate::vlir_lower::shir_expr_vars;
-    match stmt {
-        SHIRStmt::Wire { value, .. } => shir_expr_vars(value, out),
-        SHIRStmt::PortDrive { value, .. } => shir_expr_vars(value, out),
-        SHIRStmt::IndexAssign { index, value, .. } => {
-            shir_expr_vars(index, out);
-            shir_expr_vars(value, out);
-        }
-        SHIRStmt::If { condition, edge_condition, then_stmts, else_stmts } => {
-            shir_expr_vars(condition, out);
-            shir_expr_vars(edge_condition, out);
-            for st in then_stmts {
-                shir_stmt_uses(st, out);
-            }
-            if let Some(els) = else_stmts {
-                for st in els {
-                    shir_stmt_uses(st, out);
-                }
-            }
-        }
-        SHIRStmt::Match { scrutinee, edge_scrutinee, arms } => {
-            shir_expr_vars(scrutinee, out);
-            shir_expr_vars(edge_scrutinee, out);
-            for arm in arms {
-                if let Some(g) = &arm.guard {
-                    shir_expr_vars(g, out);
-                }
-                for st in &arm.stmts {
-                    shir_stmt_uses(st, out);
-                }
-            }
-        }
-        SHIRStmt::ForLoop { start, end, body, .. } => {
-            shir_expr_vars(start, out);
-            shir_expr_vars(end, out);
-            for st in body {
-                shir_stmt_uses(st, out);
-            }
-        }
-        SHIRStmt::MemRead { addr, .. } => shir_expr_vars(addr, out),
-        SHIRStmt::MemWrite { addr, value, .. } => {
-            shir_expr_vars(addr, out);
-            shir_expr_vars(value, out);
-        }
-    }
-}
-
-/// Splice the trailing segment's combinational statements ahead of the head's —
-/// the simulator's execution order (post-edge settle first) — while HOISTING
-/// past them any head statements that define names the trailing statements
-/// read. Without the hoist, a trailing wire computed from a head-segment `let`
-/// (`let next = f(xv)` after the tick, `let xv = x.read()` before it) emits as
-/// use-before-def in the `always_comb`: the settle still converges to the same
-/// fixpoint, but Verilator's ALWCOMBORDER makes it fatal under `-Wall`.
-///
-/// The hoist is exact, not a general reorder: a head statement moves only when
-/// (a) it defines a name the trailing statements (or an already-hoisted
-/// statement) read, (b) it reads nothing the trailing statements define — a
-/// genuine cycle stays in stated order — and (c) every name involved has a
-/// single defining statement, so the default-then-override reassignment idiom
-/// is never split. Statements that do not qualify keep their stated order, so
-/// emission is unchanged wherever the hazard is absent.
-fn merge_trailing_before_head(trailing: Vec<SHIRStmt>, head: Vec<SHIRStmt>) -> Vec<SHIRStmt> {
-    let mut trailing_defs = HashSet::new();
-    let mut needed = HashSet::new();
-    for st in &trailing {
-        shir_stmt_defs(st, &mut trailing_defs);
-        shir_stmt_uses(st, &mut needed);
-    }
-
-    let head_meta: Vec<(HashSet<String>, HashSet<String>)> = head
-        .iter()
-        .map(|st| {
-            let mut d = HashSet::new();
-            let mut u = HashSet::new();
-            shir_stmt_defs(st, &mut d);
-            shir_stmt_uses(st, &mut u);
-            (d, u)
-        })
-        .collect();
-
-    // Names with more than one defining statement (the default-then-override
-    // idiom) are never hoisted across.
-    let mut def_counts: HashMap<String, usize> = HashMap::new();
-    for (d, _) in &head_meta {
-        for n in d {
-            *def_counts.entry(n.clone()).or_insert(0) += 1;
-        }
-    }
-    for n in &trailing_defs {
-        *def_counts.entry(n.clone()).or_insert(0) += 1;
-    }
-    let multi: HashSet<&String> =
-        def_counts.iter().filter(|(_, c)| **c > 1).map(|(n, _)| n).collect();
-
-    let mut hoist = vec![false; head.len()];
-    loop {
-        let mut changed = false;
-        for (i, (defs, uses)) in head_meta.iter().enumerate() {
-            if !hoist[i]
-                && defs.iter().any(|n| needed.contains(n))
-                && defs.iter().all(|n| !multi.contains(n))
-                && uses.iter().all(|n| !trailing_defs.contains(n))
-            {
-                hoist[i] = true;
-                for n in uses {
-                    needed.insert(n.clone());
-                }
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    // Prune: a hoisted statement must not read a name whose only head
-    // definition stays UNHOISTED (that would create the very hazard among the
-    // head statements themselves).
-    loop {
-        let mut unhoisted_defs = HashSet::new();
-        for (i, (defs, _)) in head_meta.iter().enumerate() {
-            if !hoist[i] {
-                for n in defs {
-                    unhoisted_defs.insert(n.clone());
-                }
-            }
-        }
-        let mut changed = false;
-        for (i, (_, uses)) in head_meta.iter().enumerate() {
-            if hoist[i] && uses.iter().any(|n| unhoisted_defs.contains(n)) {
-                hoist[i] = false;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    let mut merged = Vec::with_capacity(trailing.len() + head.len());
-    let mut rest = Vec::new();
-    for (i, st) in head.into_iter().enumerate() {
-        if hoist[i] {
-            merged.push(st);
-        } else {
-            rest.push(st);
-        }
-    }
-    merged.extend(trailing);
-    merged.extend(rest);
-    merged
-}
-
-fn lower_pre_edge_stmts(
-    stmts: &[CHIRStmt],
-    promoted_names: &HashSet<String>,
-    renames: &HashMap<String, String>,
-    registers: &[CHIRRegDecl],
-    // The module's `RegOut` ports for a TRAILING segment, empty for any other
-    // (see `Forwarding::trailing_reg_outs`).
-    trailing_reg_outs: &std::rc::Rc<HashSet<String>>,
-    span: SourceSpan,
-) -> Result<Vec<SHIRStmt>, SHIRLowerError> {
-    // The wire types this segment declares. This USED to be empty, on the premise
-    // that "an `Assign` in the sequential path is a register update handled by the
-    // segment logic" — which was true only because that logic made a register update
-    // out of EVERY assign, wire or not. It does not any more (see the `Assign` arm in
-    // `extract_updates_from_stmts`), so a reassigned combinational wire has to be
-    // lowered here, as another blocking assign, exactly as the combinational module
-    // path already does. Without both halves of this change a wire reassignment
-    // either gets two drivers (before) or silently disappears (guard alone).
-    let mut wire_types = HashMap::new();
-    collect_wire_types(stmts, &mut wire_types);
-    let mut fwd = Forwarding::for_segment(
-        reg_name_set(registers, promoted_names),
-        trailing_reg_outs.clone(),
-        span,
-    );
-    lower_stmt_list(stmts, promoted_names, renames, &wire_types, &mut fwd)
-}
+// ── Helpers: register names ──────────────────────────────────────
 
 /// The names the segment walks treat as registers: declared registers plus the
 /// `<name>_r` a promoted cross-phase wire becomes.
@@ -1351,15 +1022,14 @@ fn extract_updates_from_stmts(
 
 /// Find wires that need to be promoted to registers.
 ///
-/// A wire declared in seg_j needs promotion if it is referenced in a segment
-/// that maps to a DIFFERENT hardware phase than seg_j.
+/// A wire declared in seg_j needs promotion if it is referenced in any other
+/// segment (a later one: the reference crosses a tick).
 ///
 /// Returns a list of (wire_name, wire_ty, wire_init) for promoted wires.
 /// `wire_init` is always `None` — promoted wires start at 0 (unknown initial).
 fn find_promoted_wires(
     segments: &[Vec<CHIRStmt>],
     wire_segment: &HashMap<String, usize>,
-    n_ticks: usize,
 ) -> Vec<(String, CHIRType, Option<SHIRLit>)> {
     // Collect all wire types from declarations
     let wire_types: HashMap<String, CHIRType> = segments.iter()
@@ -1376,13 +1046,16 @@ fn find_promoted_wires(
     // Find which wires are referenced in a different phase from their declaration
     let mut promote: HashSet<String> = HashSet::new();
 
+    // A wire read in a later segment than the one that declares it crosses at
+    // least one tick, so it is carried by a register. Before Phase C step 4 the test
+    // compared PHASES, with the trailing segment mapped to the last phase (the fold),
+    // so a head wire read after the last tick of a single-tick body stayed a wire;
+    // the trailing segment is now the next resumption's head, after the edge.
     for (seg_idx, stmts) in segments.iter().enumerate() {
-        let seg_phase = phase_for_segment(seg_idx, n_ticks);
         for stmt in stmts {
             collect_expr_vars_in_stmt(stmt, &mut |var_name: &str| {
                 if let Some(&decl_seg) = wire_segment.get(var_name) {
-                    let decl_phase = phase_for_segment(decl_seg, n_ticks);
-                    if decl_phase != seg_phase {
+                    if decl_seg != seg_idx {
                         promote.insert(var_name.to_string());
                     }
                 }
@@ -1791,23 +1464,6 @@ mod tests {
         assert_eq!(segments.len(), 3);
     }
 
-    // ── Phase mapping ────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_phase_for_segment_single_tick() {
-        // n_ticks=1: seg_0→phase_0, seg_1 (trailing)→phase_0
-        assert_eq!(phase_for_segment(0, 1), 0);
-        assert_eq!(phase_for_segment(1, 1), 0);
-    }
-
-    #[test]
-    fn test_phase_for_segment_two_ticks() {
-        // n_ticks=2: seg_0→phase_0, seg_1→phase_1, seg_2 (trailing)→phase_1
-        assert_eq!(phase_for_segment(0, 2), 0);
-        assert_eq!(phase_for_segment(1, 2), 1);
-        assert_eq!(phase_for_segment(2, 2), 1);
-    }
-
     // ── Combinational body ───────────────────────────────────────────────────
 
     #[test]
@@ -2106,8 +1762,12 @@ mod tests {
 
     #[test]
     fn test_promoted_wire_renamed_in_later_phase() {
-        // Two-tick module: step1 computed in phase_0, used in phase_1.
-        // phase_1's expressions should reference step1_r, not step1.
+        // Two-tick module: step1 computed in segment 1 (phase 1), used in the
+        // TRAILING segment, which is the next resumption's head and lowers into
+        // phase 0 (Phase C step 4). The use crosses a tick, so step1 is promoted:
+        // captured into step1_r at phase 1's edge, read as step1_r by the guarded
+        // trailing update in phase 0. (Before step 4 the trailing segment was folded
+        // into phase 1 and step1 stayed a wire.)
         let chir = make_chir(
             "async fn two_cycle_op(clk: Clock<MainClk>, input: u8) {
                 let mut acc: u8 = 0u8;
@@ -2120,25 +1780,21 @@ mod tests {
             }"
         );
         let shir = lower_to_shir(&chir).unwrap();
-        if let SHIRBody::Sequential(body) = &shir.body {
-            assert_eq!(body.phases.len(), 2);
-            // step1 declared in seg_1 (phase_1), used in seg_2 (trailing, also phase_1)
-            // Same phase → no promotion needed; acc should use Var("step1") directly.
-            let phase1 = &body.phases[1];
-            let acc_update = phase1.post_edge.iter().find(|u| u.target == "acc").unwrap();
-            // next_value should reference step1 (wire), not step1_r (promoted register)
-            fn contains_step1_r(expr: &SHIRExpr) -> bool {
-                match expr {
-                    SHIRExpr::Var(n) => n == "step1_r",
-                    SHIRExpr::BinOp { left, right, .. } => contains_step1_r(left) || contains_step1_r(right),
-                    _ => false,
-                }
+        let SHIRBody::Sequential(body) = &shir.body else { panic!("expected sequential") };
+        assert_eq!(body.phases.len(), 2);
+        fn mentions(expr: &SHIRExpr, name: &str) -> bool {
+            match expr {
+                SHIRExpr::Var(n) => n == name,
+                SHIRExpr::BinOp { left, right, .. } => mentions(left, name) || mentions(right, name),
+                _ => false,
             }
-            assert!(!contains_step1_r(&acc_update.next_value),
-                "acc should use wire step1, not promoted step1_r (same phase — no register needed)");
-        } else {
-            panic!("expected sequential");
         }
+        let (guard, trailing) = body.phases[0].guarded_post_edge.as_ref().expect("phase 0 runs the trailing region");
+        assert!(matches!(guard, SHIRExpr::Var(n) if n == STARTED_REG));
+        let acc_update = trailing.iter().find(|u| u.target == "acc").expect("acc is updated by the trailing region");
+        assert!(mentions(&acc_update.next_value, "step1_r"), "{:?}", acc_update.next_value);
+        assert!(!body.phases[1].post_edge.iter().any(|u| u.target == "acc"), "no fold into phase 1");
+        assert!(body.phases[1].post_edge.iter().any(|u| u.target == "step1_r"), "step1 captured at phase 1's edge");
     }
 
     #[test]

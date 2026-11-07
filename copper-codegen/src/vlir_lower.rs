@@ -338,14 +338,13 @@ fn lower_seq(
     }
 
     for phase in &s.phases {
-        let staged_here = staged_read_ports(&phase.pre_edge);
-        // Pre-edge statements run after the capture edge, so a read result they
-        // observe is the registered one.
-        let pre_bind = mem_binding(&s.memories, &staged_here, false, leg);
+        // A read result is the word the last edge delivered, wherever it is
+        // observed (SPEC I.10.1(d)).
+        let bind = mem_binding(&s.memories, leg);
         // Every drive targets a `RegOut` (refused above otherwise), so none
         // becomes a continuous `assign`.
         let (mut stmts, _no_assigns) =
-            lower_flat_stmts(&phase.pre_edge, leg, registered_outs, &mem_widths, &pre_bind)?;
+            lower_flat_stmts(&phase.pre_edge, leg, registered_outs, &mem_widths, &bind)?;
 
         // Memory net defaults go first, so a port driven only inside an `if` is
         // still assigned on every path (no latch, and the enable reads as 0).
@@ -393,10 +392,19 @@ fn lower_seq(
         comb_phases.push(VLIRCombPhase { phase_guard, stmts });
 
         // Register updates -> always_ff non-blocking assigns, guarded by phase
-        // for multi-phase modules. These latch at THIS phase's edge, so a read
-        // staged in this phase is read combinationally (same edge) here.
-        let post_bind = mem_binding(&s.memories, &staged_here, true, leg);
-        let updates = lower_reg_updates(&phase.post_edge, leg, &post_bind)?;
+        // for multi-phase modules; the trailing region's first, under its guard.
+        let mut updates = Vec::new();
+        if let Some((guard, trailing)) = &phase.guarded_post_edge {
+            let then_stmts = lower_reg_updates(trailing, leg, &bind)?;
+            if !then_stmts.is_empty() {
+                updates.push(VLIRFFStmt::If {
+                    condition: lower_expr(guard, leg, &bind)?,
+                    then_stmts,
+                    else_stmts: None,
+                });
+            }
+        }
+        updates.extend(lower_reg_updates(&phase.post_edge, leg, &bind)?);
         if multi_phase {
             ff_stmts.push(VLIRFFStmt::If {
                 condition: phase_eq(phase.phase_idx, &phase_r_width),
@@ -1795,30 +1803,23 @@ type MemPort = (String, usize);
 /// why the answer is not the same everywhere.
 type MemBinding = HashMap<MemPort, (String, String)>;
 
-/// Which memory ports a body touches, and — for read results — in which FORM.
+/// Which memory ports a body touches, and which read results it observes.
 ///
-/// A read result has two forms, and picking the wrong one shifts the design by a
-/// cycle in one direction or the other:
-///
-/// * the **combinational** net (`<m>_rd<i>_data`), a continuous read of the array.
-///   Correct only for a consumer that latches at the SAME edge as the capture: an
-///   `always_ff` register update in the phase that stages the read. There the
-///   register and the memory capture the same pre-edge value together.
-/// * the **registered** net (`<m>_rd<i>_q`), holding what the capture edge
-///   produced. Correct for every other consumer — anything reading the result
-///   *after* the capture edge, which includes a plain combinational use in the
-///   same single-tick loop (it runs post-edge) and any use in a later phase.
+/// A read result is the **registered** net (`<m>_rd<i>_q`), the word the last
+/// edge delivered — what `data()` / `is_ready()` read anywhere in a resumption
+/// (SPEC I.10.1(d)). Until Phase C step 4 (2026-11-06) a register update in the
+/// phase that staged the read took the **combinational** net (`<m>_rd<i>_data`)
+/// instead; its only consumers were the trailing updates the fold committed one
+/// edge early (12 modules, MEASUREMENTS §H), and it went with the fold.
 #[derive(Default)]
 struct MemPortUse {
     /// `(mem, port)` staged by a `read()` call.
     reads: HashSet<MemPort>,
     /// `(mem, port)` staged by a `write()` call.
     writes: HashSet<MemPort>,
-    /// `data()` observed at the capture edge / after it.
-    data_comb: HashSet<MemPort>,
+    /// `data()` observed.
     data_reg: HashSet<MemPort>,
-    /// `is_ready()` observed at the capture edge / after it.
-    valid_comb: HashSet<MemPort>,
+    /// `is_ready()` observed.
     valid_reg: HashSet<MemPort>,
 }
 
@@ -1828,112 +1829,49 @@ impl MemPortUse {
     /// becomes ready, which the emitted `en = 1'b0` default reproduces exactly.
     /// Without this the observation would reference nets nothing declares.
     fn read_touched(&self, k: &MemPort) -> bool {
-        self.reads.contains(k)
-            || self.data_comb.contains(k)
-            || self.data_reg.contains(k)
-            || self.valid_comb.contains(k)
-            || self.valid_reg.contains(k)
+        self.reads.contains(k) || self.data_reg.contains(k) || self.valid_reg.contains(k)
     }
-    /// The continuous array-read net is needed by a combinational consumer
-    /// directly, and by a registered one as the register's input.
+    /// The continuous array-read net is needed as the read register's input.
     fn needs_data_net(&self, k: &MemPort) -> bool {
-        self.data_comb.contains(k) || self.data_reg.contains(k)
+        self.data_reg.contains(k)
     }
     /// A READ port's enable exists only to answer `is_ready()` — the array read
     /// itself needs only an address. A design that never asks (a ROM read
     /// unconditionally, say) would otherwise carry a net nothing reads, which is a
     /// fatal Verilator UNUSEDSIGNAL under `-Wall`.
     fn needs_read_en(&self, k: &MemPort) -> bool {
-        self.valid_comb.contains(k) || self.valid_reg.contains(k)
+        self.valid_reg.contains(k)
     }
 }
 
-/// The nets `MemData` / `MemValid` resolve to in one phase and region.
-///
-/// `staged_here` is the set of read ports this phase stages. A consumer in the
-/// phase's **post_edge** (a register update) latches at the very edge that
-/// captures, so it must read the combinational value; everything else runs after
-/// that edge and must read the register.
-fn mem_binding(
-    memories: &[SHIRMemory],
-    staged_here: &HashSet<MemPort>,
-    post_edge: bool,
-    leg: &Legalizer,
-) -> MemBinding {
+/// The nets `MemData` / `MemValid` resolve to: the port's output stage, the word
+/// the last edge delivered (see `MemPortUse`).
+fn mem_binding(memories: &[SHIRMemory], leg: &Legalizer) -> MemBinding {
     let mut b = MemBinding::new();
     for m in memories {
         for port in 0..m.read_ports {
-            let key = (m.name.clone(), port);
-            let same_edge = post_edge && staged_here.contains(&key);
-            let nets = if same_edge {
-                // The value the port's OUTPUT will hold once this edge passes.
-                // At one cycle of latency that is the live array read; deeper, it
-                // is the stage about to shift into the output, read at its
-                // pre-edge value inside `always_ff`.
-                if m.read_lat == 1 {
-                    (
-                        leg.get(&mem_net(&m.name, true, port, "data")),
-                        leg.get(&mem_net(&m.name, true, port, "en")),
-                    )
-                } else {
-                    (
-                        leg.get(&read_stage(&m.name, port, m.read_lat - 2, true)),
-                        leg.get(&read_stage(&m.name, port, m.read_lat - 2, false)),
-                    )
-                }
-            } else {
-                // The port's output as it stands now.
-                (
-                    leg.get(&read_stage(&m.name, port, m.read_lat - 1, true)),
-                    leg.get(&read_stage(&m.name, port, m.read_lat - 1, false)),
-                )
-            };
-            b.insert(key, nets);
+            let nets = (
+                leg.get(&read_stage(&m.name, port, m.read_lat - 1, true)),
+                leg.get(&read_stage(&m.name, port, m.read_lat - 1, false)),
+            );
+            b.insert((m.name.clone(), port), nets);
         }
     }
     b
 }
 
-/// Read ports staged by a `read()` somewhere in these statements.
-fn staged_read_ports(stmts: &[SHIRStmt]) -> HashSet<MemPort> {
-    let mut u = MemPortUse::default();
-    collect_mem_use(stmts, &mut u);
-    u.reads
-}
-
-/// Tally every port a body stages, and classify every read-result observation as
-/// combinational or registered, phase by phase.
+/// Tally every port a body stages and every read result it observes.
 fn collect_phase_mem_use(phases: &[SHIRPhase], use_: &mut MemPortUse) {
     for phase in phases {
         collect_mem_use(&phase.pre_edge, use_);
-        let staged = staged_read_ports(&phase.pre_edge);
-
-        // Pre-edge statements run AFTER the edge that captured (in a single-tick
-        // loop the post-tick segment lands here), so they always read the register.
         let (mut data, mut valid) = (HashSet::new(), HashSet::new());
         collect_read_uses(&phase.pre_edge, &mut data, &mut valid);
-        use_.data_reg.extend(data.drain());
-        use_.valid_reg.extend(valid.drain());
-
-        // Register updates latch at this phase's edge: combinational iff this
-        // phase is the one staging the read.
-        for u in &phase.post_edge {
+        let guarded = phase.guarded_post_edge.iter().flat_map(|(_, us)| us.iter());
+        for u in guarded.chain(&phase.post_edge) {
             collect_read_uses_expr(&u.next_value, &mut data, &mut valid);
         }
-        for k in data {
-            if staged.contains(&k) {
-                use_.data_comb.insert(k);
-            } else {
-                use_.data_reg.insert(k);
-            }
-        }
-        for k in valid {
-            if staged.contains(&k) {
-                use_.valid_comb.insert(k);
-            } else {
-                use_.valid_reg.insert(k);
-            }
-        }
+        use_.data_reg.extend(data);
+        use_.valid_reg.extend(valid);
     }
 }
 
@@ -2150,28 +2088,13 @@ fn unstaged_read_defaults(
     out
 }
 
-/// How deep a read port's data / valid register chains have to be.
-///
-/// Stage `READ_LAT - 1` is the port's output, and a consumer that latches at the
-/// capture edge reads stage `READ_LAT - 2` instead (see `mem_binding`), so the
-/// deepest stage actually referenced depends on which forms are used. Returns
-/// `None` when no register is needed at all — the one-cycle port whose only
-/// consumer latches at the capture edge, which reads the array directly.
+/// How deep a read port's data / valid register chains have to be: stage
+/// `READ_LAT - 1` (the port's output) when the result is observed, `None` when it
+/// is not.
 fn read_chain_depth(m: &SHIRMemory, port: usize, use_: &MemPortUse, data: bool) -> Option<usize> {
     let key = (m.name.clone(), port);
-    let (delayed, same_edge) = if data {
-        (use_.data_reg.contains(&key), use_.data_comb.contains(&key))
-    } else {
-        (use_.valid_reg.contains(&key), use_.valid_comb.contains(&key))
-    };
-    let mut deepest = None;
-    if delayed {
-        deepest = Some(m.read_lat - 1);
-    }
-    if same_edge && m.read_lat >= 2 {
-        deepest = Some(deepest.map_or(m.read_lat - 2, |d: usize| d.max(m.read_lat - 2)));
-    }
-    deepest
+    let observed = if data { use_.data_reg.contains(&key) } else { use_.valid_reg.contains(&key) };
+    observed.then(|| m.read_lat - 1)
 }
 
 /// The read pipeline: `q0 <= <array read>` and `qk <= q(k-1)`, plus the matching
@@ -2998,7 +2921,8 @@ mod e2e_tests {
         println!("\n===== GENERATED VERILOG (counter) =====\n{sv}=======================================");
         assert!(sv.contains("module counter"));
         assert!(sv.contains("always_ff @(posedge clk)"));
-        assert!(sv.contains("out <= count;"), "a `RegOut` is the flop's drive:\n{sv}");
+        assert!(sv.contains("out <= "), "a `RegOut` is the flop's drive:\n{sv}");
+        assert!(!sv.contains("assign out"), "never a continuous assign:\n{sv}");
     }
 
     /// Golden test: exact emitted text for the canonical counter. Catches
@@ -3024,16 +2948,21 @@ module counter (
 );
 
     logic [7:0] count;
+    logic __copper_started;
 
     initial begin
         count = 8'd0;
+        __copper_started = 1'b0;
         out = 8'd0;
     end
 
     /* verilator lint_off MULTIDRIVEN */
     always_ff @(posedge clk) begin
-        out <= count;
-        count <= (count + step);
+        out <= (__copper_started ? (count + step) : count);
+        if (__copper_started) begin
+            count <= (count + step);
+        end
+        __copper_started <= 1'b1;
     end
     /* verilator lint_on MULTIDRIVEN */
 
@@ -3103,16 +3032,21 @@ module m (
 );
 
     logic [7:0] r;
+    logic __copper_started;
 
     initial begin
         r = 8'd0;
+        __copper_started = 1'b0;
         o = 8'd0;
     end
 
     /* verilator lint_off MULTIDRIVEN */
     always_ff @(posedge clk) begin
-        o <= r;
-        r <= ((d[7] == 1'b1) ? d : r);
+        o <= (__copper_started ? ((d[7] == 1'b1) ? d : r) : r);
+        if (__copper_started) begin
+            r <= ((d[7] == 1'b1) ? d : r);
+        end
+        __copper_started <= 1'b1;
     end
     /* verilator lint_on MULTIDRIVEN */
 
@@ -3149,16 +3083,21 @@ module m (
 );
 
     logic [7:0] r;
+    logic __copper_started;
 
     initial begin
         r = 8'd0;
+        __copper_started = 1'b0;
         o = 8'd0;
     end
 
     /* verilator lint_off MULTIDRIVEN */
     always_ff @(posedge clk) begin
-        o <= r;
-        r <= (sel ? ((d >> 8'd1) ^ r) : (d >> 8'd1));
+        o <= (__copper_started ? (sel ? ((d >> 8'd1) ^ r) : (d >> 8'd1)) : r);
+        if (__copper_started) begin
+            r <= (sel ? ((d >> 8'd1) ^ r) : (d >> 8'd1));
+        end
+        __copper_started <= 1'b1;
     end
     /* verilator lint_on MULTIDRIVEN */
 
@@ -3202,30 +3141,35 @@ module fsm (
 );
 
     logic [1:0] state;
+    logic __copper_started;
 
     initial begin
         state = 2'd0;
+        __copper_started = 1'b0;
         o = 1'b0;
     end
 
     /* verilator lint_off MULTIDRIVEN */
     always_ff @(posedge clk) begin
-        if ((state == 2'd2)) begin
+        if (((__copper_started ? ((state == 2'd0) ? 2'd1 : ((state == 2'd1) ? 2'd2 : 2'd0)) : state) == 2'd2)) begin
             o <= 1'b1;
         end else begin
             o <= 1'b0;
         end
-        case (state)
-            2'd0: begin
-                state <= 2'd1;
-            end
-            2'd1: begin
-                state <= 2'd2;
-            end
-            default: begin
-                state <= 2'd0;
-            end
-        endcase
+        if (__copper_started) begin
+            case (state)
+                2'd0: begin
+                    state <= 2'd1;
+                end
+                2'd1: begin
+                    state <= 2'd2;
+                end
+                default: begin
+                    state <= 2'd0;
+                end
+            endcase
+        end
+        __copper_started <= 1'b1;
     end
     /* verilator lint_on MULTIDRIVEN */
 

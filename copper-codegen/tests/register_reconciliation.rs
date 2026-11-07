@@ -17,13 +17,11 @@
 //!
 //!   * every inferred register appears in codegen's output (`inferred ⊆ codegen`);
 //!   * codegen adds only the **synthetic phase/pc counter** it introduces for
-//!     multi-tick / control-extracted FSMs (`codegen − inferred ⊆ {phase, pc}`),
-//!     which the source-level inference has no name for — plus, since phase C
-//!     (2026-10-23), the `<port>_hold` register behind a conditionally driven
-//!     plain `Out` emitted as a forwarded mux (`vlir_lower::opening_hold_outputs`):
-//!     the port's own hold state, which no source local names either. The first
-//!     fixtures to take that form were `branch_merge`, `branch_merge_explicit`
-//!     and `probe_fsm` on 2026-10-26, when the opening walk became arm-granular.
+//!     multi-tick / control-extracted FSMs, and the trailing region's guard
+//!     (`codegen − inferred ⊆ {phase, pc, __copper_started}`), which the
+//!     source-level inference has no name for. (From 2026-10-23 to Phase C step 4
+//!     the `<port>_hold` register of a conditionally driven plain `Out` was allowed
+//!     too; that form is gone with the plain `Out` of a clocked body.)
 //!
 //! Two REPRESENTATION mappings are applied before comparing (2026-08-27, the
 //! aggregate-surface landing):
@@ -67,9 +65,11 @@ use std::path::Path;
 
 use syn::ItemFn;
 
-/// Codegen's phase-FSM / control-extraction counter names, which the source-level
+/// Codegen's phase-FSM / control-extraction counter names, and the trailing
+/// region's guard (`__copper_started`, 0 until the first edge — the first
+/// resumption runs the head only; Phase C step 4), which the source-level
 /// inference legitimately does not produce (they are synthesized during lowering).
-const SYNTHETIC: &[&str] = &["phase", "pc"];
+const SYNTHETIC: &[&str] = &["phase", "pc", "__copper_started"];
 
 /// `pc_<digits>` — the extraction counter's collision-fallback spelling (a
 /// module that already names `pc`, like the pipelined CPU, gets `pc_1`).
@@ -137,27 +137,6 @@ fn has_port_index(name: &str, marker: &str) -> bool {
 
 fn strip_r(name: &str) -> String {
     name.strip_suffix("_r").unwrap_or(name).to_string()
-}
-
-/// The module's output port names, from the emitted header (`output logic … x,`).
-fn sv_output_ports(sv: &str) -> BTreeSet<String> {
-    sv.lines()
-        .filter_map(|l| {
-            let t = l.trim().strip_prefix("output ")?;
-            let t = t.strip_suffix(',').unwrap_or(t);
-            t.split_whitespace().last().map(str::to_string)
-        })
-        .collect()
-}
-
-/// Phase C's hold register behind a conditionally driven plain `Out`:
-/// `<port>_hold`, extended with `_` until it collides with nothing
-/// (`vlir_lower::hold_register_name`). A user register that happens to be named
-/// `<port>_hold` is inferred under that name and so is never `extra` here; the
-/// synthesized one is then the collision-renamed `<port>_hold_`.
-fn is_hold_register(name: &str, outputs: &BTreeSet<String>) -> bool {
-    let base = name.trim_end_matches('_');
-    base.strip_suffix("_hold").is_some_and(|port| outputs.contains(port))
 }
 
 fn is_hardware(f: &ItemFn) -> bool {
@@ -369,10 +348,9 @@ fn codegen_registers_match_shared_inference() {
                 })
                 .cloned()
                 .collect();
-            let outputs = sv_output_ports(&sv);
             let extra: Vec<_> = codegen
                 .difference(&inferred)
-                .filter(|r| !is_synthetic(r) && !is_hold_register(r, &outputs) && !accounted.contains(*r))
+                .filter(|r| !is_synthetic(r) && !accounted.contains(*r))
                 .cloned()
                 .collect();
 

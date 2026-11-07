@@ -572,11 +572,9 @@ async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<16>, Mai
 /// unrelated part of the module triggered extraction.
 ///
 /// The behavioural half is `tests/fixtures/trailing_statements_dut.rs`, swept
-/// differentially. Since phase C (2026-10-23) a plain `Out` driven from a register
-/// in this segment agrees with its SystemVerilog on the extraction route too
-/// (`vlir_lower::opening_hold_outputs`), and the trailing rule that refused it is
-/// retired; `pretick_out_write_before_update`'s trailing clause still constrains
-/// the write-before-update ordering there.
+/// differentially. Since Phase C step 4 (2026-11-06) the segment is the next
+/// resumption's head: it lowers into phase 0 under the `__copper_started` guard
+/// (the first resumption runs the head only), so `t`'s drive is guarded.
 #[test]
 fn trailing_combinational_statements_in_a_multi_tick_loop_lower_into_phase_zero() {
     let src = r#"
@@ -598,7 +596,7 @@ async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<8>, Main
          which is what a maximal tick-free region means",
     );
     assert!(
-        sv.contains("t <= r"),
+        sv.contains("if (__copper_started) begin\n                t <= r;"),
         "the trailing `RegOut` drive must reach the emitted module, not be dropped:\n{sv}"
     );
 }
