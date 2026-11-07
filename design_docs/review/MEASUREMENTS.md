@@ -971,3 +971,40 @@ clocked module; the combinational path shares code with them) — owed to a lowe
 - The pipelined CPU's 13 programs: unchanged (no plain `Out`; its body is unaffected by the
   barrier's removal — predicted, not argued: measured below).
 - Examples: every self-check passes.
+
+### G.6 (v) The bare regression — measured
+
+Bare `tools/regression.sh` on `a5bd6bd` (the flip; laptop): **REGRESSION OK (233 s)**. The
+first bare run, on the flip as first committed, failed to BUILD: `cargo fix` had removed
+`HardwareTest` from `examples/basejump/sipo_block.rs`, used only by its `#[cfg(not(test))]`
+`main` (restored, the commit amended). Counts:
+- 1174 passed, 0 failed, 89 ignored, 140 test binaries; G-C 114 test files; examples 32/32.
+- G-D 160 differential cases (4 ignored-with-reason: `SKIP` = `regout_trailing_single_tick`,
+  `rv32i_cpu_pipelined`, `two_domain_top`, `mod8`).
+- G-F 89 modules through the interpreter (46 at E.7), 75 skipped with a sentence.
+- **G-G differential 1234 PASS / 0 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE; reference
+  744 PASS** — predicted 0 DISAGREE and 0 EXCUSED: **as predicted**.
+- **Pins: 4, all `sim=ref≠SV`** (`preloop_linear`, `preloop_probe`, `trailing_fold`,
+  `regout_trailing_single_tick`) — **as predicted**; `b_reg`'s `Two` pin gone.
+- `rv32i_pipelined_verilator` (the 13 programs): PASS — **as predicted** (unaffected).
+- G-E 5 anchored, 159 transpiler-only.
+
+### G.7 What the SPEC must say that it does not (for the coordinator; SPEC files untouched)
+
+1. **A `Memory` read cannot drive a port at the edge that delivers it** (G.2). Under the user's
+   option (b) the two anchors are array registers; P23's anchor (`dual_port_ram`) now anchors
+   an array register, not `Memory` — III.1's evidence column for P23 should say so, and the
+   D-21 packet (running) may give `Memory` the form.
+2. **G2's register-name convention** (output ports excluded on both sides) no longer fits
+   D-8, where a clocked output IS a flop: `sync_2ff`'s second flop is the `RegOut` `q`. The
+   anchor's G2 check is now a storage count (inferred registers + `RegOut` flops = the
+   reference's flops).
+3. **Interpreter front-end gaps** reached once modules became `RegOut`-only: `const { assert!
+   }` blocks, `Self { .. }` struct literals in associated fns (REF_SKIP rows).
+4. **Hand-built untagged futures** (F.8 item 2) remain in the executor's own unit tests for the
+   combinational passthroughs (network tasks, correct) — the clocked one is now tagged.
+5. **The truncation instant moves one resumption** under the flip (an undelivered `data()` after
+   a tick is caught at resumption N+1, not N) — III.2.4's worked example should use the
+   one-resumption count.
+6. **`classify_reads`** (the deferred/immediate read classification) has no consumer left in
+   either front-end; the inventory should mark it retired with the injection.
