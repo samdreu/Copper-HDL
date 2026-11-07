@@ -43,6 +43,23 @@ impl IntTy {
         })
     }
 
+    /// The width of the type in bits (`usize`/`isize` 64, I.14.1(b)); `None` for an
+    /// unsuffixed literal.
+    pub fn width(self) -> Option<usize> {
+        Some(match self {
+            IntTy::U8 | IntTy::I8 => 8,
+            IntTy::U16 | IntTy::I16 => 16,
+            IntTy::U32 | IntTy::I32 => 32,
+            IntTy::U64 | IntTy::I64 | IntTy::Usize | IntTy::Isize => 64,
+            IntTy::U128 => 128,
+            IntTy::Unsuffixed => return None,
+        })
+    }
+
+    pub fn is_signed(self) -> bool {
+        matches!(self, IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize)
+    }
+
     /// The inclusive range of the type; `Unsuffixed` is unbounded here.
     pub fn range(self) -> (i128, i128) {
         match self {
@@ -97,6 +114,10 @@ impl Ty {
         match self {
             Ty::Logic => Some(1),
             Ty::Bits(w) => Some(*w as usize),
+            // Integer and `bool` port payloads (I.14.1; Phase C step 8): the
+            // integer's width, `usize` 64 bits.
+            Ty::Bool => Some(1),
+            Ty::Int(t) => t.width(),
             Ty::Array(t, n) => t.bit_width().map(|w| w * n),
             _ => None,
         }
@@ -115,6 +136,9 @@ pub enum Value {
     Lit(u128),
     /// `Bits::x()` of a width not yet known.
     LitX,
+    /// `Bits::all_ones()` of a width not yet known (rustc infers it; I.14.4, Phase C
+    /// step 8 — the interpreter refused this spelling until then).
+    LitOnes,
     Bool(bool),
     Int(i128, IntTy),
     /// A unit enum variant, `(enum name, variant)`.
@@ -133,6 +157,7 @@ impl fmt::Display for Value {
             Value::Bits(b) => write!(f, "{b:?}"),
             Value::Lit(v) => write!(f, "{v} (unsized Bits literal)"),
             Value::LitX => write!(f, "x (unsized)"),
+            Value::LitOnes => write!(f, "all ones (unsized)"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::Int(v, t) => write!(f, "{v}{}", t.name()),
             Value::Enum(e, v) => write!(f, "{e}::{v}"),
@@ -191,6 +216,11 @@ impl Value {
     pub fn to_bits(&self) -> Result<Vec<Logic>, RefError> {
         match self {
             Value::Bits(b) => Ok(b.to_logic_vec()),
+            Value::Bool(b) => Ok(vec![if *b { Logic::One } else { Logic::Zero }]),
+            Value::Int(i, t) => {
+                let w = t.width().ok_or_else(|| RefError::Runtime("an unsized integer at a port".into()))?;
+                Ok((0..w).map(|k| if (i >> k) & 1 == 1 { Logic::One } else { Logic::Zero }).collect())
+            }
             Value::Array(vs) => {
                 let mut out = Vec::new();
                 for v in vs {
@@ -214,6 +244,32 @@ impl Value {
                     )));
                 }
                 Ok(Value::Bits(RefBits::from_logic_slice(bits)))
+            }
+            // A `bool` / integer port has no X (I.14.2(a)): an X driven onto one is
+            // outside the environment's values (the harness drives X-free inputs).
+            Ty::Bool | Ty::Int(_) => {
+                let w = ty.bit_width().unwrap();
+                if bits.len() != w {
+                    return Err(RefError::Runtime(format!("port of width {w} given {} bits", bits.len())));
+                }
+                let mut v: i128 = 0;
+                for (k, b) in bits.iter().enumerate() {
+                    match b {
+                        Logic::One => v |= 1i128 << k,
+                        Logic::Zero => {}
+                        Logic::X => return Err(RefError::Runtime("an X bit on a `bool`/integer port".into())),
+                    }
+                }
+                Ok(match ty {
+                    Ty::Bool => Value::Bool(v == 1),
+                    Ty::Int(t) => {
+                        if t.is_signed() && w < 128 && (v >> (w - 1)) & 1 == 1 {
+                            v -= 1i128 << w;
+                        }
+                        Value::Int(v, *t)
+                    }
+                    _ => unreachable!(),
+                })
             }
             Ty::Array(t, n) => {
                 let ew = t.bit_width().ok_or_else(|| RefError::Runtime("array port of a non-bit element".into()))?;
@@ -254,6 +310,8 @@ impl Value {
             }
             (Value::LitX, Ty::Bits(w)) => Ok(Value::Bits(RefBits::all_x(*w))),
             (Value::LitX, Ty::Logic) => Ok(Value::Bits(RefBits::all_x(1))),
+            (Value::LitOnes, Ty::Bits(w)) => Ok(Value::Bits(RefBits::all_ones(*w))),
+            (Value::LitOnes, Ty::Logic) => Ok(Value::Bits(RefBits::all_ones(1))),
             (Value::Int(v, IntTy::Unsuffixed), Ty::Int(t)) => {
                 let (lo, hi) = t.range();
                 if v < lo || v > hi {
@@ -291,6 +349,7 @@ impl Value {
         match (self, other) {
             (Value::Lit(v), Value::Bits(b)) => Value::Bits(RefBits::from_uint(b.width, v)),
             (Value::LitX, Value::Bits(b)) => Value::Bits(RefBits::all_x(b.width)),
+            (Value::LitOnes, Value::Bits(b)) => Value::Bits(RefBits::all_ones(b.width)),
             (Value::Int(v, IntTy::Unsuffixed), Value::Int(_, t)) => Value::Int(v, *t),
             (s, _) => s,
         }
@@ -314,6 +373,7 @@ impl Value {
                 "the width of the Bits literal {v} was never fixed by its context"
             ))),
             Value::LitX => Err(RefError::Runtime("the width of a Bits::x() was never fixed by its context".into())),
+            Value::LitOnes => Err(RefError::Runtime("the width of a Bits::all_ones() was never fixed by its context".into())),
             other => Err(RefError::Runtime(format!("expected a Bits/Logic value, found {other}"))),
         }
     }

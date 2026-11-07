@@ -2558,6 +2558,12 @@ fn outer_dim_of(ty: &CHIRType) -> Option<Width> {
 
 fn width_of(ty: &CHIRType) -> Width {
     match ty {
+        // An unsized literal that no context sized (`chir_lower::DEFAULT_LIT_WIDTH`).
+        CHIRType::UInt { width: Width::Concrete(w) } | CHIRType::SInt { width: Width::Concrete(w) }
+            if *w == crate::chir_lower::DEFAULT_LIT_WIDTH =>
+        {
+            Width::Concrete(crate::chir_lower::DEFAULT_LIT_EMIT_WIDTH)
+        }
         CHIRType::UInt { width } | CHIRType::SInt { width } => width.clone(),
         CHIRType::Bool => Width::Concrete(1),
         // Element width — see `width_of_type`.

@@ -625,6 +625,17 @@ impl<'a> Exec<'a> {
     // ── places and patterns ────────────────────────────────────────────────
 
     fn assign_place(&mut self, place: &Expr, v: Value) -> Result<(), RefError> {
+        // `x.as_array_mut()[i] = l` is the element write `x[i] = l` (I.14.3(d); Phase C
+        // step 8): the `&mut` view names the vector itself.
+        if let Expr::Index(ix) = place {
+            if let Expr::MethodCall(mc) = &*ix.expr {
+                if mc.method == "as_array_mut" && mc.args.is_empty() {
+                    let mut ix2 = ix.clone();
+                    ix2.expr = mc.receiver.clone();
+                    return self.assign_place(&Expr::Index(ix2), v);
+                }
+            }
+        }
         match place {
             Expr::Path(p) if p.path.segments.len() == 1 => {
                 let name = p.path.segments[0].ident.to_string();
@@ -1213,6 +1224,11 @@ impl<'a> Exec<'a> {
             if ty == "Logic" {
                 return match m.as_str() {
                     "from_bool" => Ok(Value::logic(Logic::from_bool(arg1(&args)?.as_bool()?))),
+                    // `From<Bits<1>> for Logic`, `From<bool> for Logic` (I.14.3(d)).
+                    "from" => match arg1(&args)? {
+                        Value::Bool(b) => Ok(Value::logic(Logic::from_bool(b))),
+                        v => v.clone().coerce_to(&Ty::Logic),
+                    },
                     _ => Err(unsup(format!("`Logic::{m}`"))),
                 };
             }
@@ -1255,12 +1271,18 @@ impl<'a> Exec<'a> {
             }
         };
         match m {
+            // `From<Logic> for Bits<1>`, `From<[Logic; N]>`, `From<u128>` (truncating,
+            // `from_uint`) — I.14.3(d), Phase C step 8.
+            "from" => match arg1(&args)? {
+                Value::Int(v, _) => sized(Value::Lit(v as u128)),
+                Value::Array(_) => self.bits_ctor("from_array", width, margs, args),
+                v => sized(v.clone()),
+            },
             "zero" => sized(Value::Lit(0)),
             "x" => sized(Value::LitX),
-            "all_ones" => match width {
-                Some(w) => Ok(Value::Bits(RefBits::all_ones(w))),
-                None => Err(rt("`Bits::all_ones()` with no width in its spelling: give it `Bits::<N>::all_ones()`")),
-            },
+            // Unsized: rustc infers the width; sized at first contact (I.14.4,
+            // Phase C step 8 — refused until then, a parity item of D-19 (iv)).
+            "all_ones" => sized(Value::LitOnes),
             "from_lit" => {
                 let Some(a) = margs.first() else {
                     return Err(rt("`from_lit` without a const generic"));
@@ -1357,6 +1379,14 @@ impl<'a> Exec<'a> {
 
         match (&recv, m.as_str()) {
             (_, "clone") => return Ok(recv),
+            // `From`/`Into` between `Logic` and `Bits<1>` (I.14.3(d); Phase C step 8):
+            // the identity on the bit — this interpreter does not distinguish the two.
+            (Value::Bits(_) | Value::Lit(_) | Value::LitX | Value::LitOnes, "into") if args.is_empty() => {
+                return Ok(recv);
+            }
+            (Value::LitOnes, _) => {
+                return Err(rt(format!("`.{m}()` on a Bits::all_ones() whose width is not yet fixed")));
+            }
             (Value::Bits(_) | Value::Lit(_) | Value::LitX, _) => {
                 return self.bits_method(recv, &m, &targs, &args);
             }
@@ -1540,7 +1570,7 @@ impl<'a> Exec<'a> {
             "wrapping_mul" => Value::Bits(b.mul(&arg1(args)?.size_like(&recv).as_bits()?)),
             "saturating_add" | "saturating_sub" | "checked_add" | "checked_sub" => {
                 return Err(unsup(format!(
-                    "`Bits::{m}` (II.3 row (e): I.14's to admit with a meaning or refuse as a maybe-value)"
+                    "`Bits::{m}` (not a method of copper-core's `Bits`; the integer one is I.14.3(c))"
                 )));
             }
             "len" => Value::Int(w as i128, IntTy::Usize),
@@ -1551,7 +1581,8 @@ impl<'a> Exec<'a> {
     fn int_method(&mut self, v: i128, t: IntTy, m: &str, args: &[Value]) -> Result<Value, RefError> {
         let t = if t == IntTy::Unsuffixed { IntTy::Usize } else { t };
         match m {
-            "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "saturating_add" | "saturating_sub" | "pow" => {
+            "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "saturating_add" | "saturating_sub"
+            | "saturating_mul" | "pow" => {
                 let o = arg1(args)?.as_int()?;
                 let (lo, hi) = t.range();
                 let r = match m {
@@ -1560,6 +1591,8 @@ impl<'a> Exec<'a> {
                     "wrapping_mul" => wrap_int(v.wrapping_mul(o), t),
                     "saturating_add" => (v + o).clamp(lo, hi),
                     "saturating_sub" => (v - o).clamp(lo, hi),
+                    // I.14.3(c): clamped at the type's bounds (Phase C step 8).
+                    "saturating_mul" => v.checked_mul(o).map_or(if (v < 0) != (o < 0) { lo } else { hi }, |p| p.clamp(lo, hi)),
                     _ => {
                         let r = v.checked_pow(o as u32).ok_or_else(|| rt("integer overflow in `pow`"))?;
                         if r > hi { return Err(rt("integer overflow in `pow`")); }
@@ -1695,7 +1728,9 @@ impl<'a> Exec<'a> {
                     BinOp::Add(_) => Value::Bits(a.add(b)),
                     BinOp::Sub(_) => Value::Bits(a.sub(b)),
                     BinOp::Mul(_) => Value::Bits(a.mul(b)),
-                    BinOp::Div(_) => return Err(unsup("`/` on `Bits` (II.1 R15: refused in both front-ends by D-12; its meaning is I.14's)")),
+                    // I.14.3(b) (D-19 3A): truncating unsigned division, X on X or a
+                    // zero divisor; lowered by the transpiler since Phase C step 8.
+                    BinOp::Div(_) => Value::Bits(a.div(b)),
                     BinOp::Rem(_) => Value::Bits(a.rem(b)),
                     BinOp::BitAnd(_) => Value::Bits(a.and(b)),
                     BinOp::BitOr(_) => Value::Bits(a.or(b)),
@@ -1724,6 +1759,7 @@ impl<'a> Exec<'a> {
                 })
             }
             (Value::LitX, _) | (_, Value::LitX) => Err(rt("an operator on a Bits::x() whose width is not yet fixed")),
+            (Value::LitOnes, _) | (_, Value::LitOnes) => Err(rt("an operator on a Bits::all_ones() whose width is not yet fixed")),
             (Value::Int(a, ta), Value::Int(b, tb)) => {
                 let t = if *ta == IntTy::Unsuffixed { *tb } else { *ta };
                 if *ta != IntTy::Unsuffixed && *tb != IntTy::Unsuffixed && ta != tb {

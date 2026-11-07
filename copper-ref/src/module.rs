@@ -172,7 +172,7 @@ impl Module {
                 let ty = parse_ty(t, &ProgEval(&prog))?;
                 if ty.bit_width().is_none() {
                     return Err(RefError::Unsupported(format!(
-                        "port `{name}` payload `{ty:?}` is not `Logic`, `Bits<N>` or an array of them (I.14)"
+                        "port `{name}` payload `{ty:?}` is not `Logic`, `Bits<N>`, `bool`, an integer or an array of them (I.14)"
                     )));
                 }
                 Ok(ty)

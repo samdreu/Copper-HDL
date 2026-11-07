@@ -713,6 +713,14 @@ fn classify_value_ctor(path: &str) -> Option<ValueCtor> {
     None
 }
 
+/// The integer width a `from_uN` / `from_usize` constructor's argument has.
+fn from_int_arg_width(path: &str) -> Option<usize> {
+    [("from_u128", 128usize), ("from_u64", 64), ("from_u32", 32), ("from_u16", 16), ("from_u8", 8), ("from_usize", USIZE_BITS)]
+        .iter()
+        .find(|(n, _)| path.ends_with(n))
+        .map(|(_, w)| *w)
+}
+
 /// The TYPE-position turbofish width of a path that ALSO ends in a method
 /// const-parameter: `Bits::<32>::from_lit::<1>` → 32. `None` when the only
 /// turbofish is the trailing one (`Bits::from_lit::<1>`), whose value position
@@ -4134,7 +4142,19 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
                 match ctor {
                     // `Bits::from_u32(x)` — the value is the argument,
                     // reinterpreted as a `width`-bit value.
-                    ValueCtor::FromInt { width } => lower_bits_constructor(call, width, ctx),
+                    ValueCtor::FromInt { width } => {
+                        // The ARGUMENT has the name's integer type (`from_usize` a
+                        // `usize`); a type turbofish (`Bits::<8>::from_usize`) names
+                        // the RESULT's width (Phase C step 8: it used to retype the
+                        // argument's literals to the result's width).
+                        let path = call_path(call).unwrap_or_default();
+                        let arg_w = from_int_arg_width(&path).unwrap_or(width);
+                        let v = lower_bits_constructor(call, arg_w, ctx)?;
+                        Ok(match type_turbofish_width(&path) {
+                            Some(t) if t != arg_w => resize_to_target(v, &Width::Concrete(t), ctx),
+                            _ => v,
+                        })
+                    }
                     // `Bits::from_lit::<1>()` / `Bits::zero()` — a fixed value.
                     // A type-position turbofish pins the width; otherwise the
                     // default lets the surrounding assignment or operand decide.
@@ -4617,7 +4637,14 @@ fn lower_repeat(rep: &ExprRepeat, ctx: &mut LowerCtx) -> Result<CHIRExpr, CHIRLo
     }
 }
 
-const DEFAULT_LIT_WIDTH: usize = 64;
+/// The width an unsized literal carries until its context sizes it. 129 — no
+/// `Bits<N>` has it (I.14.1(c): 1 ≤ N ≤ 128), so it cannot be mistaken for a real
+/// width; VLIR emits it as 64 bits (`vlir_lower::width_of`), the literal width it
+/// was until Phase C step 8. Before step 8 the sentinel WAS 64, and a `usize` (now
+/// 64 bits) value made every literal balanced against it look unsized.
+pub(crate) const DEFAULT_LIT_WIDTH: usize = 129;
+/// What an unsized literal that survives to emission is emitted at.
+pub const DEFAULT_LIT_EMIT_WIDTH: usize = 64;
 
 /// Give an integer literal operand the width of the other side of a binary
 /// operation (or of the other arm of an `if`-expression mux).
@@ -4669,6 +4696,29 @@ fn balance_binop_literals(
     // NOT "any width but 64": since `usize` is 64 bits (I.14.1(b), Phase C step 8)
     // a 64-bit signal is a real width, so the sentinel cannot be a width test.
     let other_width = |e: &CHIRExpr| width_ignoring_default_lits(e, ctx);
+
+    // An unsized `all_ones()` (`~<unsized 0>`) against a sized operand is that
+    // operand's all-ones (Phase C step 8: `x ^ Bits::all_ones()`, `k_ones_nowidth`,
+    // was `x ^ ~64'd0`, a -Wall WIDTHEXPAND/WIDTHTRUNC).
+    let is_unsized_ones = |e: &CHIRExpr| {
+        matches!(e, CHIRExpr::UnOp { op: CHIRUnOp::BitNot, expr }
+            if matches!(**expr, CHIRExpr::Lit(ref l)
+                if l.ty == CHIRType::UInt { width: Width::Concrete(DEFAULT_LIT_WIDTH) } && l.value == 0))
+    };
+    let ones = |w: usize| CHIRExpr::Lit(CHIRLit {
+        ty: CHIRType::UInt { width: Width::Concrete(w) },
+        value: if w >= 128 { u128::MAX } else { (1u128 << w) - 1 },
+    });
+    if is_unsized_ones(&right) && !is_unsized_ones(&left) {
+        if let Some(w) = other_width(&left) {
+            return Ok((left, ones(w)));
+        }
+    }
+    if is_unsized_ones(&left) && !is_unsized_ones(&right) {
+        if let Some(w) = other_width(&right) {
+            return Ok((ones(w), right));
+        }
+    }
 
     // Case A — a bare literal against anything with a known width (the other
     // side may itself be a width-carrying literal: `Bits::<32>::from_lit::<1>()`
@@ -4821,6 +4871,22 @@ fn resize_to_target(value: CHIRExpr, target: &Width, ctx: &LowerCtx) -> CHIRExpr
             expr: Box::new(value),
             width: target.clone(),
         },
+        // An operator tree `expr_width` cannot read off: narrow it explicitly when
+        // its operands are provably wider than the target (Phase C step 8: a
+        // `usize` operand is 64 bits, so `q.write(Bits::from_usize(v & 0xff))` is a
+        // 64-bit `&` into an 8-bit port, a -Wall WIDTHTRUNC). A comparison or a
+        // logical operator is one bit, whatever its operands.
+        None => {
+            let one_bit = matches!(&value, CHIRExpr::BinOp { op, .. } if matches!(op,
+                CHIRBinOp::Eq | CHIRBinOp::Neq | CHIRBinOp::Lt | CHIRBinOp::Lte | CHIRBinOp::Gt
+                | CHIRBinOp::Gte | CHIRBinOp::LogicalAnd | CHIRBinOp::LogicalOr));
+            match (target, width_ignoring_default_lits(&value, ctx)) {
+                (Width::Concrete(t), Some(w)) if !one_bit && w > *t && matches!(value, CHIRExpr::BinOp { .. }) => {
+                    CHIRExpr::Resize { expr: Box::new(value), width: target.clone() }
+                }
+                _ => value,
+            }
+        }
         _ => value,
     }
 }
@@ -4881,6 +4947,11 @@ fn retype_default_literals_in_values(e: CHIRExpr, width: Width) -> CHIRExpr {
 fn width_ignoring_default_lits(e: &CHIRExpr, ctx: &LowerCtx) -> Option<usize> {
     match e {
         CHIRExpr::Lit(l) if l.ty == CHIRType::UInt { width: Width::Concrete(DEFAULT_LIT_WIDTH) } => None,
+        CHIRExpr::UnOp {
+            op: CHIRUnOp::ReductionAnd | CHIRUnOp::ReductionOr | CHIRUnOp::ReductionXor
+                | CHIRUnOp::LogicalNot,
+            ..
+        } => Some(1),
         CHIRExpr::BinOp { left, right, .. } => {
             width_ignoring_default_lits(left, ctx).or_else(|| width_ignoring_default_lits(right, ctx))
         }
@@ -4954,6 +5025,13 @@ fn width_of_chir_expr(e: &CHIRExpr, ctx: &LowerCtx) -> Option<usize> {
         CHIRExpr::BinOp { left, right, .. } => {
             width_of_chir_expr(left, ctx).or_else(|| width_of_chir_expr(right, ctx))
         }
+        // A reduction is one bit (I.14.3(d)); before Phase C step 8 the walk gave it
+        // its operand's width, so `x.and_reduce() == Logic::One` sized the `1` to x.
+        CHIRExpr::UnOp {
+            op: CHIRUnOp::ReductionAnd | CHIRUnOp::ReductionOr | CHIRUnOp::ReductionXor
+                | CHIRUnOp::LogicalNot,
+            ..
+        } => Some(1),
         CHIRExpr::UnOp { expr, .. } => width_of_chir_expr(expr, ctx),
         CHIRExpr::Mux { then_val, else_val, .. } => {
             width_of_chir_expr(then_val, ctx).or_else(|| width_of_chir_expr(else_val, ctx))
@@ -5244,7 +5322,7 @@ fn lower_lit_expr(
     }
 
     if let Some((value, _)) = parse_int_literal(&compact) {
-        let ty = infer_type_from_suffix(&compact).unwrap_or(CHIRType::UInt { width: Width::Concrete(64) });
+        let ty = infer_type_from_suffix(&compact).unwrap_or(CHIRType::UInt { width: Width::Concrete(DEFAULT_LIT_WIDTH) });
         return Ok(CHIRExpr::Lit(CHIRLit { ty, value }));
     }
 
@@ -5804,7 +5882,7 @@ pub fn parse_pattern(
     }
 
     if let Some((value, _)) = parse_int_literal(s) {
-        let ty = infer_type_from_suffix(s).unwrap_or(CHIRType::UInt { width: Width::Concrete(64) });
+        let ty = infer_type_from_suffix(s).unwrap_or(CHIRType::UInt { width: Width::Concrete(DEFAULT_LIT_WIDTH) });
         return Ok(CHIRPattern::Lit(CHIRLit { ty, value }));
     }
 
