@@ -51,8 +51,9 @@ same resumption, and the SV is not compared beyond it; any other panic fails the
 **EXCUSED**: a disagreement a signature class excuses, counted and printed with its
 pattern — none today (the observation-0 plain-`Out` class of 25 modules emptied with
 the D-8 rewrites and was deleted, Phase C step 3). **DISAGREE**: every disagreement prints its pattern —
-`sim≠ref,SV=ref` simulator/macro, `sim=ref≠SV` transpiler or II.3 row (P12,
-`regout_trailing_single_tick`, the trailing fold, is pinned), `sim=SV≠ref` the reference, `all-differ` spec gap or interpreter — and G-G
+`sim≠ref,SV=ref` simulator/macro, `sim=ref≠SV` transpiler or II.3 row (the pre-loop
+pair `preloop_probe`/`preloop_linear`, II.3 (f2)/(f3), is pinned; the trailing fold's
+P12 and (f4) agree since Phase C step 4), `sim=SV≠ref` the reference, `all-differ` spec gap or interpreter — and G-G
 fails on any swept disagreement and on a `REF_SKIP` measured-disagreement row whose
 pattern (`REF_SKIP_PATTERN`) no pin measured this run. The sweep does not reach `src/` (the standard
 library's `sync_2ff` is covered by its `tests/fixtures/` twin) or modules defined
@@ -243,6 +244,24 @@ Rust #[hardware] fn
   → VLIR  (vlir_lower; 1:1 with legal SystemVerilog — legalized names, concrete widths)
   → SystemVerilog text  (emit.rs)
 ```
+
+A clocked body lowers one phase per tick (`shir_lower::lower_seq_body`; a `phase_r`
+counter when there are several). Its outputs have **one emitted form**
+(`vlir_lower::split_output_regs`, SPEC I.6.9): every drive is `out <= v` in
+`always_ff` under its guards and the phase guard, `v` the forwarded value (registers
+the resumption already assigned stand for what it assigned them), holding when
+unwritten; a plain `Out` reaching `lower_seq` is an error, not a form. The **trailing
+region** (statements after the last tick) is the head of the next resumption (SPEC
+I.0.2): it lowers into phase 0 ahead of segment 0, one forwarding walk across both,
+under `if (__copper_started)`, a synthesized one-bit register that is 0 until the
+first edge (the first resumption runs the head only). A memory `data()` /
+`is_ready()` always reads the registered capture, the word the last edge delivered.
+Until Phase C step 4 (2026-11-06) a clocked plain `Out` had five more forms (a
+continuous `assign`, the every-path mux, the Moore default hoist, the mux +
+`<port>_hold` form, the phase-scoped flop) chosen by an opening/closing drive tag,
+and the trailing region was FOLDED into the last phase's edge; all of that is gone
+(`design_docs/review/MEASUREMENTS.md` §H). A combinational module still emits a
+top-level drive as `assign` and a branch-nested one in `always_comb`.
 
 ### Execution / timing model (sim)
 

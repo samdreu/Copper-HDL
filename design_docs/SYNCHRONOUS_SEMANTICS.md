@@ -210,7 +210,10 @@ tracking its inputs for the rest of that cycle.
   it from the **committed** register at that edge (`q <= acc`, not the forwarded
   `acc + d` — `shir_lower`'s `trailing_reg_outs`; landed 2026-10-23, which is
   what made `regout_trailing_single_tick` agree and sweep); control extraction's
-  trailing state already committed there. The one value that emission cannot
+  trailing state already committed there. *(Superseded by D-8 and Phase C step 4,
+  2026-11-06: the trailing region is the next resumption's head, lowered into phase
+  0 ahead of the head under a started guard with the forwarded value;
+  `trailing_reg_outs` and the fold are deleted — `review/MEASUREMENTS.md` §H.)* The one value that emission cannot
   realize is an `In` port read *directly* in `C` at an immediate read site — the
   flip-flop would sample it one drive later than the simulator did — so that
   shape is refused by `Cfg::trailing_regout_reads_input` (both front-ends; remedy:
@@ -235,7 +238,8 @@ a plain `Out` driven in that state: a conditionally-driven output became an
 edge-sampled register (`o <= edge_value` under the arm's guard), visible one cycle
 after the simulator shows it — the measured lag of `trailing_update` (folded loop)
 and `branch_trailing` (branch-nested ticks). The fix is an emission form, not a
-state placement: `vlir_lower::opening_hold_outputs` emits a conditionally-driven
+state placement *(deleted in Phase C step 4 with the clocked plain `Out`,
+`review/MEASUREMENTS.md` §H)*: `vlir_lower::opening_hold_outputs` emits a conditionally-driven
 plain `Out` whose every drive is an **opening** drive (no `In` read precedes it in
 its arm — `SHIRStmt::PortDrive::opening`, the same predicate that selects the
 forwarded continuous-assign form) as a forwarded combinational mux with a

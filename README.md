@@ -530,7 +530,9 @@ rather than papered over (`SKIP` in `build.rs`): **none as of 2026-10-29.**
   drive keeps its edge-sampled timing and the opening drive is visible at the
   opening observation (`vlir_lower::opening_hold_outputs`,
   `design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §9.4; the form was hand-written and
-  measured against the simulator before codegen changed). Both twins sweep on
+  measured against the simulator before codegen changed). (Since Phase C step 4,
+  2026-11-06, both twins are `RegOut`-only and the form is deleted with the plain
+  `Out` of a clocked body: `design_docs/review/MEASUREMENTS.md` §H.) Both twins sweep on
   every stimulus sequence. The single-seed sweep had never produced that first
   cycle for either; the multi-sequence stimulus (above) exposed it the day
   before. (`probe_fsm`, listed here until 2026-10-26, agrees and sweeps.) On
