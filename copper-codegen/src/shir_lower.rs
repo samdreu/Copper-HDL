@@ -249,18 +249,29 @@ fn lower_stmt_list(
             // A reassignment of a known combinational wire → another blocking
             // assign to it (`name = value;`). The single `logic` declaration is
             // deduplicated downstream, so repeated assigns share one wire.
+            //
+            // EVERY read below goes through `fwd.at_edge`: a register this segment
+            // assigned earlier is read as the value it was assigned (SPEC I.3.4,
+            // I.7.3), in the `always_comb` statements as in the edge-sampled ones.
+            // Under one resumption per cycle (D-8) there is no other instant for a
+            // read to see. Until Phase C step 5 (2026-11-06) only the edge-sampled
+            // consumers (a drive, a staging, the `always_ff` copy of a test) were
+            // forwarded; a wire, an element assignment and the combinational copy
+            // of a test read the committed register, which a drive's inlining hid
+            // until a value reached it through an element-assigned array (II.3
+            // (f5) and its family, MEASUREMENTS §J.3).
             CHIRStmt::Assign { target, value, .. } if wire_types.contains_key(target) => {
                 out.push(SHIRStmt::Wire {
                     name: target.clone(),
                     ty: wire_types[target].clone(),
-                    value: rename_vars(lower_expr(value)?, renames),
+                    value: fwd.at_edge(&rename_vars(lower_expr(value)?, renames)),
                 });
             }
             CHIRStmt::Wire { name, ty, value, .. } => {
                 out.push(SHIRStmt::Wire {
                     name: name.clone(),
                     ty: ty.clone(),
-                    value: rename_vars(lower_expr(value)?, renames),
+                    value: fwd.at_edge(&rename_vars(lower_expr(value)?, renames)),
                 });
             }
             CHIRStmt::PortWrite { port_name, value, .. } => {
@@ -281,8 +292,8 @@ fn lower_stmt_list(
                 // the `always_ff` copy is `TODO` cause N — it made
                 // `c = c + 1; if c == 3 { … }` fire a cycle late.
                 let arm_fwd = fwd.clone();
-                let condition = rename_vars(lower_expr(condition)?, renames);
-                let edge_condition = fwd.at_edge(&condition);
+                let edge_condition = fwd.at_edge(&rename_vars(lower_expr(condition)?, renames));
+                let condition = edge_condition.clone();
                 let then_stmts =
                     lower_stmt_list(then_body, promoted_names, renames, wire_types, &mut arm_fwd.clone())?;
                 let else_stmts = else_body.as_ref()
@@ -312,8 +323,8 @@ fn lower_stmt_list(
             CHIRStmt::Match { scrutinee, arms, .. } => {
                 // Both forms, for the reason given on the `If` arm above.
                 let arm_fwd = fwd.clone();
-                let scrutinee = rename_vars(lower_expr(scrutinee)?, renames);
-                let edge_scrutinee = fwd.at_edge(&scrutinee);
+                let edge_scrutinee = fwd.at_edge(&rename_vars(lower_expr(scrutinee)?, renames));
+                let scrutinee = edge_scrutinee.clone();
                 let shir_arms = arms.iter()
                     .map(|arm| {
                         let stmts = lower_stmt_list(
@@ -324,7 +335,7 @@ fn lower_stmt_list(
                                 .map(|p| lower_pattern(p))
                                 .collect::<Result<_, _>>()?,
                             guard: arm.guard.as_ref()
-                                .map(|g| Ok(rename_vars(lower_expr(g)?, renames)))
+                                .map(|g| Ok(arm_fwd.at_edge(&rename_vars(lower_expr(g)?, renames))))
                                 .transpose()?,
                             stmts,
                         })
@@ -340,8 +351,8 @@ fn lower_stmt_list(
                 if !body_stmts.is_empty() {
                     out.push(SHIRStmt::ForLoop {
                         var: var.clone(),
-                        start: rename_vars(lower_expr(start)?, renames),
-                        end: rename_vars(lower_expr(end)?, renames),
+                        start: fwd.at_edge(&rename_vars(lower_expr(start)?, renames)),
+                        end: fwd.at_edge(&rename_vars(lower_expr(end)?, renames)),
                         body: body_stmts,
                     });
                 }
@@ -349,8 +360,8 @@ fn lower_stmt_list(
             CHIRStmt::IndexAssign { base, index, value, .. } => {
                 out.push(SHIRStmt::IndexAssign {
                     base: base.clone(),
-                    index: rename_vars(lower_expr(index)?, renames),
-                    value: rename_vars(lower_expr(value)?, renames),
+                    index: fwd.at_edge(&rename_vars(lower_expr(index)?, renames)),
+                    value: fwd.at_edge(&rename_vars(lower_expr(value)?, renames)),
                 });
             }
             // Memory accesses stage the address/data buses that this segment's

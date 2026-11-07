@@ -1396,3 +1396,33 @@ of a family. **Four probes, predicted before running** (scratchpad `f5_probes.rs
 - `f5_branch_wire` — `r = x; let mut t = 0; if r[0] == 1 { t = 5 } q.write(t)`: **DIVERGES**
   (the branch-assigned wire is combinational under the unforwarded test; the drive cannot
   inline a branch-assigned wire).
+
+**Measured before the fix** (the probes as `tests/fixtures/array_forwarding_dut.rs`, two of them
+widened to 8 bits — `Bits::<4>::from_u8` is a compile-time error): **all four differential
+cases FAIL** and all four reference-leg cases pass — `sim = ref ≠ SV` on each, from cycle 0
+(`f5_wire`: SV `q` is the previous cycle's value throughout). **As predicted: the row is a
+family of four, not one shape.**
+
+**The fix.** Every statement `lower_stmt_list` emits reads through `Forwarding::at_edge`: a
+`let` wire's value, a wire reassignment, an element assignment's index and value, the
+combinational copy of an `if` test and of a `match` scrutinee and its arm guards, a `for`'s
+bounds. Under one resumption per cycle (D-8) there is no other instant for a read to see; the
+two forms of a test (`condition` / `edge_condition`) become equal. **Predicted emission diff:**
+the four fixture modules, plus every corpus module whose combinational block reads a register
+the segment assigned earlier through one of those statements — not enumerable by reading;
+measured below. **Predicted traces:** the four fixtures flip to agree; every other swept
+module stays trace-identical (it agrees today, so any changed comb read in it was not
+observable or was re-inlined by a drive); every anchor trace-identical.
+
+**Measured.** sv-baseline against `0d5fe5e` (230 = 226 + the 4 fixture modules): **1 corpus
+module changed — `rv32i_cpu_pipelined` — plus the 4 new.** Its diff (31 lines) is the
+branch-assigned wires `fwd_rs1`, `fwd_rs2`, `flush`, `taken` inlined into their readers (the
+combinational copy of a test now takes the forwarded form, which inlines a wire the segment
+assigned) and then pruned as dead — the same expressions the `always_ff` copy already read.
+No other module's combinational block reads a register its segment assigned earlier through
+one of the forwarded statements — fewer than "not enumerable by reading" allowed for; the
+prediction did not name the CPU. Traces: the four fixtures **agree on both legs, every
+sequence**; `rv32i_pipelined_verilator` (13 programs) and the example 13/13 — the anchor is
+trace-identical. `tools/regression.sh --no-examples`: **PARTIAL OK (191 s)**; G-F 98 (+4);
+**G-G differential 1332 PASS / 0 DISAGREE, reference 842 PASS, pinned 0**. No new
+`SKIP`/`REF_SKIP` row. (f5) closed with its family.
