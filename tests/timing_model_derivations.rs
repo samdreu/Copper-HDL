@@ -49,6 +49,16 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     "arms_only_b1",
     "arms_only_b2",
     "arms_only_match",
+    // Added 2026-11-07 (Phase C step 6, MEASUREMENTS §K.11). `for_empty` and
+    // `for_empty_start` (step 5, II.3 (f1): a counted `for` over a run-time range) are
+    // extracted into one `match pc` like every module here, but were never compared:
+    // this test replayed the passes by hand without the register append, the
+    // hoisted counter failed to lower, and the `Err` arm skipped them. Measured once
+    // the test went through `lower_fir_to_shir`. `nested_loop_added` (step 6's
+    // fixture) is a wait loop with its tick inside, extracted the same way.
+    "for_empty",
+    "for_empty_start",
+    "nested_loop_added",
     // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
     // counted `for` over the data bits, each with its tick inside) and the one-tick
     // handshake (two `while` waits). Every tick sits inside a loop, so both extract
@@ -97,14 +107,13 @@ fn lowered_phase_count(src: &str, module: &str) -> Result<usize, String> {
         })
         .ok_or("no such module")?;
 
-    // The same sequence `transpile_fir` runs: desugar, extract, then lower.
-    let mut fir = copper_codegen::capture_frontend_ir(f, &hardware_fns).map_err(|e| format!("{e:?}"))?;
-    copper_codegen::control_extract::desugar_tick_waits(&mut fir);
-    copper_codegen::control_extract::desugar_counted_loops_in(&mut fir);
-    copper_codegen::control_extract::extract_control(&mut fir);
-    let chir = copper_codegen::lower_to_chir(&fir, &hardware_fns, &Default::default())
-        .map_err(|e| e.to_string())?;
-    let shir = copper_codegen::lower_to_shir(&chir).map_err(|e| e.to_string())?;
+    // The transpiler's own pipeline to SHIR (`lower_fir_to_shir`): desugar, extract,
+    // the register authority's append, then lower. Until Phase C step 6 this test
+    // replayed the passes by hand without the append, so a module whose hoisted
+    // counter then failed to lower was silently not compared (`for_empty`,
+    // `for_empty_start`; MEASUREMENTS §K.11).
+    let fir = copper_codegen::capture_frontend_ir(f, &hardware_fns).map_err(|e| format!("{e:?}"))?;
+    let shir = copper_codegen::lower_fir_to_shir(&fir, &hardware_fns, &Default::default())?;
     match &shir.body {
         copper_core::shir::SHIRBody::Sequential(s) => Ok(s.phases.len()),
         _ => Err("not a sequential body".into()),

@@ -47,6 +47,19 @@ pub fn lower_fir_to_vlir(
     hardware_fns: &std::collections::HashSet<String>,
     registry: &ModuleRegistry,
 ) -> Result<copper_core::vlir::VLIRModule, String> {
+    let shir = lower_fir_to_shir(fir, hardware_fns, registry)?;
+    lower_to_vlir(&shir).map_err(|e| format!("{e}"))
+}
+
+/// [`transpile_fir`] up to the SHIR — the same passes in the same order, register
+/// authority included, so a test that inspects the phases sees what the
+/// transpiler lowers (tests/timing_model_derivations.rs used to rebuild this
+/// sequence by hand and missed the register append; MEASUREMENTS §K.11).
+pub fn lower_fir_to_shir(
+    fir: &copper_core::FrontendModuleIR,
+    hardware_fns: &std::collections::HashSet<String>,
+    registry: &ModuleRegistry,
+) -> Result<copper_core::shir::SHIRModule, String> {
     // Control extraction (FIR→FIR): flatten async control-flow loops whose ticks
     // live inside branches into an explicit single-tick `match pc` FSM — the shape
     // the pipeline below already lowers correctly. No-op for linear modules.
@@ -122,8 +135,7 @@ pub fn lower_fir_to_vlir(
             _ => format!("{e}"),
         }
     })?;
-    let shir = lower_to_shir(&chir).map_err(|e| format!("{e}"))?;
-    lower_to_vlir(&shir).map_err(|e| format!("{e}"))
+    lower_to_shir(&chir).map_err(|e| format!("{e}"))
 }
 
 /// The pre-loop `let mut` names of a FIR body — the declarations the FIR→FIR
