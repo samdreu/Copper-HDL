@@ -255,6 +255,12 @@ pub struct Cfg {
     /// build the graph), and five rules plus the read classifier each ask for it.
     /// The graph is immutable once built, so the answer cannot change.
     registers_cache: std::cell::OnceCell<Vec<String>>,
+    /// The **register graph**: the same loop body with every nested loop built as
+    /// real control flow (`Builder::expand_loops`), so a nested loop's interior
+    /// ticks are tick nodes and its interior assignments kill. [`Cfg::registers`]
+    /// is computed on it; every other rule reads `nodes`, where a nested loop is one
+    /// folded node. Empty for a sub-CFG and a combinational body (no register set).
+    reg_nodes: Vec<Node>,
 }
 
 impl Cfg {
@@ -280,6 +286,13 @@ impl Cfg {
         let body_entry = b.build_block(&loop_body, head);
         b.nodes[head].succs.push((body_entry, EdgeKind::Comb));
 
+        // The register graph: the same body, nested loops descended.
+        let mut rb = Builder::new(BTreeSet::new(), BTreeSet::new(), BTreeSet::new(), memory_locals(f));
+        rb.expand_loops = true;
+        let rhead = rb.new_node(Node::empty(loop_span));
+        rb.top_head = Some(rhead);
+        let rentry = rb.build_block(&loop_body, rhead);
+        rb.nodes[rhead].succs.push((rentry, EdgeKind::Comb));
 
         Some(Cfg {
             nodes: b.nodes,
@@ -290,6 +303,7 @@ impl Cfg {
             exit: None,
             nested_ticking_loops: b.nested,
             registers_cache: std::cell::OnceCell::new(),
+            reg_nodes: rb.nodes,
         })
     }
 
@@ -314,52 +328,35 @@ impl Cfg {
             exit: Some(exit),
             nested_ticking_loops: b.nested,
             registers_cache: std::cell::OnceCell::new(),
+            reg_nodes: Vec::new(),
         }
     }
 
     /// The inferred **register set** — sorted for stable structural comparison.
     ///
-    /// A candidate (defined in the loop) is a register iff its value is live across
-    /// some tick edge, i.e. it is in the live-out set of a tick node. Same-cycle
-    /// combinational temps (redefined at the loop head before any post-tick use)
-    /// are killed by that redefinition and correctly excluded.
+    /// SPEC I.7.1: a local is a register iff it is assigned inside the module loop
+    /// and **live at a `tick`** — some assignment precedes the tick and some read
+    /// follows it with no assignment between. Computed as `defined_in_loop` ∩ the
+    /// union of the live-out sets of the tick nodes of the register graph
+    /// (`reg_nodes`), where every nested loop is real control flow, so a nested
+    /// loop's interior ticks count like the hardware loop's own (Phase C step 6).
+    /// Same-cycle temporaries, killed by a reassignment before any post-tick use,
+    /// are excluded.
     ///
-    /// **Two clock boundaries, not one.** A local is a register iff it is defined in
-    /// the loop **and** live across *either*
+    /// **No back-edge clause.** From 2026-08-21 to Phase C step 6 (2026-11-07) the
+    /// locals live out of the loop head were added too, so that `sync_2ff`'s `ff2`
+    /// (`q.write(ff2); tick; ff2 = ff1; ff1 = d.read()`) was a flop: under the
+    /// two-job body that read `ff1` before the edge. Under D-8's one resumption per
+    /// cycle such a local is assigned and consumed within one resumption — a wire
+    /// (I.7.2(c)); the clause's whole surplus on the corpus was wires (I.7.5), and
+    /// the anchored `sync_2ff` is spelled tick-last, where `ff2` is a wire on every
+    /// route and `sync_2ff_ref.sv`'s second flop is the `RegOut` `q`.
     ///
-    ///   * a **tick edge** — its pre-tick value is read post-tick (the original
-    ///     rule, which catches a register by its *use* on the far side of an edge); or
-    ///   * the **loop back edge** — it is live entering the loop head, i.e. handed
-    ///     from one iteration to the next.
-    ///
-    /// The back-edge clause was added 2026-08-21 to fix a real under-approximation
-    /// (see the `sync_2ff` case below). It is not redundant with the tick clause:
-    /// anything passed from one *pre*-tick segment to the next must pass through the
-    /// intervening tick and is already caught, so the only values it newly admits are
-    /// those **defined in a post-tick segment and read before the next tick**.
-    ///
-    /// Those are genuine flip-flops, and the reason is the *ordering* inside the
-    /// post-tick segment. In the 2-FF synchronizer (`src/sync.rs`):
-    ///
-    /// ```text
-    /// loop { q.write(ff2); clk.tick().await; ff2 = ff1; ff1 = d.read(); }
-    /// ```
-    ///
-    /// `ff2` is used pre-tick and defined post-tick, so walking backwards from the
-    /// use, its own definition kills it before the tick is reached — under the tick
-    /// clause alone it looks like a same-cycle wire, and inference reported **one**
-    /// register where the simulator's behaviour, an independent hand-written
-    /// reference, and codegen all have **two**. But `ff2 = ff1` reads `ff1`'s
-    /// *pre-edge* value (the next line overwrites it), which no wire can reproduce:
-    /// `assign ff2 = ff1` would track `ff1`'s post-edge value and collapse the two
-    /// stages into one flop — the exact failure `src/sync.rs`'s own comment warns
-    /// about. Only an edge-triggered, non-blocking update behaves as observed.
-    ///
-    /// Generally: a local defined in a post-tick segment had its defining expression
-    /// evaluated against *pre-edge* values, while its consumer runs after the other
-    /// post-edge updates — so if it survives to the next iteration it needs storage.
-    /// A post-tick temp that dies within its own segment is not live at the head and
-    /// is still correctly excluded (it is combinational logic in a D-input path).
+    /// The direction of each remaining approximation (I.7.5): the graph is
+    /// path-insensitive, so a local is counted when SOME path of the graph carries
+    /// it across a tick, whether or not an execution takes that path — over, never
+    /// under. A counted `for` whose range is not statically non-empty keeps its
+    /// zero-iteration exit for that reason.
     pub fn registers(&self) -> Vec<String> {
         self.registers_cache.get_or_init(|| self.compute_registers()).clone()
     }
@@ -373,10 +370,6 @@ impl Cfg {
                 across_boundary.extend(live_out[i].iter().cloned());
             }
         }
-        // The head is an empty node (no defs/uses), so its live-out is exactly the
-        // set live entering it — i.e. carried across the back edge.
-        across_boundary.extend(live_out[self.head].iter().cloned());
-
         self.defined_in_loop
             .intersection(&across_boundary)
             .cloned()
@@ -943,38 +936,7 @@ impl Cfg {
     /// irrelevant to the propagation — a value used after a tick is still live
     /// *across* it, which is exactly what register inference keys on.
     fn liveness(&self) -> Vec<BTreeSet<String>> {
-        let n = self.nodes.len();
-        let mut live_in: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
-        let mut live_out: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
-        loop {
-            let mut changed = false;
-            // Reverse node order speeds convergence (successors tend to have higher
-            // indices in this forward-built graph); correctness is order-independent.
-            for i in (0..n).rev() {
-                let mut out = BTreeSet::new();
-                for &(s, _) in &self.nodes[i].succs {
-                    out.extend(live_in[s].iter().cloned());
-                }
-                let mut in_ = self.nodes[i].uses.clone();
-                for v in &out {
-                    if !self.nodes[i].defs.contains(v) {
-                        in_.insert(v.clone());
-                    }
-                }
-                if out != live_out[i] {
-                    live_out[i] = out;
-                    changed = true;
-                }
-                if in_ != live_in[i] {
-                    live_in[i] = in_;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        live_out
+        liveness_of(&self.nodes)
     }
 
     /// Per-clock-phase facts for the cycle-dataflow derivation table
@@ -1167,6 +1129,46 @@ impl Cfg {
     }
 }
 
+
+/// Backward-liveness fixpoint over a node set. Returns `live_out[i]` for every node.
+/// Edge kind is irrelevant to the propagation — a value used after a tick is still
+/// live *across* it, which is exactly what register inference keys on.
+fn liveness_of(nodes: &[Node]) -> Vec<BTreeSet<String>> {
+    let n = nodes.len();
+
+    let mut live_in: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
+    let mut live_out: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
+    loop {
+        let mut changed = false;
+        // Reverse node order speeds convergence (successors tend to have higher
+        // indices in this forward-built graph); correctness is order-independent.
+        for i in (0..n).rev() {
+            let mut out = BTreeSet::new();
+            for &(s, _) in &nodes[i].succs {
+                out.extend(live_in[s].iter().cloned());
+            }
+            let mut in_ = nodes[i].uses.clone();
+            for v in &out {
+                if !nodes[i].defs.contains(v) {
+                    in_.insert(v.clone());
+                }
+            }
+            if out != live_out[i] {
+                live_out[i] = out;
+                changed = true;
+            }
+            if in_ != live_in[i] {
+                live_in[i] = in_;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    live_out
+}
+
 // ── CFG construction ────────────────────────────────────────────────────────
 
 struct Builder {
@@ -1194,6 +1196,16 @@ struct Builder {
     /// loop's exit sink — so a `break` before a tick does not read as a tickless
     /// cycle. Empty while building a top-level (hardware) loop, which never breaks.
     loop_ctx: Vec<(usize, usize)>,
+    /// The label of each `loop_ctx` entry (`'outer: for …`), parallel to it. Read
+    /// only when `expand_loops` is set: the register graph routes a labelled
+    /// `break`/`continue` to the loop it names.
+    loop_labels: Vec<Option<String>>,
+    /// Build the **register graph** (SPEC I.7.1, Phase C step 6): every nested loop
+    /// is built as real control flow — header, body, back edge, exit — instead of
+    /// one folded node, so its interior `tick`s are tick suspensions of the graph
+    /// and its interior assignments kill. Consulted by [`Cfg::registers`] only;
+    /// every other rule keeps reading the folded graph.
+    expand_loops: bool,
     /// The top-level hardware loop's head, for a `continue` written directly in it.
     ///
     /// `loop_ctx` stays empty there because a hardware loop never `break`s, and a
@@ -1222,6 +1234,8 @@ impl Builder {
             mems,
             nested: Vec::new(),
             loop_ctx: Vec::new(),
+            loop_labels: Vec::new(),
+            expand_loops: false,
             top_head: None,
         }
     }
@@ -1231,6 +1245,92 @@ impl Builder {
     fn new_node(&mut self, node: Node) -> usize {
         self.nodes.push(node);
         self.nodes.len() - 1
+    }
+
+    /// The `loop_ctx` index of the nested loop a `break 'l` / `continue 'l` names,
+    /// in the register graph only (`None` for an unlabelled jump, a label naming no
+    /// nested loop, or the folded graph, which routes every jump innermost).
+    fn labelled_ctx(&self, label: Option<&syn::Lifetime>) -> Option<usize> {
+        if !self.expand_loops {
+            return None;
+        }
+        let name = label?.ident.to_string();
+        self.loop_labels.iter().rposition(|l| l.as_deref() == Some(name.as_str()))
+    }
+
+    /// A nested loop as real control flow, for the register graph (SPEC I.7.1;
+    /// I.7.5's two fold defects; D-20 step 6). Shapes, `next` the loop's exit:
+    ///
+    /// ```text
+    /// loop  { B }        H → B → H                  (exit only by `break`)
+    /// while c { B }      H[uses c] → bind → B → H,  H → next
+    /// for p in e { B }   E[uses e] → H | bind,      H → bind[defs p] → B → H,  H → next
+    /// ```
+    ///
+    /// `continue` targets `H`, `break` targets `next`. A `for` whose range is
+    /// statically non-empty (both bounds integer constant expressions of the source,
+    /// `start < end`, or `<=` for `..=`) enters its first iteration without the
+    /// zero-iteration exit, because no execution takes it; any other range keeps
+    /// that exit (I.8.4(a): an empty range is zero iterations), which is the safe
+    /// direction — a local is then possibly live around the loop, never missed.
+    fn build_loop_expanded(&mut self, expr: &Expr, next: usize) -> usize {
+        let label = match expr {
+            Expr::While(w) => w.label.as_ref(),
+            Expr::ForLoop(f) => f.label.as_ref(),
+            Expr::Loop(l) => l.label.as_ref(),
+            _ => None,
+        }
+        .map(|l| l.name.ident.to_string());
+        let span = expr.span();
+        let header = self.new_node(Node::empty(span));
+        self.loop_ctx.push((header, next));
+        self.loop_labels.push(label);
+        let body_entry = self.build_block(loop_body_stmts(expr), header);
+        self.loop_ctx.pop();
+        self.loop_labels.pop();
+        match expr {
+            Expr::While(w) => {
+                let mut uses = BTreeSet::new();
+                collect_reads(&w.cond, &mut uses);
+                let mut binds = BTreeSet::new();
+                let_bindings(&w.cond, &mut binds);
+                let into_body = if binds.is_empty() {
+                    body_entry
+                } else {
+                    self.new_node(Node {
+                        defs: binds,
+                        succs: vec![(body_entry, EdgeKind::Comb)],
+                        ..Node::empty(span)
+                    })
+                };
+                self.nodes[header].uses = uses;
+                self.nodes[header].succs = vec![(into_body, EdgeKind::Comb), (next, EdgeKind::Comb)];
+                header
+            }
+            Expr::ForLoop(f) => {
+                let mut binds = BTreeSet::new();
+                pat_bindings(&f.pat, &mut binds);
+                let bind = self.new_node(Node {
+                    defs: binds,
+                    succs: vec![(body_entry, EdgeKind::Comb)],
+                    ..Node::empty(span)
+                });
+                self.nodes[header].succs = vec![(bind, EdgeKind::Comb), (next, EdgeKind::Comb)];
+                let mut uses = BTreeSet::new();
+                collect_reads(&f.expr, &mut uses);
+                let first = if statically_nonempty_range(&f.expr) { bind } else { header };
+                self.new_node(Node {
+                    uses,
+                    succs: vec![(first, EdgeKind::Comb)],
+                    ..Node::empty(span)
+                })
+            }
+            // `loop`: no test, left only by `break`.
+            _ => {
+                self.nodes[header].succs = vec![(body_entry, EdgeKind::Comb)];
+                header
+            }
+        }
     }
 
     /// Build a real sub-CFG of a nested loop's body: `head → body → head` with a
@@ -1258,6 +1358,7 @@ impl Builder {
             nested_ticking_loops: b.nested,
             // Not consulted on a sub-CFG (the multi-phase rule runs on the top level).
             registers_cache: std::cell::OnceCell::new(),
+            reg_nodes: Vec::new(),
         }
     }
 
@@ -1385,17 +1486,33 @@ impl Builder {
             // a `break` before a tick is not misread as a tickless cycle. At the top
             // level `loop_ctx` is empty (a hardware loop never breaks) → fall through.
             Expr::Break(b) => {
-                let target = self.loop_ctx.last().map_or(next, |&(_, brk)| brk);
+                let target = match self.labelled_ctx(b.label.as_ref()) {
+                    Some(i) => self.loop_ctx[i].1,
+                    None => self.loop_ctx.last().map_or(next, |&(_, brk)| brk),
+                };
+                // `break v` reads `v` (only meaningful in the register graph; the
+                // folded graph never carried it and keeps not doing so).
+                let mut uses = BTreeSet::new();
+                if self.expand_loops {
+                    if let Some(v) = &b.expr {
+                        collect_reads(v, &mut uses);
+                    }
+                }
                 self.new_node(Node {
+                    uses,
                     succs: vec![(target, EdgeKind::Comb)],
                     ..Node::empty(b.span())
                 })
             }
             Expr::Continue(c) => {
-                let target = self
-                    .loop_ctx
-                    .last()
-                    .map(|&(cont, _)| cont)
+                let target = match self.labelled_ctx(c.label.as_ref()) {
+                    Some(i) => Some(self.loop_ctx[i].0),
+                    // A label naming no nested loop names the hardware loop.
+                    None if self.expand_loops && c.label.is_some() => self.top_head,
+                    None => None,
+                };
+                let target = target
+                    .or_else(|| self.loop_ctx.last().map(|&(cont, _)| cont))
                     .or(self.top_head)
                     .unwrap_or(next);
                 self.new_node(Node {
@@ -1423,6 +1540,9 @@ impl Builder {
             // while the flattened FSM runs one cycle per iteration. `may_exit_without_tick`
             // records that path for `check_reachability` WITHOUT weakening the Tick
             // edge, which liveness still needs (see the field's docs).
+            Expr::While(_) | Expr::ForLoop(_) | Expr::Loop(_) if self.expand_loops => {
+                self.build_loop_expanded(expr, next)
+            }
             Expr::While(_) | Expr::ForLoop(_) | Expr::Loop(_) => {
                 let mut uses = BTreeSet::new();
                 collect_reads(expr, &mut uses);
@@ -1891,6 +2011,37 @@ fn top_level_loop(f: &ItemFn) -> Option<(Vec<Stmt>, Span)> {
 }
 
 /// The statement list of a nested `while` / `for` / `loop` body.
+/// The names bound by the `let` patterns of a `while let` / let-chain condition.
+fn let_bindings(cond: &Expr, out: &mut BTreeSet<String>) {
+    match cond {
+        Expr::Let(l) => pat_bindings(&l.pat, out),
+        Expr::Binary(b) if matches!(b.op, BinOp::And(_)) => {
+            let_bindings(&b.left, out);
+            let_bindings(&b.right, out);
+        }
+        Expr::Paren(p) => let_bindings(&p.expr, out),
+        _ => {}
+    }
+}
+
+/// True iff `range` is `a..b` with `a < b`, or `a..=b` with `a <= b`, both bounds
+/// integer constant expressions of the source alone (literals and arithmetic over
+/// them, [`crate::consts::eval_syn`] with no names) — a `for` over it runs its body
+/// at least once on every execution. A bound naming anything (a const item, a
+/// generic, a local) is not decided here: the caller keeps the zero-iteration exit.
+fn statically_nonempty_range(range: &Expr) -> bool {
+    let Expr::Range(r) = range else { return false };
+    let (Some(a), Some(b)) = (&r.start, &r.end) else { return false };
+    let none = |_: &str| None;
+    let (Some(a), Some(b)) = (crate::consts::eval_syn(a, &none), crate::consts::eval_syn(b, &none)) else {
+        return false;
+    };
+    match r.limits {
+        syn::RangeLimits::HalfOpen(_) => a < b,
+        syn::RangeLimits::Closed(_) => a <= b,
+    }
+}
+
 fn loop_body_stmts(expr: &Expr) -> &[Stmt] {
     match expr {
         Expr::While(w) => &w.body.stmts,
@@ -2342,15 +2493,19 @@ mod tests {
 
 
 
-    /// The **back-edge clause** (added 2026-08-21). A local defined *post*-tick and
-    /// read *pre*-tick is a flip-flop even though its live range crosses no tick: it
-    /// crosses the loop back edge. The 2-FF synchronizer is the canonical case —
-    /// under the tick-only rule this returned just `["ff1"]`, a silent
-    /// under-approximation contradicted by the simulator's own behaviour, by
-    /// independent hand-written Verilog, and by codegen (all three have two flops).
-    /// See `Cfg::registers` for why `ff2` cannot be a wire.
+    /// The **back-edge clause is gone** (Phase C step 6, SPEC I.7.5, D-9). A local
+    /// assigned after the iteration's last tick and read in the next head before its
+    /// first tick is assigned and consumed within ONE resumption — the one that runs
+    /// from that tick to the next — so it is a wire of that resumption (I.7.2(c)),
+    /// not a register. From 2026-08-21 to 2026-11-07 a clause of `Cfg::registers`
+    /// counted the locals live out of the loop head and this test pinned
+    /// `["ff1", "ff2"]`; that was the two-job body's reading (REG9/X9), under which
+    /// `ff2 = ff1` read `ff1` before the edge. Under D-8's one resumption `q.write(ff2)`
+    /// sees the `ff2 = ff1` of its own resumption, `sync_2ff_ref.sv`'s second flop is
+    /// the `RegOut` `q`, and this spelling is one cycle late against the reference
+    /// (I.7.5) — so the anchored `sync_2ff` is spelled tick-last, below.
     #[test]
-    fn post_tick_def_read_pre_tick_is_a_register() {
+    fn post_tick_def_read_pre_tick_is_a_wire() {
         let src = r#"
             #[hardware(synchronizer)]
             async fn sync_2ff(clk: Clock<D>, d: In<Logic, S>, q: RegOut<Logic, D>) {
@@ -2364,12 +2519,28 @@ mod tests {
                 }
             }
         "#;
-        assert_eq!(regs(src), ["ff1", "ff2"]);
+        assert_eq!(regs(src), ["ff1"]);
+        // The anchored, tick-last spelling (`src/sync.rs`): the same set.
+        let tick_last = r#"
+            #[hardware(synchronizer)]
+            async fn sync_2ff(clk: Clock<D>, d: In<Logic, S>, q: RegOut<Logic, D>) {
+                let mut ff1 = Logic::Zero;
+                let mut ff2 = Logic::Zero;
+                loop {
+                    ff2 = ff1;
+                    ff1 = d.read();
+                    q.write(ff2);
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert_eq!(regs(tick_last), ["ff1"]);
     }
 
-    /// The back-edge clause must not swallow the combinational case it neighbours:
-    /// a temp defined *and* consumed within one post-tick segment dies there, so it
-    /// is not live at the head and stays a wire (it is D-input logic in hardware).
+    /// A temp defined *and* consumed within one post-tick segment dies there, so it
+    /// is live at no tick and stays a wire (it is D-input logic in hardware). Kept
+    /// from the back-edge clause's time, when it pinned that the clause did not
+    /// swallow this neighbouring case.
     #[test]
     fn post_tick_temp_dying_in_its_own_segment_is_not_a_register() {
         let src = r#"

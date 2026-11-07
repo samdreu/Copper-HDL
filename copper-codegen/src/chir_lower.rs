@@ -2206,7 +2206,15 @@ fn lower_seq_body(
     // loop body itself.
     let mut loop_body = Vec::new();
     for (name, ty, init, span) in &pre_loop_wires {
-        let value = lower_expr(init, &mut ctx)?;
+        // As for an in-loop `let` (`lower_local`): a context-width literal
+        // (`Bits::zero()`) takes the binding's declared width, and a value of
+        // another width is cast. Missing here until Phase C step 6, where the head
+        // clause's deletion made `trailing_local_into_head`'s `let mut w: Bits<8> =
+        // Bits::zero()` the first pre-loop wire with such an initializer: it emitted
+        // `w = 64'd0` and Verilator refused it (WIDTHTRUNC; MEASUREMENTS §K.1).
+        let tw = type_width(ty);
+        let value = retype_default_literals_in_values(lower_expr(init, &mut ctx)?, tw.clone());
+        let value = resize_to_target(value, &tw, &ctx);
         loop_body.push(CHIRStmt::Wire {
             name: name.clone(),
             ty: ty.clone(),

@@ -1902,3 +1902,57 @@ sv-baseline diff was NEW fixtures only), so their SV is byte-identical to `2aca0
    "unroll the enclosing loop's zero-time iterations". ui/fail `nested_runtime_empty_for`.
 5. **Left alone, as asked:** the `as_usize` / `usize` width class (step 8, I.14.7 (3)); met again
    in J.13 (`Bits::from_usize(n & 0xFF)` at 32 bits).
+
+## K. Phase C step 6 — register inference: the head clause, the nested loop, P3 / P13 / P14 (2026-11-07)
+
+Branch `claude/phase-c-registers-51a627` (from `paper` at `cd14f6e`). D-20 obligation (6);
+SPEC I.7.1 (the definition), I.7.5 (the clause and the two fold defects), I.7.6–I.7.7; III.1
+rows P2, P3, P13, P14. Every prediction below was written here before the measurement it
+predicts was run. Instruments: `register-baseline` (new, `copper-codegen/src/bin/register-baseline.rs`:
+`infer_registers` for every clocked module of `examples/`, `tests/`, `src/` — **175** at `cd14f6e`,
+inline test strings excluded), snapshot on the untouched tree; `sv-baseline` (**245** modules),
+snapshot on the untouched tree.
+
+### K.0 Predictions — (1) the head clause deleted
+
+I.7.5 measured the clause's surplus on 2026-11-04 as 8 locals in 7 modules. Step 3 re-spelled
+`sync_2ff`, `flag_sync` (all three copies) and `sync_2ff_concrete` tick-last, and D-8's rewrites
+put `struct_latch`, `struct_latch_cond`, `tuple_destructure` in the write-before-tick form, where
+`latch` and `target` are assigned before the tick and read after it — live at the tick. Read off
+today's sources, the one remaining instance of the shape (assigned after the iteration's last
+tick, read in the next head before its first tick) is `trailing_local_into_head`'s `w` (its own
+doc comment already calls it a wire).
+
+- Inferred-set change: **1 local in 1 module** — `tests/fixtures/trailing_statements_dut.rs::trailing_local_into_head`
+  loses `w`. No other module changes.
+- Emitted SV: `chir_lower` consults `fir.registers` for a pre-loop `let mut`, so the module's SV
+  **changes** (not "none" as the brief expected): `w` stops being a flop and becomes the pre-loop
+  wire (`Bits::zero()`) the trailing assignment overrides, `o <= ((__copper_started ? (r + 8'd1) : 8'd0) + r)`.
+  No other module's SV changes.
+- Verdicts: none change; the module agrees on all three legs before and after.
+
+### K.1 (1) The head clause deleted — measured
+
+`compute_registers` no longer adds `live_out[head]`.
+
+- **Inferred-set diff: 1 of 175 — `trailing_local_into_head` loses `w`, as predicted.** The
+  clause's 2026-11-04 surplus of 8 locals in 7 modules is down to this one: the other six
+  modules were re-spelled by step 3 / D-8 so that the local is live at the tick.
+- **sv-baseline: 1 of 245 — the same module, as predicted, but the predicted emission was
+  wrong in one respect (a miss).** `w` stopped being a flop and became a pre-loop wire, and the
+  wire's initializer was emitted as `w = 64'd0`: Verilator refused the model (`%Warning-WIDTHTRUNC`
+  … `%Error: Exiting due to 1 warning(s)`), so the sweep case FAILED. Cause: the pre-loop wire
+  path of `chir_lower` (`pre_loop_wires`, shared by a pre-loop `let` and by a pre-loop `let mut`
+  the register authority calls a wire) lowered the initializer with no target width, where the
+  in-loop `let` path (`lower_local`) applies `retype_default_literals_in_values` and
+  `resize_to_target`. No corpus module had reached it: a pre-loop non-`mut` `let` with a
+  context-width initializer does not occur, and until now no pre-loop `let mut` was demoted.
+  **Fixed** (same two calls on that path); sv-baseline after the fix: still 1 of 245, the same
+  module, now `w = 8'd0`. The trailing assignment `w = r + 1` is no longer emitted to `w` at all:
+  its one reader, the head's `o.write(w + r)`, reads the forwarded value (`__copper_started ?
+  (r + 8'd1) : w`), which is what I.3.4 says of a wire of a resumption.
+- **Verdicts:** `trailing_local_into_head` 6 sequences PASS, reference leg agrees (864 cycles,
+  observation 0 on 6 of 6) — before and after. No other verdict can change (no other SV changed).
+- **Unit pin retired:** `cfg::tests::post_tick_def_read_pre_tick_is_a_register` (asserted
+  `["ff1", "ff2"]`, I.7.6's obligation) → `post_tick_def_read_pre_tick_is_a_wire`, asserting
+  `["ff1"]` for the head-read spelling and for the anchored tick-last one.
