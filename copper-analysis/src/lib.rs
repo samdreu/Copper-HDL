@@ -40,7 +40,10 @@ pub use init::{
     check_register_initializers as check_register_initializers_with, is_constant_expr,
     non_constant_register_initializers, register_init_message,
 };
-pub use shape::{check_awaits, check_nested_loop_shape, check_no_preloop_tick, PRELOOP_TICK_MESSAGE};
+pub use shape::{
+    check_awaits, check_counted_for_nesting, check_nested_loop_shape, check_no_preloop_tick,
+    NESTED_RUNTIME_EMPTY_FOR_MESSAGE, PRELOOP_TICK_MESSAGE,
+};
 
 /// SPEC II.1 **R8** (D-8, Phase C step 3, 2026-11-06): a `sequential` or
 /// `synchronizer` module has no plain `Out<T, D>`. Under the one-job body every

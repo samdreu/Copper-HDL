@@ -813,6 +813,11 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             if let Err(err) = copper_analysis::check_no_preloop_tick(&input_fn) {
                 return err.to_compile_error().into();
             }
+            // A run-time-empty counted `for` ending an enclosing ticking `for`
+            // (MEASUREMENTS §J.15): same function, same message, in `transpile_target`.
+            if let Err(err) = copper_analysis::check_counted_for_nesting(&input_fn) {
+                return err.to_compile_error().into();
+            }
             // A pre-loop register must start from a constant or from `Bits::x()`
             // (2026-10-29): its initializer is the flip-flop's power-on value, which
             // the transpiler states as an `initial` assignment — and a value it

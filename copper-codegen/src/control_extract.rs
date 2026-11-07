@@ -1997,11 +1997,10 @@ fn unflattenable_in_expr(e: &ExprType, in_loop: bool) -> Option<Unflattenable> {
             "restructure the body so the path falls through to the iteration's tick, e.g. \
              `if ok { <work> }` rather than `if !ok { continue; } <work>`",
         ),
+        // Defence in depth: `copper_analysis::check_counted_for_nesting` refuses
+        // this first in both front-ends with the same message (MEASUREMENTS §J.15).
         ExprType::ForLoop(f) if ends_in_guarded_hoisted_tick(&f.body) => named(
-            "a counted `for` whose range may be empty at run time is the last statement \
-             of an enclosing tick-bearing `for`: with an empty inner range the enclosing \
-             loop's iterations take no time, which the emitted state machine cannot \
-             realize",
+            copper_analysis::NESTED_RUNTIME_EMPTY_FOR_MESSAGE,
             f.span,
             "end the enclosing `for` body with its own `clk.tick().await`, or make the inner \
              bound a constant (a literal or a `const`)",

@@ -329,6 +329,7 @@ fn vlir_for_target(
     copper_analysis::check_awaits(target).map_err(|e| e.to_string())?;
     // SPEC II.1.2 R21 (Phase C step 5): the macro runs the same function.
     copper_analysis::check_no_preloop_tick(target).map_err(|e| e.to_string())?;
+    copper_analysis::check_counted_for_nesting(target).map_err(|e| e.to_string())?;
     // A combinational `Out` written on some paths but not all is a latch — the
     // macro's rule, from the same analysis (2026-11-02, §10.12). Until then the
     // transpiler had only `check_no_latches` over its own lowering, which refused

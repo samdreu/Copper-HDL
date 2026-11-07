@@ -221,6 +221,74 @@ pub fn check_no_preloop_tick(f: &ItemFn) -> Result<(), syn::Error> {
     Ok(())
 }
 
+/// A tick-bearing counted `for` whose body ENDS in a tick-bearing counted `for`
+/// with a bound that is not static (an integer literal, or constant-shaped names —
+/// `is_constant_expr` — none of them a const generic of the module): with the inner
+/// range empty, each enclosing iteration takes zero time, which the emitted state
+/// machine cannot run without unrolling the enclosing loop. A dated II.3 limitation,
+/// REFUSED in both front-ends with one message (Phase C step 5, 2026-11-07,
+/// MEASUREMENTS §J.15).
+pub fn check_counted_for_nesting(f: &ItemFn) -> Result<(), syn::Error> {
+    let generics: Vec<String> = f
+        .sig
+        .generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            syn::GenericParam::Const(c) => Some(c.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    struct V<'g> {
+        generics: &'g [String],
+        err: Option<syn::Error>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for V<'_> {
+        fn visit_expr_for_loop(&mut self, fl: &'ast syn::ExprForLoop) {
+            if self.err.is_none() && fl.body.stmts.iter().any(stmt_contains_tick) {
+                if let Some(Stmt::Expr(Expr::ForLoop(inner), _)) = fl.body.stmts.last() {
+                    if inner.body.stmts.iter().any(stmt_contains_tick) && !range_is_static(&inner.expr, self.generics) {
+                        self.err = Some(syn::Error::new(inner.span(), NESTED_RUNTIME_EMPTY_FOR_MESSAGE));
+                    }
+                }
+            }
+            syn::visit::visit_expr_for_loop(self, fl);
+        }
+    }
+    let mut v = V { generics: &generics, err: None };
+    syn::visit::Visit::visit_block(&mut v, &f.block);
+    v.err.map_or(Ok(()), Err)
+}
+
+/// Both bounds of an exclusive range are static (see `check_counted_for_nesting`).
+fn range_is_static(e: &Expr, generics: &[String]) -> bool {
+    let Expr::Range(r) = e else { return false };
+    let names_generic = |x: &Expr| {
+        let mut hit = false;
+        struct P<'a>(&'a [String], &'a mut bool);
+        impl<'ast> syn::visit::Visit<'ast> for P<'_> {
+            fn visit_path(&mut self, p: &'ast syn::Path) {
+                if p.get_ident().is_some_and(|i| self.0.iter().any(|g| i == g)) {
+                    *self.1 = true;
+                }
+                syn::visit::visit_path(self, p);
+            }
+        }
+        syn::visit::Visit::visit_expr(&mut P(generics, &mut hit), x);
+        hit
+    };
+    [r.start.as_deref(), r.end.as_deref()].into_iter().flatten().all(|b| {
+        crate::cfg::is_constant_expr(b) && !names_generic(b)
+    })
+}
+
+/// The nesting rule's message, shared by both front-ends.
+pub const NESTED_RUNTIME_EMPTY_FOR_MESSAGE: &str = "a counted `for` whose range may be empty at \
+    run time is the last statement of an enclosing tick-bearing `for`: with an empty inner range \
+    the enclosing loop's iterations take no time, which the emitted state machine cannot realize. \
+    End the enclosing `for` body with its own `clk.tick().await`, or make the inner bound a \
+    constant (a literal or a `const`)";
+
 /// R21's message, shared by both front-ends.
 pub const PRELOOP_TICK_MESSAGE: &str = "`clk.tick().await` before the module's `loop`: the \
     statements before the loop are the first resumption's and run in no time (SPEC I.2.2, \

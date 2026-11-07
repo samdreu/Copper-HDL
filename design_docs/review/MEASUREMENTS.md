@@ -1858,3 +1858,11 @@ transpiler-only refusal (recorded). **Predictions:** sv-baseline no change; a ui
 `nested_runtime_empty_for.rs`; `front_end_parity.rs` gains the rule, green over the corpus; the
 `unsupported_constructs.rs` pin asserts the shared message; its constant-bound twin still
 transpiles; a const-generic inner bound (`0..N`) is refused by both.
+
+**Measured — as predicted.** sv-baseline: **245 modules, no changes**. The macro refuses
+`copper-macros/tests/ui/fail/nested_runtime_empty_for.rs` with the shared message (its `.stderr`
+the only file `TRYBUILD=overwrite` wrote); `unsupported_constructs.rs::a_runtime_empty_counted_for_ending_an_enclosing_for_has_its_own_diagnostic`
+asserts the same message for `0..cnt` and for a const-generic `0..N`, and its `const CNT`
+twin still transpiles; `front_end_parity.rs` test 1 runs the rule over the corpus, green (the
+UART's `0..CLKS_PER_BIT` inner loops are static by the rule). The REFUSED-one break of row 2
+becomes **REFUSED-both** (a dated II.3 row; fix direction: unroll the enclosing loop).

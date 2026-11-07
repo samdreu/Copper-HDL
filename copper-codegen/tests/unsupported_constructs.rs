@@ -955,10 +955,16 @@ async fn nested_for(clk: Clock<MainClk>, c: In<Bits<2>, MainClk>, q: RegOut<Bits
 fn a_runtime_empty_counted_for_ending_an_enclosing_for_has_its_own_diagnostic() {
     let err = transpile(NESTED_RUNTIME_EMPTY_FOR)
         .expect_err("NOW SUPPORTED: the nested run-time-empty counted `for` transpiles — sweep it");
-    assert!(
-        err.contains("may be empty at run time") && err.contains("enclosing tick-bearing `for`"),
-        "a different error than the tracked limitation: {err}"
-    );
+    // Since 2026-11-07 a shared rule refuses it in BOTH front-ends with this message
+    // (`copper_analysis::check_counted_for_nesting`; the macro's witness is
+    // `copper-macros/tests/ui/fail/nested_runtime_empty_for.rs`, MEASUREMENTS §J.15).
+    assert!(err.contains(copper_analysis::NESTED_RUNTIME_EMPTY_FOR_MESSAGE), "not the shared message: {err}");
+    // A const-generic inner bound may be 0 at an instance: refused too.
+    let generic = NESTED_RUNTIME_EMPTY_FOR
+        .replace("async fn nested_for(", "async fn nested_for<const N: usize>(")
+        .replace("0..cnt", "0..N");
+    let err = transpile(&generic).expect_err("a const-generic inner bound is refused");
+    assert!(err.contains(copper_analysis::NESTED_RUNTIME_EMPTY_FOR_MESSAGE), "{err}");
     let constant = NESTED_RUNTIME_EMPTY_FOR
         .replace("let cnt: u32 = c.read().as_u32();", "")
         .replace("0..cnt", "0..CNT");

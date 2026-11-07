@@ -1,0 +1,19 @@
+error: a counted `for` whose range may be empty at run time is the last statement of an enclosing tick-bearing `for`: with an empty inner range the enclosing loop's iterations take no time, which the emitted state machine cannot realize. End the enclosing `for` body with its own `clk.tick().await`, or make the inner bound a constant (a literal or a `const`)
+  --> tests/ui/fail/nested_runtime_empty_for.rs:21:13
+   |
+21 |             for _ in 0..cnt {
+   |             ^^^
+
+warning: unused imports: `Bits`, `Clock`, and `Logic`
+ --> tests/ui/fail/nested_runtime_empty_for.rs:1:19
+  |
+1 | use copper_core::{Bits, Clock, ClockDomain, Logic};
+  |                   ^^^^  ^^^^^               ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/nested_runtime_empty_for.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^
