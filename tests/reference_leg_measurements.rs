@@ -9,7 +9,8 @@
 //!       `regout_trailing_single_tick` — both AGREE on all three legs since Phase C
 //!       step 4 removed the fold (2026-11-06, MEASUREMENTS §H);
 //! (ii)  `pc` states of the extraction route vs the interpreter's tick sites, per
-//!       corpus module — the many-to-one ratio of I.0.4;
+//!       corpus module — the ratio of I.0.4, many-to-many (§D.3); it COUNTS, and
+//!       `tests/projection_relation.rs` builds the relation `R` and checks it (P1/P15, §L);
 //! (iii) the poison run for the register proposition (I.0.5(a), I.7.7): every local
 //!       NOT in `infer_registers`' set overwritten at every tick; a read before
 //!       reassignment is an under-inference;

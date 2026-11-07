@@ -2330,8 +2330,8 @@ its header states the method in full. In short:
 
 ### L.1 The first run — measured, predicted vs measured
 
-First run (`cargo test --test projection_relation -- --nocapture`, commit `6d0…` = the first
-commit of this branch): 131 modules related, **6 failures, 2 notes**. Every failure was the test's
+First run (`cargo test --test projection_relation -- --nocapture`, commit `82f6d91`):
+131 modules related, **6 failures, 2 notes**. Every failure was the test's
 own reading of the source, none a transpiler defect — prediction 3's direction, but not its
 members:
 
@@ -2437,9 +2437,9 @@ every run.
    between the source and the extractor's output, never correctness — it is the projection, not
    the realization (P8).
 2. **P15 — row status: MEASURED, true on both routes** (was "MEASURED false"; step 5 made it true on
-   the two probes, this measures it on every clocked module): same test. III.1.2's "measured false
-   today" count drops to P11, P12 → and P12 already flipped in step 2/4 by its own record; the counts
-   line wants re-deriving.
+   the two probes; this measures it on every clocked module): same test. III.1.2's counts line
+   ("measured false today 3 (P11, P12, P15)") wants re-deriving: P15 leaves it here, and P11/P12
+   moved in steps 2–4 by their own records (§F, §H).
 3. **I.0.4 / III.1.3 can now cite the measurement**: many-to-many measured per module (§L.2's rows),
    and `R` on the linear route is the phase index against the top-level ticks plus the entry — the
    form I.0.4 calls "`phase_r` is a position in the textual split", with the entry the second state
