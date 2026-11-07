@@ -51,9 +51,9 @@ same resumption, and the SV is not compared beyond it; any other panic fails the
 **EXCUSED**: a disagreement a signature class excuses, counted and printed with its
 pattern — none today (the observation-0 plain-`Out` class of 25 modules emptied with
 the D-8 rewrites and was deleted, Phase C step 3). **DISAGREE**: every disagreement prints its pattern —
-`sim≠ref,SV=ref` simulator/macro, `sim=ref≠SV` transpiler or II.3 row (the pre-loop
-pair `preloop_probe`/`preloop_linear`, II.3 (f2)/(f3), is pinned; the trailing fold's
-P12 and (f4) agree since Phase C step 4), `sim=SV≠ref` the reference, `all-differ` spec gap or interpreter — and G-G
+`sim≠ref,SV=ref` simulator/macro, `sim=ref≠SV` transpiler or II.3 row (none pinned since
+Phase C step 5: the pre-loop pair `preloop_probe`/`preloop_linear`, II.3 (f2)/(f3), agrees
+and is a swept fixture; the trailing fold's P12 and (f4) agree since step 4), `sim=SV≠ref` the reference, `all-differ` spec gap or interpreter — and G-G
 fails on any swept disagreement and on a `REF_SKIP` measured-disagreement row whose
 pattern (`REF_SKIP_PATTERN`) no pin measured this run. The sweep does not reach `src/` (the standard
 library's `sync_2ff` is covered by its `tests/fixtures/` twin) or modules defined
@@ -198,7 +198,9 @@ entries in `Cargo.toml`.
   `infer_registers` (backward-liveness register inference — a local is a register
   iff it is defined-in-loop ∧ live-across-a-tick), `check_reachability` (every loop
   path must reach a `clk.tick().await`, enforced as a hard spanned compile error in
-  **both** front-ends), and the G2 structural reg-match helpers. It is also where
+  **both** front-ends), the G2 structural reg-match helpers, and `consts` — the shared constant evaluator of SPEC
+  I.14.4 (started in Phase C step 5; the transpiler's counted-`for` bounds, `from_lit`
+  turbofish and `const` bodies use it; R11 and the interpreter do not yet). It is also where
   the checks that reason about **clock phases** live — `check_memory_staging` (and,
   until D-8 retired them, the plain-`Out` phase rules) — because a check
   downstream of `control_extract` cannot see the phases it is counting (that pass
@@ -254,7 +256,12 @@ unwritten; a plain `Out` reaching `lower_seq` is an error, not a form. The **tra
 region** (statements after the last tick) is the head of the next resumption (SPEC
 I.0.2): it lowers into phase 0 ahead of segment 0, one forwarding walk across both,
 under `if (__copper_started)`, a synthesized one-bit register that is 0 until the
-first edge (the first resumption runs the head only). A memory `data()` /
+first edge. The **pre-loop expression statements** (a `RegOut` write, a memory staging,
+an assignment — SPEC I.9.3) are the first resumption's: both routes lower them into
+segment 0 ahead of the head under `if (!__copper_started)` (Phase C step 5; until then the
+extraction route re-ran them at every return to state 0 and the linear route dropped
+them). Every statement of a segment reads a register it assigned earlier as the
+assigned value — the `always_comb` ones too (step 5, II.3 (f5)). A memory `data()` /
 `is_ready()` always reads the registered capture, the word the last edge delivered.
 Until Phase C step 4 (2026-11-06) a clocked plain `Out` had five more forms (a
 continuous `assign`, the every-path mux, the Moore default hoist, the mux +

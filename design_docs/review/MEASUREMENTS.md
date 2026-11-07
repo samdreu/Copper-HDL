@@ -1596,3 +1596,108 @@ not an integer or boolean literal", (d)) and, with `n`'s initializer replaced, a
 breaks closed for these spellings. `tools/regression.sh --no-examples`: **PARTIAL OK (236 s)**;
 G-F 107; **G-G differential 1420 PASS / 0 DISAGREE, reference 930, pinned 0**. Row status:
 **(g) closed; (d) partly closed** (the non-literal `const` body); not reached as listed above.
+
+### J.8 Row 8 — (e) the `Bits` method lowerings (partial)
+
+**Scope reached:** 12 of the row's methods, each with its I.14.3(d) meaning and an SV form whose
+2-state meaning is the same — `and_reduce` / `or_reduce` / `xor_reduce` → `&x` / `|x` / `^x`;
+`nand_reduce` / `nor_reduce` / `xnor_reduce` → `~(&x)` / `~(|x)` / `~(^x)` (1 bit); `get(i)` → a
+bit select (a constant index a slice, a dynamic one `x[i]`); `shift_left(n)` / `shift_right(n)` →
+`x << n` / `x >> n` (logical; a shift of `N` or more is all zeros in both); `zero_extend::<M>()` /
+`truncate::<M>()` → `M'(x)` (zero-fill / low bits); `sign_extend::<M>()` → `M'($signed(x))`.
+**Not reached:** `concat`, `part_select`, `replicate`, `set`, `mux`, `with_lsb`, `with_msb`,
+`is_valid`, `lt_logic`/`gt_logic`/`le_logic`/`ge_logic`, `as_array`, and the row's owed
+`eq_logic`, `ne_logic`, `as_array_mut`, `from_array`, `from_slice`, `From`, `all_ones`; the
+`checked_*` (OUTSIDE) / `saturating_*` (IN) decisions of I.14.3(d) are not acted on here.
+
+**Predicted emission diff:** none in the corpus (each method is refused today — "method `…` is
+not supported" — and the sweep transpiles every swept module, so none uses one). **Predicted
+traces:** the fixture `tests/fixtures/bits_methods_dut.rs` — a combinational module using all 12
+(`bits_methods_comb`) and a sequential one using the reductions on a register (`bits_methods_seq`)
+— transpiles and **agrees** (sim ≡ SV on the combinational one, which the reference leg skips by
+class; both legs on the sequential one).
+
+**Measured.** sv-baseline: **no corpus change** (241 = 239 + the 2 fixture modules) — as
+predicted. `bits_methods_seq` **agrees on both legs**; `bits_methods_comb` first **failed** on
+`shr` — not a method lowering: the fixture's amount `s.read().as_usize() + 2` is a `usize` sum
+in Rust (up to 9, so `shift_right` of 8 or more gives 0) and a 3-bit sum in the SV (`as_usize`
+is a passthrough at the receiver's width; 7 + 2 wraps to 1). A width defect of I.14.5 / I.14.7
+(3)'s class (masked in the corpus), recorded as a SPEC item, not fixed here; the fixture now
+drives the amount from a 4-bit input (still reaching `n >= 8`) and **agrees** (sim ≡ SV; the
+reference leg skips a combinational module by class).
+`tools/regression.sh --no-examples`: **PARTIAL OK (245 s)**; G-F 108 (75 skipped: +1, `bits_methods_comb`, the combinational class — no new `REF_SKIP` row); **G-G differential 1431 PASS / 0 DISAGREE, reference 936, pinned 0**.
+
+### J.9 Row 9 — R21 / (f6): not reached
+
+Not started in this sitting. What row 1 changed for it: a `tick` before the module loop is now
+**refused by the transpiler on both routes** — the pre-loop statements are lowered (row 1), and
+a tick among them is refused (`chir_lower`, "`clk.tick().await` before the module's `loop`: the
+statements before the loop are the first resumption's …"), so (f6)'s silent drop on the linear
+route is gone. The macro still admits (`validate_hardware_fn` counts any tick), so R21 is a
+REFUSED-one break until the shared rule lands in `copper-analysis` with a `copper-macros/tests/ui/fail`
+case and a `front_end_parity.rs` entry — the row as written.
+
+### J.10 For the coordinator — SPEC items (SPEC files untouched)
+
+**Rows closed, with their fixtures (III.3 ledger lines):**
+1. **(f2), (f3) — closed** (row 1): `tests/fixtures/preloop_entry_dut.rs` (`preloop_probe`,
+   `preloop_linear`), swept; `tests/reference_leg_measurements.rs::preloop_statement_agrees_on_both_routes`.
+   **P15 MEASURED true** on both routes. III.2's `sim = ref ≠ SV` instances: none left (0 pins).
+   I.9.2's realization: the started carrier (`__copper_started`, I.7.2(j)), one bit, shared with
+   the trailing region; the entry-state alternative was not taken (the linear route has no state
+   register to give an entry value). (f4) was closed by step 4 (§H.5 item 3).
+2. **(f1) — closed** (row 2): `tests/fixtures/for_empty_dut.rs` (`for_empty` = D-10 probe (ii),
+   `for_empty_start`). Two further facts for I.8.4/I.8.5: the desugar now evaluates a
+   counted-`for` range **once at entry** (a non-stable bound is snapshotted — it was re-read at
+   every exit test); and a bound named by a file `const` is now statically known (the shared
+   evaluator). **New REFUSED-one shape** (a II.3 row candidate): a counted `for` whose range may be
+   empty at run time as the last statement of an enclosing tick-bearing `for` — with an empty
+   inner range each enclosing iteration takes zero time; admitted-and-divergent before (only when
+   empty), refused by the transpiler now with its own message; the macro admits. Pin:
+   `unsupported_constructs.rs::a_runtime_empty_counted_for_ending_an_enclosing_for_has_its_own_diagnostic`.
+3. **(f5) — closed, with a family of four** (row 3): `tests/fixtures/array_forwarding_dut.rs`
+   (`f5_sipo` = `q1_c_sipo_block`, `f5_guard`, `f5_wire`, `f5_branch_wire`). II.3.3's site
+   description is narrower than the defect: every `always_comb` statement (a `let` wire, a wire
+   reassignment, an element assignment, the combinational copy of a test / scrutinee / guard, `for`
+   bounds) read the committed register. I.6.9 / I.3's implementation map: `shir_lower::lower_stmt_list`
+   now forwards every read; `SHIRStmt::If::condition == edge_condition` always.
+4. **(a) — closed** (row 4): `tests/fixtures/nested_continue_dut.rs`. Under today's
+   `check_nested_loop_shape` (tick last, one top-level tick) the rotation is always trivial, so the
+   goto to the head IS the entry copy; the entry-copy lowering is in place for a non-trivial
+   rotation (reachable once D-10's tick-last retirement lands). Still refused by the transpiler
+   only (REFUSED-one, two parity-list lines for II.1.3): a **labelled** `continue`, and a
+   `continue` of a tick-bearing counted `for` (now with its own message).
+5. **(b) — closed** (row 5): `tests/fixtures/arms_only_loop_dut.rs` (`b1`, `b2`, a `match`);
+   clause 4 lifted for a nested `loop` in both front-ends (one function); a `while` of the shape
+   keeps the clause's message in both (not this row). II.3.2's sort: rule 3's clause 4 → retired.
+   The same lowering change makes a nested loop with no top-level tick ending in a nested loop
+   zero-time at its fall-through (no corpus module; `shape.rs`'s `body_ending_in_a_nested_wait_is_accepted`
+   shape) — I.8.2's meaning.
+6. **(c) — closed** (row 6): `tests/fixtures/array_two_writes_dut.rs` (`arr_two_writes`,
+   `arr_same_element`, `arr_comb_read`). **Two new findings for II.3:** (i) an element write to an
+   array register inside a combinational `for` was ADMITTED-AND-DIVERGENT (only the last
+   iteration's write committed) — now **REFUSED-one** (pin
+   `an_array_register_element_write_inside_a_combinational_for_is_refused`; the form that would
+   realize it is unrolling); (ii) a combinational-position read of an array register missed the
+   write still in its pipeline stage — **ADMITTED-AND-DIVERGENT, fixed in this row**
+   (`vlir_lower::forward_comb_mem_index`), fixture `arr_comb_read`. Both deserve a II.3 line with
+   its date for the ledger. I.10's implementation map: an array register's write-port count is the
+   most element writes one segment stages.
+7. **(g) — closed; (d) — partly** (row 7): `tests/fixtures/const_eval_dut.rs`. `copper_analysis::consts`
+   exists (I.14.4's evaluator, started); the transpiler's `from_lit` turbofish and `const` bodies
+   use it. Open for (d): associated consts (FIR has no impl consts), const generics as values
+   (`CHIRRegDecl::init` is a literal), `const fn`s; R11's `is_constant_expr` and the interpreter
+   still use their own evaluators (I.14.7 (2) open).
+8. **(e) — 12 methods closed** (row 8): `tests/fixtures/bits_methods_dut.rs` — `and_/or_/xor_/
+   nand_/nor_/xnor_reduce`, `get`, `shift_left`, `shift_right`, `zero_extend`, `sign_extend`,
+   `truncate` (12 ledger lines). The others of the row stay REFUSED-one (listed in §J.8).
+   **Width finding:** `x.as_usize()` lowers as a passthrough at `x`'s width, so `usize` arithmetic
+   on it wraps at that width in the SV and not in Rust (`s.read().as_usize() + 2` on a 3-bit `s`) —
+   an I.14.5 (a) realization defect, masked in the corpus; a II.3 line candidate.
+9. **R21 / (f6) — not reached as a front-end rule**; (f6)'s silent drop is gone (row 1 refuses a
+   pre-loop tick in the transpiler on both routes); still REFUSED-one (§J.9).
+10. **II.3.6's map** has drifted further: (f1) `control_extract::expand_counted_for` (guard, bound
+   snapshots), (f2)/(f3) `chir_lower` pre-loop lowering + `shir_lower` `has_started`, (f5)
+   `shir_lower::lower_stmt_list`, (a) `control_extract::LoopCtx::entry`, (b)
+   `control_extract::ticks_only_in_arms` and `copper-analysis/src/shape.rs::ticks_only_in_arms`,
+   (c) `chir_lower` `array_written`/`array_write_ports`, (e) `chir_lower::lower_method_call`.

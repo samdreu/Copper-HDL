@@ -253,6 +253,14 @@ fn infer_type_from_expr(
             | "wrapping_mul" | "as_u8" | "as_u16" | "as_u32" | "as_u64" | "as_u128"
             | "as_usize" | "as_bits" => infer_type_from_expr(&mc.receiver, span, symbols, enums),
             "as_bool" => Ok(CHIRType::Bool),
+            "and_reduce" | "or_reduce" | "xor_reduce" | "nand_reduce" | "nor_reduce"
+            | "xnor_reduce" | "get" => Ok(CHIRType::UInt { width: Width::Concrete(1) }),
+            "zero_extend" | "sign_extend" | "truncate" if mc.turbofish.len() == 1 => {
+                match copper_analysis::consts::parse_int_lit(mc.turbofish[0].trim()) {
+                    Some(m) => Ok(CHIRType::UInt { width: Width::Concrete(m as usize) }),
+                    None => Ok(CHIRType::UInt { width: Width::Param(mc.turbofish[0].trim().to_string()) }),
+                }
+            }
             _ => infer_type_from_expr(&mc.receiver, span, symbols, enums),
         },
         ExprType::Call(call) => match identity_pack_call(call) {
@@ -5025,6 +5033,70 @@ fn lower_method_call(
             })
         }
         "lock" | "unwrap" | "clone" => lower_expr(&mc.receiver, ctx),
+
+        // `Bits` methods with their I.14.3(d) meaning (II.3 (e), Phase C step 5,
+        // MEASUREMENTS §J.8). A reduction is one bit; its negated forms invert it.
+        "and_reduce" | "or_reduce" | "xor_reduce" | "nand_reduce" | "nor_reduce" | "xnor_reduce"
+            if mc.args.is_empty() =>
+        {
+            let op = match mc.method.as_str() {
+                "and_reduce" | "nand_reduce" => CHIRUnOp::ReductionAnd,
+                "or_reduce" | "nor_reduce" => CHIRUnOp::ReductionOr,
+                _ => CHIRUnOp::ReductionXor, // xor_reduce, xnor_reduce
+            };
+            let reduced = CHIRExpr::UnOp { op, expr: Box::new(lower_expr(&mc.receiver, ctx)?) };
+            Ok(if matches!(mc.method.as_str(), "nand_reduce" | "nor_reduce" | "xnor_reduce") {
+                CHIRExpr::UnOp { op: CHIRUnOp::BitNot, expr: Box::new(reduced) }
+            } else {
+                reduced
+            })
+        }
+        // `x.get(i)`: bit `i` — a constant index a one-bit slice, a dynamic one a
+        // bit select (an out-of-range index is the simulator's assert).
+        "get" if mc.args.len() == 1 => {
+            let base = lower_expr(&mc.receiver, ctx)?;
+            match &mc.args[0] {
+                ExprType::Lit(l) if copper_analysis::consts::parse_int_lit(&l.text).is_some() => {
+                    let i = copper_analysis::consts::parse_int_lit(&l.text).unwrap() as usize;
+                    Ok(CHIRExpr::Slice { expr: Box::new(base), high: i, low: i })
+                }
+                idx => Ok(CHIRExpr::DynBit { base: Box::new(base), index: Box::new(lower_expr(idx, ctx)?) }),
+            }
+        }
+        // Logical shifts at the receiver's width; `n >= N` is all zeros on both sides.
+        "shift_left" | "shift_right" if mc.args.len() == 1 => {
+            let left = lower_expr(&mc.receiver, ctx)?;
+            let right = lower_expr(&mc.args[0], ctx)?;
+            Ok(CHIRExpr::BinOp {
+                left: Box::new(left),
+                op: if mc.method == "shift_left" { CHIRBinOp::Shl } else { CHIRBinOp::Shr },
+                right: Box::new(right),
+            })
+        }
+        // Width changes to the turbofish width `M`: zero-fill, sign-fill, low bits.
+        "zero_extend" | "sign_extend" | "truncate" if mc.args.is_empty() && mc.turbofish.len() == 1 => {
+            let width = match copper_analysis::consts::parse_int_lit(mc.turbofish[0].trim()) {
+                Some(m) => Width::Concrete(m as usize),
+                None if is_ident(mc.turbofish[0].trim()) => Width::Param(mc.turbofish[0].trim().to_string()),
+                None => {
+                    return Err(CHIRLowerError::UnsupportedConstruct {
+                        description: format!(
+                            "`{}::<{}>`: the target width is not a literal or a parameter",
+                            mc.method, mc.turbofish[0]
+                        ),
+                        span: mc.span,
+                        suggested_rewrite: None,
+                    })
+                }
+            };
+            let recv = lower_expr(&mc.receiver, ctx)?;
+            let expr = if mc.method == "sign_extend" {
+                CHIRExpr::SignCast { signed: true, expr: Box::new(recv) }
+            } else {
+                recv
+            };
+            Ok(CHIRExpr::Resize { expr: Box::new(expr), width })
+        }
         _ => Err(CHIRLowerError::UnsupportedConstruct {
             description: format!("method `{}` is not supported in hardware expressions", mc.method),
             span: mc.span,
