@@ -2327,3 +2327,131 @@ its header states the method in full. In short:
 4. **No unreachable `pc` state and no unreached tick site** outside a statically empty `for`.
 5. **`R` is many-to-many on the modules §D.3 named**: `det_010_awaits`, `if_tick`, `match_tick`
    (several sites → `pc = 0`), `counted_repetition`, `uart_rx` (a site over several states).
+
+### L.1 The first run — measured, predicted vs measured
+
+First run (`cargo test --test projection_relation -- --nocapture`, commit `6d0…` = the first
+commit of this branch): 131 modules related, **6 failures, 2 notes**. Every failure was the test's
+own reading of the source, none a transpiler defect — prediction 3's direction, but not its
+members:
+
+| failure | class | resolution |
+|---|---|---|
+| `shift_register` (example and fixture): the pre-loop `const { assert!(N - 1 == N_1) }` is a `Run` on the source side only | (b), predicted in kind | normalization: a `const { … }` statement is evaluated by rustc and is no statement of any resumption (§J.1 already called it "a compile-time item that lowers to nothing"); the test classes it with the initializers |
+| `if_tick_explicit`, `branch_merge_explicit`, `match_tick_explicit`: "an emitted control `if`/`match` … that is no source control construct" | NOT predicted | the test's route detection read a USER's `let mut pc; loop { match pc {…}; tick }` (a hand-written FSM, single-tick, linear route) as the extraction route's `match pc`. Fixed by deciding the route on the source: extraction iff some tick is not a top-level statement of the module loop; the CHIR must then have the extraction shape (else a failure) |
+| `nested_continue_match`: "an emitted statement at 64:20 maps to no source statement" | (a), predicted in kind, wrong member | a non-block `match` arm (`_ => q.write(…)`) is lowered as a statement with the ARM's span (pattern start); the test now gives such an arm body the arm's range and label position |
+
+Prediction 3(c) (`while !c` folded) did **not** occur: every `while` guard reaches CHIR as a
+negation. Prediction 3(a)'s other members (submodule wires, memory plumbing with a module span)
+did not occur: every CHIR statement in a resumption carries a span inside a source statement.
+
+Second run: **137 related, 0 failures, 2 notes** (the 6 above were not counted in the 131).
+
+### L.2 The measurement
+
+`projection relation: 137 clocked modules related (41 extracted, 17 linear, 79 single-tick),
+51 combinational (no H(M) state), 1 structural (no coroutine), 0 uncovered with a reason;
+|R| = 455 pairs, 831 transitions checked; sweep modules examined: 189/189.`
+
+- **P1 holds on all 137** (prediction 1: as predicted). Every transition of every reached pair,
+  every branch outcome, matched path for path.
+- **P15 holds on all 137** (prediction 2: as predicted): `pc` / `phase_r` / `__copper_started`
+  power on at 0 in SHIR and in the emitted `initial`; `__copper_started` is declared wherever read
+  and set to 1 at phase 0's edge only; the entry transition is `s_pre`'s expression statements then
+  the head (the two CPUs and `preloop_probe` / `preloop_linear` are the modules with a non-empty
+  `s_pre` run — §J.1's 5 less `shift_register`'s const block); only the initial pair has
+  `started = 0`.
+- **Coverage.** Every one of the 189 sweep modules (build.rs's `COVERED`, now also written to
+  `corpus_manifest.rs`) is examined: the 137 clocked ones related — the sweep's `SKIP`ped
+  `rv32i_cpu_pipelined` included (3 states, 2 sites) — 51 combinational ones (no H(M) state: a
+  combinational module has no `tick`, SPEC I.11) and the structural `two_domain_top` (no coroutine,
+  I.13) counted and printed. `UNCOVERED` is empty. The sweep does not reach `src/` (its
+  `sync_2ff` is covered by the `tests/fixtures/` twin `sync_2ff_concrete`, single-tick), nor do
+  this test or G-D.
+- **Many-to-many, measured** (prediction 5: as predicted). Columns: `pc` states / tick sites /
+  |R projected onto (state, site)| (the entry counted) / |R| (with counter facts and `for` choices)
+  / transitions.
+  Several sites, fewer states — `det_010_awaits` 4/6/7/7/26, `if_tick` and `match_tick` 2/3/4/4/7,
+  `arms_only_match` 6/5/6/6/19. One site over several states — `counted_repetition` 4/1/5/5/15,
+  `counted_delay` 2/1/3/3/6, `nested_loop_missed` 2/1. Both at once — the UARTs (`rx`, `uart_rx`,
+  `uart_rx_dut` 11/5/11/17/49; `uart_tx` 9/4/10/17/46), `det_for` 3/3/5/12/54, `serializer`
+  5/4/6/8/15. So `R` is a relation, never a function either way, as III.1.3 corrected I.0.4.
+  On the linear route `R` is the phase index against the top-level ticks plus the entry
+  (`|R| = phases + 1` on all 17 multi-phase and 79 single-tick modules).
+- **Negative controls** (each a throwaway edit, measured and reverted; `copper-codegen` clean):
+  (m1) `if` arms swapped in `lower_into` → 39 modules fail; (m2) the (f1) hoisted-tick guard
+  removed → `det_for` ×2, `for_empty`, `for_empty_start` fail (exactly the run-time-bounded
+  `for`s); (m3) the pre-loop statements dropped in `chir_lower` ((f3) re-introduced) → the two
+  CPUs, `preloop_probe`, `preloop_linear` fail at `(0 !started) ~ Entry`; (m4) a ticks-only-in-arms
+  nested loop's fall-through made a state transition (II.3 (b) re-introduced) → `arms_only_b2`,
+  `arms_only_match` fail; (m5) `__copper_started` powered on at 1 → P15 fails on every module that
+  declares it. The test is not vacuous on any of the five defect classes it is meant to see.
+
+### L.3 The finding — dead `pc` states (unobservable)
+
+`arms_only_b2` and `arms_only_match` (`tests/fixtures/arms_only_loop_dut.rs`, II.3 (b)'s fix of
+step 5) each have **one `pc` state in no pair of `R`**: state 1, the nested loop's head state.
+`lower_into` allocates a head (`sm.new_state()`) for every nested loop; a loop whose ticks lie only
+in arms is lowered as written, its entry is the lowered body cloned inline, and its fall-through is
+`FallThrough::ZeroTime`, a goto that `splice_zero_time_gotos` replaces by the head's statements.
+So nothing ever assigns `pc = 1`: the arm is in the emitted `case (pc)` (measured on
+`arms_only_b2`'s SV: `8'd1:` arms in all three `case`s) and is unreachable from power-on.
+**Unobservable**: `pc` powers on at 0 and takes only assigned values; the dead arm is equal to
+state 0's. Cost: one `case` item per `always` block and nothing else. Not fixed (removing the
+state means renumbering after allocation; no behaviour changes). Recorded; printed as a `note:` on
+every run.
+
+### L.4 What the test cannot see
+
+1. **The content of an atomic statement** — its expressions, the forwarding of registers the
+   resumption assigned, widths, the `always_comb`/`always_ff` split. That is P8, the sweep (G-D,
+   G-G); this test sees only that the statement ran, in order, on the path.
+2. **Data.** A branch is a label, never evaluated: two tests of one condition are two independent
+   labels on both sides (identically over-approximated). The counter facts (`advanced?`, `at
+   end?`) are the only data tracked, plus a range's static emptiness from `copper_analysis::consts`.
+   The emitted counter is incremented BEFORE the tick (`v_emit = v_src + 1` at the iteration's
+   tick); that variable correspondence is a datum, not checked here.
+3. **A statement run twice in a row** — consecutive equal `Run` labels are collapsed on both
+   sides, because one source statement lowers to several CHIR statements (struct and tuple lets).
+4. **Below CHIR.** `shir_lower::lower_seq_body`'s composition (phase `k` = segment `k`, the
+   trailing segment first in phase 0 under `__copper_started`) is RESTATED, cross-checked only
+   against SHIR's phase count, the guarded trailing updates and the phase register's literal next
+   values; VLIR/emit are read only through the `initial` block. The `pc` register's emitted next
+   value is the CHIR `pc` assignment, not the SV `pc <=` mux.
+5. **Pre-loop `let`s** are initializers (I.9.2), not statements: the test checks no pre-loop `let`
+   is lowered into a resumption, not that its value is the stated power-on value (P16, the
+   register-initializer rule).
+6. **Combinational and structural modules** have no H(M) state; they are counted, not related.
+7. **The source side shares one assumption with the extractor**: that a counted `for`'s tick is
+   its body's last statement (the walker errs, by name, if a back edge is reached without that
+   tick). Both front-ends refuse the other shape (II.1), so no admitted module is outside it.
+
+### L.5 For the coordinator — SPEC items (SPEC files untouched)
+
+1. **P1 — row status: MEASURED (consistency), true on the corpus.** Evidence:
+   `tests/projection_relation.rs::the_projection_relation_holds_on_the_corpus` — `R` built for all
+   137 clocked sweep modules on both routes (41 extracted, 17 linear, 79 single-tick), 455 pairs,
+   831 transitions checked, every branch outcome; five negative controls (§L.2). Guard: G-I in
+   `tools/regression.sh`. The open-obligation cell's "a static test that builds `R` per module and
+   checks each transition" is met; mechanization (III.1.4) remains proposed. Still consistency
+   between the source and the extractor's output, never correctness — it is the projection, not
+   the realization (P8).
+2. **P15 — row status: MEASURED, true on both routes** (was "MEASURED false"; step 5 made it true on
+   the two probes, this measures it on every clocked module): same test. III.1.2's "measured false
+   today" count drops to P11, P12 → and P12 already flipped in step 2/4 by its own record; the counts
+   line wants re-deriving.
+3. **I.0.4 / III.1.3 can now cite the measurement**: many-to-many measured per module (§L.2's rows),
+   and `R` on the linear route is the phase index against the top-level ticks plus the entry — the
+   form I.0.4 calls "`phase_r` is a position in the textual split", with the entry the second state
+   of phase 0 (`started = 0`). I.0.8's carried item "the emitted machine encodes H(M) (a static test
+   of `pc` states against tick sites …)" closes.
+4. **A dead-state remark for I.0.7 / II.3**: `lower_into` allocates a head state for a nested loop
+   whose ticks lie only in arms that no transition reaches (§L.3). Unobservable; not a II.3 row
+   (no divergence); a sentence in I.0.7's map at most, if the SPEC wants the state count read
+   exactly.
+5. **The counted `for` in H(M)'s terms**: the test reads Rust's post-tick exit test as a choice made
+   before the tick (the same program, the test being pure). I.8.4's desugaring text could state this
+   reading; it is what lets the emitted machine's `pc` relate state-by-state to the source sites.
+6. **I.9.2's "a `const { … }` block before the loop"**: no clause names it. It is admitted by both
+   front-ends and is no statement of the first resumption (compile-time). I.2.3's `s_pre` grammar or
+   I.9.3 could say so.

@@ -30,7 +30,7 @@ It lives in `tools/` **because it must be in version control**: `.gitignore` exc
 and lost on a fresh clone. If a local `run-copper` skill wrapper exists, it should be
 nothing more than an `exec` of this script — `tools/regression.sh` is the driver.
 
-It also enforces seven wiring guards, because "the check silently didn't run" has
+It also enforces eight wiring guards, because "the check silently didn't run" has
 been a recurring bug class here: **G-A** every `examples/**.rs` is registered as a
 `[[example]]`, **G-B** every registered example actually ran, **G-C** every
 `tests/*.rs` (root and per-crate) produced a test binary that ran, **G-D** the
@@ -40,7 +40,16 @@ enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran, and
 **G-G** every swept case wrote its per-sequence verdicts under the agreement
 relation of `design_docs/SPEC.md` §III.2 (`tests/common/relation.rs`, a ledger in
-`COPPER_VERDICT_LEDGER`) and each count is printed. Since 2026-11-06 observation 0
+`COPPER_VERDICT_LEDGER`) and each count is printed, and **G-I** the projection test
+(`tests/projection_relation.rs`, SPEC III.1 P1/P15, Phase C step 7) ran and passed: for
+every clocked module the sweep covers (build.rs's `corpus_manifest.rs`) it builds the
+relation `R` between the emitted control state (`pc` on the extraction route, the SHIR
+phase on the linear one, × `__copper_started`) and the coroutine's continuations (tick
+sites, read off the `syn::ItemFn` by the test's own walker), checks every transition path
+by path, and checks the initial state encodes the entry; its coverage line reaches the
+driver through `COPPER_PROJECTION_REPORT` (G-H's name is retired). A module it cannot
+relate needs an `UNCOVERED` row with a reason; there are none
+(`design_docs/review/MEASUREMENTS.md` §L). Since 2026-11-06 observation 0
 (after the first settle, before edge 1) is compared on all three legs. **OUTSIDE**: a
 simulator X at an observation compared against the 2-state SV takes that sequence's
 SV pair out of the relation from there — reported, never compared as 1 (the old
