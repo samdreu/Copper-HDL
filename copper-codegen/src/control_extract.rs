@@ -207,7 +207,15 @@ pub fn desugar_counted_loops_in(fir: &mut FrontendModuleIR) {
         return;
     };
     let mut next_counter = 0usize;
-    desugar_counted_loops(&mut l.body, &mut next_counter);
+    // The file's integer consts, so a bound named by one (`0..CLKS_PER_BIT`) is
+    // known statically, like a literal (the shared evaluator, SPEC I.14.4).
+    let consts = Consts {
+        values: copper_analysis::consts::eval_const_items(
+            fir.file_consts.iter().map(|c| (c.name.as_str(), c.value_text.as_str())),
+        ),
+        generics: fir.signature.generics.iter().map(|g| g.name.clone()).collect(),
+    };
+    desugar_counted_loops(&mut l.body, &mut next_counter, &consts);
 }
 
 /// Rewrite `for <var> in <start>..<end> { <B>; clk.tick().await; }` into the
@@ -265,17 +273,17 @@ pub fn desugar_counted_loops_in(fir: &mut FrontendModuleIR) {
 /// cycle. `copper_analysis::may_exit_without_tick` has the same hole for the same
 /// reason (it treats a `for` as a guaranteed clock boundary, which an empty range
 /// is not) and both need const evaluation to close.
-fn desugar_counted_loops(stmts: &mut Vec<RawStmt>, next_counter: &mut usize) {
+fn desugar_counted_loops(stmts: &mut Vec<RawStmt>, next_counter: &mut usize, consts: &Consts) {
     let mut out: Vec<RawStmt> = Vec::with_capacity(stmts.len());
     for mut s in std::mem::take(stmts) {
         // Descend first: an inner `for` must already be a `loop` with its tick
         // hoisted before the outer one looks at where its own body ends.
-        descend_counted(&mut s, next_counter);
+        descend_counted(&mut s, next_counter, consts);
 
         let expanded = match &s.kind {
             RawStmtKind::Expr(es) => match &es.expr {
                 ExprType::ForLoop(f) if stmts_contain_tick(&f.body) => {
-                    expand_counted_for(f, s.order, next_counter)
+                    expand_counted_for(f, s.order, next_counter, consts)
                 }
                 _ => None,
             },
@@ -290,33 +298,33 @@ fn desugar_counted_loops(stmts: &mut Vec<RawStmt>, next_counter: &mut usize) {
 }
 
 /// Recurse into every statement form that can contain a `for`.
-fn descend_counted(s: &mut RawStmt, next_counter: &mut usize) {
+fn descend_counted(s: &mut RawStmt, next_counter: &mut usize, consts: &Consts) {
     match &mut s.kind {
-        RawStmtKind::Expr(es) => descend_counted_expr(&mut es.expr, next_counter),
+        RawStmtKind::Expr(es) => descend_counted_expr(&mut es.expr, next_counter, consts),
         RawStmtKind::Local(l) => {
             if let Some(init) = l.init.as_mut() {
-                descend_counted_expr(init, next_counter);
+                descend_counted_expr(init, next_counter, consts);
             }
         }
         RawStmtKind::Item(_) => {}
     }
 }
 
-fn descend_counted_expr(e: &mut ExprType, next_counter: &mut usize) {
+fn descend_counted_expr(e: &mut ExprType, next_counter: &mut usize, consts: &Consts) {
     match e {
-        ExprType::Loop(l) => desugar_counted_loops(&mut l.body, next_counter),
-        ExprType::While(w) => desugar_counted_loops(&mut w.body, next_counter),
-        ExprType::ForLoop(f) => desugar_counted_loops(&mut f.body, next_counter),
-        ExprType::Block(b) => desugar_counted_loops(&mut b.stmts, next_counter),
+        ExprType::Loop(l) => desugar_counted_loops(&mut l.body, next_counter, consts),
+        ExprType::While(w) => desugar_counted_loops(&mut w.body, next_counter, consts),
+        ExprType::ForLoop(f) => desugar_counted_loops(&mut f.body, next_counter, consts),
+        ExprType::Block(b) => desugar_counted_loops(&mut b.stmts, next_counter, consts),
         ExprType::If(f) => {
-            desugar_counted_loops(&mut f.then_block, next_counter);
+            desugar_counted_loops(&mut f.then_block, next_counter, consts);
             if let Some(eb) = f.else_branch.as_mut() {
-                descend_counted_expr(eb, next_counter);
+                descend_counted_expr(eb, next_counter, consts);
             }
         }
         ExprType::Match(m) => {
             for a in m.arms.iter_mut() {
-                descend_counted_expr(&mut a.body, next_counter);
+                descend_counted_expr(&mut a.body, next_counter, consts);
             }
         }
         _ => {}
@@ -339,6 +347,7 @@ fn expand_counted_for(
     f: &copper_core::frontend_ir::ExprForLoop,
     order: usize,
     next_counter: &mut usize,
+    consts: &Consts,
 ) -> Option<Vec<RawStmt>> {
     let span = f.span;
     let (start, end) = match &*f.iter {
@@ -359,11 +368,11 @@ fn expand_counted_for(
 
     // A statically empty range is zero cycles and zero work: drop it, rather than
     // emit a loop that breaks at once and then takes the hoisted tick anyway.
-    if let (Some(a), Some(b)) = (int_literal(&start), int_literal(&end)) {
-        if a >= b {
-            return Some(Vec::new());
-        }
-    }
+    let statically_nonempty = match (const_value(&start, consts), const_value(&end, consts)) {
+        (Some(a), Some(b)) if a >= b => return Some(Vec::new()),
+        (Some(_), Some(_)) => true,
+        _ => false,
+    };
 
     let pat = f.pat_text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
     // `for _ in …` still needs a counter, it just has no name to reuse. Numbering
@@ -375,6 +384,40 @@ fn expand_counted_for(
     } else {
         pat
     };
+
+    // Rust evaluates `start..end` ONCE, when the loop is entered; the desugared
+    // loop reads its bounds at every exit test and at the hoisted tick's guard. A
+    // bound that is not stable — not a constant, not a const generic — is
+    // therefore snapshotted at entry into a synthesized `let` (hoisted to a
+    // register when it crosses a state), so a body that changes what the bound
+    // reads cannot change the trip count. Until Phase C step 5 (2026-11-06) the
+    // bounds were re-read (MEASUREMENTS §J.2: `register_reconciliation` saw the
+    // re-read promote the bound's own local to a register).
+    let mut snapshots: Vec<RawStmt> = Vec::new();
+    let mut snapshot = |bound: ExprType, which: &str, snapshots: &mut Vec<RawStmt>| -> ExprType {
+        if is_stable(&bound, consts) {
+            return bound;
+        }
+        let n = *next_counter;
+        *next_counter += 1;
+        let name = format!("{ANON_COUNTER}{n}_{which}");
+        snapshots.push(RawStmt {
+            order,
+            kind: RawStmtKind::Local(LocalStmt {
+                is_mut: false,
+                ty: Some(RawTypeRef { ty_text: COUNTER_TY.to_string(), span }),
+                name: name.clone(),
+                init: Some(bound),
+                attrs: Vec::new(),
+                span,
+            }),
+            text: String::new(),
+            span,
+        });
+        path_expr(&name, span)
+    };
+    let start = snapshot(start, "start", &mut snapshots);
+    let end = snapshot(end, "end", &mut snapshots);
 
     let exit_test = || {
         expr_stmt(
@@ -446,6 +489,51 @@ fn expand_counted_for(
         boundary.clone()
     };
 
+    // A range empty only at RUN TIME (`0..cnt`, `0..N`, `0..CLKS_PER_BIT`) runs
+    // zero iterations in zero time (SPEC I.8.4(b)); the first exit test breaks
+    // before the body, and the hoisted tick — which stands for the LAST
+    // iteration's tick — must not be taken. So it is guarded on the counter having
+    // advanced from its start. A literal start is re-read at the guard; any other
+    // start is snapshotted at entry (a synthesized `let`, hoisted to a register
+    // when it crosses a state), so a body that changes what `start` reads cannot
+    // fool the guard. Until Phase C step 5 (2026-11-06) the tick was taken anyway,
+    // one extra cycle per zero-count pass (II.3 (f1), MEASUREMENTS §J.2).
+    let hoisted = if statically_nonempty {
+        hoisted
+    } else {
+        let start_ref = start.clone();
+        let advanced = ExprType::Binary(ExprBinary {
+            left: Box::new(path_expr(&var, span)),
+            op: "!=".to_string(),
+            right: Box::new(start_ref),
+            span,
+        });
+        let condition = if stmts_break_enclosing_loop(work) {
+            ExprType::Binary(ExprBinary {
+                left: Box::new(ExprType::Binary(ExprBinary {
+                    left: Box::new(path_expr(&var, span)),
+                    op: ">=".to_string(),
+                    right: Box::new(end.clone()),
+                    span,
+                })),
+                op: "&&".to_string(),
+                right: Box::new(advanced),
+                span,
+            })
+        } else {
+            advanced
+        };
+        expr_stmt(
+            ExprType::If(ExprIf {
+                condition: Box::new(condition),
+                then_block: vec![boundary.clone()],
+                else_branch: None,
+                span,
+            }),
+            span,
+        )
+    };
+
     let decl = RawStmt {
         order,
         kind: RawStmtKind::Local(LocalStmt {
@@ -469,20 +557,43 @@ fn expand_counted_for(
         text: String::new(),
         span,
     };
-    Some(vec![decl, loop_stmt, hoisted])
+    Some(snapshots.into_iter().chain([decl, loop_stmt, hoisted]).collect())
 }
 
-/// A range bound that is a plain integer literal, for the empty-range check. A
-/// named `const` deliberately does NOT resolve here: this pass has no constant
-/// environment, and inventing a partial one is how two halves of a lowering start
-/// disagreeing.
-fn int_literal(e: &ExprType) -> Option<i128> {
+/// What this pass knows is constant: the file's integer consts by value
+/// (`copper_analysis::consts`) and the module's const generics by name (stable,
+/// value unknown).
+struct Consts {
+    values: std::collections::HashMap<String, i128>,
+    generics: std::collections::HashSet<String>,
+}
+
+/// A bound that cannot change while the loop runs: a constant of [`const_value`],
+/// a const generic, or arithmetic over those.
+fn is_stable(e: &ExprType, consts: &Consts) -> bool {
     match e {
-        ExprType::Lit(l) => l
-            .text
-            .trim_end_matches(|c: char| c.is_alphabetic() || c == '_')
-            .parse::<i128>()
-            .ok(),
+        ExprType::Path(p) if consts.generics.contains(p.path_text.trim()) => true,
+        ExprType::Binary(b) => is_stable(&b.left, consts) && is_stable(&b.right, consts),
+        _ => const_value(e, consts).is_some(),
+    }
+}
+
+/// A range bound's value when it is a constant of I.14 this pass can evaluate: an
+/// integer literal in any base, a file `const`, or integer arithmetic over those
+/// (the shared evaluator, `copper_analysis::consts`). Anything else — a local, a
+/// port read, a const generic — is unknown here and the range is treated as
+/// possibly empty at run time. Until 2026-11-06 only a decimal literal resolved,
+/// so `0..CLKS_PER_BIT` counted as unknown (harmless while an unknown range was
+/// lowered like a non-empty one; not since the hoisted tick is guarded, §J.2).
+fn const_value(e: &ExprType, consts: &Consts) -> Option<i128> {
+    match e {
+        ExprType::Lit(l) => copper_analysis::consts::parse_int_lit(&l.text),
+        ExprType::Path(p) => consts.values.get(p.path_text.trim()).copied(),
+        ExprType::Binary(b) => copper_analysis::consts::apply_binop(
+            b.op.trim(),
+            const_value(&b.left, consts)?,
+            const_value(&b.right, consts)?,
+        ),
         _ => None,
     }
 }
@@ -1800,6 +1911,21 @@ fn unflattenable_in_expr(e: &ExprType, in_loop: bool) -> Option<Unflattenable> {
         // declined the header — an inclusive or non-range iterator, or a body whose
         // last statement is not the tick.
         ExprType::While(w) if stmts_contain_tick(&w.body) => Some(Unflattenable::MalformedNestedLoop),
+        // The desugar of an inner counted `for` whose range may be empty at run
+        // time ends in its GUARDED hoisted tick (`if advanced { tick }`, after the
+        // desugared loop), so an enclosing counted `for` whose body ends there has
+        // no unconditional last tick to hoist. An empty inner range makes each of
+        // the enclosing loop's iterations take zero time, which a state machine
+        // advancing one state per tick cannot run (MEASUREMENTS §J.2).
+        ExprType::ForLoop(f) if ends_in_guarded_hoisted_tick(&f.body) => named(
+            "a counted `for` whose range may be empty at run time is the last statement \
+             of an enclosing tick-bearing `for`: with an empty inner range the enclosing \
+             loop's iterations take no time, which the emitted state machine cannot \
+             realize",
+            f.span,
+            "end the enclosing `for` body with its own `clk.tick().await`, or make the inner \
+             bound a constant (a literal or a `const`)",
+        ),
         ExprType::ForLoop(f) if stmts_contain_tick(&f.body) => named(
             "a `clk.tick().await` inside a `for` whose repetition cannot be counted — \
              the header must be an exclusive `start..end` range and the tick must be \
@@ -1932,4 +2058,15 @@ fn expr_contains_tick(e: &ExprType) -> bool {
         ExprType::ForLoop(f) => stmts_contain_tick(&f.body),
         _ => false,
     }
+}
+
+/// `[.., loop { .. }, if c { tick }]` — the tail an inner counted `for` with a
+/// possibly-empty range desugars to (`expand_counted_for`).
+fn ends_in_guarded_hoisted_tick(body: &[RawStmt]) -> bool {
+    let n = body.len();
+    if n < 2 || !is_loop_stmt(&body[n - 2]) {
+        return false;
+    }
+    matches!(&body[n - 1].kind, RawStmtKind::Expr(es) if matches!(&es.expr,
+        ExprType::If(f) if f.else_branch.is_none() && f.then_block.len() == 1 && is_tick_stmt(&f.then_block[0])))
 }

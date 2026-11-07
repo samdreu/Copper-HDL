@@ -928,3 +928,46 @@ async fn {name}(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: Out<Bits<8>, Ma
         );
     }
 }
+
+/// A counted `for` whose range may be empty at run time, as the LAST statement of an
+/// enclosing tick-bearing `for` (Phase C step 5, MEASUREMENTS §J.2). Since the hoisted
+/// tick of a possibly-empty range is guarded (II.3 (f1)), the enclosing body ends in a
+/// conditional tick and has no clock boundary to hoist; with an empty inner range the
+/// enclosing loop's iterations take zero time (SPEC I.8.4(b)), which a one-state-per-
+/// tick FSM cannot run. Refused by the transpiler only — the macro admits (rustc runs
+/// it) — so this is a REFUSED-one limitation for the coordinator's II.3. Before the
+/// guard it was admitted and divergent whenever the inner range was empty. The same
+/// shape with a constant inner bound (`0..CLKS_PER_BIT`, the UART) transpiles.
+const NESTED_RUNTIME_EMPTY_FOR: &str = r#"
+#[hardware(sequential)]
+async fn nested_for(clk: Clock<MainClk>, c: In<Bits<2>, MainClk>, q: RegOut<Bits<8>, MainClk>) {
+    let mut n: Bits<8> = Bits::zero();
+    loop {
+        let cnt: u32 = c.read().as_u32();
+        for _ in 0..2 {
+            n = n + Bits::from_u8(1);
+            for _ in 0..cnt {
+                q.write(n);
+                clk.tick().await;
+            }
+        }
+        q.write(Bits::from_u8(255));
+        clk.tick().await;
+    }
+}
+"#;
+
+#[test]
+fn a_runtime_empty_counted_for_ending_an_enclosing_for_has_its_own_diagnostic() {
+    let err = transpile(NESTED_RUNTIME_EMPTY_FOR)
+        .expect_err("NOW SUPPORTED: the nested run-time-empty counted `for` transpiles — sweep it");
+    assert!(
+        err.contains("may be empty at run time") && err.contains("enclosing tick-bearing `for`"),
+        "a different error than the tracked limitation: {err}"
+    );
+    let constant = NESTED_RUNTIME_EMPTY_FOR
+        .replace("let cnt: u32 = c.read().as_u32();", "")
+        .replace("0..cnt", "0..CNT");
+    let constant = format!("const CNT: usize = 0x3;\n{constant}");
+    transpile(&constant).expect("a constant inner bound is statically non-empty and transpiles");
+}

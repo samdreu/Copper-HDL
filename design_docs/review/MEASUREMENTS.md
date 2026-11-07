@@ -1296,3 +1296,103 @@ programs) passes; both CPU examples 13/13; both CPU sweep cases pass. **As predi
 `tools/regression.sh --no-examples`: PARTIAL OK (434 s); G-D **163** (+2); G-F 92 (+2); **G-G
 differential 1252 PASS / 0 DISAGREE, reference 762 PASS; pinned disagreements 0** (2 before).
 No new `SKIP`/`REF_SKIP` row. P15 holds on both routes (it is the entry the two probes test).
+
+### J.2 Row 2 — (f1) the hoisted-tick guard
+
+**Inventory (a temporary `eprintln!` in `expand_counted_for`, reverted).** 31 tick-bearing
+counted `for`s in 13 modules reach the desugaring; every one starts at a literal (`0`). Those
+with two literal bounds (`0..2`, `0..3`, `0..4`, `0..8`) are non-empty by construction and
+keep today's unconditional hoisted tick. The rest have a bound the pass cannot fold — `det_for`
+(`0..N`, with an author's `break`; two copies: the example `pattern_detector_for` and the
+fixture), and the UART receivers/transmitter `rx`, `uart_rx`, `uart_rx_dut`, `uart_tx`
+(`0..CLKS_PER_BIT`, `0..CLKS_PER_HALF_BIT`: named consts this pass has no environment for).
+
+**The form.** The fix direction of (f1): the hoisted tick stands for the last iteration's
+tick, so it is taken only if the counter advanced — `var != start` (no break), or `var >= end
+&& var != start` (an author's `break`, extending the 2026-09-02 guard). Only for a range not
+statically non-empty. `start` is re-evaluated at the guard, which is exact for a literal (the
+whole corpus); a non-literal start is snapshotted at entry into a synthesized `let` (a
+cross-state wire the extraction route hoists to a register), so a body that changes what
+`start` reads cannot fool the guard.
+
+**Predicted emission diff:** exactly 6 modules change — `det_for` ×2, `rx`, `uart_rx`,
+`uart_rx_dut`, `uart_tx`: each post-loop transition through a hoisted tick becomes
+conditional on the counter (`ctr != 0` / `i >= N && i != 0`) with the zero-time
+continuation inlined on the other arm (more states or larger arms). Everything else
+byte-identical. **Predicted traces:** all six unchanged (every bound is > 0 in every test, so
+the guard is always true where the loop is left); no anchor among them. The new fixture
+`tests/fixtures/for_empty_dut.rs` — D-10's probe (ii) `for_empty` (`for _ in 0..cnt`, `cnt`
+an input, 0 on some cycles) and `for_empty_start` (a non-literal start, `for _ in s..e`) —
+predicted **sim = ref = SV** on every sequence; before the fix `for_empty` would diverge on
+every zero-count pass (D-10: cycles 0, 15, 16 of 24).
+
+**Measured — a miss first.** The first measurement (guard on every range not two literals)
+changed the predicted 6 modules, but **4 of the 6 came out REFUSED**, not changed: in `rx`,
+`uart_rx`, `uart_rx_dut`, `uart_tx` an inner `for _ in 0..CLKS_PER_BIT { tick }` is the last
+statement of an enclosing `for _ in 0..8`, and the enclosing expansion needs an unconditional
+last tick — the guarded one is not. (My first check of the diff read the *old* snapshot for
+`REFUSED`; the refusal surfaced in `uart_rx_equivalence`. Every later check reads the new
+emission.) The prediction missed that a guarded hoisted tick composes badly with an enclosing
+counted `for`. The cause is the bound, not the guard: `CLKS_PER_BIT` is a constant (434),
+which the pass could not see. **Fix:** `copper_analysis::consts` — the start of the shared
+evaluator of I.14.4 (literals in any base with `_` and a suffix, file consts by name in any
+order, `+ - * / % << >> & | ^`, checked: overflow / division by zero is "unknown", never a
+value) — and `control_extract::const_value` folds a bound over the file's consts. A cast is
+deliberately not folded (`300 as u8` would need the truncation).
+
+Remeasured, sv-baseline against `5aaa0ff` (226 = 224 + the two new fixture modules): **2
+changed — `det_for` ×2 — plus the 2 new**; the four UART modules **byte-identical** (their
+bounds now fold, statically non-empty). Predicted 6, measured 2: the miss is the 4 UART
+modules, whose bounds were not "unknown" once constants evaluate. `det_for`'s guards read
+`(i >= N) && (i != 32'd0)`. Traces: `det_for_probe` 2/2, `uart_rx_equivalence`,
+`control_extraction_structural`, `cycle_dataflow_uart_derivation`, the sweep cases of
+`det_for`, `rx`, `uart_rx`, `uart_tx`, `uart_rx_dut` pass. The fixture
+`tests/fixtures/for_empty_dut.rs` (`for_empty`, `for_empty_start`) **agrees on both legs
+and every sequence; with the fix reversed both differential cases FAIL** (checked by
+reverse-applying the patch) — the fixture detects (f1).
+
+**A second defect found by the regression:** `register_reconciliation` failed on the new
+fixtures — codegen registered `cnt` (and `hi`), the bound's own local, which the shared
+inference does not. The desugared loop re-read `end` at every exit test, where Rust evaluates
+`start..end` once at entry; for an immutable `let` the extra register only holds the entry
+value (no divergence), but a bound reading state the body changes would change the trip
+count. **Fixed in the same row:** a bound that is not stable (a constant, a const generic,
+arithmetic over those) is snapshotted at entry, `start` and `end` alike. Remeasured: the same 2
+changed + 2 new; `register_reconciliation` passes; `timing_model_derivations` — which had
+gained `for_empty` in its extraction-hides-phases set while `for_empty_start` (snapshotted
+start) stayed out — is unchanged again (both out).
+
+**Left, and recorded (not a stop of the row):** a counted `for` whose range may be empty at
+*run time* as the last statement of an enclosing tick-bearing `for` (`for _ in 0..2 { …; for
+_ in 0..cnt { …; tick } }`). With an empty inner range each enclosing iteration takes zero
+time, which a state machine advancing one state per tick cannot run; before the guard it was
+admitted and divergent exactly then, now the transpiler refuses it with its own message
+("a counted `for` whose range may be empty at run time is the last statement of an enclosing
+tick-bearing `for` …"). The macro admits: a **REFUSED-one** shape, no corpus module has it.
+Pinned by `copper-codegen/tests/unsupported_constructs.rs::a_runtime_empty_counted_for_ending_an_enclosing_for_has_its_own_diagnostic`
+(with the constant-bound twin transpiling). SPEC item (J.10).
+
+`tools/regression.sh --no-examples` on the row's tree: **PARTIAL OK (196 s)**; G-F 94 (+2);
+**G-G differential 1280 PASS / 0 DISAGREE, reference 790 PASS, pinned 0**; examples
+`pattern_detector_for`, `uart_rx`, `uart_system` pass. No new `SKIP`/`REF_SKIP` row.
+
+### J.3 Row 3 — (f5) array-element forwarding
+
+**Reading the site first.** In `shir_lower::lower_stmt_list` a register assigned earlier in a
+segment is forwarded (`Forwarding::at_edge`) into every **edge-sampled** consumer — a `RegOut`
+drive, a memory staging, the `always_ff` copy of an `if`/`match` test — but **not** into the
+statements the `always_comb` block computes: `IndexAssign` (the row), a `let` wire's value,
+and the combinational copy of an `if` condition. A wire read by a drive is inlined by the
+drive's forwarding, which is why the gap is invisible until a value reaches the drive through
+something that cannot be inlined — an element-assigned array. So the row may be one instance
+of a family. **Four probes, predicted before running** (scratchpad `f5_probes.rs`, sim vs SV):
+- `f5_sipo` — `q1_c_sipo_block` rebuilt from Q1_TRADEOFFS §4 (ii) (`w3` carried across the
+  back edge, assigned in the last segment, read as `bits[12 + k] = w3[k]`): **DIVERGES**
+  (`data_o`'s top nibble is the previous block's `w3`).
+- `f5_guard` — `r = x; if r[0] == 1 { bits[1] = 1 } bits[0] = r[3]`: **DIVERGES** (both the
+  element value and the combinational `if` read the committed `r`).
+- `f5_wire` — `r = x; let y = r + 1; bits[k] = y[k]`: **DIVERGES** (the wire `y` is computed
+  in `always_comb` from the committed `r`).
+- `f5_branch_wire` — `r = x; let mut t = 0; if r[0] == 1 { t = 5 } q.write(t)`: **DIVERGES**
+  (the branch-assigned wire is combinational under the unforwarded test; the drive cannot
+  inline a branch-assigned wire).

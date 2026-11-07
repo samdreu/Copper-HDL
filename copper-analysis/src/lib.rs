@@ -31,6 +31,7 @@ use std::collections::BTreeSet;
 use syn::ItemFn;
 
 mod cfg;
+pub mod consts;
 mod init;
 mod shape;
 
