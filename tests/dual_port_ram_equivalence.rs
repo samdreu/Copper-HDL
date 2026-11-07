@@ -71,7 +71,7 @@ fn dual_port_ram_sim_matches_transpiled_verilog() {
     let (addra_drv, addra_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (addrb_drv, addrb_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (dia_drv, dia_in) = wire::<Bits<16>, MainClk>(Bits::zero());
-    let (dob_out, dob_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
+    let (dob_out, dob_obs) = registered_wire::<Bits<16>, MainClk>(&clk, Bits::zero());
 
     let dh: DirtyHandle = dob_out.dirty_handle();
     let reads = vec![
@@ -158,9 +158,12 @@ fn dual_port_ram_sim_matches_transpiled_verilog() {
 }
 
 /// The behavioural check could pass by luck on the sampled cycles. Pin the SHAPE
-/// too: a memory must be an array written non-blocking inside `always_ff`, and
-/// its read must be a continuous read of that array (which is what makes the
-/// capture ReadFirst) — not a registered copy that would lag a cycle.
+/// too. Since Phase C step 3 (D-8) the storage is an array register, not a
+/// `Memory` (MEASUREMENTS §G.2): the transpiler lowers it to an unpacked array
+/// with one write port whose write is staged one edge (`ram_wr0_s1_*`) and
+/// forwarded into the read, and `data_out_b` is registered from that read inside
+/// `always_ff` — `dob <= ram[addrb]` with ReadFirst order, measured identical to
+/// `examples/memory/sv/dual_port_ram.sv` by the example's own self-check.
 #[test]
 fn memory_lowers_to_an_array_with_a_readfirst_capture() {
     let sv = copper_codegen::transpile_source(
@@ -171,16 +174,16 @@ fn memory_lowers_to_an_array_with_a_readfirst_capture() {
     .expect("dual_port_ram should transpile");
 
     assert!(
-        sv.contains("logic [15:0] memory [0:255];"),
-        "the memory must be a packed array of 256 16-bit words, got:\n{sv}"
+        sv.contains("logic [15:0] ram [0:255];"),
+        "the storage must be an unpacked array of 256 16-bit words, got:\n{sv}"
     );
     assert!(
-        sv.contains("memory[memory_wr0_addr] <= memory_wr0_data;"),
+        sv.contains("ram[ram_wr0_s1_addr] <= ram_wr0_s1_data;"),
         "a write must be a non-blocking assign into the array, got:\n{sv}"
     );
     assert!(
-        sv.contains("assign memory_rd0_data = memory[memory_rd0_addr];"),
-        "the read must be a continuous read of the array — that is what makes a \
-         same-cycle read/write ReadFirst, got:\n{sv}"
+        sv.contains("data_out_b <= ((ram_wr0_s1_v && (addr_b == ram_wr0_s1_addr)) ? ram_wr0_s1_data : ram[addr_b]);"),
+        "the read port must be the registered `dob <= ram[addrb]`, forwarding the \
+         staged write, got:\n{sv}"
     );
 }

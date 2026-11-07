@@ -238,7 +238,7 @@ mod ram_ex {
         let (addra_drv, addra_in) = wire::<Bits<8>, MainClk>(Bits::zero());
         let (addrb_drv, addrb_in) = wire::<Bits<8>, MainClk>(Bits::zero());
         let (dia_drv, dia_in) = wire::<Bits<16>, MainClk>(Bits::zero());
-        let (dob_out, dob_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
+        let (dob_out, dob_obs) = registered_wire::<Bits<16>, MainClk>(&clk, Bits::zero());
 
         let dh: DirtyHandle = dob_out.dirty_handle();
         let reads = vec![

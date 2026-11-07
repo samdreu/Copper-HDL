@@ -11,7 +11,7 @@
 async fn rom_from_fn(
     clk: Clock<MainClk>,
     addr: In<Bits<4>, MainClk>,
-    data: Out<Bits<16>, MainClk>,
+    data: RegOut<Bits<16>, MainClk>,
 ) {
     let rom = Memory::<Bits<16>, 1, 0, MainClk, 1, 1>::from_fn(clk.clone(), 16, |i| {
         Bits::from_usize(i * 3 + 7)
@@ -34,7 +34,7 @@ async fn rom_from_fn(
 async fn rom_from_contents(
     clk: Clock<MainClk>,
     addr: In<Bits<2>, MainClk>,
-    data: Out<Bits<8>, MainClk>,
+    data: RegOut<Bits<8>, MainClk>,
 ) {
     let rom = Memory::<Bits<8>, 1, 0, MainClk, 1, 1>::from_contents(
         clk.clone(),

@@ -198,6 +198,84 @@ const RESET: &[(&str, &str, bool)] = &[
 /// with a plain `Out` port "awaits the Phase C rewrite" and is skipped by class.
 const REF_SKIP: &[(&str, &str)] = &[
     (
+        "ram_r2w2",
+        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "ram_r3w1",
+        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "ram_r1w2_wf",
+        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "rom_from_fn",
+        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "rom_from_contents",
+        "a `Memory` binding in the body (`Memory::from_contents`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "rom_direct",
+        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "mp_reg",
+        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "wide_index_into_narrow_addr",
+        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "narrow_index_into_narrow_addr",
+        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "wide_index_sole_consumer",
+        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "ram_write_first",
+        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "ram_wf_priority",
+        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
+        "ram_read_first_mem",
+        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
+         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
+         later Phase C step (D-16's first Phase C item), not this one",
+    ),
+    (
         "struct_latch",
         "a struct literal spelled `Self { .. }` inside an associated fn (`Latch::bubble()`): the \
          interpreter stops with \"unknown struct Self\" at the first call. Measured 2026-11-06 \

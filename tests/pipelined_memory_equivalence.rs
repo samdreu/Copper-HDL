@@ -45,7 +45,7 @@
 mod common;
 
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::types::{Bits, Logic};
 use copper_core::{Clock, ClockDomain, Memory};
 use copper_macros::hardware;
@@ -120,7 +120,11 @@ macro_rules! pipelined_test {
     ($name:ident, $module:ident, $rl:expr, $wl:expr, $wf:expr) => {
         #[test]
         fn $name() {
-            let exp = expected($rl, $wl, $wf);
+            // D-8 (Phase C step 3): the delivered word reaches the `RegOut` in the
+            // next resumption, one observation after the two-job model (SPEC
+            // I.10.1 (d)).
+            let model = expected($rl, $wl, $wf);
+            let exp: Vec<u8> = std::iter::once(0).chain(model.iter().copied()).take(model.len()).collect();
             let mut eq =
                 EquivalenceTest::for_module(stringify!($module), SRC, Some(stringify!($module)));
 
@@ -131,7 +135,7 @@ macro_rules! pipelined_test {
             let (wa_drv, wa_in) = wire::<Bits<4>, MainClk>(Bits::zero());
             let (wd_drv, wd_in) = wire::<Bits<8>, MainClk>(Bits::zero());
             let (we_drv, we_in) = wire::<Logic, MainClk>(Logic::Zero);
-            let (d_out, d_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+            let (d_out, d_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
 
             let dh = d_out.dirty_handle();
             let reads = vec![

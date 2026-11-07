@@ -35,7 +35,7 @@
 mod common;
 
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_core::types::{Bits, Logic};
 use copper_core::{Clock, ClockDomain, Memory};
 use copper_macros::hardware;
@@ -87,11 +87,24 @@ fn ref_run(write_first: bool) -> Vec<u8> {
 /// behind a common function pointer. The two DUTs are byte-identical apart from
 /// the builder call, so expanding the driver twice keeps them honest without
 /// weakening either check.
+/// `delayed`: the `Memory` spellings show the word one observation after the
+/// model (D-8: a resumption observes what the previous edge delivered and writes it
+/// to a `RegOut`, SPEC I.10.1 (d); MEASUREMENTS §G.2). `ram_read_first` is an array
+/// register since Phase C step 3 and shows it in the model's cycle.
+fn expected_trace(write_first: bool, delayed: bool) -> Vec<u8> {
+    let m = ref_run(write_first);
+    if delayed {
+        std::iter::once(0).chain(m.iter().copied()).take(m.len()).collect()
+    } else {
+        m
+    }
+}
+
 macro_rules! single_port_test {
-    ($name:ident, $module:ident, $write_first:expr) => {
+    ($name:ident, $module:ident, $write_first:expr, $delayed:expr) => {
         #[test]
         fn $name() {
-            let expected = ref_run($write_first);
+            let expected = expected_trace($write_first, $delayed);
             let mut eq =
                 EquivalenceTest::for_module(stringify!($module), SRC, Some(stringify!($module)));
 
@@ -102,7 +115,7 @@ macro_rules! single_port_test {
             let (wd_drv, wd_in) = wire::<Bits<8>, MainClk>(Bits::zero());
             let (we_drv, we_in) = wire::<Logic, MainClk>(Logic::Zero);
             let (ra_drv, ra_in) = wire::<Bits<4>, MainClk>(Bits::zero());
-            let (d_out, d_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+            let (d_out, d_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
 
             let dh = d_out.dirty_handle();
             let reads = vec![
@@ -149,8 +162,9 @@ macro_rules! single_port_test {
     };
 }
 
-single_port_test!(write_first_sim_matches_transpiled_verilog, ram_write_first, true);
-single_port_test!(read_first_sim_matches_transpiled_verilog, ram_read_first, false);
+single_port_test!(write_first_sim_matches_transpiled_verilog, ram_write_first, true, true);
+single_port_test!(read_first_sim_matches_transpiled_verilog, ram_read_first, false, false);
+single_port_test!(read_first_memory_sim_matches_transpiled_verilog, ram_read_first_mem, false, true);
 
 /// The check that gives the two above their meaning: the modes must actually
 /// disagree, and only on the read-during-write cycle. A transpiler that ignored
@@ -186,7 +200,7 @@ fn write_first_forwarding_follows_write_port_priority() {
     let (e0_drv, e0_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (e1_drv, e1_in) = wire::<Logic, MainClk>(Logic::Zero);
     let (ra_drv, ra_in) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (o_out, o_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (o_out, o_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
 
     let dh = o_out.dirty_handle();
     let reads = vec![
@@ -214,6 +228,9 @@ fn write_first_forwarding_follows_write_port_priority() {
     ];
 
     let mut mem = [0u8; 16];
+    // D-8: the word shows one observation after the model's read (see
+    // `expected_trace`), so the expected value is the previous cycle's.
+    let mut shown: u8 = 0;
     for &(e0, e1, wa, d0, d1, ra) in cases {
         wa_drv.write(Bits::<4>::from_usize(wa));
         d0_drv.write(Bits::<8>::from_u8(d0));
@@ -231,7 +248,8 @@ fn write_first_forwarding_follows_write_port_priority() {
         if e1 {
             mem[wa] = d1;
         }
-        let expected = mem[ra];
+        let expected = shown;
+        shown = mem[ra];
 
         let wa_b = Bits::<4>::from_usize(wa);
         let d0_b = Bits::<8>::from_u8(d0);
@@ -269,7 +287,7 @@ fn write_first_emits_a_priority_forwarding_mux() {
             .unwrap_or_else(|e| panic!("{m} should transpile: {e}"))
     };
 
-    let rf = emit("ram_read_first");
+    let rf = emit("ram_read_first_mem");
     assert!(
         rf.contains("assign mem_rd0_data = mem[mem_rd0_addr];"),
         "ReadFirst needs no forwarding — the non-blocking write already gives it, got:\n{rf}"

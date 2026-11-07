@@ -33,12 +33,15 @@
 //! tracking the address being staged for the *next* edge. A full cycle early, and
 //! shipped: no test drove a read result without a register in between.
 //!
-//! ## Scope: `mp_rom` is refused, deliberately
+//! ## Phase C step 3 (D-8, 2026-11-06)
 //!
-//! A plain `Out` driven from a read result in a non-staging phase has no correct
-//! emitted form (measured: the implicit-hold conversion lands a full cycle late on
-//! every sampled value). It is a clean error pointing at `RegOut`, the same
-//! `Out`/`RegOut` distinction the pre-tick alignment guardrail makes.
+//! Every output here is a `RegOut` now. A resumption observes what the previous
+//! edge delivered (SPEC I.10.1 (d)) and a `RegOut` shows from the next edge, so each
+//! model below is the two-job model DELAYED one observation (`delayed`). The refused
+//! plain-`Out` shape `mp_rom` (retired rule 7, `memory_result_drives_plain_out`) is
+//! unexpressible and its test is gone; `dual_port_ram`, the same-edge case, is an
+//! array register since step 3 (MEASUREMENTS §G.2), so the shape pin no longer
+//! covers it.
 
 mod common;
 
@@ -67,6 +70,10 @@ const ADDRS: [usize; 8] = [0, 5, 2, 9, 15, 1, 7, 3];
 /// Reference model for both two-phase DUTs: on a staging cycle the output shows
 /// the word captured on the PREVIOUS staging cycle, then this cycle's address is
 /// captured; the intervening cycle holds.
+fn delayed(v: Vec<u16>) -> Vec<u16> {
+    std::iter::once(0).chain(v.iter().copied()).take(v.len()).collect()
+}
+
 fn two_phase_expected() -> Vec<u16> {
     let mut q = 0u16;
     ADDRS
@@ -89,16 +96,18 @@ fn single_tick_direct_read_sim_matches_transpiled_verilog() {
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
     let (a_drv, a_in) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (d_out, d_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
+    let (d_out, d_obs) = registered_wire::<Bits<16>, MainClk>(&clk, Bits::zero());
     let dh = d_out.dirty_handle();
     exec.spawn_wired(rom_direct(clk.clone(), a_in, d_out), vec![dh], vec![]);
 
-    for &a in &ADDRS {
+    let direct: Vec<u16> = delayed(ADDRS.iter().map(|&a| rom(a)).collect());
+    for (i, &a) in ADDRS.iter().enumerate() {
         a_drv.write(Bits::<4>::from_usize(a));
         exec.tick_clock(&mut clk);
 
-        // No register in between: the output shows what THIS edge captured.
-        let exp = Bits::<16>::from_u16(rom(a));
+        // The word this edge captured is written to the `RegOut` by the next
+        // resumption and shows one observation later (D-8).
+        let exp = Bits::<16>::from_u16(direct[i]);
         let ab = Bits::<4>::from_usize(a);
         let db = d_obs.read();
         eq.record(
@@ -118,7 +127,7 @@ fn cross_phase_read_into_register_sim_matches_transpiled_verilog() {
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
     let (a_drv, a_in) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (d_out, d_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
+    let (d_out, d_obs) = registered_wire::<Bits<16>, MainClk>(&clk, Bits::zero());
     let dh = d_out.dirty_handle();
     exec.spawn_wired(mp_reg(clk.clone(), a_in, d_out), vec![dh], vec![]);
 
@@ -126,7 +135,7 @@ fn cross_phase_read_into_register_sim_matches_transpiled_verilog() {
         a_drv.write(Bits::<4>::from_usize(a));
         exec.tick_clock(&mut clk);
 
-        let exp = Bits::<16>::from_u16(two_phase_expected()[i]);
+        let exp = Bits::<16>::from_u16(delayed(two_phase_expected())[i]);
         let ab = Bits::<4>::from_usize(a);
         let db = d_obs.read();
         eq.record(
@@ -178,7 +187,7 @@ fn read_result_uses_the_register_after_the_capture_edge() {
 
     let direct = emit("rom_direct");
     assert!(
-        direct.contains("rom_rd0_q0 <= rom_rd0_data;") && direct.contains("assign data = rom_rd0_q0;"),
+        direct.contains("rom_rd0_q0 <= rom_rd0_data;") && direct.contains("data <= rom_rd0_q0;"),
         "a post-tick consumer must read the CAPTURED word, not the live array read — \
          reading `rom_rd0_data` here is the one-cycle-early bug, got:\n{direct}"
     );
@@ -191,62 +200,5 @@ fn read_result_uses_the_register_after_the_capture_edge() {
     assert!(
         mp.contains("rom_rd0_v0 <= rom_rd0_en;"),
         "`is_ready()` across a phase needs the valid register too, got:\n{mp}"
-    );
-
-    // dual_port_ram is the same-edge case: its register update latches at the very
-    // edge that captures, so it must read the combinational value instead.
-    let same_edge = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/examples/memory/dual_port_ram.rs"
-    ))
-    .expect("read the dual_port_ram example");
-    let sv = copper_codegen::transpile_source(
-        &same_edge,
-        Some("dual_port_ram"),
-        &copper_codegen::EmitConfig::default(),
-    )
-    .expect("dual_port_ram should transpile");
-    assert!(
-        sv.contains("memory_rd0_data : data") && !sv.contains("memory_rd0_q0"),
-        "a same-edge consumer must read the combinational value — a pipeline register \
-         would be one cycle late here, got:\n{sv}"
-    );
-}
-
-/// The rejected shape, with its diagnostic. Flips loudly if the interaction
-/// between the phase-hold conversion and the read pipeline is ever resolved.
-#[test]
-fn plain_out_driven_from_a_read_result_across_phases_is_rejected() {
-    // The refused shape lives here (and as the macro's
-    // `copper-macros/tests/ui/fail/memory_result_drives_plain_out.rs`), not in the
-    // fixture file: since 2026-10-23 both front-ends refuse it, so it cannot be a
-    // swept module.
-    const MP_ROM_SRC: &str = r#"
-#[hardware(sequential)]
-async fn mp_rom(clk: Clock<MainClk>, addr: In<Bits<4>, MainClk>, data: Out<Bits<16>, MainClk>) {
-    let rom = Memory::<Bits<16>, 1, 0, MainClk, 1, 1>::from_fn(clk.clone(), 16, |i| {
-        Bits::from_usize(i * 3 + 7)
-    });
-    loop {
-        rom.read_port::<0>().read(addr.read().as_usize());
-        clk.tick().await;
-        data.write(rom.read_port::<0>().data());
-        clk.tick().await;
-    }
-}
-"#;
-    let err = copper_codegen::transpile_source(
-        MP_ROM_SRC,
-        Some("mp_rom"),
-        &copper_codegen::EmitConfig::default(),
-    )
-    .expect_err(
-        "NOW SUPPORTED: a plain `Out` driven from a cross-phase read result transpiles. \
-         Promote `mp_rom` to a real equivalence test — it was measured landing a full cycle \
-         late when the implicit-hold conversion was allowed to handle it.",
-    );
-    assert!(
-        err.to_string().contains("multi-phase") && err.to_string().contains("RegOut"),
-        "reproduced a *different* error than the tracked plain-Out gap: {err}"
     );
 }

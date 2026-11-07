@@ -6,7 +6,7 @@
 /// tracks what that edge produced; a continuous read of the array would instead
 /// track the address being staged for the NEXT edge, a cycle early.
 #[hardware(sequential)]
-async fn rom_direct(clk: Clock<MainClk>, addr: In<Bits<4>, MainClk>, data: Out<Bits<16>, MainClk>) {
+async fn rom_direct(clk: Clock<MainClk>, addr: In<Bits<4>, MainClk>, data: RegOut<Bits<16>, MainClk>) {
     let rom = Memory::<Bits<16>, 1, 0, MainClk, 1, 1>::from_fn(clk.clone(), 16, |i| {
         Bits::from_usize(i * 3 + 7)
     });
@@ -23,7 +23,7 @@ async fn rom_direct(clk: Clock<MainClk>, addr: In<Bits<4>, MainClk>, data: Out<B
 /// and drive the output from that register in the staging phase of the next
 /// iteration.
 #[hardware(sequential)]
-async fn mp_reg(clk: Clock<MainClk>, addr: In<Bits<4>, MainClk>, data: Out<Bits<16>, MainClk>) {
+async fn mp_reg(clk: Clock<MainClk>, addr: In<Bits<4>, MainClk>, data: RegOut<Bits<16>, MainClk>) {
     let rom = Memory::<Bits<16>, 1, 0, MainClk, 1, 1>::from_fn(clk.clone(), 16, |i| {
         Bits::from_usize(i * 3 + 7)
     });

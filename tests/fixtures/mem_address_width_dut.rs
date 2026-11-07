@@ -22,7 +22,7 @@ pub async fn wide_index_into_narrow_addr(
     addr: In<Bits<32>, MainClk>,
     d: In<Bits<32>, MainClk>,
     we: In<Logic, MainClk>,
-    q: Out<Bits<32>, MainClk>,
+    q: RegOut<Bits<32>, MainClk>,
 ) {
     let mem = Memory::<Bits<32>, 1, 1, MainClk, 1, 1>::new(clk.clone(), 1024);
     let mut held: Bits<32> = Bits::zero();
@@ -59,7 +59,7 @@ pub async fn narrow_index_into_narrow_addr(
     addr: In<Bits<10>, MainClk>,
     d: In<Bits<32>, MainClk>,
     we: In<Logic, MainClk>,
-    q: Out<Bits<32>, MainClk>,
+    q: RegOut<Bits<32>, MainClk>,
 ) {
     let mem = Memory::<Bits<32>, 1, 1, MainClk, 1, 1>::new(clk.clone(), 1024);
     let mut held: Bits<32> = Bits::zero();
@@ -99,7 +99,7 @@ pub async fn wide_index_sole_consumer(
     addr: In<Bits<32>, MainClk>,
     d: In<Bits<32>, MainClk>,
     we: In<Logic, MainClk>,
-    q: Out<Bits<32>, MainClk>,
+    q: RegOut<Bits<32>, MainClk>,
 ) {
     let mem = Memory::<Bits<32>, 1, 1, MainClk, 1, 1>::new(clk.clone(), 1024);
     let mut held: Bits<32> = Bits::zero();

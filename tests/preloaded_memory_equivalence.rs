@@ -39,7 +39,7 @@
 mod common;
 
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain, Memory};
 use copper_macros::hardware;
@@ -59,19 +59,23 @@ fn from_fn_preload_sim_matches_transpiled_verilog() {
     let mut exec = HardwareExecutor::new();
 
     let (a_drv, a_in) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (d_out, d_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
+    let (d_out, d_obs) = registered_wire::<Bits<16>, MainClk>(&clk, Bits::zero());
     let dh = d_out.dirty_handle();
     let reads = vec![a_in.wire_id()];
     exec.spawn_wired(rom_from_fn(clk.clone(), a_in, d_out), vec![dh], reads);
 
     // Every address, in an order that is not the fill order — a reversed or
     // off-by-one fill cannot survive this.
+    // D-8 (Phase C step 3): the word the edge delivers is written to the `RegOut`
+    // by the next resumption, so it shows one observation later (SPEC I.10.1 (d)).
+    let mut shown: usize = 0;
     for &addr in &[0usize, 15, 1, 14, 7, 8, 2, 13, 3, 12, 4, 11, 5, 10, 6, 9] {
         a_drv.write(Bits::<4>::from_usize(addr));
         exec.tick_clock(&mut clk);
 
-        // Independent reference: the same rule the closure states.
-        let expected = Bits::<16>::from_usize(addr * 3 + 7);
+        // Independent reference: the same rule the closure states, one late.
+        let expected = Bits::<16>::from_usize(shown);
+        shown = addr * 3 + 7;
 
         let a_b = Bits::<4>::from_usize(addr);
         let d_b = d_obs.read();
@@ -93,18 +97,20 @@ fn from_contents_preload_sim_matches_transpiled_verilog() {
     let mut exec = HardwareExecutor::new();
 
     let (a_drv, a_in) = wire::<Bits<2>, MainClk>(Bits::zero());
-    let (d_out, d_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (d_out, d_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = d_out.dirty_handle();
     let reads = vec![a_in.wire_id()];
     exec.spawn_wired(rom_from_contents(clk.clone(), a_in, d_out), vec![dh], reads);
 
     const WORDS: [u8; 4] = [0xAB, 0x12, 0xF0, 0x34];
 
+    let mut shown: u8 = 0; // one observation late (D-8), as above
     for &addr in &[0usize, 2, 1, 3, 3, 0, 1, 2] {
         a_drv.write(Bits::<2>::from_usize(addr));
         exec.tick_clock(&mut clk);
 
-        let expected = Bits::<8>::from_u8(WORDS[addr]);
+        let expected = Bits::<8>::from_u8(shown);
+        shown = WORDS[addr];
 
         let a_b = Bits::<2>::from_usize(addr);
         let d_b = d_obs.read();

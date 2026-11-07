@@ -4,8 +4,16 @@
 // `sv/dual_port_ram.sv`, whose `doa` output is commented out. Copper had a dead
 // `data_out_a` output here until 2026-08-24; it was removed when the module
 // started transpiling, because an undriven output is a Verilator UNDRIVEN error.
+//
+// Since Phase C step 3 (D-8, 2026-11-06) the storage is an ARRAY REGISTER, not a
+// `Memory`. Under one job a resumption observes what the previous edge delivered
+// (SPEC I.10.1 (d)), so a `Memory` read can reach a `RegOut` only one edge after
+// it is delivered — one cycle behind the reference's `dob <= ram[addrb]`
+// (measured, MEASUREMENTS §G.2). The array spelling writes the `RegOut` from the
+// committed array in the resumption that sees the address, which is exactly that
+// `always` block; reading before writing in program order is ReadFirst.
 
-use copper_core::{Bits, Clock, ClockDomain, Logic, Memory, port::{DirtyHandle, In, Out, wire}};
+use copper_core::{Bits, Clock, ClockDomain, Logic, port::{DirtyHandle, In, RegOut, registered_wire, wire}};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -22,27 +30,22 @@ async fn dual_port_ram (
     addr_a: In<Bits<8>, MainClk>,
     addr_b: In<Bits<8>, MainClk>,
     data_in_a: In<Bits<16>, MainClk>,
-    data_out_b: Out<Bits<16>, MainClk>
+    data_out_b: RegOut<Bits<16>, MainClk>
 ) {
-    let memory = Memory::<Bits<16>, 1, 1, MainClk, 1, 1>::new(clk.clone(), 256);
-    let mut data: Bits<16> = Bits::zero();
+    let mut ram = [Bits::<16>::zero(); 256];
 
     loop {
-        // Pre-edge: stage memory ops with current inputs (processed by advance())
-        if enable_a.read() == Logic::One && write_a.read() == Logic::One {
-            memory.write_port::<0>().write(addr_a.read().as_usize(), data_in_a.read());
-        }
+        // Port B: `dob <= ram[addrb]` when enabled; an unwritten `RegOut` holds.
+        // It reads the array BEFORE port A's write below, so a same-address
+        // collision returns the old word (ReadFirst).
         if enable_b.read() == Logic::One {
-            memory.read_port::<0>().read(addr_b.read().as_usize());
+            data_out_b.write(ram[addr_b.read().as_usize()]);
         }
-
+        // Port A: `ram[addra] <= dia`, committed at this resumption's edge.
+        if enable_a.read() == Logic::One && write_a.read() == Logic::One {
+            ram[addr_a.read().as_usize()] = data_in_a.read();
+        }
         clk.tick().await;
-
-        // Post-edge: capture pipeline results and drive outputs
-        if memory.read_port::<0>().is_ready() {
-            data = memory.read_port::<0>().data();
-        }
-        data_out_b.write(data);
     }
 }
 
@@ -63,7 +66,7 @@ fn main() {
     let (addra_drv, addra_in)  = wire::<Bits<8>,  MainClk>(Bits::zero());
     let (addrb_drv, addrb_in)  = wire::<Bits<8>,  MainClk>(Bits::zero());
     let (dia_drv,   dia_in)    = wire::<Bits<16>, MainClk>(Bits::zero());
-    let (dob_out,   dob_obs)   = wire::<Bits<16>, MainClk>(Bits::zero());
+    let (dob_out,   dob_obs)   = registered_wire::<Bits<16>, MainClk>(&clk, Bits::zero());
 
     let dh: DirtyHandle = dob_out.dirty_handle();
     let reads = vec![

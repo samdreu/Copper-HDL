@@ -32,6 +32,9 @@ include!("../examples/memory/dual_port_ram.rs");
 
 // The single-tick ROM shape (§5.4's widening #2 wrongly flagged it; the audit
 // classifies it close+reg+mem+out[fwd]). Single source of truth: the fixture.
+// (Since Phase C step 3 the example is an array register and no longer imports
+// `Memory`; the ROM fixture needs it.)
+use copper_core::{Memory, port::Out};
 include!("fixtures/preloaded_rom_dut.rs");
 
 /// Verilate `sv` as `top` and run a **per-cycle stimulus**: for each cycle, set
@@ -104,19 +107,25 @@ fn transpile(src: &str, module: Option<&str>) -> String {
 /// `q = data()` commits `rom[addr_N]` at edge N; `data.write(q)` publishes the
 /// committed value at the observation instant.
 ///
-/// **Denotation: obs N = rom[addr_N] = 3·addr_N + 7.** No warm-up cycle: the
-/// first staged read is captured at edge 1 and observed at obs 1.
+/// **Denotation (two-job, before Phase C step 3): obs N = rom[addr_N].** Under
+/// D-8 the trailing region is the next resumption's head and `data` is a
+/// `RegOut`: the word captured at edge N is written in the resumption that ends
+/// at edge N+1 and shows from obs N+1 — **obs N = rom[addr_{N-1}]**, obs 1 = 0
+/// (SPEC I.10.1 (d), MEASUREMENTS §G.2).
 #[test]
 fn m3_rom_from_fn_matches_the_derived_denotation() {
     const N: usize = 13;
     let addr_seq: Vec<u64> = (1..=N as u64).map(|k| (5 * k + 3) % 16).collect();
-    let derived: Vec<u64> = addr_seq.iter().map(|a| 3 * a + 7).collect();
+    let derived: Vec<u64> = std::iter::once(0)
+        .chain(addr_seq.iter().map(|a| 3 * a + 7))
+        .take(N)
+        .collect();
 
     // Simulator, drive-then-clock.
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
     let (addr_drv, addr_in) = wire::<Bits<4>, MainClk>(Bits::zero());
-    let (data_out, data_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
+    let (data_out, data_obs) = registered_wire::<Bits<16>, MainClk>(&clk, Bits::zero());
     let dh = data_out.dirty_handle();
     let reads = vec![addr_in.wire_id()];
     exec.spawn_wired(rom_from_fn(clk.clone(), addr_in, data_out), vec![dh], reads);
@@ -189,7 +198,7 @@ fn m3_dual_port_ram_matches_the_derived_denotation() {
     let (addra_drv, addra_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (addrb_drv, addrb_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (dia_drv, dia_in) = wire::<Bits<16>, MainClk>(Bits::zero());
-    let (dob_out, dob_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
+    let (dob_out, dob_obs) = registered_wire::<Bits<16>, MainClk>(&clk, Bits::zero());
     let dh = dob_out.dirty_handle();
     let reads = vec![
         ena_in.wire_id(), enb_in.wire_id(), wea_in.wire_id(),

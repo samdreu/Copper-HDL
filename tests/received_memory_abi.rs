@@ -28,7 +28,7 @@
 
 mod common;
 use common::{verilator_available, verilator_command};
-use copper_core::port::{wire, In, Out};
+use copper_core::port::{wire, In, Out, RegOut, registered_wire};
 use copper_core::{Bits, Clock, ClockDomain, Logic, Memory};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -50,7 +50,7 @@ async fn mem_user(
     addr: In<Bits<4>, MainClk>,
     din: In<Bits<8>, MainClk>,
     we: In<Logic, MainClk>,
-    dout: Out<Bits<8>, MainClk>,
+    dout: RegOut<Bits<8>, MainClk>,
     m: Memory<Bits<8>, 1, 1, MainClk, 1, 1>,
 ) {
     let mut q: Bits<8> = Bits::zero();
@@ -75,7 +75,7 @@ async fn mem_user(
     addr: In<Bits<4>, MainClk>,
     din: In<Bits<8>, MainClk>,
     we: In<Logic, MainClk>,
-    dout: Out<Bits<8>, MainClk>,
+    dout: RegOut<Bits<8>, MainClk>,
     m: Memory<Bits<8>, 1, 1, MainClk, 1, 1>,
 ) {
     let mut q: Bits<8> = Bits::zero();
@@ -141,7 +141,10 @@ fn received_memory_bus_matches_the_owned_memory_semantics() {
     // obs N; a write at edge N is readable from edge N+1. Cycle 1 stages a
     // WRITE (no read) → dout holds its initial 0; cycle 2 reads [5] → 0xAA at
     // obs 2; …
-    let derived: [u64; 6] = [0x00, 0xAA, 0xAA, 0xAA, 0x34, 0xAA];
+    // D-8 (Phase C step 3): `dout` is a `RegOut` written by the resumption after
+    // the delivering edge, so every word shows one observation later than the
+    // two-job derivation [0x00, 0xAA, 0xAA, 0xAA, 0x34, 0xAA] (SPEC I.10.1 (d)).
+    let derived: [u64; 6] = [0x00, 0x00, 0xAA, 0xAA, 0xAA, 0x34];
 
     // ── Simulator, real Memory object ────────────────────────────────────────
     let mut clk = Clock::<MainClk>::new();
@@ -150,7 +153,7 @@ fn received_memory_bus_matches_the_owned_memory_semantics() {
     let (addr_drv, addr_in) = wire::<Bits<4>, MainClk>(Bits::zero());
     let (din_drv, din_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (we_drv, we_in) = wire::<Logic, MainClk>(Logic::Zero);
-    let (dout_out, dout_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (dout_out, dout_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = dout_out.dirty_handle();
     let reads = vec![addr_in.wire_id(), din_in.wire_id(), we_in.wire_id()];
     exec.spawn_wired(

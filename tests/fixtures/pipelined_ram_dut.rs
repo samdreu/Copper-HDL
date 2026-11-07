@@ -9,7 +9,7 @@ async fn ram_r2w2(
     waddr: In<Bits<4>, MainClk>,
     wdata: In<Bits<8>, MainClk>,
     we: In<Logic, MainClk>,
-    data: Out<Bits<8>, MainClk>,
+    data: RegOut<Bits<8>, MainClk>,
 ) {
     let mem = Memory::<Bits<8>, 1, 1, MainClk, 2, 2>::new(clk.clone(), 16);
     let mut q: Bits<8> = Bits::zero();
@@ -36,7 +36,7 @@ async fn ram_r3w1(
     waddr: In<Bits<4>, MainClk>,
     wdata: In<Bits<8>, MainClk>,
     we: In<Logic, MainClk>,
-    data: Out<Bits<8>, MainClk>,
+    data: RegOut<Bits<8>, MainClk>,
 ) {
     let mem = Memory::<Bits<8>, 1, 1, MainClk, 3, 1>::new(clk.clone(), 16);
     let mut q: Bits<8> = Bits::zero();
@@ -64,7 +64,7 @@ async fn ram_r1w2_wf(
     waddr: In<Bits<4>, MainClk>,
     wdata: In<Bits<8>, MainClk>,
     we: In<Logic, MainClk>,
-    data: Out<Bits<8>, MainClk>,
+    data: RegOut<Bits<8>, MainClk>,
 ) {
     let mem = Memory::<Bits<8>, 1, 1, MainClk, 1, 2>::new(clk.clone(), 16).write_first();
     let mut q: Bits<8> = Bits::zero();

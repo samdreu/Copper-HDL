@@ -11,7 +11,7 @@ async fn ram_write_first(
     wdata: In<Bits<8>, MainClk>,
     we: In<Logic, MainClk>,
     raddr: In<Bits<4>, MainClk>,
-    data: Out<Bits<8>, MainClk>,
+    data: RegOut<Bits<8>, MainClk>,
 ) {
     let mem = Memory::<Bits<8>, 1, 1, MainClk, 1, 1>::new(clk.clone(), 16).write_first();
     let mut q: Bits<8> = Bits::zero();
@@ -39,7 +39,37 @@ async fn ram_read_first(
     wdata: In<Bits<8>, MainClk>,
     we: In<Logic, MainClk>,
     raddr: In<Bits<4>, MainClk>,
-    data: Out<Bits<8>, MainClk>,
+    data: RegOut<Bits<8>, MainClk>,
+) {
+    // Since Phase C step 3 (D-8) an ARRAY REGISTER, not a `Memory`: under one job
+    // a `Memory` read reaches a `RegOut` one edge after delivery, one cycle behind
+    // the reference's `data <= mem[raddr]` (MEASUREMENTS §G.2). Reading the array
+    // before the write in program order is ReadFirst. Its siblings below keep the
+    // `Memory` (and its one-edge-later output).
+    let mut mem = [Bits::<8>::zero(); 16];
+
+    loop {
+        data.write(mem[raddr.read().as_usize()]);
+        if we.read() == Logic::One {
+            mem[waddr.read().as_usize()] = wdata.read();
+        }
+        clk.tick().await;
+    }
+}
+
+/// ReadFirst through a `Memory` (since Phase C step 3 `ram_read_first` is an array
+/// register, to stay identical to its reference): the same body as
+/// `ram_write_first` with `.read_first()`, so the `Memory` ReadFirst lowering stays
+/// swept and shape-pinned. Its word shows one observation after delivery (D-8,
+/// SPEC I.10.1 (d)).
+#[hardware(sequential)]
+async fn ram_read_first_mem(
+    clk: Clock<MainClk>,
+    waddr: In<Bits<4>, MainClk>,
+    wdata: In<Bits<8>, MainClk>,
+    we: In<Logic, MainClk>,
+    raddr: In<Bits<4>, MainClk>,
+    data: RegOut<Bits<8>, MainClk>,
 ) {
     let mem = Memory::<Bits<8>, 1, 1, MainClk, 1, 1>::new(clk.clone(), 16).read_first();
     let mut q: Bits<8> = Bits::zero();
@@ -70,7 +100,7 @@ async fn ram_wf_priority(
     e0: In<Logic, MainClk>,
     e1: In<Logic, MainClk>,
     raddr: In<Bits<4>, MainClk>,
-    data: Out<Bits<8>, MainClk>,
+    data: RegOut<Bits<8>, MainClk>,
 ) {
     let mem = Memory::<Bits<8>, 1, 2, MainClk, 1, 1>::new(clk.clone(), 16).write_first();
     let mut q: Bits<8> = Bits::zero();
