@@ -87,7 +87,10 @@ fn emit_all(root: &Path) -> BTreeMap<String, String> {
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root");
-    let base_dir = root.join("target/sv-baseline");
+    // `SV_BASELINE_DIR` snapshots elsewhere, so two snapshots can be `diff -r`'d.
+    let base_dir = std::env::var_os("SV_BASELINE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join("target/sv-baseline"));
 
     match mode.as_str() {
         "snapshot" => {

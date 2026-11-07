@@ -174,3 +174,88 @@ fn no_corpus_module_carries_the_retired_opt_out() {
          the macro now refuses it, so these modules cannot compile: {opted:?}"
     );
 }
+
+/// Every `#[hardware]` fn of the corpus, in every mode (the step-8 data rules apply
+/// to combinational modules too).
+fn all_hardware_fns() -> Vec<(String, ItemFn)> {
+    fn walk(items: &[Item], out: &mut Vec<ItemFn>) {
+        for item in items {
+            match item {
+                Item::Fn(f) if hardware_attr(f).is_some() => out.push(f.clone()),
+                Item::Mod(m) => {
+                    if let Some((_, items)) = &m.content {
+                        walk(items, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let root = repo_root();
+    let mut files = Vec::new();
+    for dir in ["examples", "src", "tests"] {
+        rs_files(&root.join(dir), &mut files);
+    }
+    files.sort();
+    let mut out = Vec::new();
+    for path in &files {
+        let Ok(src) = fs::read_to_string(path) else { continue };
+        let Ok(file) = syn::parse_file(&src) else { continue };
+        let mut fns = Vec::new();
+        walk(&file.items, &mut fns);
+        let rel = path.strip_prefix(&root).unwrap_or(path).display().to_string();
+        for f in fns {
+            out.push((format!("{rel}::{}", f.sig.ident), f));
+        }
+    }
+    out
+}
+
+/// Phase C step 8 (SPEC I.14.7 (7), (9); MEASUREMENTS §M): `checked_*` / `is_valid()`
+/// OUTSIDE and the memory port index below the port count, both front-ends, one
+/// function each (`check_outside_methods`, `check_memory_port_index`). The corpus
+/// passes both (it compiles through the macro, which runs them); the refused shapes'
+/// witnesses are `copper-macros/tests/ui/fail/{outside_checked_add,outside_is_valid,
+/// memory_port_index}.rs` and, for the transpiler, `copper-codegen/tests/
+/// unsupported_constructs.rs`.
+#[test]
+fn every_corpus_module_passes_the_step_8_data_rules() {
+    let mods = all_hardware_fns();
+    assert!(mods.len() >= 200, "expected every #[hardware] fn, saw {}", mods.len());
+    let mut failing = BTreeSet::new();
+    for (name, f) in &mods {
+        if let Err(e) = copper_analysis::check_outside_methods(f) {
+            failing.insert(format!("{name} — OUTSIDE method: {e}"));
+        }
+        if let Err(e) = copper_analysis::check_memory_port_index(f) {
+            failing.insert(format!("{name} — memory port index: {e}"));
+        }
+    }
+    assert!(failing.is_empty(), "{failing:#?}");
+}
+
+#[test]
+fn the_step_8_data_rules_refuse_their_witnesses_and_admit_their_twins() {
+    let parse = |s: &str| syn::parse_str::<ItemFn>(s).expect("witness parses");
+    let refused = [
+        ("checked_add", "async fn m(clk: Clock<C>, a: In<u8, C>, q: RegOut<u8, C>) { loop { q.write(a.read().checked_add(1).unwrap_or(0)); clk.tick().await; } }"),
+        ("is_valid", "async fn m(clk: Clock<C>, a: In<Bits<8>, C>, q: RegOut<Logic, C>) { loop { q.write(if a.read().is_valid() { Logic::One } else { Logic::Zero }); clk.tick().await; } }"),
+        ("read_port index", "async fn m(clk: Clock<C>, q: RegOut<Bits<8>, C>) { let mem = Memory::<Bits<8>, 1, 1, C, 1, 1>::new(clk.clone(), 4); loop { mem.read_port::<1>().read(0); q.write(mem.read_port::<0>().data()); clk.tick().await; } }"),
+        ("write_port index", "async fn m(clk: Clock<C>, mem: Memory<Bits<8>, 2, 1, C, 1, 1>) { loop { mem.write_port::<1>().write(0, Bits::zero()); clk.tick().await; } }"),
+    ];
+    for (what, src) in refused {
+        let f = parse(src);
+        let r = copper_analysis::check_outside_methods(&f).and(copper_analysis::check_memory_port_index(&f));
+        assert!(r.is_err(), "{what}: expected a refusal");
+    }
+    let admitted = [
+        "async fn m(clk: Clock<C>, a: In<u8, C>, q: RegOut<u8, C>) { loop { q.write(a.read().saturating_add(1)); clk.tick().await; } }",
+        "async fn m(clk: Clock<C>, q: RegOut<Bits<8>, C>) { let mem = Memory::<Bits<8>, 2, 1, C, 1, 1>::new(clk.clone(), 4); loop { mem.read_port::<1>().read(0); q.write(mem.read_port::<0>().data()); clk.tick().await; } }",
+        "async fn m<const K: usize>(clk: Clock<C>, mem: Memory<Bits<8>, K, 1, C, 1, 1>) { loop { mem.read_port::<3>().read(0); clk.tick().await; } }",
+    ];
+    for src in admitted {
+        let f = parse(src);
+        copper_analysis::check_outside_methods(&f).expect("admitted");
+        copper_analysis::check_memory_port_index(&f).expect("admitted");
+    }
+}

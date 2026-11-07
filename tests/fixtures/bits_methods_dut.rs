@@ -96,9 +96,9 @@ fn bits_methods_rest_comb(
     r[3] = x.le_logic(&z);
     r[4] = x.gt_logic(&z);
     r[5] = x.ge_logic(&z);
-    if x.is_valid() {
-        r[6] = Logic::One;
-    }
+    // `is_valid()` is OUTSIDE since Phase C step 8 (I.14.3(d), refused in both
+    // front-ends); `Logic::from_bool` (lowered since step 8) takes its bit.
+    r[6] = Logic::from_bool(x.and_reduce() == Logic::One);
     cmp.write(Bits::from_slice(&r));
     ones.write(Bits::<8>::all_ones() ^ Bits::from_slice(x.as_array()));
     // Unsized: the width is the context's (the interpreter refuses this spelling,

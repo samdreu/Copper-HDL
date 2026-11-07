@@ -32,6 +32,11 @@ use syn::ItemFn;
 
 mod cfg;
 pub mod consts;
+mod data;
+pub use data::{
+    check_memory_port_index, check_outside_methods, memory_port_index_message, CHECKED_METHOD_MESSAGE,
+    IS_VALID_MESSAGE,
+};
 mod init;
 mod shape;
 

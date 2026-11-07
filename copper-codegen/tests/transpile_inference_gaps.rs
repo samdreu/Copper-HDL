@@ -120,7 +120,8 @@ fn m(i: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
         "`0usize` and `: usize = 0` are the same Rust type and must emit the \
          same width, got:\n{sv}"
     );
-    assert_eq!(widths[0], "31:0", "usize is 32-bit throughout, got:\n{sv}");
+    // 64 since Phase C step 8: `usize` is the host's width (SPEC I.14.1(b)).
+    assert_eq!(widths[0], "63:0", "usize is 64-bit throughout, got:\n{sv}");
 }
 
 /// An integer local initialised from a **constant expression** — a module

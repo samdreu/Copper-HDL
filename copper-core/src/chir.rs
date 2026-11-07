@@ -430,6 +430,9 @@ pub enum CHIRPattern {
 pub enum CHIRExpr {
     Var(String),
     Lit(CHIRLit),
+    /// `Bits::x()` / `Logic::X` in an expression (SPEC I.14.2(e), I.14.7 (6)): the
+    /// type's all-X literal. `width` `None` is context-sized (SV `'x`).
+    XLit { width: Option<Width> },
     BinOp {
         left: Box<CHIRExpr>,
         op: CHIRBinOp,
@@ -514,6 +517,8 @@ pub enum CHIRBinOp {
     Add { wrapping: bool },
     Sub { wrapping: bool },
     Mul { wrapping: bool },
+    /// Unsigned truncating division (SPEC I.14.3(b)); X / zero divisor is outside the SV pairs.
+    Div,
     Rem,
     BitAnd,
     BitOr,

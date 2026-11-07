@@ -114,6 +114,9 @@ fn strip_path_qualifier(compact: &str) -> &str {
 }
 
 /// Resolve a raw Copper type text to a `CHIRType`.
+/// The width of `usize`/`isize` (SPEC I.14.1(b)).
+pub(crate) const USIZE_BITS: usize = 64;
+
 pub fn resolve_type(ty_text: &str, span: SourceSpan) -> Result<CHIRType, CHIRLowerError> {
     let compact = compact_type(ty_text);
 
@@ -132,11 +135,12 @@ pub fn resolve_type(ty_text: &str, span: SourceSpan) -> Result<CHIRType, CHIRLow
         "i32"  => Ok(CHIRType::SInt { width: Width::Concrete(32) }),
         "i64"  => Ok(CHIRType::SInt { width: Width::Concrete(64) }),
         "i128" => Ok(CHIRType::SInt { width: Width::Concrete(128) }),
-        // `usize`/`isize` have no fixed hardware width; used almost entirely as
-        // loop/index quantities, so treat them as 32-bit (matching the SV `int`
-        // loop variable, keeping index arithmetic width-consistent).
-        "usize" => Ok(CHIRType::UInt { width: Width::Concrete(32) }),
-        "isize" => Ok(CHIRType::SInt { width: Width::Concrete(32) }),
+        // `usize`/`isize` are the host's 64 bits (SPEC I.14.1(b), I.14.7 (3)): the
+        // simulator is rustc on the host, so no other width is the coroutine's.
+        // Until Phase C step 8 they were 32 here (`usize_annot`: `v << 40 >> 40`
+        // was 0 in the SV and `a` on the simulator).
+        "usize" => Ok(CHIRType::UInt { width: Width::Concrete(USIZE_BITS) }),
+        "isize" => Ok(CHIRType::SInt { width: Width::Concrete(USIZE_BITS) }),
         "bool" => Ok(CHIRType::Bool),
         "Bit"  => Ok(CHIRType::UInt { width: Width::Concrete(1) }),
         "Logic" => Ok(CHIRType::UInt { width: Width::Concrete(1) }),
@@ -250,8 +254,14 @@ fn infer_type_from_expr(
             // `.read()` on a port, and wrapping/lock/unwrap/clone wrappers, all
             // carry the width of their receiver.
             "read" | "lock" | "unwrap" | "clone" | "wrapping_add" | "wrapping_sub"
-            | "wrapping_mul" | "as_u8" | "as_u16" | "as_u32" | "as_u64" | "as_u128"
-            | "as_usize" | "as_bits" => infer_type_from_expr(&mc.receiver, span, symbols, enums),
+            | "wrapping_mul" | "as_bits" | "into" => infer_type_from_expr(&mc.receiver, span, symbols, enums),
+            // The integer views are the integer's type (I.14.5(b), I.14.7 (3)).
+            "as_u8" => Ok(CHIRType::UInt { width: Width::Concrete(8) }),
+            "as_u16" => Ok(CHIRType::UInt { width: Width::Concrete(16) }),
+            "as_u32" => Ok(CHIRType::UInt { width: Width::Concrete(32) }),
+            "as_u64" => Ok(CHIRType::UInt { width: Width::Concrete(64) }),
+            "as_u128" => Ok(CHIRType::UInt { width: Width::Concrete(128) }),
+            "as_usize" => Ok(CHIRType::UInt { width: Width::Concrete(USIZE_BITS) }),
             "as_bool" => Ok(CHIRType::Bool),
             "and_reduce" | "or_reduce" | "xor_reduce" | "nand_reduce" | "nor_reduce"
             | "xnor_reduce" | "get" | "eq_logic" | "ne_logic" | "lt_logic" | "le_logic"
@@ -689,9 +699,9 @@ fn classify_value_ctor(path: &str) -> Option<ValueCtor> {
         ("from_u32", 32),
         ("from_u16", 16),
         ("from_u8", 8),
-        // `from_usize` mirrors the 32-bit `usize` resolution; the value is the
+        // `from_usize` takes a `usize` (64 bits, I.14.1(b)); the value is the
         // argument, retyped to the assignment/operand context.
-        ("from_usize", 32),
+        ("from_usize", USIZE_BITS),
     ] {
         if path.ends_with(name) {
             // An explicit type turbofish overrides the name's implied width.
@@ -1141,14 +1151,11 @@ fn infer_type_from_suffix(compact: &str) -> Option<CHIRType> {
         ("i32",  CHIRType::SInt { width: Width::Concrete(32) }),
         ("i16",  CHIRType::SInt { width: Width::Concrete(16) }),
         ("i8",   CHIRType::SInt { width: Width::Concrete(8) }),
-        // 32, not 64: `resolve_type` decided `usize` is 32-bit (matching the SV
-        // `int` loop variable, keeping index arithmetic width-consistent) and
-        // `from_usize` mirrors it. This table is the LITERAL-SUFFIX path for the
-        // same type, so `let x = 0usize` and `let x: usize = 0` must agree —
-        // they used to emit a 64-bit and a 32-bit signal, and could then be
-        // added together in one expression.
-        ("usize", CHIRType::UInt { width: Width::Concrete(32) }),
-        ("isize", CHIRType::SInt { width: Width::Concrete(32) }),
+        // `resolve_type`'s width (64, I.14.1(b)). This table is the LITERAL-SUFFIX
+        // path for the same type, so `let x = 0usize` and `let x: usize = 0` must
+        // agree.
+        ("usize", CHIRType::UInt { width: Width::Concrete(USIZE_BITS) }),
+        ("isize", CHIRType::SInt { width: Width::Concrete(USIZE_BITS) }),
     ];
     for (suffix, ty) in suffixes {
         if let Some(base) = compact.strip_suffix(suffix) {
@@ -3579,7 +3586,7 @@ fn lower_expr_stmt(
                     suggested_rewrite: None,
                 });
             };
-            let addr = lower_expr(&mc.args[0], ctx)?;
+            let addr = peel_widening_resize(lower_expr(peel_index_views(&mc.args[0]), ctx)?, ctx);
             let value = lower_expr(&mc.args[1], ctx)?;
             out.push(CHIRStmt::MemWrite { mem, port, addr, value, span });
         }
@@ -3595,7 +3602,7 @@ fn lower_expr_stmt(
                     suggested_rewrite: None,
                 });
             };
-            let addr = lower_expr(&mc.args[0], ctx)?;
+            let addr = peel_widening_resize(lower_expr(peel_index_views(&mc.args[0]), ctx)?, ctx);
             out.push(CHIRStmt::MemRead { mem, port, addr, span });
         }
 
@@ -3629,6 +3636,21 @@ fn lower_expr_stmt(
             out.push(CHIRStmt::PortWrite { port_name, value, span });
         }
 
+        // `x.as_array_mut()[i] = l` is the element write `x[i] = l` (I.14.3(d); II.3
+        // row (e), Phase C step 8): the `&mut` view names the vector itself.
+        ExprType::Assign(assign)
+            if matches!(assign.left.as_ref(), ExprType::Index(ix)
+                if matches!(ix.base.as_ref(), ExprType::MethodCall(m)
+                    if m.method == "as_array_mut" && m.args.is_empty())) =>
+        {
+            let ExprType::Index(ix) = assign.left.as_ref() else { unreachable!() };
+            let ExprType::MethodCall(m) = ix.base.as_ref() else { unreachable!() };
+            let mut ix2 = ix.clone();
+            ix2.base = m.receiver.clone();
+            let mut a2 = assign.clone();
+            a2.left = Box::new(ExprType::Index(ix2));
+            return lower_expr_stmt(&ExprType::Assign(a2), span, ctx, out);
+        }
         ExprType::Assign(assign) => {
             // Tuple destructuring: `(a, b) = rhs` becomes one assignment per
             // element, each taking the corresponding projection of `rhs`.
@@ -3728,7 +3750,7 @@ fn lower_expr_stmt(
                     ] {
                         ctx.symbols.entry(format!("{base}_wr{port}_{suffix}")).or_insert(ty);
                     }
-                    let addr = resize_index(lower_expr(&idx.index, ctx)?, addr_w, ctx);
+                    let addr = resize_index(lower_expr(peel_index_views(&idx.index), ctx)?, addr_w, ctx);
                     let ew = type_width(&elem_ty);
                     let value = retype_default_literals_in_values(
                         lower_expr(&assign.right, ctx)?,
@@ -3745,7 +3767,7 @@ fn lower_expr_stmt(
                     ctx.array_written.insert(base, port + 1);
                     return Ok(());
                 }
-                let index = lower_expr(&idx.index, ctx)?;
+                let index = peel_widening_resize(lower_expr(peel_index_views(&idx.index), ctx)?, ctx);
                 let value = lower_expr(&assign.right, ctx)?;
                 out.push(CHIRStmt::IndexAssign { base, index, value, span });
                 return Ok(());
@@ -3922,8 +3944,30 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
 
         ExprType::Binary(bin) => {
             let left = lower_expr(&bin.left, ctx)?;
-            let right = lower_expr(&bin.right, ctx)?;
+            // A shift amount through an integer view is the receiver's value (the
+            // view's zero-extension moves no bit of the amount; I.14.7 (3)).
+            let right = if matches!(bin.op.as_str(), "<<" | ">>") {
+                peel_widening_resize(lower_expr(peel_index_views(&bin.right), ctx)?, ctx)
+            } else {
+                lower_expr(&bin.right, ctx)?
+            };
             let op = lower_binop(&bin.op, bin.span)?;
+            // A comparison with the X literal (`v == Logic::X`) asks whether a value
+            // is the simulator's third value — a 2-state realization holds no X, so
+            // the question has no SV form (I.14.3(d)'s `is_valid` class). Kept refused
+            // (MEASUREMENTS §M); an X literal as a VALUE lowers (I.14.7 (6)).
+            if matches!(op, CHIRBinOp::Eq | CHIRBinOp::Neq | CHIRBinOp::Lt | CHIRBinOp::Lte
+                | CHIRBinOp::Gt | CHIRBinOp::Gte)
+                && (matches!(left, CHIRExpr::XLit { .. }) || matches!(right, CHIRExpr::XLit { .. }))
+            {
+                return Err(CHIRLowerError::UnsupportedConstruct {
+                    description: "a comparison with `Logic::X` / `Bits::x()` asks whether a value is X, \
+                        which a 2-state realization cannot answer (SPEC I.14.3(d), the `is_valid` class)"
+                        .to_string(),
+                    span: bin.span,
+                    suggested_rewrite: None,
+                });
+            }
             // An integer literal takes the width of the other operand, so
             // `timer < 1` compares at the register's width rather than the
             // default literal width (which would widen the whole expression)
@@ -3932,6 +3976,7 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
             // Rust type is independent of the shifted value's.
             let is_shift = matches!(op, CHIRBinOp::Shl | CHIRBinOp::Shr);
             let (left, right) = balance_binop_literals(left, right, bin.span, is_shift, ctx)?;
+            let (left, right) = widen_to_usize(&op, left, right, ctx);
             Ok(signed_binop(op, left, right))
         }
 
@@ -4060,6 +4105,26 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
                         })),
                     },
                 })
+            } else if call_path(call).as_deref().is_some_and(|p| {
+                p.ends_with("::from") || p == "from" || p.ends_with("::from_bool")
+            }) && call.args.len() == 1
+                && call_path(call).as_deref().is_some_and(|p| p.starts_with("Logic") || p.starts_with("Bits"))
+            {
+                // `Logic::from(b1)`, `Bits::from(l)`, `Bits::<1>::from(l)`,
+                // `Logic::from_bool(b)` (I.14.3(d), I.14.7 (4), (7)): the identity on
+                // the bit(s); a type turbofish width resizes it (`From<u128>` truncates).
+                let path = call_path(call).unwrap_or_default();
+                let inner = lower_expr(strip_ref(&call.args[0]), ctx)?;
+                Ok(match type_turbofish_width(&path) {
+                    Some(w) => resize_to_target(inner, &Width::Concrete(w), ctx),
+                    None => inner,
+                })
+            } else if call_path(call).as_deref().is_some_and(|p| p == "x" || p.ends_with("::x")) && call.args.is_empty() {
+                // `Bits::<W>::x()` / `Bits::x()` as a value (I.14.2(e), I.14.7 (6)): the
+                // type's all-X literal; without a width turbofish it is sized by its
+                // context (`'x`). Outside the SV pairs by III.2.2 wherever it is observed.
+                let path = call_path(call).unwrap_or_default();
+                Ok(CHIRExpr::XLit { width: type_turbofish_width(&path).map(Width::Concrete) })
             } else if let Some(inner) = identity_pack_call(call) {
                 // `Bits::from_array` / `from_slice` move no bits — lower the
                 // argument in place of the call.
@@ -4117,9 +4182,24 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
                 (false, CHIRExpr::SignCast { expr, .. }) => {
                     CHIRExpr::SignCast { signed: false, expr }
                 }
-                // `as u*`/`as usize` of a plain expression is the historical
-                // strip: signedness-free, width handled at VLIR emission.
-                (false, plain) => plain,
+                // `as u*`/`as usize` of a plain expression: Rust's integer cast
+                // truncates or zero-extends (I.14.3(c)), so a known width that
+                // differs from the target's is an explicit `W'(…)` (Phase C step
+                // 8: with `usize` at 64 bits, a 32-bit value cast `as usize` left
+                // implicit was a -Wall WIDTHEXPAND). A bare literal stays a strip;
+                // its width comes from its context.
+                (false, plain) => {
+                    let tw = resolve_type(&cast.target_ty.ty_text, cast.target_ty.span)
+                        .ok()
+                        .and_then(|t| width_of_type_concrete(&t));
+                    match (tw, width_ignoring_default_lits(&plain, ctx)) {
+                        (Some(t), Some(w)) if t > w => widening_resize(plain, t, ctx),
+                        (Some(t), Some(w)) if t != w => {
+                            CHIRExpr::Resize { expr: Box::new(plain), width: Width::Concrete(t) }
+                        }
+                        _ => plain,
+                    }
+                }
             })
         }
 
@@ -4183,6 +4263,14 @@ fn lower_bits_constructor(
         suggested_rewrite: None,
     })?;
     let lowered = lower_expr(arg, ctx)?;
+    // `from_usize`: a `usize` argument is 64 bits, the default literal width, so a
+    // bare literal already has it and a literal balanced against an operand (`i *
+    // 3` against the 32-bit `int` loop variable) keeps that operand's width —
+    // retyping it to 64 would make it a "default" literal the assignment then
+    // narrows to its target (`i * 16'd3`, a -Wall WIDTHEXPAND). Phase C step 8.
+    if width == USIZE_BITS {
+        return Ok(lowered);
+    }
     // The argument is a `width`-bit value (Rust infers its literals as the
     // constructor's source type, e.g. `u32`), so retype its literals to match.
     Ok(retype_literals(lowered, width))
@@ -4577,9 +4665,10 @@ fn balance_binop_literals(
         matches!(e, CHIRExpr::Lit(l)
             if l.ty == CHIRType::UInt { width: Width::Concrete(DEFAULT_LIT_WIDTH) })
     };
-    let other_width = |e: &CHIRExpr| {
-        width_of_chir_expr(e, ctx).filter(|w| *w != DEFAULT_LIT_WIDTH)
-    };
+    // The other operand's width with the default-width literals in it ignored —
+    // NOT "any width but 64": since `usize` is 64 bits (I.14.1(b), Phase C step 8)
+    // a 64-bit signal is a real width, so the sentinel cannot be a width test.
+    let other_width = |e: &CHIRExpr| width_ignoring_default_lits(e, ctx);
 
     // Case A — a bare literal against anything with a known width (the other
     // side may itself be a width-carrying literal: `Bits::<32>::from_lit::<1>()`
@@ -4764,6 +4853,17 @@ fn retype_default_literals_in_values(e: CHIRExpr, width: Width) -> CHIRExpr {
                 .collect(),
             default: default.map(recurse),
         },
+        // A comparison's or a logical operator's operands are not the value's
+        // width (their result is one bit): a literal there was balanced against
+        // its sibling, and since `usize` is 64 bits (Phase C step 8) one balanced
+        // against a `usize` looks like a default literal — retyping it to the
+        // value's width made `r != 0` into `r != 1'b0` (a -Wall WIDTHEXPAND).
+        CHIRExpr::BinOp { left, op, right }
+            if matches!(op, CHIRBinOp::Eq | CHIRBinOp::Neq | CHIRBinOp::Lt | CHIRBinOp::Lte
+                | CHIRBinOp::Gt | CHIRBinOp::Gte | CHIRBinOp::LogicalAnd | CHIRBinOp::LogicalOr) =>
+        {
+            CHIRExpr::BinOp { left, op, right }
+        }
         CHIRExpr::BinOp { left, op, right } => CHIRExpr::BinOp {
             left: recurse(left),
             op,
@@ -4776,6 +4876,65 @@ fn retype_default_literals_in_values(e: CHIRExpr, width: Width) -> CHIRExpr {
 /// Best-effort width of an already-lowered expression, resolved against the
 /// in-scope signal types. Measuring the *lowered* form matters because pattern
 /// bindings have been substituted by then (`t` → `timer`).
+/// `width_of_chir_expr`, with a default-width (unsized) literal contributing no
+/// width: `x + 1` has `x`'s width, `1 + 2` none.
+fn width_ignoring_default_lits(e: &CHIRExpr, ctx: &LowerCtx) -> Option<usize> {
+    match e {
+        CHIRExpr::Lit(l) if l.ty == CHIRType::UInt { width: Width::Concrete(DEFAULT_LIT_WIDTH) } => None,
+        CHIRExpr::BinOp { left, right, .. } => {
+            width_ignoring_default_lits(left, ctx).or_else(|| width_ignoring_default_lits(right, ctx))
+        }
+        CHIRExpr::UnOp { expr, .. } | CHIRExpr::SignCast { expr, .. } => width_ignoring_default_lits(expr, ctx),
+        CHIRExpr::Mux { then_val, else_val, .. } => width_ignoring_default_lits(then_val, ctx)
+            .or_else(|| width_ignoring_default_lits(else_val, ctx)),
+        other => width_of_chir_expr(other, ctx),
+    }
+}
+
+/// A zero-extension of `e` to `t` bits. A compound `e` (an operator tree) is first
+/// cast to its own width: Verilator gives a size cast's width to its operand's
+/// leaves (`64'((w >> 7) & 31)` is a -Wall WIDTHEXPAND on the 32-bit `w`), while
+/// `64'(32'(…))` extends one 32-bit value (Phase C step 8).
+fn widening_resize(e: CHIRExpr, t: usize, ctx: &LowerCtx) -> CHIRExpr {
+    let w = width_ignoring_default_lits(&e, ctx);
+    let simple = matches!(
+        e,
+        CHIRExpr::Var(_) | CHIRExpr::Lit(_) | CHIRExpr::Slice { .. } | CHIRExpr::Resize { .. }
+            | CHIRExpr::DynBit { .. } | CHIRExpr::MemData { .. } | CHIRExpr::MemIndex { .. }
+    );
+    let inner = match w {
+        Some(w) if !simple && w < t => CHIRExpr::Resize { expr: Box::new(e), width: Width::Concrete(w) },
+        _ => e,
+    };
+    CHIRExpr::Resize { expr: Box::new(inner), width: Width::Concrete(t) }
+}
+
+/// Rust's operands of a binary operator share one type, so when one is a `usize`
+/// (64 bits, I.14.1(b)) and the other's emitted width is narrower — the SV `int`
+/// loop variable and `parameter int` (32), a view of a narrower receiver — the
+/// narrower one is zero-extended (Phase C step 8; before, `usize` was 32 and the two
+/// matched). Shifts are excluded: an amount's type is independent.
+fn widen_to_usize(op: &CHIRBinOp, left: CHIRExpr, right: CHIRExpr, ctx: &LowerCtx) -> (CHIRExpr, CHIRExpr) {
+    if matches!(op, CHIRBinOp::Shl | CHIRBinOp::Shr | CHIRBinOp::LogicalAnd | CHIRBinOp::LogicalOr) {
+        return (left, right);
+    }
+    let comparison_or_bool = |e: &CHIRExpr| {
+        matches!(e, CHIRExpr::BinOp { op, .. } if matches!(op,
+            CHIRBinOp::Eq | CHIRBinOp::Neq | CHIRBinOp::Lt | CHIRBinOp::Lte | CHIRBinOp::Gt
+            | CHIRBinOp::Gte | CHIRBinOp::LogicalAnd | CHIRBinOp::LogicalOr))
+    };
+    if comparison_or_bool(&left) || comparison_or_bool(&right) {
+        return (left, right);
+    }
+    let (wl, wr) = (width_ignoring_default_lits(&left, ctx), width_ignoring_default_lits(&right, ctx));
+    let widen = |e: CHIRExpr| widening_resize(e, USIZE_BITS, ctx);
+    match (wl, wr) {
+        (Some(USIZE_BITS), Some(w)) if w < USIZE_BITS => (left, widen(right)),
+        (Some(w), Some(USIZE_BITS)) if w < USIZE_BITS => (widen(left), right),
+        _ => (left, right),
+    }
+}
+
 fn width_of_chir_expr(e: &CHIRExpr, ctx: &LowerCtx) -> Option<usize> {
     if let Some(elem) = indexed_array_elem(e, ctx) {
         return width_of_type_concrete(elem);
@@ -4788,6 +4947,10 @@ fn width_of_chir_expr(e: &CHIRExpr, ctx: &LowerCtx) -> Option<usize> {
             // Not a signal: a `parameter int` / `localparam int` is 32 bits.
             .or_else(|| ctx.params.contains(name).then_some(32)),
         CHIRExpr::Lit(l) => width_of_type_concrete(&l.ty),
+        CHIRExpr::XLit { width } => match width {
+            Some(Width::Concrete(w)) => Some(*w),
+            _ => None,
+        },
         CHIRExpr::BinOp { left, right, .. } => {
             width_of_chir_expr(left, ctx).or_else(|| width_of_chir_expr(right, ctx))
         }
@@ -4906,7 +5069,58 @@ fn project_tuple_element(
 /// Cast an array-register index to the address width — the same treatment a
 /// memory address gets (cause Q): an unresized wide index into a narrow
 /// selector is a Verilator width warning, fatal under `-Wall`.
+/// An index or a memory address written through an integer view or a widening
+/// cast — `x.as_usize()`, `x.as_u128() as usize` — names the receiver's value: an
+/// in-range index is below 2^64, so the zero-extension the view now lowers to
+/// (I.14.7 (3)) changes no index bit. Peeled syntactically, so a parametric-width
+/// receiver (whose width the CHIR walk cannot compare) is peeled too. A narrowing
+/// cast (`as u8`) is kept: it changes the index.
+pub(crate) fn peel_index_views(e: &ExprType) -> &ExprType {
+    match e {
+        ExprType::MethodCall(mc)
+            if mc.args.is_empty()
+                // A view never truncates (`types.rs`'s post-mono width assert).
+                && matches!(mc.method.as_str(), "as_usize" | "as_u8" | "as_u16" | "as_u32" | "as_u64" | "as_u128") =>
+        {
+            peel_index_views(&mc.receiver)
+        }
+        ExprType::Cast(c)
+            if matches!(compact_type(&c.target_ty.ty_text).as_str(), "usize" | "u64" | "u128") =>
+        {
+            peel_index_views(&c.expr)
+        }
+        other => other,
+    }
+}
+
+/// A dynamic select's index: a `usize` expression the peel could not narrow (an
+/// arithmetic one, `(i + rot) % N`) is 64 bits, which Verilator's -Wall refuses as
+/// a select index ("requires 3 bit index, not 64 bits", WIDTHTRUNC); an in-range
+/// index is below 2^32, so it is cast to the 32 bits of the SV `int` that `usize`
+/// index arithmetic had before Phase C step 8 — the same index value.
+fn select_index(index: CHIRExpr, ctx: &LowerCtx) -> CHIRExpr {
+    match width_ignoring_default_lits(&index, ctx) {
+        Some(w) if w > 32 => CHIRExpr::Resize { expr: Box::new(index), width: Width::Concrete(32) },
+        _ => index,
+    }
+}
+
+/// A widening `Resize` (a zero-extension, e.g. an `as_usize()` view) peeled off an
+/// index: the index's low bits are the same either way, so a direct
+/// `arr[x.as_usize()]` keeps the receiver (I.14.7 (3)).
+pub(crate) fn peel_widening_resize(expr: CHIRExpr, ctx: &LowerCtx) -> CHIRExpr {
+    match expr {
+        CHIRExpr::Resize { expr: inner, width: Width::Concrete(t) }
+            if width_of_chir_expr(&inner, ctx).is_some_and(|w| w <= t) =>
+        {
+            peel_widening_resize(*inner, ctx)
+        }
+        other => other,
+    }
+}
+
 fn resize_index(expr: CHIRExpr, addr_w: usize, ctx: &LowerCtx) -> CHIRExpr {
+    let expr = peel_widening_resize(expr, ctx);
     let target = Width::Concrete(addr_w);
     let expr = retype_default_literals_in_values(expr, target.clone());
     if width_of_chir_expr(&expr, ctx) == Some(addr_w) {
@@ -4927,7 +5141,7 @@ fn lower_index(idx: &ExprIndex, ctx: &mut LowerCtx) -> Result<CHIRExpr, CHIRLowe
     if let ExprType::Path(pth) = idx.base.as_ref() {
         let name = compact_ident(&pth.path_text);
         if let Some((_, _, addr_w)) = ctx.array_regs.get(&name).cloned() {
-            let raw = lower_expr(&idx.index, ctx)?;
+            let raw = lower_expr(peel_index_views(&idx.index), ctx)?;
             let index = resize_index(raw, addr_w, ctx);
             let plain = CHIRExpr::MemIndex {
                 mem: name.clone(),
@@ -4956,13 +5170,23 @@ fn lower_index(idx: &ExprIndex, ctx: &mut LowerCtx) -> Result<CHIRExpr, CHIRLowe
         }
     }
     let base = lower_expr(&idx.base, ctx)?;
+    // Width 1 (I.14.5(c), I.14.7 (4)): a `Bits<1>` is the SV scalar `logic`, which
+    // has no bit range — `v[0]` is the operand itself (any other index is Rust's
+    // run-time failure, outside the trace). Before: `v[0]` on a scalar, which
+    // Verilator refuses ("Illegal bit or array select", `w1_index`, `w1_comb`).
+    if width_of_chir_expr(&base, ctx) == Some(1)
+        && !matches!(&base, CHIRExpr::Var(n) if ctx.array_regs.contains_key(n))
+        && matches!(eval_const_usize(&idx.index), Some(0) | None)
+    {
+        return Ok(base);
+    }
     // A compile-time constant index is a static one-bit `Slice`; anything else
     // (e.g. a loop variable) is a dynamic single-bit select `base[index]`.
     match eval_const_usize(&idx.index) {
         Some(bit) => Ok(CHIRExpr::Slice { expr: Box::new(base), high: bit, low: bit }),
         None => {
-            let index = lower_expr(&idx.index, ctx)?;
-            Ok(CHIRExpr::DynBit { base: Box::new(base), index: Box::new(index) })
+            let index = peel_widening_resize(lower_expr(peel_index_views(&idx.index), ctx)?, ctx);
+            Ok(CHIRExpr::DynBit { base: Box::new(base), index: Box::new(select_index(index, ctx)) })
         }
     }
 }
@@ -5010,6 +5234,8 @@ fn lower_lit_expr(
         // 4-state single-bit constants → 1-bit literals.
         "Logic::One"  => return Ok(CHIRExpr::Lit(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(1) }, value: 1 })),
         "Logic::Zero" => return Ok(CHIRExpr::Lit(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(1) }, value: 0 })),
+        // The X value as an expression (I.14.2(e), I.14.7 (6)): the all-X literal.
+        "Logic::X" => return Ok(CHIRExpr::XLit { width: Some(Width::Concrete(1)) }),
         _ => {}
     }
 
@@ -5063,7 +5289,7 @@ fn signed_binop(op: CHIRBinOp, left: CHIRExpr, right: CHIRExpr) -> CHIRExpr {
             op,
             right: wrap(ri),
         },
-        CHIRBinOp::Rem => CHIRExpr::SignCast {
+        CHIRBinOp::Div | CHIRBinOp::Rem => CHIRExpr::SignCast {
             signed: true,
             expr: Box::new(CHIRExpr::BinOp { left: wrap(li), op, right: wrap(ri) }),
         },
@@ -5086,6 +5312,7 @@ fn lower_binop(op: &str, span: SourceSpan) -> Result<CHIRBinOp, CHIRLowerError> 
         "+"  => Ok(CHIRBinOp::Add { wrapping: false }),
         "-"  => Ok(CHIRBinOp::Sub { wrapping: false }),
         "*"  => Ok(CHIRBinOp::Mul { wrapping: false }),
+        "/"  => Ok(CHIRBinOp::Div),
         "%"  => Ok(CHIRBinOp::Rem),
         "&"  => Ok(CHIRBinOp::BitAnd),
         "|"  => Ok(CHIRBinOp::BitOr),
@@ -5121,6 +5348,64 @@ fn lower_unop(op: &str, span: SourceSpan) -> Result<CHIRUnOp, CHIRLowerError> {
     }
 }
 
+/// `a.saturating_add(b)` / `_sub` / `_mul` on unsigned integers (see the call site).
+fn lower_saturating(
+    mc: &copper_core::frontend_ir::ExprMethodCall,
+    ctx: &mut LowerCtx,
+) -> Result<CHIRExpr, CHIRLowerError> {
+    let a = lower_expr(&mc.receiver, ctx)?;
+    let b = lower_expr(&mc.args[0], ctx)?;
+    let (a, b) = balance_binop_literals(a, b, mc.span, false, ctx)?;
+    let signed = |e: &CHIRExpr| match e {
+        CHIRExpr::SignCast { signed, .. } => *signed,
+        CHIRExpr::Var(n) => matches!(ctx.symbols.get(n), Some(CHIRType::SInt { .. })),
+        CHIRExpr::Lit(l) => matches!(l.ty, CHIRType::SInt { .. }),
+        _ => false,
+    };
+    let refuse = |why: &str| CHIRLowerError::UnsupportedConstruct {
+        description: format!("`{}` {why} (SPEC I.14.3(c); MEASUREMENTS §M)", mc.method),
+        span: mc.span,
+        suggested_rewrite: None,
+    };
+    if signed(&a) || signed(&b) {
+        return Err(refuse("on a signed integer is not lowered yet"));
+    }
+    let Some(n) = width_ignoring_default_lits(&a, ctx).or_else(|| width_ignoring_default_lits(&b, ctx)) else {
+        return Err(refuse("needs operands of a known width"));
+    };
+    if n > 64 {
+        return Err(refuse("is lowered for integers of at most 64 bits"));
+    }
+    let lit = |w: usize, v: u128| CHIRExpr::Lit(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(w) }, value: v });
+    let max = if n >= 128 { u128::MAX } else { (1u128 << n) - 1 };
+    let bx = |e: &CHIRExpr| Box::new(e.clone());
+    Ok(match mc.method.as_str() {
+        "saturating_add" => {
+            let sum = CHIRExpr::BinOp { left: bx(&a), op: CHIRBinOp::Add { wrapping: true }, right: bx(&b) };
+            CHIRExpr::Mux {
+                cond: Box::new(CHIRExpr::BinOp { left: bx(&sum), op: CHIRBinOp::Lt, right: bx(&a) }),
+                then_val: Box::new(lit(n, max)),
+                else_val: Box::new(sum),
+            }
+        }
+        "saturating_sub" => CHIRExpr::Mux {
+            cond: Box::new(CHIRExpr::BinOp { left: bx(&a), op: CHIRBinOp::Lt, right: bx(&b) }),
+            then_val: Box::new(lit(n, 0)),
+            else_val: Box::new(CHIRExpr::BinOp { left: bx(&a), op: CHIRBinOp::Sub { wrapping: true }, right: bx(&b) }),
+        },
+        _ => {
+            let w2 = Width::Concrete(2 * n);
+            let wide = |e: &CHIRExpr| Box::new(CHIRExpr::Resize { expr: bx(e), width: w2.clone() });
+            let prod = CHIRExpr::BinOp { left: wide(&a), op: CHIRBinOp::Mul { wrapping: true }, right: wide(&b) };
+            CHIRExpr::Mux {
+                cond: Box::new(CHIRExpr::BinOp { left: bx(&prod), op: CHIRBinOp::Gt, right: Box::new(lit(2 * n, max)) }),
+                then_val: Box::new(lit(n, max)),
+                else_val: Box::new(CHIRExpr::Resize { expr: Box::new(prod), width: Width::Concrete(n) }),
+            }
+        }
+    })
+}
+
 fn lower_method_call(
     mc: &copper_core::frontend_ir::ExprMethodCall,
     ctx: &mut LowerCtx,
@@ -5129,7 +5414,7 @@ fn lower_method_call(
     // the same lowering `(a.as_u32() as i32) >> n` gets via the cast path.
     if mc.method == "arithmetic_shift_right" && mc.args.len() == 1 {
         let recv = lower_expr(&mc.receiver, ctx)?;
-        let amt = lower_expr(&mc.args[0], ctx)?;
+        let amt = peel_widening_resize(lower_expr(peel_index_views(&mc.args[0]), ctx)?, ctx);
         return Ok(signed_binop(
             CHIRBinOp::Shr,
             CHIRExpr::SignCast { signed: true, expr: Box::new(recv) },
@@ -5164,11 +5449,31 @@ fn lower_method_call(
     match mc.method.as_str() {
         // Value passthroughs (simulation-only conversions on already-hardware
         // values): `port.read()`, `logic.as_bool()`. Lower to the receiver.
-        "read" | "as_bool" | "as_u8" | "as_u16" | "as_u32" | "as_u64" | "as_u128"
-        | "as_usize" | "as_bits"
+        "read" | "as_bool" | "as_bits" | "into" | "as_array_mut"
             if mc.args.is_empty() =>
         {
             lower_expr(&mc.receiver, ctx)
+        }
+        // The integer views (I.14.5(b), I.14.7 (3)): the value zero-extended to the
+        // integer's width (a narrower receiver; a `Bits` wider than the integer
+        // cannot call the view — `types.rs`'s post-mono assert). Until Phase C step 8
+        // these were passthroughs at the receiver's width (`usize_width`: `v << 30
+        // >> 30` was 0 in the SV). An index or memory address peels the extension
+        // again (`peel_widening_resize`), so a direct `arr[x.as_usize()]` is unchanged.
+        "as_u8" | "as_u16" | "as_u32" | "as_u64" | "as_u128" | "as_usize" if mc.args.is_empty() => {
+            let w = match mc.method.as_str() {
+                "as_u8" => 8,
+                "as_u16" => 16,
+                "as_u32" => 32,
+                "as_u64" => 64,
+                "as_u128" => 128,
+                _ => USIZE_BITS,
+            };
+            let inner = lower_expr(&mc.receiver, ctx)?;
+            Ok(match width_of_chir_expr(&inner, ctx) {
+                Some(rw) if rw == w => inner,
+                _ => widening_resize(inner, w, ctx),
+            })
         }
 
         "wrapping_add" if mc.args.len() == 1 => {
@@ -5198,19 +5503,20 @@ fn lower_method_call(
                 right: Box::new(right),
             })
         }
-        "saturating_add" | "saturating_sub" | "checked_add" | "checked_sub" => {
-            Err(CHIRLowerError::UnsupportedConstruct {
-                description: format!(
-                    "`{}` is not supported in hardware; use wrapping arithmetic or plain `+`/`-`",
-                    mc.method
-                ),
-                span: mc.span,
-                suggested_rewrite: Some(format!(
-                    "replace with `.wrapping_{}()`",
-                    mc.method.trim_start_matches("saturating_").trim_start_matches("checked_")
-                )),
-            })
+        // `saturating_*` on an unsigned integer (I.14.3(c): IN, clamp at the type's
+        // bounds; I.14.7 (7), Phase C step 8): `s = a + b; s < a ? MAX : s`,
+        // `a < b ? 0 : a - b`, and the product at 2N bits clamped to MAX. A signed
+        // operand is not lowered yet (refused, MEASUREMENTS §M).
+        "saturating_add" | "saturating_sub" | "saturating_mul" if mc.args.len() == 1 => {
+            lower_saturating(mc, ctx)
         }
+        // `checked_*` is OUTSIDE (I.14.3(c)): refused by both front-ends before
+        // lowering (`copper_analysis::check_outside_methods`); kept as defence.
+        m if m.starts_with("checked_") => Err(CHIRLowerError::UnsupportedConstruct {
+            description: copper_analysis::CHECKED_METHOD_MESSAGE.to_string(),
+            span: mc.span,
+            suggested_rewrite: None,
+        }),
         "lock" | "unwrap" | "clone" => lower_expr(&mc.receiver, ctx),
 
         // `Bits` methods with their I.14.3(d) meaning (II.3 (e), Phase C step 5,
@@ -5239,13 +5545,19 @@ fn lower_method_call(
                     let i = copper_analysis::consts::parse_int_lit(&l.text).unwrap() as usize;
                     Ok(CHIRExpr::Slice { expr: Box::new(base), high: i, low: i })
                 }
-                idx => Ok(CHIRExpr::DynBit { base: Box::new(base), index: Box::new(lower_expr(idx, ctx)?) }),
+                idx => Ok(CHIRExpr::DynBit {
+                    base: Box::new(base),
+                    index: Box::new(select_index(
+                        peel_widening_resize(lower_expr(peel_index_views(idx), ctx)?, ctx),
+                        ctx,
+                    )),
+                }),
             }
         }
         // Logical shifts at the receiver's width; `n >= N` is all zeros on both sides.
         "shift_left" | "shift_right" if mc.args.len() == 1 => {
             let left = lower_expr(&mc.receiver, ctx)?;
-            let right = lower_expr(&mc.args[0], ctx)?;
+            let right = peel_widening_resize(lower_expr(peel_index_views(&mc.args[0]), ctx)?, ctx);
             Ok(CHIRExpr::BinOp {
                 left: Box::new(left),
                 op: if mc.method == "shift_left" { CHIRBinOp::Shl } else { CHIRBinOp::Shr },
@@ -5320,7 +5632,14 @@ fn lower_method_call(
         }
         // A 2-state value is always valid; the simulator's `false` for an X is
         // outside every pair with the SV (III.2.2).
-        "is_valid" if mc.args.is_empty() => Ok(CHIRExpr::Lit(CHIRLit { ty: CHIRType::Bool, value: 1 })),
+        // `is_valid()` is OUTSIDE (I.14.3(d), D-19): refused by both front-ends before
+        // lowering (`copper_analysis::check_outside_methods`); kept as defence. Phase C
+        // step 5 had lowered it to `1` (MEASUREMENTS §J.14), which step 8 retired.
+        "is_valid" if mc.args.is_empty() => Err(CHIRLowerError::UnsupportedConstruct {
+            description: copper_analysis::IS_VALID_MESSAGE.to_string(),
+            span: mc.span,
+            suggested_rewrite: None,
+        }),
         "eq_logic" | "ne_logic" | "lt_logic" | "le_logic" | "gt_logic" | "ge_logic" if mc.args.len() == 1 => {
             let left = lower_expr(&mc.receiver, ctx)?;
             let right = lower_expr(strip_ref(&mc.args[0]), ctx)?;
@@ -5754,7 +6073,7 @@ fn validate_expr(
                 });
             }
         }
-        CHIRExpr::Lit(_) => {}
+        CHIRExpr::Lit(_) | CHIRExpr::XLit { .. } => {}
         CHIRExpr::SignCast { expr, .. } => validate_expr(expr, known, span)?,
         CHIRExpr::BinOp { left, right, .. } => {
             validate_expr(left, known, span)?;
@@ -6028,8 +6347,8 @@ fn strip_int_suffix(s: &str) -> (&str, Option<usize>) {
     let suffixes: &[(&str, usize)] = &[
         ("u128", 128), ("u64", 64), ("u32", 32), ("u16", 16), ("u8", 8),
         ("i128", 128), ("i64", 64), ("i32", 32), ("i16", 16), ("i8", 8),
-        // See `infer_type_from_suffix`: `usize`/`isize` are 32-bit throughout.
-        ("usize", 32), ("isize", 32),
+        // See `infer_type_from_suffix`: `usize`/`isize` are 64-bit (I.14.1(b)).
+        ("usize", USIZE_BITS), ("isize", USIZE_BITS),
     ];
     for (suffix, width) in suffixes {
         if let Some(stripped) = s.strip_suffix(suffix) {
@@ -6469,7 +6788,7 @@ fn walk_chir_expr(expr: &CHIRExpr, f: &mut impl FnMut(&CHIRExpr)) {
             walk_chir_expr(base, f);
             walk_chir_expr(index, f);
         }
-        CHIRExpr::Var(_) | CHIRExpr::Lit(_) | CHIRExpr::MemData { .. } | CHIRExpr::MemValid { .. } => {}
+        CHIRExpr::Var(_) | CHIRExpr::Lit(_) | CHIRExpr::XLit { .. } | CHIRExpr::MemData { .. } | CHIRExpr::MemValid { .. } => {}
     }
 }
 
@@ -7388,10 +7707,12 @@ mod tests {
     }
 
     #[test]
-    fn test_lower_method_call_saturating_add_rejected() {
+    fn test_lower_method_call_saturating_add_lowers_to_a_clamp() {
+        // Phase C step 8 (I.14.7 (7)): `s < a ? MAX : s`; an operand of unknown width
+        // is refused (here `x` is not in scope).
         assert!(matches!(
             lower("x.saturating_add(1)"),
-            Err(CHIRLowerError::UnsupportedConstruct { .. })
+            Err(CHIRLowerError::UnsupportedConstruct { .. }) | Ok(CHIRExpr::Mux { .. })
         ));
     }
 

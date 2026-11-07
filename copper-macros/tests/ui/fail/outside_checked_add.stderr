@@ -1,0 +1,19 @@
+error: `checked_*` arithmetic returns an `Option`, which is not a hardware value: it is OUTSIDE (SPEC I.14.3(c), D-19). Use `wrapping_*` (modular) or `saturating_*` (clamped), or test the operands before the operation
+  --> tests/ui/fail/outside_checked_add.rs:14:26
+   |
+14 |         q.write(a.read().checked_add(1).unwrap_or(0));
+   |                          ^^^^^^^^^^^
+
+warning: unused import: `Clock`
+ --> tests/ui/fail/outside_checked_add.rs:1:19
+  |
+1 | use copper_core::{Clock, ClockDomain};
+  |                   ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/outside_checked_add.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^

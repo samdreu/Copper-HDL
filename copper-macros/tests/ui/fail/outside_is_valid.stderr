@@ -1,0 +1,19 @@
+error: `is_valid()` asks whether a value holds the simulator's third value X, which no 2-state realization holds: it is OUTSIDE (SPEC I.14.3(d), D-19)
+  --> tests/ui/fail/outside_is_valid.rs:14:25
+   |
+14 |     q.write(if a.read().is_valid() { Logic::One } else { Logic::Zero });
+   |                         ^^^^^^^^
+
+warning: unused imports: `Bits` and `Logic`
+ --> tests/ui/fail/outside_is_valid.rs:1:19
+  |
+1 | use copper_core::{Bits, ClockDomain, Logic};
+  |                   ^^^^               ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `Out`
+ --> tests/ui/fail/outside_is_valid.rs:2:25
+  |
+2 | use copper_core::port::{In, Out};
+  |                         ^^  ^^^

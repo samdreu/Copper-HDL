@@ -34,6 +34,17 @@ pub struct VLIRModule {
     pub localparams: Vec<VLIRLocalParam>,
     pub ports: Vec<VLIRPort>,
     pub body: VLIRBody,
+    /// Width constraints as elaboration-time checks (SPEC I.14.5(d), I.14.7 (8)):
+    /// `if (!(cond)) begin : … $error(message); end`. Filled from the module's
+    /// `const { assert!(…) }` statements by `copper-codegen`'s `width_checks`.
+    pub width_checks: Vec<VLIRWidthCheck>,
+}
+
+/// One width constraint: `cond` is SystemVerilog text over the parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VLIRWidthCheck {
+    pub cond: String,
+    pub message: String,
 }
 
 /// A module-level constant. `value_expr` is already SystemVerilog text.
@@ -338,6 +349,8 @@ pub enum VLIRExpr {
     Var(String),
     /// Width-explicit literal, e.g. `8'd5`, `1'b0`.
     Lit { width: Width, value: u128 },
+    /// All-X literal (`W'bx`, or the context-sized `'x` when `width` is `None`).
+    XLit { width: Option<Width> },
     BinOp {
         left: Box<VLIRExpr>,
         op: VLIRBinOp,
@@ -387,7 +400,7 @@ pub enum VLIRExpr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VLIRBinOp {
-    Add, Sub, Mul, Rem,
+    Add, Sub, Mul, Div, Rem,
     BitAnd, BitOr, BitXor,
     Shl, Shr,
     Eq, Neq, Lt, Lte, Gt, Gte,

@@ -266,6 +266,8 @@ pub enum SHIRPattern {
 pub enum SHIRExpr {
     Var(String),
     Lit(SHIRLit),
+    /// All-X literal (CHIR `XLit`).
+    XLit { width: Option<crate::chir::Width> },
     BinOp {
         left: Box<SHIRExpr>,
         op: CHIRBinOp,

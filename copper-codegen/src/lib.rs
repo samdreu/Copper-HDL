@@ -5,6 +5,7 @@ pub mod control_extract;
 pub mod shir_lower;
 pub mod vlir_lower;
 pub mod emit;
+pub mod width_checks;
 
 pub use parser::capture_frontend_ir;
 pub use chir_lower::{lower_to_chir, ModuleRegistry};
@@ -373,7 +374,9 @@ fn vlir_for_target(
     prepared: &PreparedSource,
 ) -> Result<copper_core::vlir::VLIRModule, String> {
     let fir = checked_fir_for_target(target, prepared)?;
-    lower_fir_to_vlir(&fir, &prepared.hardware_fns, &prepared.registry)
+    let mut vlir = lower_fir_to_vlir(&fir, &prepared.hardware_fns, &prepared.registry)?;
+    vlir.width_checks = width_checks::width_checks(target, &fir.file_const_source).0;
+    Ok(vlir)
 }
 
 /// One module's lowered forms, for a test that inspects what the transpiler does
@@ -396,7 +399,8 @@ pub fn lower_source_module(src: &str, module: &str) -> Result<LoweredModule, Str
     let fir = checked_fir_for_target(target, &prepared)?;
     let chir = lower_fir_to_chir(&fir, &prepared.hardware_fns, &prepared.registry)?;
     let shir = lower_to_shir(&chir).map_err(|e| format!("{e}"))?;
-    let vlir = lower_to_vlir(&shir).map_err(|e| format!("{e}"))?;
+    let mut vlir = lower_to_vlir(&shir).map_err(|e| format!("{e}"))?;
+    vlir.width_checks = width_checks::width_checks(target, &fir.file_const_source).0;
     let sv = emit_verilog(&vlir, &EmitConfig::default());
     Ok(LoweredModule { fir, chir, shir, sv })
 }
@@ -412,6 +416,11 @@ fn checked_fir_for_target(
     // front-ends). In practice a module reaching the transpiler already compiled
     // through the macro's check; this keeps the standalone CLI honest.
     copper_analysis::check_reachability(target).map_err(|e| e.to_string())?;
+    // SPEC I.14.3 (c), (d), I.14.6(c) (Phase C step 8): the macro's rules, same
+    // functions, same messages — `checked_*` / `is_valid()` OUTSIDE, a memory port
+    // index below the port count.
+    copper_analysis::check_outside_methods(target).map_err(|e| e.to_string())?;
+    copper_analysis::check_memory_port_index(target).map_err(|e| e.to_string())?;
     // Front-end parity (2026-10-23): the two shape rules the macro now enforces
     // too, from the shared crate, AFTER reachability so a module that never ticks
     // at all gets the reachability message (the better of the two) rather than a

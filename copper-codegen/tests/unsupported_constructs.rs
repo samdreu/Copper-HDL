@@ -18,10 +18,10 @@ fn transpile(src: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-/// The division operator `/`. NOTE the asymmetry discovered while probing: `/` is
-/// rejected, but `%` (remainder) transpiles fine to `(a % b)`. So this pins `/`
-/// only — `%` is a supported construct (a Verilator equivalence for it would need
-/// to guard against a zero divisor).
+/// The division operator `/` — SUPPORTED since Phase C step 8 (2026-11-07, SPEC
+/// I.14.3(b), I.14.7 (5)): lowered as `%` is, `(a / b)`. Until then it was refused
+/// ("binary operator '/' not supported", D-19's `xp_div`); the behavioural check is
+/// the corpus sweep of `tests/fixtures/data_i14_dut.rs::xp_div`.
 const DIV_DUT: &str = r#"
 #[hardware(combinational)]
 fn div8(a: In<Bits<8>, ()>, b: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
@@ -43,12 +43,9 @@ fn asr8(a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
 
 
 #[test]
-fn division_operator_is_unsupported() {
-    let err = transpile(DIV_DUT).expect_err("NOW SUPPORTED: `/` transpiles — add an equivalence test.");
-    assert!(
-        err.contains("'/'") && err.contains("not supported"),
-        "reproduced a *different* transpile error than the tracked `/` gap: {err}"
-    );
+fn division_operator_is_supported() {
+    let sv = transpile(DIV_DUT).expect("`/` transpiles since Phase C step 8");
+    assert!(sv.contains("(a / b)"), "expected `(a / b)` in the emitted SV, got:\n{sv}");
 }
 
 /// Guards the `/`-vs-`%` asymmetry: `%` really does transpile. If this ever starts
@@ -1031,4 +1028,83 @@ async fn r21_extracted(clk: Clock<MainClk>, go: In<Logic, MainClk>, q: RegOut<Bi
         let err = transpile(src).expect_err("a pre-loop tick must be refused (R21)");
         assert!(err.contains(copper_analysis::PRELOOP_TICK_MESSAGE), "not R21's message: {err}");
     }
+}
+
+
+// ── Phase C step 8 (SPEC I.14.7; MEASUREMENTS §M) ─────────────────────────────
+
+/// `checked_*` and `is_valid()` are OUTSIDE (I.14.3(c), (d)): the transpiler refuses
+/// them with the macro's message (`copper_analysis::check_outside_methods`; the
+/// macro's witnesses are `copper-macros/tests/ui/fail/outside_{checked_add,is_valid}.rs`).
+#[test]
+fn checked_arithmetic_and_is_valid_are_outside_in_both_front_ends() {
+    let checked = r#"
+#[hardware(sequential)]
+async fn m(clk: Clock<C>, a: In<u8, C>, q: RegOut<u8, C>) {
+    loop {
+        q.write(a.read().checked_add(1).unwrap_or(0));
+        clk.tick().await;
+    }
+}
+"#;
+    let err = transpile(checked).expect_err("checked_add is OUTSIDE");
+    assert!(err.contains(copper_analysis::CHECKED_METHOD_MESSAGE), "{err}");
+    let valid = r#"
+#[hardware(combinational)]
+fn m(a: In<Bits<8>, C>, q: Out<Logic, C>) {
+    q.write(if a.read().is_valid() { Logic::One } else { Logic::Zero });
+}
+"#;
+    let err = transpile(valid).expect_err("is_valid is OUTSIDE");
+    assert!(err.contains(copper_analysis::IS_VALID_MESSAGE), "{err}");
+}
+
+/// A memory port index at or above the port count (I.14.6(c), D-19 6b-A): refused by
+/// the shared rule, the macro's message (witness `copper-macros/tests/ui/fail/
+/// memory_port_index.rs`); its in-range twin transpiles.
+#[test]
+fn a_memory_port_index_beyond_the_port_count_is_refused_in_both_front_ends() {
+    let src = r#"
+#[hardware(sequential)]
+async fn m(clk: Clock<C>, a: In<Bits<2>, C>, q: RegOut<Bits<8>, C>) {
+    let mem = Memory::<Bits<8>, 1, 1, C, 1, 1>::new(clk.clone(), 4);
+    loop {
+        if mem.read_port::<0>().is_ready() {
+            q.write(mem.read_port::<0>().data());
+        }
+        mem.read_port::<K>().read(a.read().as_usize());
+        clk.tick().await;
+    }
+}
+"#;
+    let err = transpile(&src.replace("<K>", "<1>")).expect_err("read_port::<1> of a 1-port memory");
+    assert!(err.contains(&copper_analysis::memory_port_index_message("mem", "read_port", 1, 1)), "{err}");
+    transpile(&src.replace("<K>", "<0>")).expect("read_port::<0> transpiles");
+}
+
+/// `Bits::x()` / `Logic::X` as a VALUE emit the type's X literal (I.14.7 (6), D-19's
+/// `xw_port`); a comparison with one asks whether a value is X — the `is_valid`
+/// class — and stays refused (transpiler only; recorded as REFUSED-one, §M).
+#[test]
+fn the_x_literal_is_emitted_as_a_value_and_refused_in_a_comparison() {
+    let src = r#"
+#[hardware(sequential)]
+async fn m(clk: Clock<C>, c: In<Logic, C>, a: In<Bits<8>, C>, q: RegOut<Bits<8>, C>, ql: RegOut<Logic, C>) {
+    loop {
+        if c.read() == Logic::One { q.write(Bits::x()); } else { q.write(a.read()); }
+        ql.write(Logic::X);
+        clk.tick().await;
+    }
+}
+"#;
+    let sv = transpile(src).expect("an X write transpiles");
+    assert!(sv.contains("q <= 'x;") && sv.contains("ql <= 1'bx;"), "{sv}");
+    let cmp = r#"
+#[hardware(combinational)]
+fn m(a: In<Logic, C>, q: Out<Logic, C>) {
+    q.write(if a.read() == Logic::X { Logic::One } else { Logic::Zero });
+}
+"#;
+    let err = transpile(cmp).expect_err("a comparison with X is refused");
+    assert!(err.contains("asks whether a value is X"), "{err}");
 }

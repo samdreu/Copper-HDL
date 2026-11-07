@@ -232,7 +232,7 @@ pub fn lower_to_vlir(shir: &SHIRModule) -> LowerResult<VLIRModule> {
         }
     }
 
-    let mut module = VLIRModule { name, params, localparams, ports, body };
+    let mut module = VLIRModule { name, params, localparams, ports, body, width_checks: Vec::new() };
     narrow_sole_resize_wires(&mut module);
     Ok(module)
 }
@@ -827,6 +827,7 @@ fn lower_expr(e: &SHIRExpr, leg: &Legalizer, mb: &MemBinding) -> LowerResult<VLI
             addr: Box::new(lower_expr(addr, leg, mb)?),
         },
         SHIRExpr::Lit(lit) => lower_lit(lit),
+        SHIRExpr::XLit { width } => VLIRExpr::XLit { width: width.clone() },
         // The read port's output, and its valid flag. WHICH net that is depends
         // on where this expression sits relative to the capture edge — see
         // `mem_binding`. Resolving it here rather than at the use site is what
@@ -927,6 +928,7 @@ fn lower_binop(op: &CHIRBinOp) -> VLIRBinOp {
         CHIRBinOp::Add { .. } => VLIRBinOp::Add,
         CHIRBinOp::Sub { .. } => VLIRBinOp::Sub,
         CHIRBinOp::Mul { .. } => VLIRBinOp::Mul,
+        CHIRBinOp::Div => VLIRBinOp::Div,
         CHIRBinOp::Rem => VLIRBinOp::Rem,
         CHIRBinOp::BitAnd => VLIRBinOp::BitAnd,
         CHIRBinOp::BitOr => VLIRBinOp::BitOr,
@@ -1131,6 +1133,7 @@ pub(crate) fn shir_expr_vars(e: &SHIRExpr, out: &mut HashSet<String>) {
         // A memory read result names nets synthesized by the memory lowering,
         // not signals the phase analysis can move or promote.
         SHIRExpr::Lit(_)
+        | SHIRExpr::XLit { .. }
         | SHIRExpr::PhaseEq(_)
         | SHIRExpr::MemData { .. }
         | SHIRExpr::MemValid { .. } => {}
@@ -1367,7 +1370,7 @@ fn collect_vlir_reads(expr: &VLIRExpr, out: &mut HashSet<String>) {
         VLIRExpr::Var(name) => {
             out.insert(name.clone());
         }
-        VLIRExpr::Lit { .. } => {}
+        VLIRExpr::Lit { .. } | VLIRExpr::XLit { .. } => {}
         VLIRExpr::BinOp { left, right, .. } => {
             collect_vlir_reads(left, out);
             collect_vlir_reads(right, out);
@@ -1974,7 +1977,7 @@ fn collect_read_uses_expr(
         SHIRExpr::MemValid { mem, port } => {
             valid.insert((mem.clone(), *port));
         }
-        SHIRExpr::Var(_) | SHIRExpr::Lit(_) | SHIRExpr::PhaseEq(_) => {}
+        SHIRExpr::Var(_) | SHIRExpr::Lit(_) | SHIRExpr::XLit { .. } | SHIRExpr::PhaseEq(_) => {}
         SHIRExpr::BinOp { left, right, .. } => {
             collect_read_uses_expr(left, data, valid);
             collect_read_uses_expr(right, data, valid);
@@ -2477,7 +2480,7 @@ fn forward_mem_index_expr(
             }
             *e = value;
         }
-        VLIRExpr::Var(_) | VLIRExpr::Lit { .. } => {}
+        VLIRExpr::Var(_) | VLIRExpr::Lit { .. } | VLIRExpr::XLit { .. } => {}
     }
 }
 
@@ -3452,7 +3455,7 @@ fn narrow_sole_resize_wires(m: &mut VLIRModule) {
         }
         match e {
             VLIRExpr::Var(name) => u.entry(name.clone()).or_default().other = true,
-            VLIRExpr::Lit { .. } => {}
+            VLIRExpr::Lit { .. } | VLIRExpr::XLit { .. } => {}
             VLIRExpr::BinOp { left, right, .. } => {
                 scan_expr(left, u);
                 scan_expr(right, u);

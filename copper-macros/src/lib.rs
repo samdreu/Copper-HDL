@@ -735,6 +735,15 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
         return err.to_compile_error().into();
     }
 
+    // SPEC I.14.3 (c), (d): `checked_*` and `is_valid()` are OUTSIDE; I.14.6(c): a
+    // memory port index below the port count (Phase C step 8, all modes). Same
+    // functions, same messages, in `transpile_target`.
+    if let Err(err) = copper_analysis::check_outside_methods(&input_fn) {
+        return err.to_compile_error().into();
+    }
+    if let Err(err) = copper_analysis::check_memory_port_index(&input_fn) {
+        return err.to_compile_error().into();
+    }
     // Reject software idioms that have no honest gate mapping (Option / `?` /
     // panic!) — use an explicit `{ valid, payload }` struct and error output.
     if let Err(err) = check_no_unsupported_idioms(&input_fn) {

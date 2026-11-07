@@ -1143,7 +1143,7 @@ fn collect_expr_vars(expr: &CHIRExpr, visitor: &mut impl FnMut(&str)) {
             visitor(mem);
             collect_expr_vars(addr, visitor);
         }
-        CHIRExpr::Lit(_) => {}
+        CHIRExpr::Lit(_) | CHIRExpr::XLit { .. } => {}
         CHIRExpr::BinOp { left, right, .. } => {
             collect_expr_vars(left, visitor);
             collect_expr_vars(right, visitor);
@@ -1235,6 +1235,7 @@ fn subst_vars(expr: SHIRExpr, subst: &HashMap<String, SHIRExpr>) -> SHIRExpr {
             addr: Box::new(subst_vars(*addr, subst)),
         },
         SHIRExpr::Lit(_)
+        | SHIRExpr::XLit { .. }
         | SHIRExpr::PhaseEq(_)
         | SHIRExpr::MemData { .. }
         | SHIRExpr::MemValid { .. } => expr,
@@ -1307,6 +1308,7 @@ pub fn lower_expr(expr: &CHIRExpr) -> Result<SHIRExpr, SHIRLowerError> {
             addr: Box::new(lower_expr(addr)?),
         }),
         CHIRExpr::Lit(lit) => Ok(SHIRExpr::Lit(lower_lit(lit))),
+        CHIRExpr::XLit { width } => Ok(SHIRExpr::XLit { width: width.clone() }),
         CHIRExpr::BinOp { left, op, right } => Ok(SHIRExpr::BinOp {
             left: Box::new(lower_expr(left)?),
             op: op.clone(),

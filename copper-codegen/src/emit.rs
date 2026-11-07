@@ -77,6 +77,21 @@ impl Emitter<'_> {
                 port_names: self.port_names.clone(),
                 lint_multidriven: false,
             };
+            // Width constraints as elaboration-time checks (SPEC I.14.5(d), I.14.7
+            // (8), Phase C step 8): a generate-time `if` whose `$error` stops
+            // elaboration of an instance the Rust side would refuse.
+            for (k, c) in m.width_checks.iter().enumerate() {
+                let msg = c.message.replace('\\', "\\\\").replace('"', "\\\"");
+                e.out.push_str(&format!(
+                    "{i}// Width constraint (Rust `const {{ assert!(..) }}`, SPEC I.14.5(d)).\n\
+                     {i}if (!({cond})) begin : __copper_width_check_{k}\n\
+                     {i2}$error(\"{msg}\");\n\
+                     {i}end\n\n",
+                    i = e.indent(1),
+                    i2 = e.indent(2),
+                    cond = c.cond,
+                ));
+            }
             match &m.body {
                 VLIRBody::Combinational(c) => e.comb_body(c),
                 VLIRBody::Sequential(s) => e.seq_body(s),
@@ -792,6 +807,11 @@ fn expr_str(e: &VLIRExpr) -> String {
     match e {
         VLIRExpr::Var(name) => name.clone(),
         VLIRExpr::Lit { width, value } => lit_str(width, *value),
+        VLIRExpr::XLit { width } => match width {
+            Some(Width::Concrete(w)) => format!("{w}'bx"),
+            Some(Width::Param(p)) => format!("{{({p}){{1'bx}}}}"),
+            None => "'x".to_string(),
+        },
         VLIRExpr::BinOp { left, op, right } => {
             // SystemVerilog's `>>` is LOGICAL even on a signed operand; the
             // arithmetic shift Rust's `as i32 >> k` means needs `>>>` (and a
@@ -867,6 +887,7 @@ fn binop_str(op: VLIRBinOp) -> &'static str {
         VLIRBinOp::Add => "+",
         VLIRBinOp::Sub => "-",
         VLIRBinOp::Mul => "*",
+        VLIRBinOp::Div => "/",
         VLIRBinOp::Rem => "%",
         VLIRBinOp::BitAnd => "&",
         VLIRBinOp::BitOr => "|",
@@ -911,6 +932,7 @@ mod tests {
             name: "loopy".to_string(),
             params: vec![VLIRParam { name: "N".to_string(), default: Some(8) }],
             localparams: vec![],
+            width_checks: vec![],
             ports: vec![VLIRPort {
                 name: "out".to_string(),
                 outer_dim: None,

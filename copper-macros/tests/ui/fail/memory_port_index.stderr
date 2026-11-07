@@ -1,0 +1,19 @@
+error: `mem.read_port::<1>()`: the memory has 1 read port(s), R = 1, so port index 1 does not exist — a port index must be below the port count (SPEC I.14.6(c), D-19 6b-A; decided at the instance, refused in both front-ends)
+  --> tests/ui/fail/memory_port_index.rs:24:9
+   |
+24 |         mem.read_port::<1>().read(a.read().as_usize());
+   |         ^^^
+
+warning: unused imports: `Bits`, `Clock`, and `Memory`
+ --> tests/ui/fail/memory_port_index.rs:1:19
+  |
+1 | use copper_core::{Bits, Clock, ClockDomain, Memory};
+  |                   ^^^^  ^^^^^               ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/memory_port_index.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^
