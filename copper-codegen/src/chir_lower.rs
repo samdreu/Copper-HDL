@@ -5269,16 +5269,22 @@ fn lower_index(idx: &ExprIndex, ctx: &mut LowerCtx) -> Result<CHIRExpr, CHIRLowe
     }
 }
 
-/// Evaluate an expression to a constant `usize`, for use as a bit index.
-/// Currently only integer literals; extended to loop-variable substitution when
-/// `for`-loop unrolling lands.
+/// Evaluate an expression to a constant `usize`, for use as a bit index: I.14.4's
+/// constants through the shared evaluator the register fold uses (`fold_const_init`
+/// over the module's `ConstEnv` — file consts, associated consts, `const fn`s, any
+/// base, underscores; I.14.7 (2), Phase C step 8). Until then integer literals only,
+/// so `x[K]` with `const K` was a dynamic select. A const generic or a local is not a
+/// constant here (the module is parametric in it): `None`, a dynamic select.
 fn eval_const_usize(expr: &ExprType) -> Option<usize> {
     match expr {
         ExprType::Lit(lit) => {
             let compact: String = lit.text.chars().filter(|c| !c.is_whitespace()).collect();
             parse_int_literal(&compact).map(|(v, _)| v as usize)
         }
-        _ => None,
+        _ => match fold_const_init(expr, Some(USIZE_BITS), &EnumRegistry::new(), &[]) {
+            Ok(RegisterInit::Value(v)) => usize::try_from(v).ok(),
+            _ => None,
+        },
     }
 }
 
@@ -5619,8 +5625,9 @@ fn lower_method_call(
         "get" if mc.args.len() == 1 => {
             let base = lower_expr(&mc.receiver, ctx)?;
             match &mc.args[0] {
-                ExprType::Lit(l) if copper_analysis::consts::parse_int_lit(&l.text).is_some() => {
-                    let i = copper_analysis::consts::parse_int_lit(&l.text).unwrap() as usize;
+                // A constant index (I.14.4, through `eval_const_usize`): a static select.
+                idx if eval_const_usize(idx).is_some() => {
+                    let i = eval_const_usize(idx).unwrap();
                     Ok(CHIRExpr::Slice { expr: Box::new(base), high: i, low: i })
                 }
                 idx => Ok(CHIRExpr::DynBit {

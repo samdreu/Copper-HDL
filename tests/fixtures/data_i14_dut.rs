@@ -239,3 +239,30 @@ fn w1_from_comb(a: In<Bits<1>, MainClk>, l: In<Logic, MainClk>, q: Out<Logic, Ma
     qb.write(Bits::from(l.read()));
 }
 
+
+/// I.14.7 (2): a constant bit index through the shared evaluator — a file const,
+/// a const expression, a `const fn` — a static select (a dynamic one before step 8).
+const DI_K: usize = 0x3;
+const DI_HI: usize = DI_K * 2 + 1;
+const fn di_half(n: usize) -> usize {
+    n / 2
+}
+#[hardware(sequential)]
+async fn const_index(
+    clk: Clock<MainClk>,
+    a: In<Bits<8>, MainClk>,
+    q: RegOut<Bits<4>, MainClk>,
+    p: RegOut<Bits<8>, MainClk>,
+) {
+    loop {
+        let x = a.read();
+        p.write(x);
+        let mut r = [Logic::Zero; 4];
+        r[0] = x[DI_K];
+        r[1] = x[DI_HI];
+        r[2] = x[di_half(DI_HI) - 1];
+        r[3] = x.get(1_0 / 5);
+        q.write(Bits::from_slice(&r));
+        clk.tick().await;
+    }
+}
