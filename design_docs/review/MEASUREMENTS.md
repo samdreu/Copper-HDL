@@ -1637,6 +1637,23 @@ route is gone. The macro still admits (`validate_hardware_fn` counts any tick), 
 REFUSED-one break until the shared rule lands in `copper-analysis` with a `copper-macros/tests/ui/fail`
 case and a `front_end_parity.rs` entry — the row as written.
 
+### J.11 The bare regression — measured
+
+Bare `tools/regression.sh` on `b2eeea3` (laptop): **REGRESSION OK (248 s)**.
+- 1205 passed, 0 failed, 88 ignored, 140 test binaries; G-C 114 test files; examples **32/32**
+  (both CPUs, every BaseJump self-check, `dual_port_ram`, the UART, two-domain and CDC examples).
+- G-D **180** differential cases (161 at §H.6; +19, every one a fixture of this step), 3
+  ignored-with-reason (`SKIP`: `rv32i_cpu_pipelined`, `two_domain_top`, `mod8` — unchanged).
+- G-F 108 modules through the interpreter (90 at §H.6), 75 skipped with a sentence (+1:
+  `bits_methods_comb`, the combinational class — no new `REF_SKIP` row).
+- **G-G differential 1431 PASS / 0 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE; reference
+  936 PASS** (1240 / 750 at §H.6).
+- **Pinned disagreements: 0** (2 at §H.6: `preloop_probe`, `preloop_linear` — gone, row 1).
+- G-E 5 anchored, 178 transpiler-only. New `SKIP` / `REF_SKIP` rows: **none**.
+- Anchors: the pipelined CPU's 13 programs pass (its SV changed in rows 1 and 3, trace-identical);
+  every other anchor's SV is byte-identical to `80ae993` (no anchored module is in any row's
+  changed set), so its trace cannot have moved.
+
 ### J.10 For the coordinator — SPEC items (SPEC files untouched)
 
 **Rows closed, with their fixtures (III.3 ledger lines):**
