@@ -660,3 +660,70 @@ impl<'ast> Visit<'ast> for Assigned {
         self.visit_expr(&a.body);
     }
 }
+
+/// The interpreter's constant evaluator over one file, for the D-21 B2 differential
+/// test (`tests/const_evaluators_agree.rs`): the file's items (and, optionally, one
+/// fn's body-local items and const generics) collected exactly as [`Module::new`]
+/// collects them, and an expression evaluated with no locals, exactly as a `const`
+/// item or a width is (`Exec::eval_const`). Shares no code with
+/// `copper_analysis::consts` — that independence is what B2 keeps (SPEC I.14.4).
+pub struct ConstScope {
+    prog: Program,
+}
+
+impl ConstScope {
+    pub fn new(file: &syn::File, body_of: Option<&ItemFn>, generics: &[(&str, u64)]) -> Result<Self, RefError> {
+        let mut prog = Program {
+            consts: HashMap::new(),
+            const_vals: RefCell::new(HashMap::new()),
+            enums: HashMap::new(),
+            structs: HashMap::new(),
+            fns: HashMap::new(),
+            methods: HashMap::new(),
+            generics: generics.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            clocks: Vec::new(),
+            inputs: HashMap::new(),
+            outputs: Vec::new(),
+        };
+        for it in &file.items {
+            collect_item(it, &mut prog)?;
+        }
+        if let Some(f) = body_of {
+            for s in &f.block.stmts {
+                if let Stmt::Item(it) = s {
+                    collect_item(it, &mut prog)?;
+                }
+            }
+        }
+        Ok(ConstScope { prog })
+    }
+
+    /// Every `const` the scope holds (`K`, `T::K`).
+    pub fn const_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.prog.consts.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// A named const, coerced to its declared type (as a read of it in a body is).
+    pub fn eval_const_named(&self, name: &str) -> Result<Value, RefError> {
+        let path: syn::Expr = syn::parse_str(name).map_err(|e| RefError::Parse(format!("{e}")))?;
+        Exec::eval_const(&self.prog, &path)
+    }
+
+    /// Evaluate `e` with no locals: a constant or an error.
+    pub fn eval(&self, e: &Expr) -> Result<Value, RefError> {
+        Exec::eval_const(&self.prog, e)
+    }
+
+    /// Evaluate `e` and coerce it to the type `ty` (a `let`'s annotation).
+    pub fn eval_as(&self, e: &Expr, ty: &syn::Type) -> Result<Value, RefError> {
+        let t = parse_ty(ty, &ProgEval(&self.prog))?;
+        Exec::eval_const(&self.prog, e)?.coerce_to(&t)
+    }
+
+    /// The declaration-order index of an enum unit variant, if the scope knows it.
+    pub fn enum_index(&self, enum_name: &str, variant: &str) -> Option<usize> {
+        self.prog.enums.get(enum_name)?.iter().position(|v| v == variant)
+    }
+}

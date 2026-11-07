@@ -253,6 +253,16 @@ impl ConstEnv {
         &self.values
     }
 
+    /// Evaluate an expression over this environment, `locals` bound first (a
+    /// module's const generics): consts, `T::K`, `const fn` calls, the grammar of
+    /// [`Self::from_items`]. `None` outside it. (The B2 differential test's entry,
+    /// D-21; the transpiler's own callers go through `get` / `call`.)
+    pub fn eval_expr(&self, e: &syn::Expr, locals: &HashMap<String, i128>) -> Option<i128> {
+        let mut locals = locals.clone();
+        let mut fuel = FUEL;
+        self.eval(e, &mut locals, None, &mut fuel)
+    }
+
     fn call_fuel(&self, name: &str, args: &[i128], fuel: &mut usize) -> Option<i128> {
         let f = self.fns.get(name)?;
         if f.sig.inputs.len() != args.len() {

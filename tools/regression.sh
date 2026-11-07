@@ -57,6 +57,11 @@
 #        continuations was built and every transition checked on every clocked module
 #        the sweep covers, the initial state included; its counts are printed
 #        (G-H is retired, see above)
+#   G-J  the two CONSTANT EVALUATORS agree (D-21 B2, SPEC I.14.4,
+#        tests/const_evaluators_agree.rs): the interpreter's and copper_analysis's
+#        evaluated every corpus const item, pre-loop initializer, counted-`for` bound
+#        and index both ways (initializers also against the transpiler's stated
+#        power-on value), 0 DISAGREE; its counts are printed
 #
 # and it prints the `#[ignore]`d tests every run, because a skipped check that prints
 # nothing is indistinguishable from a passing one.
@@ -225,7 +230,11 @@ if [ "$RUN_TEST" -eq 1 ]; then
   # test's stdout is captured).
   PROJ_REPORT="$TMP/projection.txt"
   rm -f "$PROJ_REPORT"
-  COPPER_VERDICT_LEDGER="$LEDGER" COPPER_PROJECTION_REPORT="$PROJ_REPORT" cargo test --workspace > "$TMP/test.log" 2>&1
+  # G-J's coverage line (tests/const_evaluators_agree.rs writes it on a pass).
+  CONST_REPORT="$TMP/const_eval.txt"
+  rm -f "$CONST_REPORT"
+  COPPER_VERDICT_LEDGER="$LEDGER" COPPER_PROJECTION_REPORT="$PROJ_REPORT" COPPER_CONST_EVAL_REPORT="$CONST_REPORT" \
+    cargo test --workspace > "$TMP/test.log" 2>&1
   TEST_RC=$?
 
   grep -E "^test result:" "$TMP/test.log" | awk '
@@ -288,6 +297,19 @@ if [ "$RUN_TEST" -eq 1 ]; then
   PROJ_N=$(echo "$PROJ_LINE" | sed -E 's/^([0-9]+) clocked.*/\1/')
   [ "${PROJ_N:-0}" -gt 0 ] 2>/dev/null || fail "G-I: the projection relation covered zero modules"
   echo "  G-I ok: projection relation — $PROJ_LINE"
+
+  # G-J — the two CONSTANT EVALUATORS (D-21 B2, SPEC I.14.4). The interpreter's
+  # evaluator stays independent of the front-ends' so the reference leg can attribute
+  # a disagreement; this test pins the two against each other on every corpus
+  # constant. It fails itself on a disagreement, an unpinned asymmetry, or a class
+  # with nothing compared; here it must have RUN, passed and written its counts.
+  grep -q "^test the_two_constant_evaluators_agree_on_every_corpus_constant \.\.\. ok" "$TMP/test.log" \
+    || fail "G-J: the constant-evaluator test (tests/const_evaluators_agree.rs) did not run or did not pass"
+  [ -s "$CONST_REPORT" ] || fail "G-J: the constant-evaluator test wrote no report"
+  CONST_LINE=$(grep -h "^constant evaluators:" "$CONST_REPORT" | tail -1 | sed 's/^constant evaluators: //')
+  [ -n "$CONST_LINE" ] || fail "G-J: the constant-evaluator report has no coverage line"
+  echo "$CONST_LINE" | grep -q " 0 DISAGREE$" || fail "G-J: the constant evaluators disagree: $CONST_LINE"
+  echo "  G-J ok: constant evaluators — $CONST_LINE"
 
   # G-F — the REFERENCE-INTERPRETER leg. copper-ref runs the kernel under SPEC
   # §I.0's one-resumption protocol with no rustc lowering and no executor, so it is

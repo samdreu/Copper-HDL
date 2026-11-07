@@ -53,7 +53,7 @@ pub fn static_tick_sites(f: &syn::ItemFn) -> std::collections::BTreeSet<TickSite
     interp::collect_tick_sites(&f.block.stmts, &mut Vec::new(), &mut out);
     out
 }
-pub use module::{Module, Port, PortKind};
+pub use module::{ConstScope, Module, Port, PortKind};
 pub use value::{IntTy, Ty, Value};
 
 /// Why the interpreter could not run, or could not continue.
