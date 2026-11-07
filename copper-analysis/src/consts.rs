@@ -59,6 +59,7 @@ pub fn eval_syn(expr: &syn::Expr, env: &dyn Fn(&str) -> Option<i128>) -> Option<
     match expr {
         Expr::Lit(l) => match &l.lit {
             syn::Lit::Int(i) => parse_int_lit(&i.to_string()),
+            syn::Lit::Bool(b) => Some(b.value as i128),
             _ => None,
         },
         Expr::Path(p) => env(&p.path.get_ident()?.to_string()),
@@ -142,7 +143,11 @@ mod tests {
             ("CLKS_PER_BIT", "434"),
             ("BAD", "foo()"),
             ("DIV0", "1 / 0"),
+            ("YES", "true"),
+            ("START", "1 + 2"),
         ]);
+        assert_eq!(env.get("YES"), Some(&1));
+        assert_eq!(env.get("START"), Some(&3));
         assert_eq!(env.get("CLKS_PER_BIT"), Some(&434));
         assert_eq!(env.get("HALF"), Some(&217));
         assert!(!env.contains_key("BAD"));

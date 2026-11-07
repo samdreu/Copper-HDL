@@ -702,7 +702,9 @@ fn trailing_const_param(path: &str) -> Option<u128> {
     let start = path.rfind("::<")? + 3;
     let rest = &path[start..];
     let end = rest.find('>')?;
-    rest[..end].trim().parse::<u128>().ok()
+    // Any base, `_` separators, a suffix (SPEC I.14.4; II.3 (g)): the shared
+    // evaluator's literal. Decimal only until Phase C step 5 (MEASUREMENTS §J.7).
+    copper_analysis::consts::parse_int_lit(rest[..end].trim()).and_then(|v| u128::try_from(v).ok())
 }
 
 /// Width from a **type** turbofish: `Bits::<8>::from_u8` → 8. Returns `None` when
@@ -1383,12 +1385,21 @@ fn fold_const_text(
     }
     if let Some(c) = consts.iter().find(|c| c.name == compact) {
         let value = compact_ident(&c.value_text);
-        return match (parse_int_literal(&value), value.as_str()) {
-            (Some((v, _)), _) => Ok(Value(v)),
-            (None, "true") => Ok(Value(1)),
-            (None, "false") => Ok(Value(0)),
+        if let Some((v, _)) = parse_int_literal(&value) {
+            return Ok(Value(v));
+        }
+        // A non-literal body (`const START: u8 = 1 + 2`, a const defined from other
+        // consts): the shared evaluator over every file const (SPEC I.14.4; II.3 (d),
+        // Phase C step 5, MEASUREMENTS §J.7).
+        let env = copper_analysis::consts::eval_const_items(
+            consts.iter().map(|c| (c.name.as_str(), c.value_text.as_str())),
+        );
+        return match env.get(compact).copied().map(u128::try_from) {
+            Some(Ok(v)) => Ok(Value(v)),
             _ => Err(format!(
-                "names `const {compact}`, whose value `{}` is not an integer or boolean literal",
+                "names `const {compact}`, whose value `{}` is not a constant the shared \
+                 evaluator can fold (integer literals, `true`/`false`, other consts, integer \
+                 arithmetic)",
                 c.value_text
             )),
         };

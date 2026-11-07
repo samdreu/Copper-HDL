@@ -1557,4 +1557,42 @@ every `MemIndex` in the combinational phases, for a memory of write latency ≥ 
 Remeasured: sv-baseline **no corpus change** (238 = 235 + 3 new); `arr_two_writes`,
 `arr_same_element` and the probe as `arr_comb_read` **agree on both legs, every sequence**.
 Not predicted: the defect itself. Predicted and held: no corpus emission change, the anchors
-byte-identical (the CPUs' register-file reads all reach `always_ff`).
+byte-identical (the CPUs' register-file reads all reach `always_ff`). `tools/regression.sh
+--no-examples`: **PARTIAL OK (226 s)**; G-F 106; **G-G differential 1414 PASS / 0 DISAGREE,
+reference 924, pinned 0**. The comb-`for` refusal is pinned by
+`unsupported_constructs.rs::an_array_register_element_write_inside_a_combinational_for_is_refused`.
+
+### J.7 Row 7 — (d), (g): the shared constant evaluator (partial)
+
+**Scope reached in this sitting.** I.14.4's direction is one evaluator in `copper-analysis` used by
+R11, the transpiler's fold and the interpreter. Started in row 2 (`copper_analysis::consts`:
+literals in any base with `_` and a suffix, consts by name, integer arithmetic, checked). This
+row routes two of the transpiler's under-evaluations through it:
+- **(g)** a `from_lit::<V>()` turbofish in any base or with underscores (`trailing_const_param`
+  parsed decimal only) — in an initializer and in a body, since both go through
+  `classify_value_ctor`;
+- **(d), the non-literal `const` body** (`const START: u8 = 1 + 2`, and consts defined from other
+  consts): `fold_const_text` evaluates the body over every file const (`eval_const_items`,
+  extended to `true`/`false`).
+**Not reached:** (d)'s associated const (`T::K` — the FIR's `FrontendImplIR` captures methods only,
+so a parser change comes first), the const generic as a value (a parametric module's initializer
+would be the parameter, not a folded literal: `CHIRRegDecl::init` is a literal today), the
+`const fn` (its body must be evaluated); R11's `is_constant_expr` and the interpreter still use
+their own tests (I.14.4's "the syntactic test becomes that evaluator's success").
+
+**Predicted emission diff:** none in the corpus — 264 `from_lit` uses, all decimal (D-19), and
+no corpus initializer names a non-literal `const` (it would be refused today, and the only 4
+refused sentinels are other shapes: two width inferences, `with`, a non-hardware call).
+**Predicted traces:** the fixture `tests/fixtures/const_eval_dut.rs` — `const_init_expr` (a
+register initialized from `const START: u8 = 1 + 2` and a const defined from another, hex and
+underscore `from_lit` in an initializer and in the body) — transpiles and **agrees on both legs,
+every sequence**; before, refused by the transpiler at the initializer.
+
+**Measured.** sv-baseline: **no corpus change** (239 = 238 + the fixture, NEW) — as predicted.
+`const_init_expr` **agrees on both legs, every sequence**; with the `chir_lower` change
+reverse-applied it is refused at `n` ("names `const CE_START`, whose value `CE_BASE * 4 + 0x1` is
+not an integer or boolean literal", (d)) and, with `n`'s initializer replaced, at `m` ("a call to
+`Bits::from_lit::<0xA5>`, which is not a `Bits` value constructor", (g)) — both REFUSED-one
+breaks closed for these spellings. `tools/regression.sh --no-examples`: **PARTIAL OK (236 s)**;
+G-F 107; **G-G differential 1420 PASS / 0 DISAGREE, reference 930, pinned 0**. Row status:
+**(g) closed; (d) partly closed** (the non-literal `const` body); not reached as listed above.
