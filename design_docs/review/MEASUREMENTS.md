@@ -1511,3 +1511,50 @@ prediction — I had not predicted this pin after row 4 showed it). `tools/regre
 reference 886, pinned 0**. (b) closes: REFUSED-both → admitted, the clause lifted in both
 front-ends together (one function), no ui/fail case existed; `front_end_parity.rs` sweeps the
 fixtures under the shared rule.
+
+### J.6 Row 6 — (c) an array write port per element write
+
+**The form** (the row's first fix direction, a second write port, generalized): write `k` of a
+segment to an array register stages write port `k`, in program order; a read lowered after `n`
+writes muxes ports `n-1 … 0` (latest outermost) over the committed array; the register's port
+count is the most writes any one segment stages. The memory machinery already gives the highest
+port priority — outermost in the commit-stage forwarding (`forward_ff_mem_index`, "highest index
+outermost") and last among the nonblocking commits — so the last write wins (I.7.3). The priority
+mux onto one port (the other direction) cannot carry two writes to *different* elements.
+
+**A probe first** (scratchpad `arr_for.rs`, before the change): an element write inside a
+combinational `for` (`for j in 0..4 { arr[j] = a + arr[j] }`) is **admitted today and emitted
+wrong** — one write site, one port, its nets reassigned per iteration in `always_comb`, so only
+the last iteration's write reaches the commit. Not in II.3.3. One port per site cannot carry it
+either; **refused** now with its own message (a REFUSED-one shape, the macro admits; SPEC item),
+not unrolled — unrolling is a form of its own.
+
+**Predicted emission diff:** none in the corpus (the refusal of a second write proves no corpus
+module writes an array register twice in a segment; a corpus module with an element write in a
+combinational `for` would turn REFUSED — predicted none, since such a module would have
+diverged in the sweep). **Predicted traces:** the fixture `tests/fixtures/array_two_writes_dut.rs`
+— `arr_two_writes` (a constant- and a dynamic-index write, reads before and after) and
+`arr_same_element` (two writes to one dynamic element, writes in exclusive arms, a read after
+them) — **agrees on both legs, every sequence**; both were refused before. The register-file
+anchors (both CPUs, `regfile_dut`) byte-identical.
+
+**Measured — a pre-existing defect found by the fixture.** With the ports in place, sv-baseline
+showed no corpus change and the probe `arr_for.rs` was refused with its new message, as
+predicted; `arr_two_writes` **agreed**, but `arr_same_element` **diverged** (differential FAIL,
+reference leg pass). The emitted ports were right (program order, exclusive arms on distinct
+ports, the latest outermost); the wrong read was `arr[0] = arr[1] + arr[2]` — an array read in
+**combinational** position (a write's data), which reads the array without the write the
+previous cycle staged. An array register commits a stage late (write latency 2, a two-job-era
+choice: "the write is staged in the post-tick segment"), so during the cycle after a write the
+array does not hold it yet; `forward_ff_mem_index` forwards the committing stage into every
+`always_ff` read, nothing did so for an `always_comb` read. **Confirmed pre-existing** with a
+one-write-site probe (`arr[i] = arr[k] + a`, whose emission the port change does not touch):
+it diverges on the committed tree (`395b23a`'s chir_lower, the row's patch reverse-applied) — an
+ADMITTED-AND-DIVERGENT shape not in II.3.3, masked in the corpus because every array read there
+reaches a drive. **Fixed:** `forward_comb_mem_index` applies the same committing-stage mux to
+every `MemIndex` in the combinational phases, for a memory of write latency ≥ 2 only (at latency
+1 the committing stage is this cycle's staging, which a read before the write must not see).
+Remeasured: sv-baseline **no corpus change** (238 = 235 + 3 new); `arr_two_writes`,
+`arr_same_element` and the probe as `arr_comb_read` **agree on both legs, every sequence**.
+Not predicted: the defect itself. Predicted and held: no corpus emission change, the anchors
+byte-identical (the CPUs' register-file reads all reach `always_ff`).

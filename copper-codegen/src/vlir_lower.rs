@@ -423,6 +423,9 @@ fn lower_seq(
     // write port's COMMITTING stage, exactly `read_net_value`'s WriteFirst
     // rule applied in edge position.
     forward_ff_mem_index(&mut ff_stmts, &s.memories, &mem_use, leg);
+    for phase in comb_phases.iter_mut() {
+        forward_comb_mem_index(&mut phase.stmts, &s.memories, &mem_use, leg);
+    }
 
     // The read pipeline stage and the write commits close out `always_ff`;
     // nonblocking assignment makes their position relative to the register
@@ -2353,72 +2356,6 @@ fn forward_ff_mem_index(
     use_: &MemPortUse,
     leg: &Legalizer,
 ) {
-    fn rewrite_expr(
-        e: &mut VLIRExpr,
-        memories: &[SHIRMemory],
-        use_: &MemPortUse,
-        leg: &Legalizer,
-    ) {
-        // Children first, so a nested MemIndex inside a rewritten mux's address
-        // is handled exactly once.
-        match e {
-            VLIRExpr::BinOp { left, right, .. } => {
-                rewrite_expr(left, memories, use_, leg);
-                rewrite_expr(right, memories, use_, leg);
-            }
-            VLIRExpr::UnOp { expr, .. }
-            | VLIRExpr::Slice { expr, .. }
-            | VLIRExpr::Resize { expr, .. }
-            | VLIRExpr::SignCast { expr, .. } => rewrite_expr(expr, memories, use_, leg),
-            VLIRExpr::Ternary { cond, then_val, else_val } => {
-                rewrite_expr(cond, memories, use_, leg);
-                rewrite_expr(then_val, memories, use_, leg);
-                rewrite_expr(else_val, memories, use_, leg);
-            }
-            VLIRExpr::Concat(parts) => {
-                for p in parts {
-                    rewrite_expr(p, memories, use_, leg);
-                }
-            }
-            VLIRExpr::DynBit { base, index } => {
-                rewrite_expr(base, memories, use_, leg);
-                rewrite_expr(index, memories, use_, leg);
-            }
-            VLIRExpr::MemIndex { mem, addr } => {
-                rewrite_expr(addr, memories, use_, leg);
-                let Some(m) = memories
-                    .iter()
-                    .find(|m| !m.received && leg.get(&m.name) == *mem)
-                else {
-                    return;
-                };
-                let read_addr = (**addr).clone();
-                let mut value = e.clone();
-                for port in 0..m.write_ports {
-                    if !use_.writes.contains(&(m.name.clone(), port)) {
-                        continue;
-                    }
-                    let (en, waddr, wdata) = write_commit_nets(&m.name, port, m.write_lat);
-                    let addr_expr = read_addr.clone();
-                    value = VLIRExpr::Ternary {
-                        cond: Box::new(VLIRExpr::BinOp {
-                            left: Box::new(VLIRExpr::Var(leg.get(&en))),
-                            op: VLIRBinOp::LogicalAnd,
-                            right: Box::new(VLIRExpr::BinOp {
-                                left: Box::new(addr_expr),
-                                op: VLIRBinOp::Eq,
-                                right: Box::new(VLIRExpr::Var(leg.get(&waddr))),
-                            }),
-                        }),
-                        then_val: Box::new(VLIRExpr::Var(leg.get(&wdata))),
-                        else_val: Box::new(value),
-                    };
-                }
-                *e = value;
-            }
-            VLIRExpr::Var(_) | VLIRExpr::Lit { .. } => {}
-        }
-    }
     fn rewrite_stmt(
         st: &mut VLIRFFStmt,
         memories: &[SHIRMemory],
@@ -2427,14 +2364,14 @@ fn forward_ff_mem_index(
     ) {
         match st {
             VLIRFFStmt::NonBlockingAssign { value, .. } => {
-                rewrite_expr(value, memories, use_, leg)
+                forward_mem_index_expr(value, memories, use_, leg, false)
             }
             VLIRFFStmt::MemAssign { addr, value, .. } => {
-                rewrite_expr(addr, memories, use_, leg);
-                rewrite_expr(value, memories, use_, leg);
+                forward_mem_index_expr(addr, memories, use_, leg, false);
+                forward_mem_index_expr(value, memories, use_, leg, false);
             }
             VLIRFFStmt::If { condition, then_stmts, else_stmts } => {
-                rewrite_expr(condition, memories, use_, leg);
+                forward_mem_index_expr(condition, memories, use_, leg, false);
                 for s in then_stmts {
                     rewrite_stmt(s, memories, use_, leg);
                 }
@@ -2445,9 +2382,9 @@ fn forward_ff_mem_index(
                 }
             }
             VLIRFFStmt::Case { selector, arms, default } => {
-                rewrite_expr(selector, memories, use_, leg);
+                forward_mem_index_expr(selector, memories, use_, leg, false);
                 for a in arms {
-                    rewrite_expr(&mut a.selector_value, memories, use_, leg);
+                    forward_mem_index_expr(&mut a.selector_value, memories, use_, leg, false);
                     for s in &mut a.stmts {
                         rewrite_stmt(s, memories, use_, leg);
                     }
@@ -2462,6 +2399,139 @@ fn forward_ff_mem_index(
     }
     for st in stmts {
         rewrite_stmt(st, memories, use_, leg);
+    }
+}
+
+/// A `MemIndex` rewritten into the committing-stage forwarding mux, per write port,
+/// highest index outermost. `comb`: the read is in `always_comb` position, where only
+/// a memory whose write commits a stage LATER (write latency >= 2, every array
+/// register) has a write in flight that the array does not hold yet; at latency 1
+/// the committing stage is this cycle's staging, which a combinational read before
+/// the write must not see.
+fn forward_mem_index_expr(
+    e: &mut VLIRExpr,
+    memories: &[SHIRMemory],
+    use_: &MemPortUse,
+    leg: &Legalizer,
+    comb: bool,
+) {
+    // Children first, so a nested MemIndex inside a rewritten mux's address
+    // is handled exactly once.
+    match e {
+        VLIRExpr::BinOp { left, right, .. } => {
+            forward_mem_index_expr(left, memories, use_, leg, comb);
+            forward_mem_index_expr(right, memories, use_, leg, comb);
+        }
+        VLIRExpr::UnOp { expr, .. }
+        | VLIRExpr::Slice { expr, .. }
+        | VLIRExpr::Resize { expr, .. }
+        | VLIRExpr::SignCast { expr, .. } => forward_mem_index_expr(expr, memories, use_, leg, comb),
+        VLIRExpr::Ternary { cond, then_val, else_val } => {
+            forward_mem_index_expr(cond, memories, use_, leg, comb);
+            forward_mem_index_expr(then_val, memories, use_, leg, comb);
+            forward_mem_index_expr(else_val, memories, use_, leg, comb);
+        }
+        VLIRExpr::Concat(parts) => {
+            for p in parts {
+                forward_mem_index_expr(p, memories, use_, leg, comb);
+            }
+        }
+        VLIRExpr::DynBit { base, index } => {
+            forward_mem_index_expr(base, memories, use_, leg, comb);
+            forward_mem_index_expr(index, memories, use_, leg, comb);
+        }
+        VLIRExpr::MemIndex { mem, addr } => {
+            forward_mem_index_expr(addr, memories, use_, leg, comb);
+            let Some(m) = memories
+                .iter()
+                .find(|m| !m.received && leg.get(&m.name) == *mem && (!comb || m.write_lat >= 2))
+            else {
+                return;
+            };
+            let read_addr = (**addr).clone();
+            let mut value = e.clone();
+            for port in 0..m.write_ports {
+                if !use_.writes.contains(&(m.name.clone(), port)) {
+                    continue;
+                }
+                let (en, waddr, wdata) = write_commit_nets(&m.name, port, m.write_lat);
+                let addr_expr = read_addr.clone();
+                value = VLIRExpr::Ternary {
+                    cond: Box::new(VLIRExpr::BinOp {
+                        left: Box::new(VLIRExpr::Var(leg.get(&en))),
+                        op: VLIRBinOp::LogicalAnd,
+                        right: Box::new(VLIRExpr::BinOp {
+                            left: Box::new(addr_expr),
+                            op: VLIRBinOp::Eq,
+                            right: Box::new(VLIRExpr::Var(leg.get(&waddr))),
+                        }),
+                    }),
+                    then_val: Box::new(VLIRExpr::Var(leg.get(&wdata))),
+                    else_val: Box::new(value),
+                };
+            }
+            *e = value;
+        }
+        VLIRExpr::Var(_) | VLIRExpr::Lit { .. } => {}
+    }
+}
+
+/// The combinational-position twin of [`forward_ff_mem_index`]: an array
+/// register's write staged in the previous resumption commits at the edge ending
+/// this one (write latency 2), so a combinational read of the array this cycle —
+/// a branch test, a wire, a memory staging value — must see it through the
+/// committing stage, as the `always_ff` reads already do. Until Phase C step 5
+/// (2026-11-06) only `always_ff` reads were forwarded and a combinational read saw
+/// the array one write behind (MEASUREMENTS §J.6; masked while every read reached
+/// a drive).
+fn forward_comb_mem_index(
+    stmts: &mut [VLIRStmt],
+    memories: &[SHIRMemory],
+    use_: &MemPortUse,
+    leg: &Legalizer,
+) {
+    let f = |e: &mut VLIRExpr| forward_mem_index_expr(e, memories, use_, leg, true);
+    fn walk(st: &mut VLIRStmt, f: &dyn Fn(&mut VLIRExpr)) {
+        match st {
+            VLIRStmt::WireAssign { value, .. } | VLIRStmt::PortAssign { value, .. } => f(value),
+            VLIRStmt::If { condition, edge_condition, then_stmts, else_stmts } => {
+                f(condition);
+                f(edge_condition);
+                for s in then_stmts {
+                    walk(s, f);
+                }
+                for s in else_stmts.iter_mut().flatten() {
+                    walk(s, f);
+                }
+            }
+            VLIRStmt::Case { selector, edge_selector, arms, default } => {
+                f(selector);
+                f(edge_selector);
+                for a in arms {
+                    f(&mut a.selector_value);
+                    for s in &mut a.stmts {
+                        walk(s, f);
+                    }
+                }
+                for s in default.iter_mut().flatten() {
+                    walk(s, f);
+                }
+            }
+            VLIRStmt::ForLoop { start, end, body, .. } => {
+                f(start);
+                f(end);
+                for s in body {
+                    walk(s, f);
+                }
+            }
+            VLIRStmt::IndexAssign { index, value, .. } => {
+                f(index);
+                f(value);
+            }
+        }
+    }
+    for st in stmts {
+        walk(st, &f);
     }
 }
 

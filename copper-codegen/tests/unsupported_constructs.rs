@@ -965,3 +965,29 @@ fn a_runtime_empty_counted_for_ending_an_enclosing_for_has_its_own_diagnostic() 
     let constant = format!("const CNT: usize = 0x3;\n{constant}");
     transpile(&constant).expect("a constant inner bound is statically non-empty and transpiles");
 }
+
+/// An element write to an array register inside a combinational `for`: one write site
+/// run once per iteration, all in one cycle. Measured 2026-11-06 (Phase C step 5,
+/// MEASUREMENTS §J.6) admitted and divergent — the site's one write port had its nets
+/// reassigned per iteration, so only the last iteration's write committed. Refused
+/// since, transpiler only (the macro admits: a REFUSED-one shape for the coordinator's
+/// II.3). Two writes as separate statements are supported (II.3 (c),
+/// `tests/fixtures/array_two_writes_dut.rs`).
+#[test]
+fn an_array_register_element_write_inside_a_combinational_for_is_refused() {
+    let src = r#"
+#[hardware(sequential)]
+async fn arr_for_writes(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, k: In<Bits<2>, MainClk>, q: RegOut<Bits<8>, MainClk>) {
+    let mut arr = [Bits::<8>::zero(); 4];
+    loop {
+        q.write(arr[k.read().as_usize()]);
+        for j in 0..4 {
+            arr[j] = a.read() + arr[j];
+        }
+        clk.tick().await;
+    }
+}
+"#;
+    let err = transpile(src).expect_err("NOW SUPPORTED: an element write in a comb `for` transpiles — sweep it");
+    assert!(err.contains("inside a combinational `for`"), "a different error: {err}");
+}

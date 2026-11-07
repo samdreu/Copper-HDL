@@ -2134,6 +2134,13 @@ fn lower_seq_body(
         });
     }
     loop_body.extend(lower_stmts(loop_stmts, &mut ctx)?);
+    // An array register's write-port count is the most element writes one segment
+    // staged (at least the one port it was declared with).
+    for m in memories.iter_mut() {
+        if let Some(&n) = ctx.array_write_ports.get(&m.name) {
+            m.write_ports = m.write_ports.max(n);
+        }
+    }
 
     let has_tick = loop_body.iter().any(|s| matches!(s, CHIRStmt::AwaitTick { .. }));
     if !has_tick {
@@ -2421,10 +2428,19 @@ pub(crate) struct LowerCtx<'a> {
     /// name → (element type, depth, address width). Lowered as an internal
     /// memory (array + staged write commit) with COMBINATIONAL word reads.
     array_regs: std::collections::HashMap<String, (CHIRType, usize, usize)>,
-    /// Array registers already written in the CURRENT tick-free segment: a read
-    /// lowered after the write statement takes the write-through mux against
-    /// the `<name>_fwd_*` wires. Cleared at every `AwaitTick`.
-    array_written: std::collections::HashSet<String>,
+    /// Array registers already written in the CURRENT tick-free segment, with how
+    /// many element writes it has staged so far: write `k` of a segment stages
+    /// write port `k` (program order), and a read lowered after the writes takes
+    /// the write-through mux over those ports, the latest outermost. Cleared at
+    /// every `AwaitTick`. (Until Phase C step 5, 2026-11-06, a second write in a
+    /// segment was refused — one write port, II.3 (c), MEASUREMENTS §J.6.)
+    array_written: std::collections::HashMap<String, usize>,
+    /// The most element writes any one segment stages, per array register: its
+    /// write-port count.
+    array_write_ports: std::collections::HashMap<String, usize>,
+    /// Depth of combinational `for` bodies being lowered: an element write there is
+    /// one write site run once per iteration, which one write port cannot carry.
+    comb_for_depth: usize,
     /// Locals (wires AND flattened registers) of struct type: name → struct
     /// name. What lets a whole-struct copy (`ex_mem = new_ex_mem;`) and a
     /// struct-typed leaf in a conditional tree expand per-field.
@@ -2465,7 +2481,9 @@ impl<'a> LowerCtx<'a> {
             bindings: std::collections::HashMap::new(),
             fns: std::collections::HashMap::new(),
             array_regs: std::collections::HashMap::new(),
-            array_written: std::collections::HashSet::new(),
+            array_written: std::collections::HashMap::new(),
+            array_write_ports: std::collections::HashMap::new(),
+            comb_for_depth: 0,
             struct_locals: std::collections::HashMap::new(),
             inlining: std::collections::HashSet::new(),
             structs: std::collections::HashMap::new(),
@@ -3372,7 +3390,10 @@ fn lower_expr_stmt(
             };
             // The loop variable is an integer index, in scope for the body.
             ctx.symbols.insert(var.clone(), CHIRType::UInt { width: Width::Concrete(32) });
-            let body = lower_stmts(&f.body, ctx)?;
+            ctx.comb_for_depth += 1;
+            let body = lower_stmts(&f.body, ctx);
+            ctx.comb_for_depth -= 1;
+            let body = body?;
             out.push(CHIRStmt::ForLoop { var, start, end, body, span });
         }
 
@@ -3509,16 +3530,34 @@ fn lower_expr_stmt(
             if let ExprType::Index(idx) = assign.left.as_ref() {
                 let base = extract_assign_target(&idx.base, span)?;
                 if let Some((elem_ty, _, addr_w)) = ctx.array_regs.get(&base).cloned() {
-                    if ctx.array_written.contains(&base) {
+                    if ctx.comb_for_depth > 0 {
+                        // Measured 2026-11-06 (MEASUREMENTS §J.6): one site, one port,
+                        // its nets reassigned per iteration — only the last
+                        // iteration's write committed. Admitted and divergent before.
                         return Err(CHIRLowerError::UnsupportedConstruct {
                             description: format!(
-                                "array register `{base}` is written twice in one cycle; it \
-                                 has ONE write port. Merge the writes into a single \
-                                 statement with muxed address and data"
+                                "an element write to array register `{base}` inside a \
+                                 combinational `for`: each iteration is a write of the same \
+                                 cycle, which the emitted write ports cannot carry from one \
+                                 statement"
                             ),
                             span,
-                            suggested_rewrite: None,
+                            suggested_rewrite: Some(
+                                "write the elements as separate statements, or compute the \
+                                 new words into a local array first"
+                                    .to_string(),
+                            ),
                         });
+                    }
+                    let port = ctx.array_written.get(&base).copied().unwrap_or(0);
+                    let wp = ctx.array_write_ports.entry(base.clone()).or_insert(0);
+                    *wp = (*wp).max(port + 1);
+                    for (suffix, ty) in [
+                        ("en", CHIRType::Bool),
+                        ("addr", CHIRType::UInt { width: Width::Concrete(addr_w) }),
+                        ("data", elem_ty.clone()),
+                    ] {
+                        ctx.symbols.entry(format!("{base}_wr{port}_{suffix}")).or_insert(ty);
                     }
                     let addr = resize_index(lower_expr(&idx.index, ctx)?, addr_w, ctx);
                     let ew = type_width(&elem_ty);
@@ -3529,12 +3568,12 @@ fn lower_expr_stmt(
                     let value = resize_to_target(value, &ew, ctx);
                     out.push(CHIRStmt::MemWrite {
                         mem: base.clone(),
-                        port: 0,
+                        port,
                         addr,
                         value,
                         span,
                     });
-                    ctx.array_written.insert(base);
+                    ctx.array_written.insert(base, port + 1);
                     return Ok(());
                 }
                 let index = lower_expr(&idx.index, ctx)?;
@@ -4696,23 +4735,26 @@ fn lower_index(idx: &ExprIndex, ctx: &mut LowerCtx) -> Result<CHIRExpr, CHIRLowe
                 mem: name.clone(),
                 addr: Box::new(index.clone()),
             };
-            if !ctx.array_written.contains(&name) {
-                return Ok(plain);
+            let written = ctx.array_written.get(&name).copied().unwrap_or(0);
+            // Ports in program order, the latest write outermost: it wins.
+            let mut value = plain;
+            for port in 0..written {
+                let hit = CHIRExpr::BinOp {
+                    left: Box::new(CHIRExpr::Var(format!("{name}_wr{port}_en"))),
+                    op: CHIRBinOp::LogicalAnd,
+                    right: Box::new(CHIRExpr::BinOp {
+                        left: Box::new(index.clone()),
+                        op: CHIRBinOp::Eq,
+                        right: Box::new(CHIRExpr::Var(format!("{name}_wr{port}_addr"))),
+                    }),
+                };
+                value = CHIRExpr::Mux {
+                    cond: Box::new(hit),
+                    then_val: Box::new(CHIRExpr::Var(format!("{name}_wr{port}_data"))),
+                    else_val: Box::new(value),
+                };
             }
-            let hit = CHIRExpr::BinOp {
-                left: Box::new(CHIRExpr::Var(format!("{name}_wr0_en"))),
-                op: CHIRBinOp::LogicalAnd,
-                right: Box::new(CHIRExpr::BinOp {
-                    left: Box::new(index),
-                    op: CHIRBinOp::Eq,
-                    right: Box::new(CHIRExpr::Var(format!("{name}_wr0_addr"))),
-                }),
-            };
-            return Ok(CHIRExpr::Mux {
-                cond: Box::new(hit),
-                then_val: Box::new(CHIRExpr::Var(format!("{name}_wr0_data"))),
-                else_val: Box::new(plain),
-            });
+            return Ok(value);
         }
     }
     let base = lower_expr(&idx.base, ctx)?;
@@ -5261,8 +5303,10 @@ fn validate_module_scope(module: &CHIRModule) -> Result<(), CHIRLowerError> {
             // An ARRAY REGISTER's write staging nets: synthesized by the memory
             // lowering, referenced by the write-through mux (see `lower_index`).
             for mem in &body.memories {
-                for suffix in ["en", "addr", "data"] {
-                    known.insert(format!("{}_wr0_{suffix}", mem.name));
+                for port in 0..mem.write_ports.max(1) {
+                    for suffix in ["en", "addr", "data"] {
+                        known.insert(format!("{}_wr{port}_{suffix}", mem.name));
+                    }
                 }
             }
             for sub in &body.submodules {
