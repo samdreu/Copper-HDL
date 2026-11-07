@@ -1008,3 +1008,92 @@ first bare run, on the flip as first committed, failed to BUILD: `cargo fix` had
    one-resumption count.
 6. **`classify_reads`** (the deferred/immediate read classification) has no consumer left in
    either front-end; the inventory should mark it retired with the injection.
+
+## H. Phase C step 4 — the transpiler's one port form, the trailing fold removed (2026-11-06)
+
+Branch `claude/phase-c-transpiler-257dc5` (from `paper` at `663bbe2`). D-20 obligation (4);
+SPEC I.0.7, I.6.9 (the transpiler's obligations), I.11 (what a combinational module keeps).
+Every prediction in H.0 was written here before the emission it predicts was changed. The
+instrument is `sv-baseline` (`copper-codegen/src/bin/sv-baseline.rs`), snapshot taken on
+`663bbe2`: **224 top-level modules** in `examples/`, `tests/`, `src/` (131 clocked, 4 refused
+sentinels; inline source strings in tests are not in it).
+
+### H.0 Inventory and predictions (written before any code change)
+
+**What exists.** After step 3 every clocked module's data outputs are `RegOut` (R8), so in
+`vlir_lower::lower_seq` `hold_outs` = the registered ports and every drive reaches
+`split_output_regs` (F3, the edge-sampled flop). Unreachable from a clocked module, and
+deleted: F1 for a clocked body (a top-level drive to a non-hold port → module-level `assign`;
+the seq body's `output_assigns` and its `MultiplyDrivenOutput` check), F2's sequential pieces
+(the single-phase `nested_port_drives` comb routing, `every_path_outs`, and the Moore hoist
+`hoist_moore_output_defaults`, which *is* reached — see below), F4 (`opening_hold_outputs`,
+`DriveMix`/`port_drive_mix`, `strip_closing_drives`, `shadow_hold_ff`, `hold_register_name`,
+the `<port>_hold` registers, `comb_defaults`, `VLIRHoldFormPort`/`hold_form_ports`), F5
+(`phase_scoped_output_ports`); in `shir_lower` the opening/closing tagging (`seen_in_read`,
+`forward_opening_drives`, `PortDrive::opening`) and `PortDrive`'s two value forms (one value,
+the forwarded one: `at_edge` is the identity on the combinational path); the trailing fold
+(`trailing_reg_outs`, the trailing segment's register updates folded into phase `n-1`).
+Kept for the combinational path: `lower_flat_stmts` (its continuous-`assign` arm is F1 for a
+combinational module), `nested_port_drives`, `hoist_branch_local_defaults`, `check_no_latches`.
+
+**Probe, the trailing segment** (a temporary `eprintln!` in `lower_to_shir`, reverted):
+20 of the 131 clocked modules have a non-empty segment after their last tick, all on the
+linear route (no extracted module has one — extraction ends every path at a tick). 16 are
+single-tick, 2 multi-tick (`trailing_out`, `trailing_local_into_head`), counting the probes
+`trailing_fold`, `trunc_data`, `trunc_oob`.
+
+**Probe, the same-edge memory binding** (`mem_binding`'s combinational arm, a register
+update in the phase that stages the read): used by exactly 12 modules, all single-tick with
+the `q = data()` update in the trailing segment (`mem_user`, `narrow_index_into_narrow_addr`,
+`ram_r1w2_wf`, `ram_r2w2`, `ram_r3w1`, `ram_read_first_mem`, `ram_wf_priority`,
+`ram_write_first`, `rom_from_contents`, `rom_from_fn`, `wide_index_into_narrow_addr`,
+`wide_index_sole_consumer`). Its only consumer is the fold: a folded trailing update latches
+one edge early, so it must read what the edge is about to deliver. Under D-8 every `data()` /
+`is_ready()` reads what the last edge delivered (I.10.1(d)), the registered net — so the arm
+is deleted with the fold.
+
+**Probe, the Moore hoist on a clocked body:** it fires in exactly one module, `seq6`
+(`b0`/`b1`/`b2` over a 3-bit state with 6 states).
+
+**The new lowering of the trailing region** (SPEC I.0.2: the resumption that ends at edge
+`N+1` runs the trailing region `T`, then the head `H`, to the head's tick): `T` moves into
+phase 0 *ahead of* `H` with one forwarding map in that order (its register updates no
+longer go to phase `n-1`), every drive takes the forwarded value (no committed-register
+special case), and `T` is guarded by a one-bit register `started_r` (power-on 0, set at
+edge 1), because the first resumption runs `pre; H` only. A module without a trailing segment
+gets no `started_r`.
+
+**Predicted emission diff (sv-baseline):**
+- (P-a) The 20 trailing modules CHANGE: a `started_r` register (`initial` 0, `started_r <= 1'b1`
+  every edge), `T`'s register updates and drives under `if (started_r)` in phase 0; in the 12
+  memory modules `T`'s reads take the registered net (`<m>_rd0_q0`/`_v0`) instead of
+  `<m>_rd0_data`/`_en`, and the port drive reads the forwarded update.
+- (P-b) `seq6` CHANGES: the three top `bK <= 1'b0` lines before the state `case` go (the
+  `case`'s empty default stays; its encodings 6 and 7 are unreachable).
+- (P-c) Nothing else changes: the 4 `REFUSED` sentinels unchanged, every combinational and
+  structural module **byte-identical** (checked separately below), every other clocked module
+  byte-identical (no hold form is reachable; `opening`/`value` were read only by the deleted
+  forms — except `merge_trailing_before_head`'s use sets, which see only trailing modules).
+
+**Predicted traces:**
+- (T-a) `regout_trailing_single_tick` (P12): sim = ref = SV, obs_{N+1} = Σ x_2..x_{N+1}; its
+  `SKIP` row is deleted and it sweeps; `regout_trailing_single_tick_is_the_trailing_fold`'s
+  pin flips to an agreement assertion.
+- (T-b) `trailing_fold` (II.3 row (f4), D-11 (iv)): **flips to agree** — the pin's divergence
+  at obs_1 was the fold executing `T` at edge 1, which `started_r` removes. (f4) is listed under
+  D-20 step (5) as part of the entry of I.9.2, but its mechanism is this step's fold.
+- (T-c) `preloop_probe` (f2) and `preloop_linear` (f3): **unchanged, still sim = ref ≠ SV** —
+  the pre-loop statements (extraction re-runs them, the linear route drops them) are I.9.2's
+  entry, step (5); this step adds no pre-loop lowering.
+- (T-d) The other 18 trailing modules: port traces **identical** (the fold was an encoding of
+  `T` shifted by one register state wherever `T` reads no input; the 12 memory modules shift
+  their internal `q` by one edge and their port not at all; `T`'s edge-1 effects in the fold
+  were writes of power-on zeros).
+- (T-e) `seq6`: identical (the removed default covers unreachable encodings only).
+- (T-f) Every anchor unchanged: BaseJump (`bsg_dff_en`, `bsg_counter_up_down`, `sipo_block`),
+  `sync_2ff_ref.sv`, the goldens (`det_010`, `det_110101`, `lfsr`, `shift_register`, the three
+  frozen traces), `dual_port_ram`, the `REFERENCE` rows, the two-clock pins, the pipelined CPU's
+  13 programs — none has a trailing segment or reaches the Moore hoist, so their SV is
+  predicted byte-identical, not merely trace-identical.
+- (T-g) G-G 0 DISAGREE; one more swept case (161 differential, 3 ignored); the reference leg
+  count grows by `regout_trailing_single_tick`'s sequences.
