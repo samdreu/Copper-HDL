@@ -52,7 +52,7 @@ async fn det_010(
 // the next iteration's leading `out_o.write(Zero)` clobbers the detection in the
 // same `tick_clock`'s post-edge before it is observed. The read timing (which
 // cycle each `in_i.read()` samples) is handled separately by the macro's static
-// edge-phase classification (`copper_analysis::classify_reads`, impl-plan item 3).
+// edge-phase classification (`copper_analysis::classify_reads` (retired with the barrier, Phase C steps 3–4), impl-plan item 3).
 #[hardware(sequential)]
 async fn det_010_awaits (
     clk: Clock<MainClk>,
@@ -124,7 +124,7 @@ mod tests {
     // phase differently by path (`design_docs/OUTDATED/
     // EXECUTION_MODEL_RECONCILIATION.md`). Impl-plan item 3 replaced that heuristic
     // with the macro's static edge-phase classification of each read site
-    // (`copper_analysis::classify_reads`), so the machine now samples inputs on the
+    // (`copper_analysis::classify_reads` (retired with the barrier, Phase C steps 3–4)), so the machine now samples inputs on the
     // correct cycles regardless of iteration count — and `det_010_awaits` uses
     // `RegOut` for its write-before-tick output. Both fixes together make the two
     // codings agree; the hardware-anchored version of this check is

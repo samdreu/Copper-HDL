@@ -200,7 +200,7 @@ fn det_010_matches_independent_verilog() {
 /// The variable-iteration-loop coding matches the SAME independent golden
 /// cycle-by-cycle under Verilator. This is **impl-plan item 3's provable claim**:
 /// replacing the runtime `synced_read` heuristic with CFG-derived static read
-/// timing (`copper_analysis::classify_reads`) makes the variable-iteration
+/// timing (`copper_analysis::classify_reads` (retired with the barrier, Phase C steps 3–4)) makes the variable-iteration
 /// `while in_i.read() == 0 { tick }` machine sample its inputs on the correct
 /// cycles, so it detects the "010" pattern where the independent hardware does.
 /// (The output uses `RegOut` — the write-before-tick Moore output axis — see the

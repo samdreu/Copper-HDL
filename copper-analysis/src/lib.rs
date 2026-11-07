@@ -34,7 +34,7 @@ mod cfg;
 mod init;
 mod shape;
 
-pub use cfg::{classify_reads, classify_reads_with, Cfg, DerivationFacts, EdgeKind, PhaseFacts, ReadTiming};
+pub use cfg::{Cfg, DerivationFacts, EdgeKind, PhaseFacts};
 pub use init::{
     check_register_initializers as check_register_initializers_with, is_constant_expr,
     non_constant_register_initializers, register_init_message,

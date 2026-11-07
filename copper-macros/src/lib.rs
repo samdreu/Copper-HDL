@@ -834,9 +834,7 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             // c2 (gate G6): the sim macro consumes the SHARED analysis crate — the
             // same one the transpiler consumes — proving a proc-macro can depend on
             // it with no dependency cycle. The inferred register set is logged for
-            // the FSM report; `inject_synced_reads` (item 3) additionally consumes
-            // the crate's `classify_reads` to bake per-read edge-phase timing into
-            // the generated code. Computed on the pristine ItemFn before we rewrite.
+            // the FSM report. Computed on the pristine ItemFn.
             let inferred_registers = cfg.as_ref().map(|c| c.registers()).unwrap_or_default();
             log::debug!(
                 "copper-analysis inferred registers for `{}`: {:?}",

@@ -1,6 +1,6 @@
 //! Read-timing regression suite: sim-vs-Verilator equivalence for multi-tick
 //! loops with CROSS-TICK input reads — the case the static read-timing
-//! classification targets (`copper_analysis::classify_reads`, impl-plan item 3;
+//! classification targets (`copper_analysis::classify_reads` (retired with the barrier, Phase C steps 3–4), impl-plan item 3;
 //! EXECUTION_MODEL_RECONCILIATION.md). Each module has a combinational (aliased)
 //! output, so a `verilator: PASS` here isolates read timing from the still-open
 //! output-timing axis. Every one of these would have failed before the fix (the

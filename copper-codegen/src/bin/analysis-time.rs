@@ -75,7 +75,6 @@ fn one_run(tokens: &str, mode: &str) {
                 let _ = c.check_reachability();
                 let _ = c.registers();
             }
-            let _ = copper_analysis::classify_reads_with(&f, cfg.as_ref());
         }
     }
 }
@@ -101,7 +100,6 @@ fn breakdown(tokens: &str, mode: &str) {
     timed!("check_reachability", copper_analysis::check_reachability(&f));
     timed!("check_clocked_outputs", copper_analysis::check_clocked_outputs(&f));
     timed!("infer_registers", copper_analysis::infer_registers(&f));
-    timed!("classify_reads", copper_analysis::classify_reads(&f));
     // The same work with one graph: how much of the above is rebuilding it.
     let t0 = Instant::now();
     let cfg = copper_analysis::Cfg::build(&f);

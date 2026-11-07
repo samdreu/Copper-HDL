@@ -4,13 +4,13 @@
 //!
 //! The unit tests in `src/cfg.rs` exercise the CFG builder internals; this file
 //! pins the *published* contract — [`infer_registers`], [`check_reachability`],
-//! [`check_definite_assignment`], [`classify_reads`], [`reference_sv_registers`],
+//! [`check_definite_assignment`], [`reference_sv_registers`],
 //! and the [`RegMatch`] asserts — the surface both front-ends (macro + transpiler)
 //! actually consume. A regression here is a regression in a compile-time guarantee.
 
 use copper_analysis::{
-    check_definite_assignment, check_reachability, classify_reads, infer_registers,
-    reference_sv_registers, Cfg, ReadTiming, RegMatch,
+    check_definite_assignment, check_reachability, infer_registers,
+    reference_sv_registers, Cfg, RegMatch,
 };
 use syn::ItemFn;
 
@@ -249,40 +249,6 @@ fn sequential_partial_output_is_not_a_latch() {
         }
     "#;
     assert!(check_definite_assignment(&f(src)).is_ok(), "enabled register is not a latch");
-}
-
-// ── read-timing classification (item 3) ──────────────────────────────────────
-
-/// Loop-top reads that precede a tick register at the edge → `Deferred`.
-#[test]
-fn pretick_reads_are_deferred() {
-    let src = r#"
-        #[hardware(sequential)]
-        async fn m(clk: Clock<C>, a: In<Bits<8>, C>, b: In<Bits<8>, C>, out: RegOut<Bits<8>, C>) {
-            loop {
-                let s = a.read() + b.read();
-                clk.tick().await;
-                out.write(s);
-            }
-        }
-    "#;
-    assert_eq!(classify_reads(&f(src)), vec![ReadTiming::Deferred, ReadTiming::Deferred]);
-}
-
-/// A trailing read after the last tick with nothing following consumes the value
-/// the edge produced → `Immediate` (the enabled-register idiom).
-#[test]
-fn trailing_read_is_immediate() {
-    let src = r#"
-        #[hardware(sequential)]
-        async fn dff_en(clk: Clock<C>, en: In<Logic, C>, q: RegOut<Logic, C>) {
-            loop {
-                clk.tick().await;
-                if en.read() == Logic::One { q.write(Logic::One); }
-            }
-        }
-    "#;
-    assert_eq!(classify_reads(&f(src)), vec![ReadTiming::Immediate]);
 }
 
 // ── reference-SV register extraction + G2 structural match ───────────────────

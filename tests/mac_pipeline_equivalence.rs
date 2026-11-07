@@ -28,7 +28,7 @@ const DUT_SRC: &str = include_str!("fixtures/mac_pipeline_dut.rs");
 // simulator now samples cross-tick reads at the registering edge (the pre-edge of
 // the tick_clock the read belongs to), matching the transpiled phase FSM and
 // independent hand-written Verilog — see EXECUTION_MODEL_RECONCILIATION.md. The
-// loop-top reads are classified `Deferred` by `copper_analysis::classify_reads`
+// loop-top reads are classified `Deferred` by `copper_analysis::classify_reads` (retired with the barrier, Phase C steps 3–4)
 // (impl-plan item 3), which is what samples them at the registering edge. Inputs
 // are read every 3 cycles at phase 0
 // (cycles 0, 3, 6), so the stimulus places its three input groups there.
