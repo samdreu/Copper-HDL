@@ -1,41 +1,10 @@
 // Startup probes for the reference-interpreter measurements
-// (tests/reference_leg_measurements.rs, design_docs/review/MEASUREMENTS.md §D):
-// the pre-loop re-execution of §B and the two linear-route defects of SPEC I.9.4,
-// each an ADMITTED-AND-DIVERGENT row of II.3 ((f2), (f3), (f4)). Not in
-// tests/fixtures/ because they are known-divergent and the sweep must stay green;
-// they become sweep fixtures with the Phase C entry (II.3.6's fix list, item 1).
+// (tests/reference_leg_measurements.rs, design_docs/review/MEASUREMENTS.md §D).
+// Each was an ADMITTED-AND-DIVERGENT row of II.3: (f4) here (closed by Phase C step 4),
+// (f2)/(f3) now in tests/fixtures/preloop_entry_dut.rs (closed by step 5).
 
-// §B probe (i), II.3 row (f2): a pre-loop RegOut write under control extraction.
-// The coroutine runs it once (I.9.3); the extraction route re-runs it at every
-// return to state 0.
-#[hardware(sequential)]
-async fn preloop_probe(clk: Clock<MainClk>, go: In<Logic, MainClk>, q: RegOut<Bits<8>, MainClk>) {
-    let mut cnt: Bits<8> = Bits::zero();
-    q.write(Bits::from_u8(7));
-    loop {
-        cnt = cnt + Bits::from_u8(1);
-        if go.read() == Logic::One {
-            clk.tick().await;
-            q.write(cnt);
-        }
-        clk.tick().await;
-    }
-}
-
-// D-11 probe (i-b), II.3 row (f3): the same pre-loop write on the LINEAR route,
-// which drops it silently (chir_lower's `_ => {}`).
-#[hardware(sequential)]
-async fn preloop_linear(clk: Clock<MainClk>, go: In<Logic, MainClk>, q: RegOut<Bits<8>, MainClk>) {
-    let mut cnt: Bits<8> = Bits::zero();
-    q.write(Bits::from_u8(7));
-    loop {
-        cnt = cnt + Bits::from_u8(1);
-        if go.read() == Logic::One {
-            q.write(cnt);
-        }
-        clk.tick().await;
-    }
-}
+// The pre-loop pair — §B probe (i) (row (f2)) and D-11's (i-b) (row (f3)) — moved to
+// `tests/fixtures/preloop_entry_dut.rs` when the Phase C entry closed both (2026-11-06).
 
 // D-11 probe (iv), II.3 row (f4): the linear route's phase-0 fold runs a trailing
 // region the coroutine has not executed at edge 1 — the trailing drive's power-on

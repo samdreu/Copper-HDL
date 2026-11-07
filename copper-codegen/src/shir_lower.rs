@@ -418,10 +418,10 @@ fn lower_structural_body(st: &CHIRStructuralBody) -> Result<SHIRStructuralBody, 
 
 // ── Sequential body ───────────────────────────────────────────────────────────
 
-/// The guard register of the trailing region (`lower_seq_body`, step 10): 0 until
-/// the first edge, 1 after it. A synthesized name, like the extraction route's
-/// `__copper_ctr*` counters.
-const STARTED_REG: &str = "__copper_started";
+/// The guard register of the trailing region and of the pre-loop statements
+/// (`lower_seq_body`, step 10): 0 until the first edge, 1 after it. A synthesized
+/// name, like the extraction route's `__copper_ctr*` counters.
+use copper_core::chir::STARTED_REG;
 
 fn lower_seq_body(
     seq: &CHIRSeqBody,
@@ -507,6 +507,9 @@ fn lower_seq_body(
     // MEASUREMENTS §H.
     let trailing = &segments[n_ticks];
     let has_trailing = !trailing.is_empty();
+    // The pre-loop statements, guarded by `!__copper_started` in segment 0 by
+    // `chir_lower` (SPEC I.9.2's entry), read the same bit.
+    let has_started = has_trailing || seq.entry_guard;
     let started_ty = CHIRType::UInt { width: Width::Concrete(1) };
     let mut phases: Vec<SHIRPhase> = Vec::new();
     // `__copper_started` is read (never assigned) by the walks below; the
@@ -594,7 +597,7 @@ fn lower_seq_body(
             }
         }
 
-        if phase_idx == 0 && has_trailing {
+        if phase_idx == 0 && has_started {
             post_edge.push(SHIRRegUpdate {
                 target: STARTED_REG.to_string(),
                 next_value: SHIRExpr::Lit(SHIRLit { ty: started_ty.clone(), value: 1 }),
@@ -617,7 +620,7 @@ fn lower_seq_body(
         phases.push(SHIRPhase { phase_idx, pre_edge, guarded_post_edge, post_edge });
     }
 
-    if has_trailing {
+    if has_started {
         registers.push(SHIRReg {
             name: STARTED_REG.to_string(),
             ty: started_ty.clone(),

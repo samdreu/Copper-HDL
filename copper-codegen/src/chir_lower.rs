@@ -1696,6 +1696,11 @@ fn lower_seq_body(
     // loop body. Collected here, lowered once the context exists, and prepended
     // to the loop body. Stored as (name, type, init expr, span).
     let mut pre_loop_wires: Vec<(String, CHIRType, &ExprType, SourceSpan)> = Vec::new();
+    // Pre-loop expression statements — a `RegOut` write, a memory staging, an
+    // assignment (SPEC I.9.3): statements of the FIRST resumption, executed once,
+    // in program order before the head. Lowered once the context exists, behind
+    // the entry guard (see where they are lowered).
+    let mut pre_loop_stmts: Vec<RawStmt> = Vec::new();
     // Seeded with the module's ports so pre-loop register inits that reference
     // ports (or later registers) can infer their width.
     let mut symbols = build_symbol_table(fir);
@@ -1973,7 +1978,7 @@ fn lower_seq_body(
                             suggested_rewrite: Some("replace `while cond { body }` with `loop { if !cond { break; } body clk.tick().await; }`".to_string()),
                         });
                     }
-                    _ => {}
+                    _ => pre_loop_stmts.push(stmt.clone()),
                 }
             }
             _ => {}
@@ -2097,6 +2102,37 @@ fn lower_seq_body(
             span: *span,
         });
     }
+    // The ENTRY of SPEC I.9.2: the pre-loop expression statements run once, as the
+    // first resumption's, ahead of the head. Both routes reach `shir_lower` with the
+    // head in phase 0, so the run-once form is one guard there: `__copper_started`,
+    // the carrier that is 0 during exactly the first resumption (I.7.2(j)) — the
+    // same bit that keeps the trailing region out of it. Until Phase C step 5
+    // (2026-11-06) the linear route dropped these statements here (`_ => {}`, II.3
+    // (f3)) and the extraction route moved them into state 0, re-running them at
+    // every return to it ((f2)); MEASUREMENTS §J.1.
+    let pre = lower_stmts(&pre_loop_stmts, &mut ctx)?;
+    let entry_guard = !pre.is_empty();
+    if entry_guard {
+        if let Some(span) = first_tick_span(&pre) {
+            return Err(CHIRLowerError::UnsupportedConstruct {
+                description: "`clk.tick().await` before the module's `loop`: the statements \
+                              before the loop are the first resumption's and run in no time \
+                              (SPEC I.2.2, I.9.3)"
+                    .to_string(),
+                span,
+                suggested_rewrite: Some("move the tick into the loop".to_string()),
+            });
+        }
+        loop_body.push(CHIRStmt::If {
+            condition: CHIRExpr::UnOp {
+                op: CHIRUnOp::LogicalNot,
+                expr: Box::new(CHIRExpr::Var(copper_core::chir::STARTED_REG.to_string())),
+            },
+            then_body: pre,
+            else_body: None,
+            span: fir.span,
+        });
+    }
     loop_body.extend(lower_stmts(loop_stmts, &mut ctx)?);
 
     let has_tick = loop_body.iter().any(|s| matches!(s, CHIRStmt::AwaitTick { .. }));
@@ -2114,6 +2150,7 @@ fn lower_seq_body(
         memories,
         submodules: ctx.submodules,
         loop_body,
+        entry_guard,
     })
 }
 
@@ -5234,6 +5271,10 @@ fn validate_module_scope(module: &CHIRModule) -> Result<(), CHIRLowerError> {
                 }
                 known.insert(sub.output_wire.clone());
             }
+            // The entry guard's carrier, declared by `shir_lower` (SPEC I.9.2).
+            if body.entry_guard {
+                known.insert(copper_core::chir::STARTED_REG.to_string());
+            }
             validate_stmts(&body.loop_body, &mut known, module.span)?;
         }
         CHIRBody::Structural(body) => {
@@ -8025,4 +8066,16 @@ mod tests {
             CHIRExpr::Resize { expr: Box::new(w), width: Width::Concrete(8) }
         );
     }
+}
+
+/// The span of the first `AwaitTick` anywhere in `stmts`, at any depth.
+fn first_tick_span(stmts: &[CHIRStmt]) -> Option<SourceSpan> {
+    stmts.iter().find_map(|s| match s {
+        CHIRStmt::AwaitTick { .. } => Some(*s.span()),
+        CHIRStmt::If { then_body, else_body, .. } => first_tick_span(then_body)
+            .or_else(|| else_body.as_deref().and_then(first_tick_span)),
+        CHIRStmt::Match { arms, .. } => arms.iter().find_map(|a| first_tick_span(&a.body)),
+        CHIRStmt::ForLoop { body, .. } => first_tick_span(body),
+        _ => None,
+    })
 }

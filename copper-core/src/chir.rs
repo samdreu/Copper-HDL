@@ -182,7 +182,15 @@ pub struct CHIRSeqBody {
     pub submodules: Vec<CHIRSubmoduleInst>,
     /// The infinite loop body containing one or more AwaitTick boundaries.
     pub loop_body: Vec<CHIRStmt>,
+    /// The loop body's segment 0 reads [`STARTED_REG`] to run the pre-loop
+    /// statements in the first resumption only (SPEC I.9.2's entry).
+    pub entry_guard: bool,
 }
+
+/// The one-bit carrier that is 0 during exactly the first resumption and 1 after
+/// the first edge (SPEC I.9.2, I.7.2(j)): it keeps the trailing region out of the
+/// first resumption and the pre-loop statements out of every later one.
+pub const STARTED_REG: &str = "__copper_started";
 
 #[derive(Debug, Clone)]
 pub struct CHIRRegDecl {

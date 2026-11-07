@@ -21,7 +21,7 @@
 
 mod common;
 
-use common::{verilator_available, EquivalenceTest, Pattern, Rng};
+use common::{verilator_available, EquivalenceTest, Rng};
 use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
@@ -34,6 +34,8 @@ impl ClockDomain for MainClk {}
 
 include!("ref_probes/startup_probes.rs");
 const PROBES_SRC: &str = include_str!("ref_probes/startup_probes.rs");
+include!("fixtures/preloop_entry_dut.rs");
+const PRELOOP_SRC: &str = include_str!("fixtures/preloop_entry_dut.rs");
 include!("fixtures/out_phase_dut.rs");
 const OUT_PHASE_SRC: &str = include_str!("fixtures/out_phase_dut.rs");
 const SYNC_TICK_LAST_SRC: &str = include_str!("ref_probes/sync_2ff_tick_last.rs");
@@ -84,17 +86,20 @@ macro_rules! run_go_q {
     }};
 }
 
-/// §B probe (i) and D-11's (i-b): PREDICTED sim = ref ≠ SV for both. The
-/// simulator and the interpreter both run the pre-loop write once; the extraction
-/// route re-runs it, the linear route drops it.
+/// §B probe (i) and D-11's (i-b): pinned sim = ref ≠ SV while the extraction route
+/// re-ran the pre-loop write at every return to state 0 and the linear route
+/// dropped it (II.3 (f2), (f3); P15 false). Since Phase C step 5 (2026-11-06) both
+/// routes run it once, in the first resumption, behind `__copper_started` (SPEC
+/// I.9.2's entry) — PREDICTED and measured to agree on all three legs
+/// (MEASUREMENTS §J.1). P15 holds on both routes.
 #[test]
-fn preloop_statement_is_spec_vs_transpiler_on_both_routes() {
+fn preloop_statement_agrees_on_both_routes() {
     if !verilator_available() {
         panic!("Verilator is absent: this measurement needs the SV leg and cannot be skipped silently");
     }
     let runs = [
-        ("preloop_probe", run_go_q!("preloop_probe", PROBES_SRC, preloop_probe, 64)),
-        ("preloop_linear", run_go_q!("preloop_linear", PROBES_SRC, preloop_linear, 64)),
+        ("preloop_probe", run_go_q!("preloop_probe", PRELOOP_SRC, preloop_probe, 64)),
+        ("preloop_linear", run_go_q!("preloop_linear", PRELOOP_SRC, preloop_linear, 64)),
     ];
     for (name, v) in runs {
         println!("{name}: transpiled {} interpreter {:?}", v.transpiled, v.interpreter);
@@ -103,10 +108,8 @@ fn preloop_statement_is_spec_vs_transpiler_on_both_routes() {
             "{name}: the interpreter was predicted to agree with the simulator: {:?}",
             v.interpreter
         );
-        assert!(!v.transpiled, "{name}: the transpiled SV was predicted to diverge (II.3 rows (f2)/(f3))");
-        // SPEC §III.2.8: sim = ref ≠ SV — a transpiler bug or a II.3 row (here (f2)/(f3)).
-        assert_eq!(v.pattern, Some(Pattern::SimEqRefNeSv), "{name}: {}", v.report);
-        v.record_pin(&format!("{name}: II.3 row {} (P15), the Phase C entry fixes it", if name == "preloop_probe" { "(f2)" } else { "(f3)" }));
+        assert!(v.transpiled, "{name}: the transpiled SV was predicted to agree (II.3 (f2)/(f3) closed): {}", v.report);
+        assert_eq!(v.pattern, None, "{name}: {}", v.report);
     }
 }
 

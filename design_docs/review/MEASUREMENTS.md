@@ -1229,3 +1229,70 @@ IR through `transpile_item_fn` (H.1).
 7. **A pre-loop non-`mut` `let` is a segment-0 wire in CHIR** (`trailing_fold`'s `r`), so a
    trailing read of it is promoted to a register (`r_r`) rather than folded to a constant —
    correct, one register more. Belongs with step 5's pre-loop handling.
+
+## J. Phase C step 5 — the II.3.6 fix list (2026-11-06)
+
+Branch `claude/phase-c-fixlist-0c597d` (from `paper` at `80ae993`). D-20 obligation (5); SPEC
+II.3.3 rows, II.3.4 (R21), II.3.6. Every prediction below was written here before the code it
+predicts was changed. Instrument: `sv-baseline`, snapshot of the untouched tree at `80ae993`
+(224 top-level modules), re-snapshotted after each row so each row's diff is its own.
+
+### J.1 Row 1 — the entry of I.9.2: (f2), (f3), P15
+
+**Inventory (a temporary `eprintln!` at both pre-loop sites, reverted).** Pre-loop expression
+statements reach the transpiler in exactly 5 of 224 modules: extraction route —
+`preloop_probe` (1 statement), `rv32i_cpu_pipelined` (4: three port writes, the first fetch
+staging); linear route — `preloop_linear` (1), `rv32i_cpu_transpilable` (1: the first fetch
+staging), `shift_register` (its `const { assert!(..) }`, a compile-time item that lowers to
+nothing, in two copies: the example and the fixture).
+
+**The form, decided on the evidence.** Two candidate entries (I.9.2): an entry value of
+`pc`/`phase_r` whose arm is `s_pre` and a clone of the head, or a one-bit started carrier
+(I.7.2(j)). The linear route has no `pc` and, single-tick, no `phase_r`, so the entry state
+would need a state register the route does not have plus a clone of the head on both routes;
+step 4's `__copper_started` is 0 during exactly the first resumption on both routes (each
+reaches `shir_lower::lower_seq_body` as phases, the extraction route as one phase whose body
+is `match pc`). **Chosen: the started carrier.** CHIR lowers the pre-loop expression
+statements (both routes — `control_extract` no longer moves them into state 0) into
+segment 0, after the pre-loop wires and ahead of the head, as `if (!__copper_started) { s }`;
+`shir_lower` declares `__copper_started` whenever the trailing region or the entry guard
+reads it. The first resumption runs `s_pre ; H`, every later one `T ; H` (I.0.2) — `T` and
+`s` are exclusive by the one bit. A pre-loop `tick` (R21) is refused by this lowering until
+row 9 puts the rule in both front-ends.
+
+**Predicted emission diff (sv-baseline):** exactly 4 modules change —
+- `preloop_probe`, `preloop_linear`: gain `__copper_started` (`initial` 0, set every phase-0
+  edge) and `if (!__copper_started) q <= 8'd7;` ahead of the head's drive; `preloop_probe`'s
+  state 0 no longer contains the write.
+- `rv32i_cpu_pipelined`: gains `__copper_started`; the three port writes and the fetch staging
+  leave state 0's arm and precede the `case (pc)` under `!__copper_started`.
+- `rv32i_cpu_transpilable`: gains `__copper_started` and a guarded first-fetch staging
+  `memory` read-port address/enable ahead of the head's.
+- `shift_register` (both copies) and every other module **byte-identical**.
+
+**Predicted traces:** `preloop_probe`, `preloop_linear` flip to **sim = ref = SV** (the pin in
+`tests/reference_leg_measurements.rs` becomes an agreement assertion; P15 holds on both
+routes); both CPUs trace-identical — the pipelined CPU's 13 programs (anchored) and the
+transpilable CPU's examples pass, because the head writes the three ports on every path and
+restages the fetch in the same resumption (masked, I.9.3). The probes become sweep fixtures
+(`tests/fixtures/preloop_entry_dut.rs`), so G-D grows by 2 cases and G-G by their sequences.
+
+**Measured.** sv-baseline against `80ae993`: **4 of 224 changed — `preloop_probe`,
+`preloop_linear`, `rv32i_cpu_pipelined`, `rv32i_cpu_transpilable`; `shift_register` and every
+other module byte-identical. As predicted.** The emitted forms are the predicted ones
+(`logic __copper_started;`, `initial … = 1'b0`, `if ((!__copper_started)) begin q <= 8'd7; end`
+ahead of the head, `__copper_started <= 1'b1;` at phase 0's edge). One detail the prediction
+did not name: in `rv32i_cpu_pipelined` the old emission also carried the four pre-loop
+statements **at the end of state 1** (the back edge's zero-time goto to state 0 spliced state
+0's body, pre-loop statements included — the (f2) re-run, masked because the head had just
+written the same forwarded values); they are gone with state 0's copy. A first run refused all
+four modules (`validate` did not know the carrier name) — fixed before measuring.
+
+Traces: `preloop_probe`, `preloop_linear` **sim = ref = SV** — as a sweep fixture
+(`tests/fixtures/preloop_entry_dut.rs`, both legs, every sequence) and in
+`tests/reference_leg_measurements.rs::preloop_statement_agrees_on_both_routes` (was
+`…_is_spec_vs_transpiler_on_both_routes`, the pin removed). `rv32i_pipelined_verilator` (the 13
+programs) passes; both CPU examples 13/13; both CPU sweep cases pass. **As predicted.**
+`tools/regression.sh --no-examples`: PARTIAL OK (434 s); G-D **163** (+2); G-F 92 (+2); **G-G
+differential 1252 PASS / 0 DISAGREE, reference 762 PASS; pinned disagreements 0** (2 before).
+No new `SKIP`/`REF_SKIP` row. P15 holds on both routes (it is the entry the two probes test).
