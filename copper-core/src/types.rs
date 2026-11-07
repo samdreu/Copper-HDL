@@ -394,12 +394,20 @@ impl<const N: usize> Bits<N> {
         Self { bits: result }
     }
 
-    // ── X-aware comparisons (Verilog `==` semantics) ──────────────────────────
+    // ── X-aware comparisons (IEEE 1800 `==`, `<`, … semantics) ──────────────────────────
 
-    /// Returns X if either operand contains any X bit, otherwise One/Zero.
+    /// IEEE 1800 `==` (SPEC I.14.2(h), D-19 2a-B): Zero when some bit pair is known
+    /// and differs, else X if any bit of either operand is X, else One.
     pub fn eq_logic(&self, other: &Self) -> Logic {
-        if !self.is_valid() || !other.is_valid() { return Logic::X; }
-        Logic::from_bool(self == other)
+        let mut any_x = false;
+        for i in 0..N {
+            match (self.bits[i], other.bits[i]) {
+                (Logic::X, _) | (_, Logic::X) => any_x = true,
+                (a, b) if a != b => return Logic::Zero,
+                _ => {}
+            }
+        }
+        if any_x { Logic::X } else { Logic::One }
     }
 
     pub fn ne_logic(&self, other: &Self) -> Logic { !self.eq_logic(other) }
@@ -1568,6 +1576,12 @@ mod tests {
         assert_eq!(a.eq_logic(&Bits::from_lit::<43>()), Logic::Zero);
         assert_eq!(a.eq_logic(&Bits::x()), Logic::X);
         assert_eq!(Bits::<8>::x().eq_logic(&Bits::from_lit::<42>()), Logic::X);
+        // IEEE 1800 `==`: a known differing bit decides, whatever the X bits are.
+        let mut p: Bits<8> = Bits::from_lit::<42>();
+        p.set(0, Logic::X);
+        assert_eq!(p.eq_logic(&Bits::from_lit::<43>()), Logic::X);
+        assert_eq!(p.eq_logic(&Bits::from_lit::<10>()), Logic::Zero);
+        assert_eq!(p.ne_logic(&Bits::from_lit::<10>()), Logic::One);
     }
 
     #[test]

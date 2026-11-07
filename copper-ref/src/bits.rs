@@ -243,8 +243,11 @@ impl RefBits {
 
     pub fn eq_logic(&self, o: &Self) -> Logic {
         self.same_width(o, "eq_logic");
+        // IEEE 1800 `==` (SPEC I.14.2(h)): a known differing bit pair decides 0.
+        let known = Self::mask(self.width) & !(self.x | o.x);
+        if (self.val ^ o.val) & known != 0 { return Logic::Zero; }
         if !self.is_valid() || !o.is_valid() { return Logic::X; }
-        Logic::from_bool(self == o)
+        Logic::One
     }
     fn cmp_logic(&self, o: &Self, f: impl Fn(u128, u128) -> bool) -> Logic {
         match (self.as_uint(), o.as_uint()) {

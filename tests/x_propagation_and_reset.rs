@@ -8,7 +8,7 @@
 //! # X splits into two regimes, and they behave completely differently
 //!
 //! * **Data** is X-*pessimistic*: X flows through the datapath and contaminates what
-//!   it touches (`eq` on an X operand is X, not false — see
+//!   it touches (`eq_logic` on an X operand is X unless a known bit differs — IEEE `==`, see
 //!   `copper-core/tests/port_and_type_edge_cases.rs::eq_logic_is_x_pessimistic`).
 //! * **Control** *aborts*: `as_bool()` and `as_uint()` panic on X rather than
 //!   propagating it, so branching on an unknown stops the simulation instead of

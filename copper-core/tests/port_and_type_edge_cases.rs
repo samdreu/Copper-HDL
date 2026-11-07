@@ -139,8 +139,8 @@ fn bits1_logic_roundtrip_both_ways() {
     assert_eq!(b.get(0), Logic::One);
 }
 
-/// An X anywhere in either operand makes an X-aware equality X (Verilog `===`-ish
-/// pessimism), while two identical valid values compare One.
+/// `eq_logic` is IEEE 1800 `==` (SPEC I.14.2(h)): an X makes it X unless a known bit
+/// pair already differs, which makes it Zero; two identical valid values compare One.
 #[test]
 fn eq_logic_is_x_pessimistic() {
     let a = Bits::<4>::from_usize(0b1010);
@@ -150,6 +150,8 @@ fn eq_logic_is_x_pessimistic() {
     let mut x = Bits::<4>::from_usize(0b1010);
     x.set(1, Logic::X);
     assert_eq!(x.eq_logic(&b), Logic::X, "an X operand poisons equality");
+    let c = Bits::<4>::from_usize(0b0010);
+    assert_eq!(x.eq_logic(&c), Logic::Zero, "a known differing bit decides (IEEE `==`)");
 }
 
 /// Reduction operators over an all-ones and a mixed vector.
