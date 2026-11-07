@@ -435,17 +435,23 @@ fn poison_run_for_the_register_proposition() {
         assert_eq!(poison_run(SYNC_TICK_LAST_SRC, "sync_2ff_tick_last", &[], &forced), Err("ff1".to_string()), "ff1 is live at the tick: the first POSITIVE");
     }
 
-    // The fold defect of I.7.5, by construction: the inference misses `v`, the
-    // poison run flags it (PREDICTED), so the corpus walk below has teeth.
+    // The fold defect of I.7.5, by construction. Until Phase C step 6 the inference
+    // missed `v` (a tick-bearing nested loop was one folded node with no defs) and
+    // the poison run flagged it — the walk below had teeth. The register graph now
+    // descends into the `for` (MEASUREMENTS §K.2): `v` is inferred, and the poison
+    // run must leave the trace unchanged. The teeth stay: forcing `v` into the
+    // poison set must still be caught.
     {
         let f = syn::parse_file(SYNC_TICK_LAST_SRC).unwrap();
         let item = f.items.iter().find_map(|i| match i { syn::Item::Fn(f) if f.sig.ident == "fold_defect" => Some(f.clone()), _ => None }).unwrap();
         let regs: BTreeSet<String> = copper_analysis::infer_registers(&item).into_iter().collect();
         println!("fold_defect: infer_registers = {regs:?}");
-        assert!(!regs.contains("v"), "I.7.5: the fold misses `v` today (if this fails, the defect was fixed — update the row)");
+        assert_eq!(regs, BTreeSet::from(["i".to_string(), "v".to_string()]), "I.7.5: the descended nested loop infers `v`");
         let m = Module::new(SYNC_TICK_LAST_SRC, "fold_defect", &[]).unwrap();
         let targets: HashSet<String> = m.assigned_in_loop().difference(&regs).cloned().collect();
-        assert_eq!(poison_run(SYNC_TICK_LAST_SRC, "fold_defect", &[], &targets), Err("v".to_string()), "the poison run catches the fold's under-inference");
+        assert_eq!(poison_run(SYNC_TICK_LAST_SRC, "fold_defect", &[], &targets), Ok(()), "nothing left to poison");
+        let forced: HashSet<String> = HashSet::from(["v".to_string()]);
+        assert_eq!(poison_run(SYNC_TICK_LAST_SRC, "fold_defect", &[], &forced), Err("v".to_string()), "`v` is live at the interior tick");
     }
 
     let mut flagged: BTreeMap<String, String> = BTreeMap::new();

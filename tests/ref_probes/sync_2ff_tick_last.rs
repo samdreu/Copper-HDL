@@ -16,9 +16,11 @@ async fn sync_2ff_tick_last(clk: Clock<MainClk>, d: In<Logic, MainClk>, q: RegOu
 
 // The nested-loop fold defect of SPEC I.7.5, verbatim: `v` is assigned before a
 // ticking `for` and read inside it after an interior tick — live at that tick, a
-// register of I.7.1 — but the inference folds the nested loop into one node with
-// no definitions and sees `v`'s use at the node's entry only, where it is not
-// live out of any tick node. PREDICTED: the poison run flags `v`.
+// register of I.7.1. Until Phase C step 6 the inference folded the nested loop
+// into one node with no definitions, saw `v`'s use at the node's entry only, and
+// missed it (the poison run flagged `v`, MEASUREMENTS §D.4). The register graph
+// now descends into the loop and infers {i, v} (§K.2); the swept twin is
+// `tests/fixtures/nested_loop_registers_dut.rs::nested_loop_missed`.
 #[hardware(sequential)]
 async fn fold_defect(clk: Clock<MainClk>, x: In<Bits<8>, MainClk>, q: RegOut<Bits<8>, MainClk>) {
     loop {

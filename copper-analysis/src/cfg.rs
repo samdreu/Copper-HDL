@@ -363,9 +363,9 @@ impl Cfg {
 
     /// The uncached computation behind [`Cfg::registers`].
     fn compute_registers(&self) -> Vec<String> {
-        let live_out = self.liveness();
+        let live_out = liveness_of(&self.reg_nodes);
         let mut across_boundary = BTreeSet::new();
-        for (i, node) in self.nodes.iter().enumerate() {
+        for (i, node) in self.reg_nodes.iter().enumerate() {
             if node.is_tick {
                 across_boundary.extend(live_out[i].iter().cloned());
             }
@@ -932,13 +932,6 @@ impl Cfg {
         Ok(())
     }
 
-    /// Backward-liveness fixpoint. Returns `live_out[i]` for every node. Edge kind is
-    /// irrelevant to the propagation — a value used after a tick is still live
-    /// *across* it, which is exactly what register inference keys on.
-    fn liveness(&self) -> Vec<BTreeSet<String>> {
-        liveness_of(&self.nodes)
-    }
-
     /// Per-clock-phase facts for the cycle-dataflow derivation table
     /// (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md` phase 1). **Reporting only** — no
     /// rule keys on this; it exists so the table's mechanical columns come from the
@@ -1264,7 +1257,7 @@ impl Builder {
     /// ```text
     /// loop  { B }        H → B → H                  (exit only by `break`)
     /// while c { B }      H[uses c] → bind → B → H,  H → next
-    /// for p in e { B }   E[uses e] → H | bind,      H → bind[defs p] → B → H,  H → next
+    /// for p in e { B }   E[uses e, defs p] → H | B,  H[uses p] → B → H,  H → next
     /// ```
     ///
     /// `continue` targets `H`, `break` targets `next`. A `for` whose range is
@@ -1308,18 +1301,20 @@ impl Builder {
                 header
             }
             Expr::ForLoop(f) => {
+                // The binding stands for the COUNTER of I.8.5's desugaring (I.7.2(g);
+                // D-10: a register of the kernel whatever the pattern): set at the
+                // entry, read by the header's test and increment. So a named counter
+                // is live at every interior tick; `_` names nothing (the transpiler's
+                // `__copper_ctr<n>`).
                 let mut binds = BTreeSet::new();
                 pat_bindings(&f.pat, &mut binds);
-                let bind = self.new_node(Node {
-                    defs: binds,
-                    succs: vec![(body_entry, EdgeKind::Comb)],
-                    ..Node::empty(span)
-                });
-                self.nodes[header].succs = vec![(bind, EdgeKind::Comb), (next, EdgeKind::Comb)];
+                self.nodes[header].uses = binds.clone();
+                self.nodes[header].succs = vec![(body_entry, EdgeKind::Comb), (next, EdgeKind::Comb)];
                 let mut uses = BTreeSet::new();
                 collect_reads(&f.expr, &mut uses);
-                let first = if statically_nonempty_range(&f.expr) { bind } else { header };
+                let first = if statically_nonempty_range(&f.expr) { body_entry } else { header };
                 self.new_node(Node {
+                    defs: binds,
                     uses,
                     succs: vec![(first, EdgeKind::Comb)],
                     ..Node::empty(span)

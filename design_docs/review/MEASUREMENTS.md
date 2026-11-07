@@ -1956,3 +1956,67 @@ doc comment already calls it a wire).
 - **Unit pin retired:** `cfg::tests::post_tick_def_read_pre_tick_is_a_register` (asserted
   `["ff1", "ff2"]`, I.7.6's obligation) → `post_tick_def_read_pre_tick_is_a_wire`, asserting
   `["ff1"]` for the head-read spelling and for the anchored tick-last one.
+
+### K.2 Predictions — (2) the nested loop's CFG descended
+
+The register graph (`Cfg::reg_nodes`, built by the same `Builder` with `expand_loops`) builds
+each nested loop as control flow: `loop` = header → body → header, left by `break`; `while c` =
+header[uses c] → body → header, header → exit; `for p in e` = entry[uses e, defs p] → header
+| body, header[uses p] → body → header, header → exit. The `for`'s binding stands for the
+counter of I.8.5's desugaring (I.7.2(g), D-10: "the counter `c` is a register of the kernel
+whatever the pattern"), so a named counter is read at the header and is live at every interior
+tick; a `_` counter has no name and stays outside the set, as before (`__copper_ctr`). The
+zero-iteration exit is omitted only for a range whose bounds are integer constant expressions of
+the source alone with `start < end` (`..=`: `<=`); a bound naming a const item or generic keeps
+the exit — over, never under (I.7.5's direction). Labelled `break`/`continue` go to the loop they
+name. Every other rule keeps the folded graph.
+
+Read off the 40 modules of `examples/`, `tests/` with a tick-bearing nested loop (a source scan),
+against today's sets:
+
+- **`tests/ref_probes/sync_2ff_tick_last.rs::fold_defect`: `{i}` → `{i, v}`** — the missed local
+  of I.7.5 (assigned before the `for`, read inside it after an interior tick).
+- **`tests/fixtures/extracted_dut.rs::ex_regfile`: `{ra, regs, wa, wd, we}` → `{regs}`** and
+  **`::ex_reg_then_wire`: `{r, xv}` → `{r}`** — the added local of I.7.5: `let we = wen.read()`
+  etc. are assigned after the head tick and read after `if h { loop { tick } }`; the halt loop
+  has no exit, so no path carries them across its tick, and they are wires of the head's
+  resumption. Under the fold, the halt loop was a node whose out-edge is a tick and they were
+  live out of it.
+- Every other module unchanged, including `det_for` (`ok` is assigned before the `for` and read
+  after it on the path through an interior tick and the exit, so it stays), `serializer`,
+  `uart_tx`, the UART receivers, the counted fixtures, the arms-only and nested-`continue`
+  fixtures, `for_empty*` (the run-time bounds are read at the entry only), and the pipelined CPU
+  (its halt `loop { tick }` has no exit and nothing is live into it). No module with only
+  tick-free nested loops changes (a fold had no defs, so expanding can only kill more).
+- Emitted SV: **no change** (sv-baseline 0 of 245). `v` in `fold_defect` and the `ex_*` locals
+  are realized by the transpiler's own mechanisms (control extraction hoists cross-state locals
+  and appends them to `fir.registers` itself; a same-state in-loop `let` is a wire whatever
+  `fir.registers` says).
+- Verdicts: none change. The poison-run pin on `fold_defect` (`tests/reference_leg_measurements.rs`,
+  "the fold probe's flag asserted present") **fails** and is inverted: `v` is no longer poisoned.
+  The poison run newly poisons `we`, `wa`, `wd`, `ra`, `xv` and stays clean.
+
+### K.3 (2) The nested loop's CFG descended — measured
+
+- **Inferred-set diff (register-baseline against the post-(1) snapshot): 4 of 175.** Three as
+  predicted — `fold_defect` `+v`; `ex_regfile` `−{ra, wa, wd, we}`; `ex_reg_then_wire` `−xv` —
+  and **one miss: `rv32i_cpu_pipelined` `−{fetched, mem_load}`.** The mechanism is the
+  `ex_regfile` one and I mis-applied it to the CPU: both are assigned after the head tick and
+  read after the halt `if mem_wb.is_ecall { …; loop { tick } }`, which the fold made a node with
+  a tick out-edge they were live across. I looked at what is live INTO the halt loop instead of
+  what the fold carried OUT of it. Both are wires of the head's resumption (the memory results
+  read through `data()` at the head).
+- **sv-baseline: 0 of 245**, as predicted. The CPU's SV is byte-identical, so its 13-program
+  anchor is untouched.
+- **Verdicts:** none can change (no SV changed; the simulator and the interpreter do not read
+  the register set).
+- **P2, the poison run (`tests/reference_leg_measurements.rs::poison_run_for_the_register_proposition`),
+  re-run: 111 modules clean, 0 flagged, 77 not eligible** (§D.4 had 47 clean; the D-8 rewrites
+  put the plain-`Out` modules in the leg). The fold probe: `infer_registers` = {i, v}, the poison
+  set is empty and the trace unchanged; forcing `v` into it is caught (`Poisoned("v")`) — the
+  probe keeps its teeth as a positive. The pin was inverted accordingly. The modules whose sets
+  shrank are in the clean set: `we`/`wa`/`wd`/`ra`/`xv`/`fetched`/`mem_load` are poisoned at every
+  tick and no read sees the poison (the CPU is leg-eligible only where the interpreter runs it;
+  `ex_regfile`/`ex_reg_then_wire` are).
+- `copper-codegen/tests/register_reconciliation.rs`: 110 clocked fixtures, no violation (the
+  `ex_*` locals were absorbed comb wires before and still are).
