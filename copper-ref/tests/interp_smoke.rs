@@ -274,9 +274,12 @@ async fn sm(clk: Clock<C>, x: In<Logic, C>, q: RegOut<Logic, C>) { loop { printl
     let div = "
 #[hardware(sequential)]
 async fn dv(clk: Clock<C>, x: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) { loop { q.write(x.read() / Bits::from_u8(2)); clk.tick().await; } }";
+    // `/` is I.14.3(b)'s truncating division since Phase C step 8 (it was refused
+    // as R15 until the transpiler lowered it).
     let mut m = Module::new(&format!("{PRELUDE}{div}"), "dv", &[]).unwrap();
-    let e = m.resume(&[("x", Value::Lit(8))]).unwrap_err();
-    assert!(matches!(e, RefError::Unsupported(ref s) if s.contains("R15")), "{e}");
+    m.resume(&[("x", Value::Lit(8))]).expect("`/` is interpreted");
+    m.edge();
+    assert_eq!(m.observe()[0].1, Value::Bits(copper_ref::RefBits::from_uint(8, 4)), "8 / 2");
 
     let comb = "
 #[hardware(combinational)]
