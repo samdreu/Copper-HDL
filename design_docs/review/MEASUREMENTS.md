@@ -2193,3 +2193,89 @@ bulk). Measured:
 - Poison run: **113 clean, 0 flagged, 77 not eligible** (the two new fixtures added). None of the
   three changed modules is leg-eligible (`SKIP` / `REF_SKIP`), so the evidence for them is the
   unchanged SV. Reconciliation 112 / P13 146 modules: no violation, 0 surplus.
+
+### K.11 The bare regression — measured
+
+First bare `tools/regression.sh` on `a88ff82`: **REGRESSION FAIL** — one test,
+`tests/timing_model_derivations.rs::the_two_phase_derivations_agree_except_where_extraction_hides_them`,
+whose extracted set gained `for_empty`, `for_empty_start` and `nested_loop_added`. Cause: the test
+replayed desugar / extract / lower by hand and skipped `transpile_fir`'s register append, so step
+5's `for_empty*` failed to lower there (the hoisted `__copper_ctr` was not a register and its
+initializer did not lower as a pre-loop wire) and its `Err` arm skipped them silently. They had
+never been compared. Hoist-by-liveness (K.7) gives such a local a zero-valued wire, so they lowered
+and were compared. Fixed by exposing `copper_codegen::lower_fir_to_shir` (the transpiler's own
+pipeline to SHIR, which `lower_fir_to_vlir` now calls) and using it in the test. All three are
+extracted into one `match pc`, like every member, and were added with that reason (`3e5145c`).
+
+Second bare run on `3e5145c` (laptop): **REGRESSION OK (257 s)**. 1220 passed, 0 failed, 89 ignored,
+141 test binaries; examples **32/32**; G-C 114 test files; G-D **186** differential cases (184 + the
+two fixtures), 3 ignored-with-reason (unchanged `SKIP` rows); G-F 113 modules, 76 skipped; **G-G
+differential 1467 PASS / 0 DISAGREE** (1455 + 12, the fixtures' 6 + 6), **reference 967 PASS**
+(955 + 12), **pinned 0**; G-E 5 anchored, 184 transpiler-only. **No new `SKIP`, `REF_SKIP` or `PARAMS`
+row.** Anchors: no anchored module's SV changed in any sv-baseline diff of this step (`mac_fsm`,
+`det_010`, `det_110101`, `lfsr`, `sync_2ff` + twins, the BaseJump examples, the two-clock pins, the
+pipelined CPU's SV byte-identical through all three inference changes). Their tests ran and passed
+in this run.
+
+### K.12 For the coordinator — SPEC items (SPEC files untouched)
+
+1. **P3 — row status: MEASURED, true on the corpus up to the stated direction.** Three
+   over-inferences removed: the head clause (K.1: 1 local left of I.7.5's 8, `trailing_local_into_head`'s
+   `w`), the fold (K.3: one miss fixed — `fold_defect`'s `v` — and 7 surplus locals in 3 modules
+   removed), and a third class I.7.5 does not name, a `let` inside an expression block (K.10: 22
+   locals in 3 modules). What remains is path-insensitivity: a counted `for` whose range is not a
+   literal non-empty range keeps its zero-iteration exit, and macro tokens all count — over,
+   never under. I.7.5 / I.7.6's map is stale: no head clause (`cfg.rs` `compute_registers`), the
+   register set is computed on `Cfg::reg_nodes` (the register graph, `Builder::expand_loops`,
+   `build_loop_expanded`), the folded node remains for every other rule, and `collect_reads`
+   returns free reads. The obligations of I.7.6 met here: "delete the head clause", "descend into
+   the nested loop's CFG", "two reconciliation fixtures" (`tests/fixtures/nested_loop_registers_dut.rs`),
+   retire the unit pin `post_tick_def_read_pre_tick_is_a_register` (restated as `…_is_a_wire`).
+   REG2/REG9/X9 and SS's back-edge sentence are SPEC/inventory text — for you.
+2. **I.7.2(g) as realized:** the register graph models a named `for` binding as I.8.5's counter
+   (set at entry, read by the header), so `i` is a register whenever the loop ticks, read after the
+   tick or not — D-10's reading. A `_` counter is nameless and outside the set (`__copper_ctr`).
+   I.7.2(g)'s "(D-10: …)" note says exactly this; worth a sentence that the analysis implements it.
+3. **P13 — row status: MEASURED (corpus), true after two fixes.**
+   `copper-codegen/tests/register_reconciliation.rs::corpus_realized_registers_are_inferred`,
+   146 modules, pinned empty. The first run found two emitted, unobservable surplus flops (K.5):
+   a hoisted source local outside the set (`nested_loop_added`'s `w`) and a promoted pre-loop
+   constant (`trailing_fold`'s `r_r`). Fixed (K.7): the hoist still moves by name mention, but a
+   hoisted SOURCE local is a register only if the inference names it, otherwise a wire of each
+   resumption; the passes' own counters stay registers; a pre-loop constant gets no carrier
+   (`CHIRSeqBody::pre_loop_constants`). I.7.6's "by name mention rather than liveness" is
+   therefore now "by name mention, realized by liveness". I.7.7's P13 bullet closes.
+4. **P14 — row status: MEASURED, true; no II.3 row.** Probe K.8–K.9: 15 swept modules, every
+   hoisted register's power-on value unstated and randomized → identical verdicts. The claim in the
+   code comment was wrong (and its example, `mac_pipeline`'s `product_r`, is a promoted wire, not a
+   hoisted local); corrected. The probe switch `COPPER_PROBE_HOISTED_INIT_UNSTATED` stays. III.1's
+   ASSERTED count drops by one (P14).
+5. **P2 — re-run: 113 clean, 0 flagged, 77 not eligible** (§D.4 had 47). The row's "re-run over the
+   corpus once D-8's rewrite puts the plain-`Out` modules in the leg" is done. `fold_defect` is now a
+   positive by forcing (`Poisoned("v")`), no longer a flagged under-inference.
+6. **R11's domain shrank — a decision for you (stopped, not changed).** `check_register_initializers`
+   asks only about pre-loop `let`s in the register set. With the head clause gone, a pre-loop
+   `let mut w = a.read()` that is a resumption wire (`trailing_local_into_head`'s shape with a
+   non-constant initializer) is now ADMITTED by both front-ends where both refused it before.
+   Measured on a throwaway fixture: it agrees on all three legs (6/6 PASS, the interpreter 864
+   cycles) — the first resumption reads the initializer once, as I.7.2(c) says. But `s_pre`'s
+   grammar (I.2.3) has no non-constant `let`, and I.7.4(c) / D-12's R11 already says the rule is to
+   be widened to every pre-loop `let`. That widening is now the only thing that would refuse this
+   shape. Parity holds either way.
+7. **Two transpiler defects found and fixed on the way**, neither in II.3's table: the pre-loop wire
+   path emitted a context-width literal at 64 bits (K.1; latent until a `let mut` was first demoted);
+   and P13's two surplus flops (item 3). The `as_usize`/`from_usize` width class (I.14.7 (3)) was
+   met again (K.7) and left alone.
+8. **I.7.5's "added" shape in its own words is not transpilable**: `for _ in 0..3 { tick; w =
+   x.read() }` is refused (a counted body's tick must be last; a wait loop's likewise). The fixture
+   uses the tick-last `loop { w = x.read(); if … { break } tick }`. The refusal is the existing
+   lowering limitation; I.7.5's example could use the tick-last spelling.
+9. **A test that replayed the pipeline by hand** (K.11) hid two step-5 modules from its comparison;
+   `lower_fir_to_shir` now gives tests the real pipeline. Any other hand-rolled replay is worth an
+   audit (not done here).
+10. **Anchors:** no anchored module's register set or SV changed in any of the step's diffs —
+   `mac_fsm`, `det_010`, `det_110101`, `lfsr` (the `assert_source_registers_match_reference_sv`
+   users), `sync_2ff` / `flag_sync` / `sync_2ff_concrete` ({ff1}), the pipelined CPU (SV
+   byte-identical through all three inference changes). The consumers checked: R11 (item 6),
+   `fir.registers` (sv-baseline per change), the G2 helpers (unchanged sets), the interpreter
+   (consumes no register set; the poison run does, item 5).
