@@ -291,6 +291,139 @@ pub fn register_init_call_message(name: &str, callee: &str) -> String {
     )
 }
 
+/// The **held pre-loop values** (D-21 §N.4, the shape I.7.2(b) with a non-constant
+/// initializer): a pre-loop `let` that the module loop never assigns but does read,
+/// whose initializer reads a run-time *value* — an `In` port, or an earlier pre-loop
+/// binding that is itself one. Every resumption reads the value the first one
+/// computed, so it is state the residue carries, yet I.7.1 (i) calls it a constant
+/// and the analysis no register. A clock or memory binding (`clk.clone()`,
+/// `Memory::new(clk.clone(), …)`) reads no `In` port and is not one. `(name, init)`
+/// in source order.
+pub fn held_preloop_values(f: &ItemFn) -> Vec<(String, &Expr)> {
+    let mut ports = BTreeSet::new();
+    for arg in &f.sig.inputs {
+        if let FnArg::Typed(pt) = arg {
+            let is_in = matches!(&*pt.ty, syn::Type::Path(tp)
+                if tp.path.segments.last().is_some_and(|s| s.ident == "In"));
+            if is_in {
+                pat_names(&pt.pat, &mut ports);
+            }
+        }
+    }
+    let Some(body) = f.block.stmts.iter().find_map(|s| match s {
+        Stmt::Expr(Expr::Loop(l), _) => Some(&l.body),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let (assigned, mentioned) = loop_names(body);
+    let mut valued = ports; // names whose value is a run-time value
+    let mut out = Vec::new();
+    for s in &f.block.stmts {
+        match s {
+            Stmt::Expr(Expr::Loop(_), _) => break,
+            Stmt::Local(l) => {
+                let Some(init) = &l.init else { continue };
+                let reads_value = reads_runtime(&init.expr, &valued).is_some();
+                let mut names = BTreeSet::new();
+                pat_names(&l.pat, &mut names);
+                if reads_value {
+                    for n in &names {
+                        if mentioned.contains(n) && !assigned.contains(n) {
+                            out.push((n.clone(), &*init.expr));
+                        }
+                    }
+                    valued.extend(names);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The names the loop body assigns (an assignment's or compound assignment's root,
+/// `x.set(..)`'s receiver, a `let` that shadows) and the names it mentions.
+fn loop_names(body: &syn::Block) -> (BTreeSet<String>, BTreeSet<String>) {
+    fn root(e: &Expr) -> Option<String> {
+        match e {
+            Expr::Path(p) if p.path.segments.len() == 1 => Some(p.path.segments[0].ident.to_string()),
+            Expr::Index(i) => root(&i.expr),
+            Expr::Field(fl) => root(&fl.base),
+            Expr::Paren(p) => root(&p.expr),
+            _ => None,
+        }
+    }
+    #[derive(Default)]
+    struct V {
+        assigned: BTreeSet<String>,
+        mentioned: BTreeSet<String>,
+    }
+    impl<'ast> Visit<'ast> for V {
+        fn visit_expr_assign(&mut self, a: &'ast syn::ExprAssign) {
+            self.assigned.extend(root(&a.left));
+            syn::visit::visit_expr_assign(self, a);
+        }
+        fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
+            use syn::BinOp::*;
+            if matches!(
+                b.op,
+                AddAssign(_) | SubAssign(_) | MulAssign(_) | DivAssign(_) | RemAssign(_) | BitXorAssign(_)
+                    | BitAndAssign(_) | BitOrAssign(_) | ShlAssign(_) | ShrAssign(_)
+            ) {
+                self.assigned.extend(root(&b.left));
+            }
+            syn::visit::visit_expr_binary(self, b);
+        }
+        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+            if m.method == "set" || m.method == "as_array_mut" {
+                self.assigned.extend(root(&m.receiver));
+            }
+            syn::visit::visit_expr_method_call(self, m);
+        }
+        fn visit_local(&mut self, l: &'ast syn::Local) {
+            pat_names(&l.pat, &mut self.assigned);
+            syn::visit::visit_local(self, l);
+        }
+        fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+            if p.qself.is_none() && p.path.segments.len() == 1 {
+                self.mentioned.insert(p.path.segments[0].ident.to_string());
+            }
+            syn::visit::visit_expr_path(self, p);
+        }
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            // A macro's tokens may name a binding (`assert!(x == …)`): count them.
+            for t in m.tokens.clone() {
+                if let proc_macro2::TokenTree::Ident(i) = t {
+                    self.mentioned.insert(i.to_string());
+                }
+            }
+        }
+    }
+    let mut v = V::default();
+    v.visit_block(body);
+    (v.assigned, v.mentioned)
+}
+
+/// H1 (D-21 §N.4, prototype): refuse a held pre-loop value, both front-ends.
+pub fn check_held_preloop_values(f: &ItemFn) -> Result<(), syn::Error> {
+    match held_preloop_values(f).first() {
+        None => Ok(()),
+        Some((name, init)) => Err(syn::Error::new(init.span(), held_preloop_message(name))),
+    }
+}
+
+/// The message both front-ends print for a held pre-loop value.
+pub fn held_preloop_message(name: &str) -> String {
+    format!(
+        "`{name}` is computed once, before the module loop, from a value read at run time, and \
+         read again inside the loop: every cycle sees the first cycle's value, so `{name}` is a \
+         register — but its value at power-on is the input's, which the hardware does not have. \
+         Make it a register with a constant start (`let mut {name} = Bits::zero();` or \
+         `Bits::x()`) and assign it where it should be sampled, or read the input inside the loop"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +524,20 @@ mod tests {
         assert_eq!(calls("seed()"), vec!["seed".to_string()]);
         assert_eq!(calls("Other::bubble()"), vec!["Other::bubble".to_string()]);
         assert_eq!(calls("Bits::from_u32(g(1))"), vec!["g".to_string()]);
+    }
+
+    #[test]
+    fn a_held_preloop_value_is_found_and_a_wire_or_a_clock_binding_is_not() {
+        let held = |body: &str| held_preloop_values(&fn_of(body)).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        assert_eq!(held("let x = a.read(); loop { o.write(x); clk.tick().await; }"), vec!["x"]);
+        assert_eq!(held("let x = a.read(); let y = x + 1; loop { o.write(y); clk.tick().await; }"), vec!["y"]);
+        // C2's wire: reassigned in the loop.
+        assert!(held("let mut w = a.read(); loop { o.write(w); clk.tick().await; w = a.read(); }").is_empty());
+        // Read only before the loop.
+        assert!(held("let x = a.read(); let mut r = Bits::zero(); loop { o.write(r); clk.tick().await; r = r + a.read(); }").is_empty());
+        // A clock or memory binding.
+        assert!(held("let c2 = clk.clone(); let m = Memory::new(clk.clone(), 4); loop { o.write(m.data()); c2.tick().await; }").is_empty());
+        // A constant held binding is a constant (I.7.2(b)).
+        assert!(held("let k = Bits::from_u8(3); loop { o.write(k); clk.tick().await; }").is_empty());
     }
 }

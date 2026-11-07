@@ -1,0 +1,19 @@
+error: `x` is computed once, before the module loop, from a value read at run time, and read again inside the loop: every cycle sees the first cycle's value, so `x` is a register — but its value at power-on is the input's, which the hardware does not have. Make it a register with a constant start (`let mut x = Bits::zero();` or `Bits::x()`) and assign it where it should be sampled, or read the input inside the loop
+  --> tests/ui/fail/held_preloop_read.rs:14:13
+   |
+14 |     let x = a.read();
+   |             ^
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/held_preloop_read.rs:1:25
+  |
+1 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Bits` and `Clock`
+ --> tests/ui/fail/held_preloop_read.rs:2:19
+  |
+2 | use copper_core::{Bits, Clock, ClockDomain};
+  |                   ^^^^  ^^^^^

@@ -42,7 +42,8 @@ mod shape;
 
 pub use cfg::{Cfg, DerivationFacts, EdgeKind, PhaseFacts};
 pub use init::{
-    call_path_text, check_register_initializer_calls,
+    call_path_text, check_held_preloop_values, check_register_initializer_calls, held_preloop_message,
+    held_preloop_values,
     check_register_initializers as check_register_initializers_with, is_constant_expr,
     is_core_const_ctor, non_const_calls_in_register_initializers,
     non_constant_register_initializers, preloop_register_initializers, register_init_call_message,

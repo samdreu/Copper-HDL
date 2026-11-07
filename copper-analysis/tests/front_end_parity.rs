@@ -303,3 +303,20 @@ fn r11_halves_refuse_their_witnesses_and_admit_their_twins() {
     assert!(copper_analysis::check_register_initializers(&f).is_ok());
     assert!(copper_analysis::check_register_initializer_calls_in(&f, &|_| false).is_ok());
 }
+
+/// D-21 §N.4 H1 (prototype): no corpus module has a held pre-loop value (the rule
+/// refuses it in both front-ends); the witness is ui/fail `held_preloop_read.rs`.
+#[test]
+fn no_corpus_module_holds_a_preloop_read() {
+    let mods = all_hardware_fns();
+    let mut held = BTreeSet::new();
+    let mut looked = 0;
+    for (name, f) in &mods {
+        looked += 1;
+        for (v, _) in copper_analysis::held_preloop_values(f) {
+            held.insert(format!("{name}::{v}"));
+        }
+    }
+    println!("held pre-loop values: {} modules scanned, {} flagged", looked, held.len());
+    assert!(held.is_empty(), "{held:#?}");
+}

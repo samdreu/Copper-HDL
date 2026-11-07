@@ -873,6 +873,11 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             }) {
                 return err.to_compile_error().into();
             }
+            // D-21 §N.4 H1 (prototype): a held pre-loop value is refused. Same
+            // function, same message, in `transpile_target`.
+            if let Err(err) = copper_analysis::check_held_preloop_values(&input_fn) {
+                return err.to_compile_error().into();
+            }
             // The memory-port staging rules and the plain-`Out`-from-a-read-result
             // rule — transpiler-only until 2026-10-23, now enforced here too (front-end
             // parity): one access per bus per cycle, a read result observed only after
