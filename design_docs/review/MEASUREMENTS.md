@@ -2935,6 +2935,28 @@ Recommendation: **H1** — it is the smallest change, it is R11's own reason (a 
 hold has to come from somewhere it can state), and it refuses nothing in the corpus; H2 if `s_pre`
 should mean everything the coroutine means.
 
+**N.4.1 Both prototyped (user: "explore both", 2026-11-07).** One detector shared by both,
+`copper_analysis::held_preloop_values`: a pre-loop `let` the module loop never assigns but mentions,
+whose initializer reads an `In` port or an earlier such binding; clock and `Memory` bindings excluded.
+Predictions were written first (notes file `phase-c-consts-d21.md`).
+
+| | **H1 — refuse** (branch `claude/phase-c-consts-h1`, `9112ef0`, `f5ec675`) | **H2 — register loaded by the first resumption** (branch `claude/phase-c-consts-h2`, `326bdbf`, `5f1b14e`, `5d9153d`) |
+|---|---|---|
+| Change | `check_held_preloop_values` in both front-ends, one message ("`x` is computed once, before the module loop, from a value read at run time, and read again inside the loop …"); ui/fail `held_preloop_read`; `front_end_parity` corpus scan | `Cfg::registers` counts a held value; R11's halves and the macro's `const { }` wrap skip it; the transpiler rewrites `let x: T = e;` → `let mut x: T = <X>; x = e;` (no `initial`, loaded under `!__copper_started`); the projection test reads a held `let` as a first-resumption statement; the B2 test skips it |
+| Emitted SV of the witness | refused | `o <= (!__copper_started ? a : x); x <= (!__copper_started ? a : x);` — no power-on value for `x` |
+| Witness and twins | refused by both | `preloop_held_read` 6/6, `preloop_held_two_ticks` 6/6, `preloop_held_cond` (chained `y = x + 1`, read on one path) 8/8 PASS on all three legs |
+| Corpus | 272 `#[hardware]` fns scanned, **0 flagged** (predicted 0) | register sets of existing modules unchanged; sv-baseline: only new modules (predicted 0 changed) |
+| False positive found | **both**: the first full run failed `unsupported_constructs::preload_reading_a_signal_is_rejected` — a `Memory::from_fn` preload reading a port was caught by the detector before I.10's "Initial contents must be constant" rule; fixed by excluding `Memory` bindings (not predicted) | same |
+| Bare regression (after the fix) | **REGRESSION OK (443 s)**: G-G 1608 PASS / 12 OUTSIDE / 0 DISAGREE, ref 1118, G-I 160, G-D 211, G-J 0 DISAGREE, examples 32/32 | **REGRESSION OK (409 s)**: G-G 1628 PASS / 12 OUTSIDE / 0 DISAGREE (+20, the 3 fixtures), ref 1138, G-I 163, G-D 214, G-J 0 DISAGREE, examples 32/32 |
+| Size | analysis +1 rule, both front-ends 1 call each | analysis register set, R11, macro wrap, transpiler source rewrite, 2 test walkers |
+| Prototype limits | the detector is syntactic (a `let` in the loop that shadows the name counts as an assignment — under-refuses) | as H1's detector; the rewrite handles `Logic`/`Bits<N>` held values only, the type annotated or a port read; the projection test now uses the analysis's detector (a shared-code caveat for an independent check) |
+| SPEC text it needs | R11 (II.1) widened: "a register, or a pre-loop `let` live at a tick"; I.2.3's OPEN note closes as REFUSED | I.7.1 (i) amended: a pre-loop `let` with a non-constant initializer that is live at a tick is a register with no power-on value (assigned by the first resumption, like I.7.2(d)'s loop-born register); I.7.4 gains that case; I.2.3's OPEN note closes as IN |
+
+Neither branch is merged into `claude/phase-c-consts-867296`; each is one decision away. The
+recommendation stands at **H1** on size and on what it asks of the spec (R11's existing reason); H2
+is measured to work and gives the shape its coroutine meaning at the cost of a second kind of
+register (one with no power-on value set before the loop).
+
 ### N.5 Found on the way (recorded, not fixed)
 
 1. **A `u8` file const in a body expression emits as a 32-bit `localparam int`**:
