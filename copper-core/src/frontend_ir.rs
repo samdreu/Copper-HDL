@@ -55,6 +55,12 @@ pub struct FrontendModuleIR {
     pub file_fns: Vec<FrontendFnIR>,
     pub file_structs: Vec<ItemStruct>,
     pub file_consts: Vec<ItemConst>,
+    /// Source text of every item that can define a constant (SPEC I.14.4): the
+    /// `const` items, the inherent `impl` blocks (their associated consts and
+    /// `const fn`s) and the free `const fn`s. Read by
+    /// `copper_analysis::consts::ConstEnv::from_items`; text because this crate has
+    /// no `syn` (Phase C step 5, 2026-11-07).
+    pub file_const_source: Vec<String>,
     pub file_impls: Vec<FrontendImplIR>,
     pub file_traits: Vec<FrontendTraitIR>,
 

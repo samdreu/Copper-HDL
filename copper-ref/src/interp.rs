@@ -1151,6 +1151,9 @@ impl<'a> Exec<'a> {
                     _ => Err(unsup(format!("`{a}::{b}`"))),
                 };
             }
+            if let Some(v) = self.lookup_const(&format!("{a}::{b}"))? {
+                return Ok(v);
+            }
             if self.prog.structs.contains_key(&a) || self.prog.enums.contains_key(&a) {
                 return Err(unsup(format!("associated item `{a}::{b}` (II.3 row (d): an associated const)")));
             }

@@ -283,7 +283,12 @@ fn lower_seq(
             // The register's own width, not the literal's: a `let mut pc: u8 = 0`
             // arrives as a 64-bit literal, and `pc = 64'd0` into `logic [7:0]`
             // is a width-truncation lint.
-            init: r.init.as_ref().map(|l| VLIRExpr::Lit { width: width_of(&r.ty), value: l.value }),
+            init: r.init.as_ref().map(|l| VLIRExpr::Lit { width: width_of(&r.ty), value: l.value }).or_else(|| {
+                r.init_param.as_ref().map(|p| VLIRExpr::Resize {
+                    expr: Box::new(VLIRExpr::Var(p.clone())),
+                    width: width_of(&r.ty),
+                })
+            }),
         })
         .collect();
 

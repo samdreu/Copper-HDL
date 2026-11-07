@@ -72,6 +72,7 @@ pub fn capture_frontend_ir(design_fn: &ItemFn, hardware_fns: &std::collections::
         file_fns: Vec::new(),
         file_structs: Vec::new(),
         file_consts: Vec::new(),
+        file_const_source: Vec::new(),
         file_impls: Vec::new(),
         file_traits: Vec::new(),
         span: capture_source_span(design_fn),
@@ -342,6 +343,8 @@ pub struct FileScope {
     pub fns: Vec<FrontendFnIR>,
     pub structs: Vec<ItemStruct>,
     pub consts: Vec<ItemConst>,
+    /// See `FrontendModuleIR::file_const_source`.
+    pub const_source: Vec<String>,
     pub impls: Vec<FrontendImplIR>,
     pub traits: Vec<FrontendTraitIR>,
 }
@@ -358,9 +361,21 @@ pub fn capture_file_scope(
         fns: Vec::new(),
         structs: Vec::new(),
         consts: Vec::new(),
+        const_source: Vec::new(),
         impls: Vec::new(),
         traits: Vec::new(),
     };
+    for item in &file.items {
+        let defines_constants = match item {
+            syn::Item::Const(_) => true,
+            syn::Item::Fn(f) => f.sig.constness.is_some(),
+            syn::Item::Impl(imp) => imp.trait_.is_none(),
+            _ => false,
+        };
+        if defines_constants {
+            scope.const_source.push(quote::ToTokens::to_token_stream(item).to_string());
+        }
+    }
 
     for item in &file.items {
         match item {

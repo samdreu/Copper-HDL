@@ -200,6 +200,12 @@ pub fn desugar_counted_loops_in(fir: &mut FrontendModuleIR) {
     let Some(idx) = fir.raw_statements.iter().position(is_loop_stmt) else {
         return;
     };
+    // The file's integer consts, so a bound named by one (`0..CLKS_PER_BIT`) is
+    // known statically, like a literal (the shared evaluator, SPEC I.14.4).
+    let consts = Consts {
+        values: const_values(fir),
+        generics: fir.signature.generics.iter().map(|g| g.name.clone()).collect(),
+    };
     let RawStmtKind::Expr(es) = &mut fir.raw_statements[idx].kind else {
         return;
     };
@@ -207,14 +213,6 @@ pub fn desugar_counted_loops_in(fir: &mut FrontendModuleIR) {
         return;
     };
     let mut next_counter = 0usize;
-    // The file's integer consts, so a bound named by one (`0..CLKS_PER_BIT`) is
-    // known statically, like a literal (the shared evaluator, SPEC I.14.4).
-    let consts = Consts {
-        values: copper_analysis::consts::eval_const_items(
-            fir.file_consts.iter().map(|c| (c.name.as_str(), c.value_text.as_str())),
-        ),
-        generics: fir.signature.generics.iter().map(|g| g.name.clone()).collect(),
-    };
     desugar_counted_loops(&mut l.body, &mut next_counter, &consts);
 }
 
@@ -2162,4 +2160,16 @@ fn ticks_only_in_arms(body: &[RawStmt]) -> bool {
         && ticking.iter().all(|s| {
             matches!(&s.kind, RawStmtKind::Expr(es) if matches!(es.expr, ExprType::If(_) | ExprType::Match(_)))
         })
+}
+
+/// The file's integer consts by value: the shared evaluator's environment
+/// (`ConstEnv`: const items, associated consts, `const fn`s) when the FIR carries the
+/// item sources, else the const items alone.
+fn const_values(fir: &FrontendModuleIR) -> std::collections::HashMap<String, i128> {
+    let mut v = copper_analysis::consts::eval_const_items(
+        fir.file_consts.iter().map(|c| (c.name.as_str(), c.value_text.as_str())),
+    );
+    let env = copper_analysis::consts::ConstEnv::from_items(fir.file_const_source.iter().map(String::as_str));
+    v.extend(env.values().iter().map(|(k, x)| (k.clone(), *x)));
+    v
 }

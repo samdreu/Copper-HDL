@@ -88,6 +88,8 @@ pub struct SHIRReg {
     pub name: String,
     pub ty: CHIRType,
     pub init: Option<SHIRLit>,
+    /// See `CHIRRegDecl::init_param`.
+    pub init_param: Option<String>,
 }
 
 /// A memory array instance. Mirrors `CHIRMemoryDecl` minus the span.

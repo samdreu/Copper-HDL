@@ -460,6 +460,11 @@ fn collect_item(it: &Item, prog: &mut Program) -> Result<(), RefError> {
                 if let syn::ImplItem::Fn(f) = ii {
                     prog.methods.insert((ty.clone(), f.sig.ident.to_string()), f.clone());
                 }
+                // An associated const is a const of I.14.4 named `T::K` (Phase C
+                // step 5, II.3 (d), MEASUREMENTS §J.13).
+                if let syn::ImplItem::Const(c) = ii {
+                    prog.consts.insert(format!("{ty}::{}", c.ident), (Some(c.ty.clone()), c.expr.clone()));
+                }
             }
         }
         _ => {}

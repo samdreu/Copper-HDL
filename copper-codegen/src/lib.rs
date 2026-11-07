@@ -381,6 +381,7 @@ fn inject_file_scope(fir: &mut copper_core::FrontendModuleIR, scope: &parser::Fi
     fir.file_fns.extend(scope.fns.iter().cloned());
     fir.file_structs.extend(scope.structs.iter().cloned());
     fir.file_consts.extend(scope.consts.iter().cloned());
+    fir.file_const_source.extend(scope.const_source.iter().cloned());
     fir.file_impls.extend(scope.impls.iter().cloned());
     fir.file_traits.extend(scope.traits.iter().cloned());
 }

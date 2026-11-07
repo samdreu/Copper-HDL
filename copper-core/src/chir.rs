@@ -198,6 +198,11 @@ pub struct CHIRRegDecl {
     pub ty: CHIRType,
     /// Initial value for simulation. Not emitted in synthesis output.
     pub init: Option<CHIRLit>,
+    /// A power-on value that is a const generic of the module (`let mut n = N;`):
+    /// emitted as `initial n = <width>'(N)` in the parametric module, since the
+    /// value is the instance's (SPEC I.14.4; Phase C step 5, MEASUREMENTS §J.13).
+    /// `init` is then `None`.
+    pub init_param: Option<String>,
     pub span: SourceSpan,
 }
 

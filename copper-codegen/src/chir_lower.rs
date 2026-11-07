@@ -1224,6 +1224,33 @@ fn mask_to(v: u128, width: Option<usize>) -> u128 {
     }
 }
 
+thread_local! {
+    /// The module being lowered's constant environment (`ConstEnv`: const items,
+    /// associated consts, `const fn`s), read by `fold_const_text` and the
+    /// `const fn` arm of `fold_const_init`. Set for the duration of
+    /// `lower_seq_body` by [`ConstEnvScope`]; empty elsewhere (Phase C step 5,
+    /// MEASUREMENTS §J.13).
+    static CONST_ENV: std::cell::RefCell<copper_analysis::consts::ConstEnv> =
+        std::cell::RefCell::new(copper_analysis::consts::ConstEnv::default());
+}
+
+/// Installs a module's `ConstEnv` and restores the previous one on drop.
+struct ConstEnvScope(Option<copper_analysis::consts::ConstEnv>);
+
+impl ConstEnvScope {
+    fn enter(env: copper_analysis::consts::ConstEnv) -> Self {
+        ConstEnvScope(Some(CONST_ENV.with(|c| std::mem::replace(&mut *c.borrow_mut(), env))))
+    }
+}
+
+impl Drop for ConstEnvScope {
+    fn drop(&mut self) {
+        if let Some(prev) = self.0.take() {
+            CONST_ENV.with(|c| *c.borrow_mut() = prev);
+        }
+    }
+}
+
 /// Fold a constant initializer to its value (or to "undefined"). `width` is the
 /// register's concrete width when known, used to give `!`, `-` and casts their
 /// two's-complement meaning; `Err` carries the reason, for `lower_register_init`'s
@@ -1249,6 +1276,22 @@ fn fold_const_init(
                 .ok_or_else(|| "is a call through something other than a path".to_string())?;
             if path == "x" || path.ends_with("::x") {
                 return Ok(Undefined);
+            }
+            // A `const fn` of the file (`f(c, …)`, `T::f(c, …)`), its arguments folded
+            // first (SPEC I.14.4; II.3 (d), MEASUREMENTS §J.13).
+            if CONST_ENV.with(|c| c.borrow().is_const_fn(&path)) {
+                let mut args = Vec::with_capacity(call.args.len());
+                for a in &call.args {
+                    let v = value_of(fold_const_init(a, None, enums, consts)?, "a `const fn` argument")?;
+                    args.push(i128::try_from(v).map_err(|_| format!("passes `{path}` a value wider than 127 bits"))?);
+                }
+                return match CONST_ENV.with(|c| c.borrow().call(&path, &args)).map(u128::try_from) {
+                    Some(Ok(v)) => Ok(Value(mask_to(v, width))),
+                    _ => Err(format!(
+                        "calls `const fn {path}`, which the shared evaluator cannot run to an \
+                         integer (its body is outside the evaluator's grammar, or it fails)"
+                    )),
+                };
             }
             match classify_value_ctor(&path) {
                 Some(ValueCtor::Const { value, .. }) => Ok(Value(value)),
@@ -1390,6 +1433,12 @@ fn fold_const_text(
     }
     if let Some((_, value)) = resolve_enum_path(compact, enums) {
         return Ok(Value(value));
+    }
+    // A const of the environment: an item or an associated const (`T::K`).
+    if let Some(v) = CONST_ENV.with(|c| c.borrow().get(compact)) {
+        if let Ok(v) = u128::try_from(v) {
+            return Ok(Value(v));
+        }
     }
     if let Some(c) = consts.iter().find(|c| c.name == compact) {
         let value = compact_ident(&c.value_text);
@@ -1681,6 +1730,10 @@ fn lower_seq_body(
     hardware_fns: &std::collections::HashSet<String>,
     registry: &ModuleRegistry,
 ) -> Result<CHIRSeqBody, CHIRLowerError> {
+    // The file's constants for the register-initializer fold (SPEC I.14.4).
+    let _const_env = ConstEnvScope::enter(copper_analysis::consts::ConstEnv::from_items(
+        fir.file_const_source.iter().map(String::as_str),
+    ));
     let clock = fir.clocks.first()
         .map(|c| c.param_name.clone())
         .ok_or_else(|| CHIRLowerError::UnsupportedConstruct {
@@ -1873,6 +1926,7 @@ fn lower_seq_body(
                                 name: rname,
                                 ty: fty,
                                 init: finit,
+                                init_param: None,
                                 span: local.span,
                             });
                         }
@@ -1914,7 +1968,22 @@ fn lower_seq_body(
                         .attrs
                         .iter()
                         .any(|a| a == crate::control_extract::HOISTED_CROSS_STATE_ATTR);
+                    // A const generic as the power-on value (`let mut n: u32 = N;`):
+                    // the instance's value, stated as the parameter in the emitted
+                    // parametric module (SPEC I.14.4; MEASUREMENTS §J.13).
+                    let init_param = match &local.init {
+                        Some(ExprType::Path(p))
+                            if fir.signature.generics.iter().any(|g| {
+                                matches!(g.kind, copper_core::frontend_ir::GenericParamKind::Const)
+                                    && g.name == compact_ident(&p.path_text)
+                            }) =>
+                        {
+                            Some(compact_ident(&p.path_text))
+                        }
+                        _ => None,
+                    };
                     let init = match &local.init {
+                        _ if init_param.is_some() => None,
                         Some(e) => match lower_register_init(
                             &local.name,
                             e,
@@ -1933,6 +2002,7 @@ fn lower_seq_body(
                         name: local.name.clone(),
                         ty,
                         init,
+                        init_param,
                         span: local.span,
                     });
                 } else if let Some(init) = &local.init {

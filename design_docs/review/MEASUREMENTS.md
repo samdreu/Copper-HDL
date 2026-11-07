@@ -1744,3 +1744,55 @@ the shared message (its `.stderr` the only file `TRYBUILD=overwrite` wrote — n
 the same text on a linear-route and an extraction-route module; `front_end_parity.rs` test 1 runs
 the rule over the corpus, green. **(f6) closed, R21 in both front-ends with one message.**
 `tools/regression.sh --no-examples`: **PARTIAL OK (282 s)**; G-G differential 1431 PASS / 0 DISAGREE, reference 936, pinned 0.
+
+### J.13 Row 7, the rest of (d)
+
+**Two parts of the request need a different form — stopped, recorded.**
+- **R11 (`check_register_initializers`) on the shared evaluator.** In the macro the rule sees the
+  annotated `ItemFn` only — a proc macro is not given the file — so it cannot *evaluate* `START`,
+  `T::K` or `f(3)`; rustc evaluates them. What R11 can decide there is whether an initializer is
+  constant-*shaped* (I.14.4's grammar with names unresolved), which is what `is_constant_expr` is.
+  Moving it onto an evaluator needs either the file's items in the macro (not available to a proc
+  macro) or a rustc-checked spelling (the macro emitting the initializer in a `const` context,
+  which needs every `Bits` constructor to be a `const fn` — they are not today). A decision for
+  the coordinator/user.
+- **The interpreter on `copper_analysis::consts`.** `copper-ref` evaluates a constant with its own
+  typed evaluator (`Exec::eval_const`, `lookup_const`: `Value`s with `Bits` widths, X, coercion to
+  the declared type), which is *richer* than the `i128` evaluator in `copper-analysis`; routing it
+  through the latter would lose the types. The direction "one evaluator" points the other way —
+  the interpreter's typed evaluator as the shared one (a dependency question: `copper-codegen`
+  would evaluate through `copper-ref`'s code, or that code moves into `copper-analysis`). A
+  decision for the coordinator/user.
+
+**Done here — the transpiler's fold.** `copper_analysis::consts::ConstEnv` over the file's
+const items, impl consts (`T::K`) and `const fn`s (parameters bound to integer arguments; a body
+of `let` bindings, `if`/`else` and a tail expression; recursion bounded), carried into the FIR as
+source text (`FrontendModuleIR::file_const_source`, since `copper-core` has no `syn`). The fold
+uses it for a path (`K`, `T::K`) and for a call to a `const fn`; row 2's counted-`for` bounds use
+the same environment. **Predicted emission diff:** none in the corpus (no corpus initializer
+names an associated const or calls a `const fn` — it would be refused today; a counted-`for` bound
+naming a const defined by a `const fn` would become statically known, and none is in row 2's
+inventory). **Predicted traces:** fixture `tests/fixtures/const_eval_dut.rs::const_assoc_fn`
+agrees on both legs; refused before.
+
+**Measured.** sv-baseline: **no corpus change** (243 = 241 + the 2 new fixture modules) — as
+predicted, including no counted-`for` bound newly folded (the corpus's `const fn`s,
+`safe_clog2` ×5, feed only combinational generics). Fixture `tests/fixtures/const_eval_dut.rs`
+gained `const_assoc_fn` (`CeCfg::DEPTH`, `CE_W = ce_clog2(CeCfg::DEPTH as usize) as u8` — the
+corpus's own `clog2` shape: `match`, mutable locals, `while` — and `CeCfg::half(201)`) and
+`const_generic_init<START>` (`let mut n: usize = START`, the sweep instance `START = 5`, a new
+`PARAMS` row with its sentence; emitted `initial n = 32'(START);`). Both **agree on both legs,
+every sequence** — after two fixes the first run found:
+- the **interpreter** refused `CeCfg::DEPTH` ("associated item … (II.3 row (d))"): it now
+  collects an impl's consts as `T::K` and looks them up (`copper-ref` `module.rs`, `interp.rs`) —
+  its own typed evaluator, not `copper_analysis::consts` (the stop above);
+- the first `const_generic_init` spelling failed **Verilator** on `Bits::from_usize(n & 0xFF) ^ x`
+  (a 32-bit `usize` reaching an 8-bit operand: step 8's I.14.7 (3) class, left alone as asked); the
+  fixture observes `n` through comparisons instead. A `u8` const generic is not swept: the
+  generated sweep passes every `PARAMS` value as `usize`.
+Not re-measured: that each new shape was refused before (by reading: the fold's
+"names `…`, which is not a constant this module can see" for `T::K` and `N`, "a call to `…`" for
+`T::f(…)`). R11 is unchanged, so a single-segment `const fn` call as an initializer
+(`let mut n = f(3);`) is still refused by **both** front-ends — no parity break, an
+under-admission against I.14.4 that lands with R11's form decision.
+`tools/regression.sh --no-examples`: **PARTIAL OK (325 s)**; G-F 110; G-G differential 1443 PASS / 0 DISAGREE, reference 948, pinned 0. Row status: **(d) closed in the transpiler** (associated consts, `const fn`, const generics as a power-on value); **stopped**: R11 and the interpreter on the shared evaluator (above).

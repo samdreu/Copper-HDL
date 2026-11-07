@@ -483,6 +483,7 @@ fn lower_seq_body(
             init: wire_init
                 .clone()
                 .or_else(|| Some(SHIRLit { ty: wire_ty.clone(), value: 0 })),
+            init_param: None,
         });
     }
 
@@ -636,6 +637,7 @@ fn lower_seq_body(
             name: STARTED_REG.to_string(),
             ty: started_ty.clone(),
             init: Some(SHIRLit { ty: started_ty, value: 0 }),
+            init_param: None,
         });
     }
     if n_ticks > 1 {
@@ -644,6 +646,7 @@ fn lower_seq_body(
             name: "phase_r".to_string(),
             ty: CHIRType::UInt { width: Width::Concrete(phase_width) },
             init: Some(SHIRLit { ty: CHIRType::UInt { width: Width::Concrete(phase_width) }, value: 0 }),
+            init_param: None,
         });
     }
 
@@ -1404,6 +1407,7 @@ fn lower_reg_decl(r: &CHIRRegDecl) -> Result<SHIRReg, SHIRLowerError> {
         name: r.name.clone(),
         ty: r.ty.clone(),
         init: r.init.as_ref().map(|lit| SHIRLit { ty: lit.ty.clone(), value: lit.value }),
+        init_param: r.init_param.clone(),
     })
 }
 
@@ -1632,6 +1636,7 @@ mod tests {
             name: "count".to_string(),
             ty: CHIRType::UInt { width: Width::Concrete(8) },
             init: None,
+            init_param: None,
             span: span(),
         }];
         let promoted = std::collections::HashSet::new();
@@ -1669,6 +1674,7 @@ mod tests {
             name: "x".to_string(),
             ty: CHIRType::UInt { width: Width::Concrete(8) },
             init: None,
+            init_param: None,
             span: span(),
         }];
         let promoted = std::collections::HashSet::new();
@@ -1746,8 +1752,8 @@ mod tests {
             },
         ];
         let regs = vec![
-            CHIRRegDecl { name: "stage1_r".to_string(), ty: CHIRType::UInt { width: Width::Concrete(8) }, init: None, span: span() },
-            CHIRRegDecl { name: "stage2_r".to_string(), ty: CHIRType::UInt { width: Width::Concrete(8) }, init: None, span: span() },
+            CHIRRegDecl { name: "stage1_r".to_string(), ty: CHIRType::UInt { width: Width::Concrete(8) }, init: None, init_param: None, span: span() },
+            CHIRRegDecl { name: "stage2_r".to_string(), ty: CHIRType::UInt { width: Width::Concrete(8) }, init: None, init_param: None, span: span() },
         ];
         let promoted = std::collections::HashSet::new();
         let updates = extract_reg_updates_shared(&stmts, &regs, &promoted, span(), &HashMap::new(), &mut HashMap::new())
@@ -1835,7 +1841,7 @@ mod tests {
                 span: span(),
             },
         ];
-        let regs = vec![CHIRRegDecl { name: "R".to_string(), ty: CHIRType::UInt { width: Width::Concrete(8) }, init: None, span: span() }];
+        let regs = vec![CHIRRegDecl { name: "R".to_string(), ty: CHIRType::UInt { width: Width::Concrete(8) }, init: None, init_param: None, span: span() }];
         let promoted = std::collections::HashSet::new();
         let updates = extract_reg_updates_shared(&stmts, &regs, &promoted, span(), &HashMap::new(), &mut HashMap::new())
             .unwrap();

@@ -110,6 +110,9 @@ const SKIP: &[(&str, &str)] = &[
 ///
 /// A generic module missing from this table is ignored with a reason that says so.
 const PARAMS: &[(&str, &[(&str, i64)])] = &[
+    // A const generic used as a register's power-on VALUE (Phase C step 5, II.3 (d)):
+    // a value that is not 0, so `initial n = 8'(START)` is visibly the parameter.
+    ("const_generic_init", &[("START", 5)]),
     ("det_for", &[("N", 3)]),
     ("mux", &[("WIDTH_P", 8), ("ELS_P", 4), ("LG_ELS_LP", 2)]),
     ("priority_encode", &[("N", 8), ("N_LOG", 3)]),
