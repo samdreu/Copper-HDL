@@ -1987,10 +1987,14 @@ fn lower_seq_body(
                     // init for the type (`HOISTED_CROSS_STATE_ATTR`): the state assigns
                     // it before any read, so its power-on value is unobservable by the
                     // program. A constant one is stated as it is; a non-constant one —
-                    // typically an input read — gets zero (2026-10-29: the flop still
-                    // exists, and a registered port can forward it before the state
-                    // assigns it, e.g. `mac_pipeline`'s `product_r`) rather than being
-                    // refused as an author's initializer would be.
+                    // typically an input read — gets zero rather than being refused as
+                    // an author's initializer would be. (Until 2026-11-07 this said a
+                    // registered port "can forward it before the state assigns it";
+                    // measured false — P14, MEASUREMENTS §K.9: with every hoisted
+                    // register's power-on value unstated and randomized, no verdict of
+                    // the 15 swept modules that have one changes. `mac_pipeline`'s
+                    // `product_r`, the example it named, is a promoted wire of the
+                    // linear route, not a hoisted local.)
                     let hoisted = local
                         .attrs
                         .iter()
@@ -2011,6 +2015,11 @@ fn lower_seq_body(
                     };
                     let init = match &local.init {
                         _ if init_param.is_some() => None,
+                        // The P14 probe (SPEC III.1; MEASUREMENTS §K.8): leave a hoisted
+                        // register's power-on value UNSTATED, so a sweep under
+                        // `COPPER_VERILATOR_X_INITIAL` starts it at a random value. If no
+                        // trace changes, the value is unobservable. Off unless set.
+                        _ if hoisted && std::env::var_os(P14_PROBE_ENV).is_some() => None,
                         Some(e) => match lower_register_init(
                             &local.name,
                             e,
@@ -8467,3 +8476,9 @@ fn method_unsupported(mc: &copper_core::frontend_ir::ExprMethodCall, why: &str) 
         suggested_rewrite: None,
     }
 }
+
+/// `COPPER_PROBE_HOISTED_INIT_UNSTATED`: set, a hoisted cross-state register gets no
+/// `initial` line (the P14 probe, MEASUREMENTS §K.8). A measurement switch, like
+/// `COPPER_VERILATOR_X_INITIAL`; it changes the emitted SV, so the model cache never
+/// aliases a probed build with a normal one.
+pub(crate) const P14_PROBE_ENV: &str = "COPPER_PROBE_HOISTED_INIT_UNSTATED";

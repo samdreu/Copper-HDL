@@ -2120,3 +2120,44 @@ After both: P13 holds on the corpus (0 surplus) and the fixture reconciliation p
   `v + Bits::from_usize(i)`, and Verilator refused it (WIDTHEXPAND/WIDTHTRUNC — `from_usize(i)` is
   32 bits): the open `as_usize`/`usize` width class (I.14.7 (3), left alone by step 5). The swept
   twin reads `i` in a comparison instead; `fold_defect` keeps the verbatim I.7.5 spelling.
+
+### K.8 Predictions — (5) P14, the hoisted initializer
+
+The claim (SPEC I.7.7, the `chir_lower` comment on `HOISTED_CROSS_STATE_ATTR`, 2026-10-29):
+a hoisted register's power-on value is stated (its constant, or 0 for a non-constant
+initializer) because "a registered port can forward it before the state assigns it". I.7.4(d)
+says no execution reads a loop-born local before its `let`, so the value must be unobservable;
+P14 asks whether the realization agrees.
+
+Probe: `COPPER_PROBE_HOISTED_INIT_UNSTATED=1` (`chir_lower::P14_PROBE_ENV`) drops the `initial`
+line of every hoisted register — the source locals the hoist moves and the counted-`for`
+desugar's `__copper_ctr*` counters, which carry the same marker — and the sweep runs under
+`COPPER_VERILATOR_X_INITIAL=1` (`--x-initial unique`, seeded random power-on values for every
+unstated register) with and without the probe. Only the SV of the modules that have a hoisted
+register changes under the probe: **17 existing modules + the 2 new fixtures** (sv-baseline
+under the probe; `trailing_fold` is in that list only because the snapshot predates K.7):
+`det_for` (both copies), `serializer`, `rx`, `uart_rx` + `uart_tx` (system), `uart_rx_dut`,
+`skip_on_halt`, `counted_delay`, `counted_repetition`, `capture_after_wait`, `rom_paced`,
+`for_empty`, `for_empty_start`, `fold_defect`, `pulse_registered`, `nested_loop_missed`.
+
+- Predicted: **no verdict changes** between the two runs for any of them: every hoisted
+  register is assigned in its declaring state before any state reads it (a source local by Rust
+  scoping, a counter by the desugar's entry assignment), so P14 holds — the comment's
+  "can forward it before the state assigns it" does not happen. Any change would be an
+  admitted-and-divergent row candidate.
+
+### K.9 (5) P14 — measured
+
+Both runs over the 16 `_differential` cases of the 15 swept modules with a hoisted register
+(`det_for` twice; `fold_defect` and `pulse_registered` are not swept), under
+`COPPER_VERILATOR_X_INITIAL=1`: run A without the probe, 16 models built (cache miss); run B with
+`COPPER_PROBE_HOISTED_INIT_UNSTATED=1`, 15 rebuilt — every probed SV differs (the one cache hit is
+`nested_loop_added`, which has no hoisted register after K.7). **Every verdict is identical: 16/16
+PASS in both, the same sequence counts, 0 DISAGREE** — as predicted. **P14 holds**: no hoisted
+register's power-on value reaches a trace, so the hoist's stated initializer is a realization
+choice with no observable meaning (I.7.4(d), (e)), and there is no admitted-and-divergent row
+candidate. The `chir_lower` comment's justification ("a registered port can forward it before the
+state assigns it", `mac_pipeline`'s `product_r`) was wrong twice over: nothing forwards it, and
+`product_r` is a promoted wire of the linear route, not a hoisted local; the comment now says so.
+The probe switch stays (`chir_lower::P14_PROBE_ENV`), off unless set, so the measurement can be
+repeated. Not covered: a seed other than 1, and the CPUs (neither has a hoisted register).
