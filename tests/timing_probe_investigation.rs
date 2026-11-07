@@ -2,7 +2,7 @@
 //! registered-output timing match hand-written Verilog, and which coding?
 //! Compares the atomic sim against INDEPENDENT hand-written .sv (not the transpiler)
 //! via the same drive→posedge→sample verilator harness the examples use.
-use copper_core::port::{registered_wire, wire, In, Out, RegOut};
+use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain};
 use copper_macros::hardware;

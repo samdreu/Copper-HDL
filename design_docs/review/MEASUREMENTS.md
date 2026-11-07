@@ -918,3 +918,56 @@ interpreter (46 at E.7). G-G differential **1226 PASS / 0 EXCUSED / 0 DISAGREE**
 emptied with the rewrites, because every member was rewritten); reference 712 PASS. G-H:
 **15 of 160** cases still change under `One` (F.6: 66) — exactly the 14 `Memory`-output
 modules of G.2 and P12 (`regout_trailing_single_tick`), 186 sequences, all `sim≠SV,no-ref`.
+
+### G.3 Decided: option (b) (user, 2026-11-06), and the Memory rewrites measured
+
+The user chose (b) in this session. A coordinator message relayed "Spec packet first" (a
+D-21 packet to give I.10 a no-extra-cycle output form); the user, asked to resolve the
+conflict, answered "Keep option (b)". Part 4 (`de9e84e`):
+- **Anchored, re-spelled as array registers, measured identical in both modes:**
+  `dual_port_ram` (its self-check against `dual_port_ram.sv`), `ram_read_first` (the
+  sweep's `REFERENCE` comparison). Predicted identical; measured identical.
+- **Unanchored, Memory kept, +1 cycle:** 13 modules. Predicted: each hand model is the
+  two-job model delayed one observation, and sim ≡ SV holds. Measured exactly that in every
+  hand test (`pipelined_memory`, `preloaded_memory`, `write_first_memory`,
+  `multiphase_memory`, `received_memory_abi`, the m3 derivation), both modes.
+- New `ram_read_first_mem` keeps the `Memory` ReadFirst lowering swept and shape-pinned.
+- Part 4 regression (`--no-examples`): G-G differential 1240 PASS / 0 DISAGREE, reference
+  744 PASS; under `One` 1 of 161 cases (P12) differs.
+
+### G.4 R8 and the rule retirement (`9e41b61`) — deletions against D-13's sizing
+
+| item | D-13 sized | deleted |
+|---|---|---|
+| ui/fail cases of rules 7–15 | 19 of 39 | **19** (39 → 20), + `ui/pass/pretick_alignment_ok` |
+| `pretick_alignment_corpus.rs` | whole file, 83 entries | whole file |
+| `hold_form_audit.rs` | whole file, 20 entries | whole file |
+| `front_end_parity.rs` test 2 | 1 | 1 (replaced by the opt-out-absence audit; test 1 runs R8) |
+| `cfg.rs` unit tests | ≈109 of 165 | **114** (by the retired methods and their 8 test helpers) |
+| battery `sequential_forwarding_divergence.rs` | 167 tests; 62 refused unexpressible, `RegOut` rows kept | **166 of 167**: 159 of its 160 modules had a plain `Out`; the one `RegOut`-only module's test stays |
+| `SKIP` rows | 4 of 7 | 4 (in part 2) |
+| `analysis_semantics.rs` | — | 8 (`multi_write_*`, rule 8) |
+| unsupported_constructs / multiphase_memory | — | 1 each (rule 7's plain-`Out` refusals) |
+
+R8 is one function in `copper-analysis` (`check_no_plain_out`, gated by the attribute in
+`check_clocked_outputs`) with one message, called by both front-ends (the macro's input fn
+no longer carries its own `#[hardware]` attribute, so the macro calls the ungated core — the
+first spelling of the macro call never fired, caught by the ui case). Witnesses:
+`ui/fail/plain_out_on_sequential.rs`, `plain_out_on_synchronizer.rs`,
+`unsupported_constructs::a_plain_out_on_a_clocked_module_is_refused_by_r8`;
+`ui/fail/retired_pretick_opt_out.rs` refuses the retired flag. Re-spelled ui cases kept their
+error lines byte-identical (columns only). **Tree scan: plain-`Out` clocked module definitions
+697 → 3**, the three being R8's two ui witnesses and copper-ref's refusal test.
+**Not deleted:** the plain-`Out` emission forms F1–F5 in `vlir_lower` (now unreachable from a
+clocked module; the combinational path shares code with them) — owed to a lowering clean-up.
+
+### G.5 The flip (`3a8d616`) — predictions for the bare regression (written before it ran)
+
+- REGRESSION OK.
+- G-G differential: 0 DISAGREE, 0 EXCUSED (the class deleted); reference leg all PASS.
+- Pins: four, all `sim=ref≠SV`: `preloop_probe`, `preloop_linear`, `trailing_fold` (P15,
+  unchanged) and `regout_trailing_single_tick` (P12, now a `SKIP` row, II.3 (f4)); `b_reg`'s
+  never-ticked `Two` pin gone.
+- The pipelined CPU's 13 programs: unchanged (no plain `Out`; its body is unaffected by the
+  barrier's removal — predicted, not argued: measured below).
+- Examples: every self-check passes.

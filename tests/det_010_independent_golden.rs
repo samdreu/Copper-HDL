@@ -25,7 +25,7 @@
 
 mod common;
 
-use copper_core::port::{registered_wire, wire, In, Out, RegOut};
+use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::{make_cycle, HardwareExecutor, HardwareTest, SimulationTrace};

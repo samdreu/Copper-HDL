@@ -48,11 +48,11 @@ SV pair out of the relation from there — reported, never compared as 1 (the ol
 undelivered `data()`, an out-of-range address, an X fed to a condition or `as_*`,
 integer overflow) ends the trace, the simulator and the interpreter must fail at the
 same resumption, and the SV is not compared beyond it; any other panic fails the case.
-**EXCUSED**: a plain `Out` on a clocked module may disagree with the SV at observation
-0 only (a signature class, vacuous under D-8; 25 modules measured), counted and
-printed with its pattern. **DISAGREE**: every disagreement prints its pattern —
-`sim≠ref,SV=ref` simulator/macro, `sim=ref≠SV` transpiler or II.3 row, `sim=SV≠ref`
-the reference or the two-job residue, `all-differ` spec gap or interpreter — and G-G
+**EXCUSED**: a disagreement a signature class excuses, counted and printed with its
+pattern — none today (the observation-0 plain-`Out` class of 25 modules emptied with
+the D-8 rewrites and was deleted, Phase C step 3). **DISAGREE**: every disagreement prints its pattern —
+`sim≠ref,SV=ref` simulator/macro, `sim=ref≠SV` transpiler or II.3 row (P12,
+`regout_trailing_single_tick`, the trailing fold, is pinned), `sim=SV≠ref` the reference, `all-differ` spec gap or interpreter — and G-G
 fails on any swept disagreement and on a `REF_SKIP` measured-disagreement row whose
 pattern (`REF_SKIP_PATTERN`) no pin measured this run. The sweep does not reach `src/` (the standard
 library's `sync_2ff` is covered by its `tests/fixtures/` twin) or modules defined
@@ -198,8 +198,8 @@ entries in `Cargo.toml`.
   iff it is defined-in-loop ∧ live-across-a-tick), `check_reachability` (every loop
   path must reach a `clk.tick().await`, enforced as a hard spanned compile error in
   **both** front-ends), and the G2 structural reg-match helpers. It is also where
-  the checks that reason about **clock phases** live — `multi_phase_out_write`,
-  `check_memory_staging`, `memory_result_drives_plain_out` — because a check
+  the checks that reason about **clock phases** live — `check_memory_staging` (and,
+  until D-8 retired them, the plain-`Out` phase rules) — because a check
   downstream of `control_extract` cannot see the phases it is counting (that pass
   rewrites branch- or loop-nested ticks into a single-tick `match pc` FSM). Any new
   phase-sensitive rule belongs here, on the source, not in codegen. That policy is
@@ -210,7 +210,8 @@ entries in `Cargo.toml`.
 - **`copper-macros`** — the
   `#[hardware(sequential|combinational|synchronizer|structural)]` proc macro.
   Validates the signature (exactly one `Clock<D>` parameter for a behavioral
-  module), enforces CDC rules at compile time, injects per-read freshness guards,
+  module), enforces CDC rules at compile time, refuses a plain `Out` on a clocked
+  module (R8),
   wraps combinational bodies in the `loop { …; delta_yield().await; }` shape, and
   makes the module a `HardwareModule` (so a bare `async fn` won't simulate). A
   `structural` parent is transpile-only: it is not spawned in the simulator, which
@@ -250,14 +251,25 @@ rules the whole project is built around:
 
 - Every `clk.tick().await` is a **clock-cycle boundary**; each suspension point
   becomes an FSM state; every value live across an await becomes a **register**.
-- A tick has phases: **pre-edge settle → clock edge → post-edge settle →
-  post-edge observation**. `HardwareExecutor::tick_clock` drives these; the
-  current phase gates phase-aware futures.
+- **One resumption per tick** (SPEC §I.0.2, D-8; the only executor since Phase C
+  step 3, 2026-11-06): `HardwareExecutor::tick_clock::<D>` settles the network on the
+  driven inputs, resumes each coroutine of `D` once to its next `tick` (every read
+  sees `x_{N+1}`), commits the edge, and settles the network for the observation;
+  the post-edge settle resumes no coroutine, and only `D`'s ticks resume `D`'s
+  coroutines. The two-job executor, its `PreEdgeBarrier` and the macro's per-read
+  barrier injection are gone.
 - **Simulation must be independent of Rust async poll order** — a well-formed
   design simulates identically under any `poll_tasks` order. Do not introduce
   timing that depends on task ordering.
-- `Out` vs `RegOut`: `RegOut<T,D>` is a registered output driven from
-  `always_ff` (use for write-before-tick Moore outputs); plain `Out` otherwise.
+- **Every output of a clocked module is a `RegOut`** (SPEC II.1 R8, D-8; refused in
+  both front-ends by `copper_analysis::check_no_plain_out` / `check_clocked_outputs`).
+  A `RegOut` written in the resumption that ends at edge N+1 shows from `obs_{N+1}`
+  and holds when unwritten (the enabled register). A value that must follow an input
+  within the cycle (a passthrough, a Mealy output) is a `#[hardware(combinational)]`
+  module wired to the clocked module's `RegOut`s; plain `Out` is combinational-only.
+  A `Memory` read reaches a `RegOut` one edge after delivery (SPEC I.10.1 (d)); a
+  latency-1 synchronous read whose register IS the port (`dob <= ram[a]`) is an array
+  register written in program order (`dual_port_ram`, `ram_read_first`).
 
 ### Clock-domain crossing (CDC)
 
@@ -290,164 +302,17 @@ receive/clone one.
   **historical plan** — `SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md` (its status notes are
   dated; do not take "not started" there at face value).
   `design_docs/OUTDATED/` is historical, not authoritative.
-- **`PRETICK_ALIGNMENT_GUARDRAIL.md`** — the pre-tick alignment family: four rules
-  (`Cfg::unprotected_pretick_out_write`, `multi_phase_out_write`,
-  `pretick_out_write_before_update`; the first's constant-write clause was retired
-  2026-10-28), joined 2026-10-23 by two more of the same discipline —
-  `trailing_regout_reads_input` (a `RegOut` written after the last tick from an input
-  read directly; a `RegOut` write takes effect at the first clock edge after it
-  executes, so the flip-flop would sample the input one drive late) and
-  `out_first_driven_late` (a constant-only plain `Out` first written after the second
-  edge: a startup transient the `assign` cannot show), and 2026-10-26 by
-  `trailing_out_reads_input` (the plain-`Out` sibling of the `RegOut` rule: a plain
-  `Out` written after the last tick from an input read directly, in a body that
-  crosses more than one edge — neither trailing drive form samples the input when the
-  simulator's immediate read did; the single-tick body agrees and is exempt) — every
-  one with an exact-set
-  corpus pin in `copper-analysis/tests/pretick_alignment_corpus.rs` and enforced in
-  both front-ends. A former fifth, `unprotected_trailing_out_write`, was retired
-  2026-10-23 when phase C landed (see below). **D1** is **guarded** (rule
-  2026-08-21, narrowed 2026-08-26, **re-derived 2026-10-28**, **narrowed 2026-10-30**
-  — `CYCLE_DATAFLOW_SEMANTICS.md` §10, §10.4–10.5, guardrail §5.8): before the first
-  tick, a plain `Out` is a compile error when its drives have **mixed anchors** — an
-  `In` read comb-reaches some write of the port while some write has a read-free
-  path from the loop head — **and** either one write is **path-dependent** (reached
-  by the read on one path and not on another: codegen holds it to the edge, the
-  simulator runs it at the opening on the read-free path) or the port is written on
-  **every path** (the every-path comb mux has no hold register and shows the closing
-  write one observation early), unobservable only for a single every-path drive that
-  forwards no register it reads (`d3a`) — or when a write no read reaches sits under
-  an `if`/`match` that tests a register assigned earlier in the segment (a
-  **forwarded guard**: the comb copy tests the committed value; `d4a`). A held port
-  whose drives each have a uniform anchor is realized by the drive-level mux + hold
-  form and admitted (`d2a`, `branch_merge_explicit`, the `d5*` probes). Witnesses
-  `w4_mixed_alignment` and the six refused `d*` probes (`d1f`, `d1g`, `d2b`, `d3c`,
-  `d4a`, `d4c`); `pc_arm_*` and `probe_fsm` (a read in a sibling arm reaches nothing)
-  are admitted and compile clean, as is a constant behind its own read. The former constant-write clause and its "unprotected register assignment"
-  conjunct are gone. A register-reading write that no `In` read reaches is an
-  opening-prefix drive and is **legal** — forwarded continuous-assign emission gives
-  it the meaning the simulator always had. Fix a real hit with `RegOut`, make the
-  anchor uniform (read the input before every write of the port or before none),
-  test only committed state, or move the writes after the tick. A module that
-  exists to *demonstrate* the hazard
-  opts out with `#[hardware(sequential, allow_pretick_alignment)]` — this silences the
-  error, not the detection, and must never be reached for in a real design.
-  **D2 is FIXED** (2026-08-21) — a read feeding a combinational `Out` in a
-  register-free segment is now `Immediate`, so a passthrough tracks its producer
-  instead of lagging it.
-  The other rules: **`multi_phase_out_write`** (a plain `Out` driven in more than one
-  clock phase, **narrowed 2026-10-23 by cycle-dataflow phase E** to the measured
-  divergent class and **again 2026-10-30, per drive** — the linear route, a
-  register-free body with reads, a write **whose anchors differ between the sides**
-  (an input read reaches it in its phase while the simulator runs it at the opening
-  on some path: an immediate read, `e5`, or a read on one path to it and not on
-  another, `e11`/`e11b` — the latter a divergent shape the 2026-10-23 clause had
-  admitted), or a wait loop's read before an opening write (unmeasured, refused by
-  construction); an extracted body none of whose writes an input read reaches
-  (whatever it reads elsewhere), one whose every write follows a deferred read, and
-  since 2026-10-30 any mix of the two (`e4`, `e6`, `e4r`, `e4f`) are accepted and
-  measured agreeing — the "input read anywhere" clause was retired 2026-10-26 —
-  `CYCLE_DATAFLOW_SEMANTICS.md` §9, §10.4–10.5, the `e*` battery in
-  `tests/sequential_forwarding_divergence.rs`; enforced in both front-ends);
-  **`pretick_out_write_before_update`** (a
-  plain `Out` written from a register before that register's update in the same
-  segment publishes the previous generation; 2026-08-26/27). **Phase C landed
-  2026-10-23** (`vlir_lower::opening_hold_outputs`): a conditionally-driven plain
-  `Out` whose drives are all *opening* drives (no `In` read precedes them in the
-  arm) is emitted as a forwarded combinational mux with a `<port>_hold` register
-  instead of an edge-sampled register, which is what made the control-extraction
-  route's trailing drives one cycle late; `trailing_update`, `branch_trailing` and
-  `pulse_plain` now agree, and `unprotected_trailing_out_write` is gone. **Reach of
-  phase C:** since 2026-10-26 the opening predicate is **arm-granular** (an
-  `if`/`match` seeds each arm's walk from its condition's reads alone), so the mux
-  form reaches any extracted module whose drives have no read before them in their
-  own arm — `e9` agrees, and so do the former D1 witnesses `pc_arm_*` and `probe_fsm`
-  (sv-baseline delta: seven modules, no referenced one; D1 was re-derived on that
-  evidence 2026-10-28, see above). Until then the predicate
-  was statement-granular over the whole `match pc` and the form was emitted only for
-  input-free modules. **Drive-level since 2026-10-29:** the decision is per
-  drive, not per port — a port with at least one opening drive takes the form, its
-  comb copy muxing the opening drives only while every drive (closing ones
-  included) loads the hold register at the edge — so a mixed-anchor port realizes
-  both anchors: `branch_merge`'s `tail_o` (the sweep's last measured divergence,
-  both twins' `SKIP` rows gone), `d2a`, `e4` and `e6` agree; sv-baseline delta
-  exactly the seven mixed-anchor hold-form ports, pinned as an exact set by
-  `copper-codegen/tests/hold_form_audit.rs` through `copper_codegen::hold_form_ports`
-  (sixteen since 2026-10-30, the nine new probe ports added). **Both mixed-anchor
-  clauses were narrowed 2026-10-30** (`CYCLE_DATAFLOW_SEMANTICS.md` §10.4–10.5) to
-  the residue the form leaves — a drive whose anchors differ between the sides, or
-  the every-path mux — so `d2a`, `branch_merge_explicit`, `e4`, `e6` compile without
-  an opt-out; eleven probes were predicted and matched on the first run, and `e11b`,
-  a divergent shape clause 4 had admitted, is refused. `e8`, the battery's other single-phase divergence, is refused
-  by `trailing_out_reads_input` since the same day (`CYCLE_DATAFLOW_SEMANTICS.md`
-  §9.4), so both gaps phase E found are closed. **The §10.5 gap closed the same day
-  (§10.6):** clause 4's path-dependent half also reaches a plain `Out` written ONCE,
-  in a non-head phase, on the extraction route (`e12` — it compiled with no opt-out
-  and diverges; its uniform controls `e12a` / `e12b` agree); on the linear route the
-  same shape (`e13`) AND its every-path control (`e13a`) diverge because the route
-  emits a continuous assign whatever reads precede the write — a missing closing
-  form. **Closed the same day (§10.7)** by a rule of its own,
-  **`linear_out_write_anchor_mismatch`**: on the linear multi-tick route the form is
-  chosen by the operand's kind (a same-segment `let` wire → the phase-guarded flop,
-  a register/input/constant → a continuous assign), so a wire written with no
-  deferred read on some path, or a register/input/constant written behind one when
-  the assign can change at another edge (another segment's update — the trailing
-  statements included — an update after the write, an input, a constant outside the
-  head segment) is refused; fourteen probes, every verdict predicted first, zero
-  live modules. It also closes V8's unexamined middle segment (`e14j`) and
-  `out_first_driven_late`'s closing-constant blind spot (`e14d`). **Restated by
-  form 2026-11-02 (§10.8)** after the register-free linear class — which the rule
-  had returned nothing for — was measured on thirty-six probes (every verdict
-  predicted first): the form follows the drive's shape as well as its operand —
-  a held conditional write behind a read is the flop (closing; `e15af`/`e15ag`,
-  refused before, admitted), an input-valued assign is refused whatever precedes it
-  (the register-free passthrough samples once per iteration, `e15a`/`e15g`), and a
-  constant-valued wire's lag is a transient invisible in the head (`e15f`/`e15fr`
-  admitted). The register requirement is gone; `trailing_out_reads_input` counts
-  an immediate read in the drive's guard (`e15ai`); zero live modules. **The latch
-  §10.8 read off the route was fixed the same day (§10.9):** a conditional drive's
-  phase-gated comb copy had no assignment outside its phase; now the hold form's
-  `o = o_hold` default sits at the top of the `always_comb` outside every phase
-  guard (`VLIRSeqBody::comb_defaults`) and an every-path conditional port takes a
-  held port's two forms, so the six rows refused for the form agree and compile
-  (`e15t`/`e15w`/`e15x`/`e15wr` the flop, `e15ac`/`e15ad` the hold form; sv-baseline
-  delta exactly those seven latch-shaped probes with `e15z`). The rule's residue, per
-  conditional drive: (A) a port written both unconditionally and conditionally in
-  one segment — two drivers (`e16g`/`e16i`/`e16k`); (B) a conditional drive after
-  the last tick — the hoisted flop, one late (`e16d`/`e16e`); (C) in a pre-tick
-  segment, with a wire-valued drive on the port the flop, refused iff opening on
-  some path (`e16m`, the one §10.9 prediction that missed: a port with a wire-valued
-  drive is a phase-scoped hold port and the hold form does not reach it), otherwise
-  refused iff an input read reaches the drive while the simulator runs it at the
-  opening on some path (the register-free passthrough under a read-free guard,
-  `e16f`, admitted by every rule until then; a read-free path, `e16l`) or no read
-  reaches it and its guard tests a register assigned earlier in the segment
-  (`e16n`/`e16o`); mixed-anchor ports agree through the drive-level form
-  (`e16a`/`e16b`/`e16h`/`e16q`, in `hold_form_ports`). D1's every-path clause does
-  not apply on this route since then (`e16q`). **The single-tick route's two drivers
-  were fixed the same day (§10.10):** a default write followed (or preceded) by a
-  conditional override of a plain `Out` now stays in the comb copy in program order,
-  one every-path `always_comb` mux instead of an assign beside a second driver (`e16j`
-  agrees; the trailing and register-default spellings had BUILT with the drivers
-  fighting behind the `always_ff` `MULTIDRIVEN` pragma). The neighbours exposed a
-  divergence no rule saw: a closing head write of a register the trailing region of a
-  ONE-tick loop updates (`e17h`, `e14n`'s single-tick twin) — `pretick_out_write_before_update`
-  gained a single-tick trailing-update clause (value or guard, every-path ports only;
-  `e17d`/`e17h`/`e17j`), D1 refuses the rest (`e17c`/`e17e`/`e17f`); zero live modules,
-  sv-baseline delta `e16j` plus the new probes. **V8's pre-tick clause now reads the
-  guard (§10.11):** on the single-tick route, an every-path write behind a read under a
-  guard on a register updated later in the same segment diverges, because the comb mux
-  tests Q one generation ahead (`e18b`/`e18c`, admitted until then). It is refused by a
-  guard edition scoped to that port form. The held port and the multi-tick and
-  extraction routes are the flop and agree (`e18a`, `e18f`–`e18i`). Zero live modules;
-  `d2b` overlaps D1. The value clause over-refuses a held port (`e18j` agrees): that is
-  pinned, not narrowed, and the decision is the user's. **The combinational route got the same
-  routing (§10.12):** `o.write(3); if c { o.write(x) }` was admitted by the macro and
-  refused by the transpiler as a latch — a front-end parity break. The default now stays
-  in `always_comb`, and the transpiler runs the macro's `check_definite_assignment` too
-  (`check_no_latches` stays as defence in depth); a truly partial write is refused by
-  both (`copper-codegen/tests/comb_definite_assignment_parity.rs`). The doc also records **five** rejected fixes with
-  measured evidence so they are not re-tried, and the prior-art survey in §10.
+- **The pre-tick alignment rules are retired by D-8** (Phase C step 3, 2026-11-06).
+  The family (`unprotected_pretick_out_write`, `pretick_out_write_before_update`,
+  `trailing_regout_reads_input`, `trailing_out_reads_input`,
+  `linear_out_write_anchor_mismatch`, `multi_phase_out_write`,
+  `out_first_driven_late`), `multi_write_collapse` and
+  `memory_result_drives_plain_out` all reasoned about a plain `Out` on a clocked body,
+  which R8 now refuses; they were deleted with their exact-set pins, ui/fail cases,
+  `cfg.rs` unit tests, the `allow_pretick_alignment` opt-out (now itself refused) and
+  the plain-`Out` divergence battery. SPEC §II.3.2 is the authority on the sort;
+  `PRETICK_ALIGNMENT_GUARDRAIL.md` and `CYCLE_DATAFLOW_SEMANTICS.md` §9–§10 are the
+  historical record of what they measured.
 - **Verilator work dirs are unique PER INVOCATION** (`obj_dir_<module><params>_<pid>_<n>`),
   not per module. Two tests in one binary can Verilate the *same* top module in
   parallel — `tests/det_010_independent_golden.rs` checks two codings against the same
@@ -466,9 +331,9 @@ receive/clone one.
   awaited), reachability, the register power-on rule (`check_register_initializers`,
   2026-10-29 — a pre-loop register's initializer must be a constant, which reaches the
   SV as its `initial` value, or `Bits::x()`; no opt-out; `COPPER_VERILATOR_X_INITIAL=1`
-  randomizes Verilator's power-on values to measure what is left unstated), the
-  pre-tick alignment family (opt-out honoured in both), the memory rules and
-  `multi_write_collapse` (no opt-out in either). A module that compiles therefore
+  randomizes Verilator's power-on values to measure what is left unstated), R8 (no
+  plain `Out` on a clocked module, one shared message) and the memory rules. A module
+  that compiles therefore
   transpiles, or is refused by both. The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only

@@ -66,7 +66,7 @@ fn line(cycle: usize, inputs: &[(&str, u128)], outputs: &[(&str, u128)]) -> Stri
 
 mod counter {
     use crate::line;
-    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+    use copper_core::port::{wire, In, RegOut, registered_wire};
     use copper_core::types::{Bits, Clock, ClockDomain};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};
@@ -96,7 +96,7 @@ mod counter {
 
 mod lfsr {
     use crate::line;
-    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+    use copper_core::port::{wire, In, RegOut, registered_wire};
     use copper_core::types::{Bits, Clock, ClockDomain, Logic};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};
@@ -136,7 +136,7 @@ mod lfsr {
 
 mod shift_register {
     use crate::line;
-    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+    use copper_core::port::{wire, In, RegOut, registered_wire};
     use copper_core::types::{Bits, Clock, ClockDomain, Logic};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};
@@ -194,7 +194,7 @@ mod shift_register {
 
 mod pattern_detector {
     use crate::line;
-    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+    use copper_core::port::{wire, In, RegOut, registered_wire};
     use copper_core::types::{Clock, ClockDomain, Logic};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};
@@ -234,7 +234,7 @@ mod pattern_detector {
 
 mod det_010 {
     use crate::line;
-    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+    use copper_core::port::{wire, In, RegOut};
     use copper_core::types::{Clock, ClockDomain, Logic};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};
@@ -274,7 +274,7 @@ mod det_010 {
 
 mod mac_pipeline {
     use crate::line;
-    use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+    use copper_core::port::{wire, In, RegOut, registered_wire};
     use copper_core::types::{Bits, Clock, ClockDomain};
     use copper_macros::hardware;
     use copper_sim::{HardwareExecutor, SchedulerMode};

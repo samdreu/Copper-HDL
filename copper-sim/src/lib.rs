@@ -1,9 +1,4 @@
-use copper_core::ClockDomain;
-use std::any::TypeId;
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -20,50 +15,8 @@ pub use testing::{HardwareTest, TestResult, make_cycle};
 pub mod executor;
 
 pub use executor::{
-    HardwareExecutor, HardwareModule, ModuleInfo, PollOrder, ResumptionMode, SchedulerMode,
+    HardwareExecutor, HardwareModule, ModuleInfo, PollOrder, SchedulerMode,
 };
-
-/// Which phase of the clock cycle `tick_clock` is currently executing.
-/// Set by the executor before each `poll_tasks()` call so that phase-aware futures
-/// (`PreEdgeBarrier`) can determine whether to block or proceed.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PollPhase {
-    PreEdge,
-    PostEdge,
-}
-
-thread_local! {
-    /// Current clock phase set by `tick_clock` before each settle pass, keyed per
-    /// clock domain (by `TypeId`) so that advancing one domain's clock cannot
-    /// perturb another domain's phase-gated futures. A domain with no entry yet
-    /// defaults to `PreEdge` (see `is_pre_edge`).
-    static POLL_PHASE: RefCell<HashMap<TypeId, PollPhase>> = RefCell::new(HashMap::new());
-}
-
-pub(crate) fn set_poll_phase<Domain: ClockDomain>(phase: PollPhase) {
-    POLL_PHASE.with(|cell| {
-        cell.borrow_mut().insert(TypeId::of::<Domain>(), phase);
-    });
-}
-
-thread_local! {
-    /// Whether the executor polling on this thread runs [`ResumptionMode::One`]
-    /// (Phase C step 2). Set by the executor at the start of every settle. Under it
-    /// the barrier is Ready at once — the body without the injection — so neither
-    /// `POLL_PHASE` nor its `PreEdge` default has any meaning there.
-    static ONE_RESUMPTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-pub(crate) fn set_one_resumption(one: bool) {
-    ONE_RESUMPTION.with(|c| c.set(one));
-}
-
-fn is_pre_edge<Domain: ClockDomain>() -> bool {
-    POLL_PHASE.with(|cell| {
-        cell.borrow().get(&TypeId::of::<Domain>()).copied().unwrap_or(PollPhase::PreEdge)
-            == PollPhase::PreEdge
-    })
-}
 
 /// A future that suspends for exactly one delta cycle, then resumes.
 ///
@@ -101,38 +54,10 @@ pub fn delta_yield() -> DeltaYield {
     DeltaYield { yielded: false }
 }
 
-/// A future that blocks during post-edge settle and resolves at the start of
-/// the next pre-edge settle, for its own clock domain `Domain`.
-///
-/// Unlike `delta_yield`, which resumes after exactly one delta pass regardless
-/// of clock phase, `PreEdgeBarrier` checks `Domain`'s current phase on every
-/// poll. It returns `Pending` whenever `Domain` is in post-edge (even across
-/// multiple dirty-driven re-polls), and `Ready` the first time it is polled in
-/// pre-edge. This guarantees that the code after the barrier always executes with
-/// fresh inputs that were driven by the testbench before the current `tick_clock`
-/// call began. Scoped per domain so a barrier for one clock is never woken by
-/// another clock's phase transitions.
-pub struct PreEdgeBarrier<Domain: ClockDomain> {
-    _domain: PhantomData<Domain>,
-}
-
-impl<Domain: ClockDomain> Future for PreEdgeBarrier<Domain> {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        if ONE_RESUMPTION.with(|c| c.get()) || is_pre_edge::<Domain>() {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    }
-}
-
-/// Return a future that suspends until `Domain`'s clock enters its pre-edge
-/// settle phase. Inject this at the end of every sequential module's main loop
-/// via `#[hardware(sequential)]` — the macro does this automatically.
-pub fn pre_edge_barrier<Domain: ClockDomain>() -> PreEdgeBarrier<Domain> {
-    PreEdgeBarrier { _domain: PhantomData }
-}
+// `PreEdgeBarrier` / `pre_edge_barrier` (the parking point the macro injected
+// before a deferred input read) and the per-domain `POLL_PHASE` it read were
+// deleted with the two-job executor (Phase C step 3, D-8): under one resumption
+// per tick every read sees `x_{N+1}` with no barrier.
 
 /// A helper macro to spawn a child module's future and track the parent-child
 /// relationship in the executor.

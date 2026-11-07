@@ -11,7 +11,7 @@
 mod common;
 
 use common::{logic, EquivalenceTest};
-use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+use copper_core::port::{wire, In, RegOut, registered_wire};
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;

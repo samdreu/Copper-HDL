@@ -28,7 +28,7 @@
 
 mod common;
 use common::{verilator_available, verilator_command};
-use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+use copper_core::port::{wire, In, RegOut, registered_wire};
 use copper_core::{Bits, Clock, ClockDomain, Logic, Memory};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;

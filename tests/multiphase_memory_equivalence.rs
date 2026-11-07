@@ -46,7 +46,7 @@
 mod common;
 
 use common::EquivalenceTest;
-use copper_core::port::{registered_wire, wire, In, Out, RegOut};
+use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain, Memory};
 use copper_macros::hardware;

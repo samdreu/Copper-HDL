@@ -52,7 +52,7 @@ pub struct HardwareModule<F> {
     /// `Some` for a `sequential`/`synchronizer` module (the `D` of its one
     /// `Clock<D>`), `None` for a combinational module (it has no clock; it is part
     /// of the network every settle evaluates) and for hand-built futures. Read only
-    /// under [`ResumptionMode::One`]; the two-job executor ignores it.
+    /// to decide which domain's ticks resume it.
     domain: Option<TypeId>,
 }
 
@@ -104,56 +104,25 @@ pub struct HardwareExecutor {
     // rebuild after a spawn.
     levelized_plan: Vec<Vec<usize>>,
     graph_dirty: bool,
-    // how many resumptions a sequential coroutine gets per tick (Phase C step 2)
-    resumption: ResumptionMode,
     // per-domain edge count (SPEC §I.1.6, §I.12.6 (8)): edges are numbered per
     // domain, so the executor counts each domain's ticks separately
     cycles: HashMap<TypeId, u64>,
 }
 
-/// How many times a sequential coroutine is resumed per tick of its domain —
-/// Phase C step 2 (SPEC §I.0.2, D-8), behind a switch until the corpus's two-job
-/// spellings are rewritten (step 3).
+/// The tick protocol (SPEC §I.0.2, D-8; Phase C step 3 made it the only one): per
+/// tick of `D`, the network settles on the driven inputs, then each coroutine of
+/// `D` parked at a `tick` is resumed **once** and runs to its next `tick`
+/// (`t_{N+1}⁻`), then the edge commits, then the network settles for the
+/// observation; the post-edge settle resumes no coroutine (§I.13.2(b)). A
+/// coroutine is resumed by its own domain's ticks only, and a domain never ticked
+/// has run nothing (§I.12.2). The two-job executor (`ResumptionMode::Two`, a
+/// second resumption after the edge and a pre-edge barrier for deferred reads) was
+/// deleted with the flip.
 ///
-/// - [`ResumptionMode::Two`] — **the default today**, the two-job executor: a tick
-///   resolves in the POST-edge settle, so the code after a `tick` runs after the
-///   edge, and a read the macro classified as deferred parks at a
-///   [`PreEdgeBarrier`](crate::PreEdgeBarrier) until the next pre-edge settle. Every
-///   task is polled in every settle of every domain.
-/// - [`ResumptionMode::One`] — the spec's protocol: per tick of `D`, the network
-///   settles on the driven inputs, then each coroutine of `D` parked at a `tick` is
-///   resumed **once** and runs to its next `tick` (`t_{N+1}⁻`), then the edge
-///   commits, then the network settles for the observation; the post-edge settle
-///   resumes no coroutine (§I.13.2(b)). A coroutine is resumed by its own domain's
-///   ticks only, and a domain never ticked has run nothing (§I.12.2). The barrier is
-///   a no-op (Ready at once), which is exactly the body without the injection.
-///
-/// Selected by `COPPER_RESUMPTION` (`one` | `two`, case-insensitive; unset or
-/// anything else = the compiled default) or [`HardwareExecutor::with_resumption_mode`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum ResumptionMode {
-    /// The two-job executor (compiled default until Phase C step 3).
-    #[default]
-    Two,
-    /// One resumption per tick of the coroutine's own domain (SPEC §I.0.2).
-    One,
-}
-
-impl ResumptionMode {
-    /// The mode a fresh executor uses: `COPPER_RESUMPTION`, else [`ResumptionMode::Two`].
-    pub fn env_default() -> ResumptionMode {
-        match std::env::var("COPPER_RESUMPTION") {
-            Ok(v) if v.eq_ignore_ascii_case("one") => ResumptionMode::One,
-            Ok(v) if v.eq_ignore_ascii_case("two") => ResumptionMode::Two,
-            _ => ResumptionMode::Two,
-        }
-    }
-}
-
-/// Which tasks a settle polls under [`ResumptionMode::One`].
+/// Which tasks a settle polls.
 #[derive(Clone, Copy)]
 enum PollSet {
-    /// Every task (the two-job executor; and any direct `poll_tasks` call).
+    /// Every task (a direct `poll_tasks` call).
     All,
     /// The combinational network only: untagged tasks.
     Network,
@@ -343,7 +312,7 @@ struct TaskEntry {
     /// are these reads. Consumed by [`Self::compute_topo_order`] under
     /// [`SchedulerMode::Levelized`]; the fixpoint scheduler ignores it.
     reads: Vec<WireId>,
-    /// The module's domain tag ([`HardwareModule`]'s), read under [`ResumptionMode::One`].
+    /// The module's domain tag ([`HardwareModule`]'s): which domain's ticks resume it.
     domain: Option<TypeId>,
 }
 
@@ -367,26 +336,8 @@ impl HardwareExecutor {
             scheduler: SchedulerMode::env_default(),
             levelized_plan: Vec::new(),
             graph_dirty: true,
-            resumption: ResumptionMode::env_default(),
             cycles: HashMap::new(),
         }
-    }
-
-    /// Select how many resumptions a coroutine gets per tick (Phase C step 2).
-    /// Overrides `COPPER_RESUMPTION`. Set it before the first settle.
-    pub fn set_resumption_mode(&mut self, mode: ResumptionMode) {
-        self.resumption = mode;
-    }
-
-    /// Builder form of [`Self::set_resumption_mode`].
-    pub fn with_resumption_mode(mut self, mode: ResumptionMode) -> Self {
-        self.resumption = mode;
-        self
-    }
-
-    /// The resumption mode this executor runs.
-    pub fn resumption_mode(&self) -> ResumptionMode {
-        self.resumption
     }
 
     /// Select the settling algorithm (item 6). The default is
@@ -628,9 +579,8 @@ impl HardwareExecutor {
         self.poll_set(PollSet::All);
     }
 
-    /// Settle over the tasks `set` admits (every task under the two-job executor).
+    /// Settle over the tasks `set` admits.
     fn poll_set(&mut self, set: PollSet) {
-        crate::set_one_resumption(self.resumption == ResumptionMode::One);
         match self.scheduler {
             SchedulerMode::Fixpoint => self.poll_tasks_fixpoint(set),
             SchedulerMode::Levelized => {
@@ -932,17 +882,10 @@ impl HardwareExecutor {
 
     /// Advance the simulation by one tick of `Domain`.
     ///
-    /// Under [`ResumptionMode::Two`] (today's default): a pre-edge settle in which
-    /// every task is polled with `Domain`'s ticks not resolving (a deferred read
-    /// parked at its barrier resumes here), the edge, then a post-edge settle in
-    /// which every task is polled with `Domain`'s ticks resolving — so a coroutine
-    /// is resumed in both settles, and its post-tick code runs after the edge.
-    ///
-    /// Under [`ResumptionMode::One`] (SPEC §I.0.2, §I.13.2(b)): drive (the caller,
-    /// before this call), settle the network, resume each of `Domain`'s coroutines
-    /// once to its next `tick`, the edge, settle the network for the observation.
-    /// No other domain's coroutine is polled, and the post-edge settle polls no
-    /// coroutine at all.
+    /// Drive (the caller, before this call), settle the network, resume each of
+    /// `Domain`'s coroutines once to its next `tick`, the edge, settle the network
+    /// for the observation (SPEC §I.0.2, §I.13.2(b)). No other domain's coroutine
+    /// is polled, and the post-edge settle polls no coroutine at all.
     ///
     /// All phase/resolution signals are keyed per clock domain (`Domain`), so
     /// ticking this clock cannot perturb any other domain's tasks.
@@ -952,54 +895,31 @@ impl HardwareExecutor {
     }
 
     /// The **pre-edge settle** half of [`Self::tick_clock`], without advancing the
-    /// clock: under [`ResumptionMode::Two`] every task is polled with `Domain`'s
-    /// ticks not resolving; under [`ResumptionMode::One`] the network settles on the
-    /// driven inputs and then `Domain`'s coroutines are resumed once (`t_{N+1}⁻`),
-    /// re-settling the network over what they wrote.
+    /// clock: the network settles on the driven inputs and then `Domain`'s
+    /// coroutines are resumed once (`t_{N+1}⁻`), re-settling the network over what
+    /// they wrote.
     ///
     /// Split out so the differential harness can read signal values *between*
     /// phases (observation 0 is read here); ordinary callers use [`Self::tick_clock`].
     pub fn pre_edge_settle<Domain: ClockDomain>(&mut self) {
-        crate::set_poll_phase::<Domain>(crate::PollPhase::PreEdge);
-        match self.resumption {
-            ResumptionMode::Two => {
-                copper_core::types::set_tick_resolving::<Domain>(false);
-                self.poll_set(PollSet::All);
-            }
-            ResumptionMode::One => {
-                // A coroutine parked at `Domain`'s tick from the previous resumption
-                // has `cycle >= target` since that edge; resolving it here, and only
-                // here, is the one resumption of this tick.
-                copper_core::types::set_tick_resolving::<Domain>(true);
-                // The network settles on (q_N, x_{N+1}) first, so every resumption
-                // reads settled wires whatever the scheduler's visit order.
-                self.poll_set(PollSet::Network);
-                self.poll_set(PollSet::NetworkAnd(TypeId::of::<Domain>()));
-            }
-        }
+        // A coroutine parked at `Domain`'s tick from the previous resumption has
+        // `cycle >= target` since that edge; resolving it here, and only here, is
+        // the one resumption of this tick.
+        copper_core::types::set_tick_resolving::<Domain>(true);
+        // The network settles on (q_N, x_{N+1}) first, so every resumption reads
+        // settled wires whatever the scheduler's visit order.
+        self.poll_set(PollSet::Network);
+        self.poll_set(PollSet::NetworkAnd(TypeId::of::<Domain>()));
     }
 
     /// The **clock-edge + post-edge settle** half of [`Self::tick_clock`]: advance
-    /// `Domain`'s clock, settle, and count the edge in `Domain`'s cycle counter.
-    /// Under [`ResumptionMode::Two`] every task is polled with `Domain`'s ticks
-    /// resolving (the second resumption); under [`ResumptionMode::One`] only the
-    /// network is evaluated, on the committed values, for the observation.
-    /// Must follow [`Self::pre_edge_settle`] for the same domain.
+    /// `Domain`'s clock, evaluate the network on the committed values for the
+    /// observation, and count the edge in `Domain`'s cycle counter. Must follow
+    /// [`Self::pre_edge_settle`] for the same domain.
     pub fn post_edge_settle<Domain: ClockDomain>(&mut self, clk: &mut Clock<Domain>) {
         clk.advance();
-
-        crate::set_poll_phase::<Domain>(crate::PollPhase::PostEdge);
-        match self.resumption {
-            ResumptionMode::Two => {
-                copper_core::types::set_tick_resolving::<Domain>(true);
-                self.poll_set(PollSet::All);
-            }
-            ResumptionMode::One => {
-                copper_core::types::set_tick_resolving::<Domain>(false);
-                self.poll_set(PollSet::Network);
-            }
-        }
-
+        copper_core::types::set_tick_resolving::<Domain>(false);
+        self.poll_set(PollSet::Network);
         *self.cycles.entry(TypeId::of::<Domain>()).or_insert(0) += 1;
     }
 
@@ -1041,19 +961,24 @@ mod tests {
     use copper_core::port::{wire, In, Out};
 
     // These low-level executor tests drive raw futures directly rather than going
-    // through the `#[hardware]` macro (that lives downstream and would inject
-    // read-timing machinery unrelated to what they exercise). They wrap in
-    // `HardwareModule::__new` — the same thing the macro does — so spawn accepts them.
+    // through the `#[hardware]` macro (which lives downstream). A clocked future is
+    // wrapped in `HardwareModule::__new_in_domain::<D>` — what the macro emits for a
+    // clocked module — so its own domain's ticks resume it (SPEC §I.12.1); since the
+    // flip (Phase C step 3) an untagged future is part of the network, polled in
+    // every settle, so a counter left untagged would have its ticks resolve pre-edge
+    // (MEASUREMENTS §F.7, F.8 item 2). The counter is written in the one-job
+    // spelling: count, publish, tick — the value written in the resumption that ends
+    // at edge N stays on the wire through obs_N, so it reads 1, 2, 3.
     fn wired_counter(
         clk: Clock<TestClk>,
         out: Out<u8>,
     ) -> HardwareModule<impl std::future::Future<Output = ()>> {
-        HardwareModule::__new(async move {
+        HardwareModule::__new_in_domain::<TestClk>(async move {
             let mut value = 0u8;
             loop {
+                value = value.wrapping_add(1);
                 out.write(value);
                 clk.tick().await;
-                value = value.wrapping_add(1);
             }
         })
     }
@@ -1079,9 +1004,8 @@ mod tests {
         let dirty = out.dirty_handle();
         exec.spawn_wired(wired_counter(clk.clone(), out), vec![dirty], vec![]);
 
-        // Post-edge continuation: out.write(value) and the increment both run in
-        // the tick's post-edge, so the value written at edge N (after incrementing)
-        // is observed in cycle N — the counter reads 1,2,3 (matching `assign q=v`).
+        // One resumption per tick: the resumption that ends at edge N increments and
+        // writes N, which the wire still shows at observation N — 1, 2, 3.
         exec.tick_clock(&mut clk);
         assert_eq!(in_.read(), 1);
 

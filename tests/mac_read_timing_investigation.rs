@@ -5,7 +5,7 @@
 //! 10,13,16 at cycles 0,3,6) and the transpiler (phase-0 edges 0,3,6).
 //! Run with: cargo test --test mac_read_timing_investigation -- --nocapture
 mod common;
-use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+use copper_core::port::{wire, In, RegOut, registered_wire};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain};
 use copper_macros::hardware;

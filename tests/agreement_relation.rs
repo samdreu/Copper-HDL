@@ -191,10 +191,12 @@ fn an_out_of_range_address_truncates() {
 }
 
 /// (iii-c) PREDICTED: `go` = 1 on cycles 0..=5, 0 on cycle 6 → no read is issued
-/// for edge 7 and the `data()` after it is undelivered. Today's simulator runs
-/// the post-tick statement at t_7⁺ — inside cycle 6's `tick_clock` — so the
-/// failure is caught at recorded cycle 6: TRUNCATED at resumption 7 by the
-/// simulator's count, reference leg not run; the SV agrees on obs_0..obs_6.
+/// for edge 7 and the `data()` after it is undelivered. The two-job simulator ran
+/// the post-tick statement at t_7⁺ (resumption 7, inside cycle 6's `tick_clock`);
+/// since the flip (Phase C step 3) the statement after a tick is the head of the
+/// NEXT resumption, which runs at t_8⁻ — inside cycle 7's `tick_clock` — so the
+/// trace is TRUNCATED at resumption 8 (measured), reference leg not run; the SV
+/// agrees on every observation before it.
 #[test]
 fn an_undelivered_data_truncates() {
     need_verilator();
@@ -227,7 +229,7 @@ fn an_undelivered_data_truncates() {
     let s = &v.sequences[0];
     assert_eq!(s.verdict(), "TRUNCATED", "{}", s.line("trunc_data"));
     let (r, m) = s.truncated.clone().unwrap();
-    assert_eq!(r, 7, "{}", s.line("trunc_data"));
+    assert_eq!(r, 8, "{}", s.line("trunc_data"));
     assert!(m.contains("not yet valid"), "{m}");
 }
 

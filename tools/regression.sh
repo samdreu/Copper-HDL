@@ -45,16 +45,13 @@
 #        modules it skips are skipped with a sentence (build.rs REF_SKIP)
 #   G-G  the AGREEMENT RELATION's verdicts (SPEC §III.2): every swept case wrote its
 #        per-sequence verdicts to the ledger, the counts of PASS, OUTSIDE (an X vs the
-#        SV), TRUNCATED (a run-time failure), EXCUSED (observation 0 of a plain `Out`)
-#        and each disagreement pattern are printed, no sweep disagreement survives,
+#        SV), TRUNCATED (a run-time failure), EXCUSED (a signature class — none since
+#        the observation-0 plain-`Out` class emptied with D-8) and each disagreement pattern are printed, no sweep disagreement survives,
 #        and every REF_SKIP row excusing a measured disagreement is matched by a pin
 #        that measured the same pattern this run
-#   G-H  the ONE-RESUMPTION executor (Phase C step 2, `COPPER_RESUMPTION=one`, not yet
-#        the default): the sweep is run a second time under it and its verdict counts
-#        are printed, so the flip step 3 owes is measured on every run; it fails only
-#        where the new executor breaks sim ≡ ref (a reference-leg disagreement, or a
-#        differential pattern with sim ≠ ref), never on the sim ≠ SV of the two-job
-#        spellings step 3 rewrites
+#        (G-H, the sweep re-run under the one-resumption executor while it was behind
+#        `COPPER_RESUMPTION`, merged into G-G when it became the only executor —
+#        Phase C step 3, 2026-11-06)
 #
 # and it prints the `#[ignore]`d tests every run, because a skipped check that prints
 # nothing is indistinguishable from a passing one.
@@ -64,8 +61,6 @@ set -uo pipefail
 # internally (see copper-sim `verilator_status`), but this script also probes the
 # binary directly, so clear it here too.
 unset VERILATOR_ROOT
-# The run is a verdict on the compiled default executor; G-H runs the other mode itself.
-unset COPPER_RESUMPTION
 
 # Every Verilator model recompiles the Verilator runtime C++ from scratch, and a full
 # run builds a few hundred models. Verilator's generated makefiles honour OBJCACHE
@@ -289,46 +284,12 @@ if [ "$RUN_TEST" -eq 1 ]; then
   # two outcomes: a sequence can PASS, leave the relation OUTSIDE (an X observation
   # against the 2-state SV, III.2.2 — never compared as 1), be TRUNCATED at a
   # run-time failure both the simulator and the reference fail at (III.2.4), be
-  # EXCUSED by a signature class (a plain `Out` at observation 0, III.2.1), or
+  # EXCUSED by a signature class (none today: the observation-0 plain-`Out` class
+  # emptied with the D-8 rewrites and was deleted at the flip, III.2.1), or
   # DISAGREE by a pattern (III.2.8). Each verdict that is not a PASS is exactly the
   # kind of thing that hides if nobody prints it, so every count is printed, zeros
   # included, and the ledger must account for every case that ran.
   gg_relation "$LEDGER" "$SWEPT" "$REF_RAN" 1
-
-  # G-H — the one-resumption executor (SPEC §I.0.2, D-8; Phase C step 2), behind
-  # `COPPER_RESUMPTION=one` until step 3 rewrites the two-job spellings and flips the
-  # default. The sweep runs again under it and every count is printed. Today 66 cases
-  # change (the plain-`Out` modules and P12, MEASUREMENTS §F.1), and they are counted,
-  # not failed. A disagreement with the reference interpreter does fail, because the
-  # new executor exists to BE the coroutine the interpreter runs (P12).
-  LEDGER_ONE="$TMP/ledger_one"
-  rm -rf "$LEDGER_ONE"; mkdir -p "$LEDGER_ONE"
-  COPPER_RESUMPTION=one COPPER_VERDICT_LEDGER="$LEDGER_ONE" \
-    cargo test --test corpus_generated > "$TMP/sweep_one.log" 2>&1 || true
-  ALL_ONE="$(cat "$LEDGER_ONE"/*.tsv 2>/dev/null)"
-  [ -n "$ALL_ONE" ] || fail "G-H: the one-resumption sweep wrote no verdicts"
-  D_ONE=$(printf '%s\n' "$ALL_ONE" | awk -F'\t' '$1=="sweep-differential" && $2=="CASE"' | wc -l | tr -d ' ')
-  R_ONE=$(printf '%s\n' "$ALL_ONE" | awk -F'\t' '$1=="sweep-reference" && $2=="CASE"' | wc -l | tr -d ' ')
-  [ "$D_ONE" -eq "$SWEPT" ] || fail "G-H: $SWEPT differential case(s) under the default, $D_ONE under one resumption"
-  [ "$R_ONE" -eq "$REF_RAN" ] || fail "G-H: $REF_RAN reference-leg case(s) under the default, $R_ONE under one resumption"
-  for origin in sweep-differential sweep-reference; do
-    line=""
-    for v in PASS OUTSIDE TRUNCATED EXCUSED DISAGREE; do
-      n=$(printf '%s\n' "$ALL_ONE" | awk -F'\t' -v o="$origin" -v v="$v" '$1==o && $2==v' | wc -l | tr -d ' ')
-      line="$line $n $v,"
-    done
-    echo "  G-H ${origin#sweep-} (one resumption): sequences —${line%,}"
-  done
-  CHANGED=$(printf '%s\n' "$ALL_ONE" | awk -F'\t' '$1=="sweep-differential" && $2=="DISAGREE"{print $3}' | sort -u | wc -l | tr -d ' ')
-  PATS_ONE=$(printf '%s\n' "$ALL_ONE" | awk -F'\t' '$1=="sweep-differential" && $2=="DISAGREE"' | grep -o 'pattern=[^ ]*' | sed 's/pattern=//' | sort | uniq -c | awk '{printf "%s%s %s", (NR>1?", ":""), $1, $2}')
-  echo "       cases that disagree under one resumption: $CHANGED of $D_ONE (the flip step 3 owes); by pattern: ${PATS_ONE:-none}"
-  BAD_ONE=$(printf '%s\n' "$ALL_ONE" | awk -F'\t' '($1=="sweep-reference" && $2=="DISAGREE") || ($1=="sweep-differential" && $2=="DISAGREE" && $0 ~ /pattern=(sim≠ref|sim=SV≠ref|all-differ)/)' | wc -l | tr -d ' ')
-  if [ "$BAD_ONE" -gt 0 ]; then
-    printf '%s\n' "$ALL_ONE" | awk -F'\t' '($1=="sweep-reference" && $2=="DISAGREE") || ($1=="sweep-differential" && $2=="DISAGREE" && $0 ~ /pattern=(sim≠ref|sim=SV≠ref|all-differ)/)' | cut -c1-200 | head -10
-    KEEP_LOG=1
-    fail "G-H: $BAD_ONE sequence(s) where the one-resumption simulator disagrees with the reference interpreter"
-  fi
-  echo "  G-H ok: under one resumption the simulator agrees with the reference interpreter on every sequence it runs"
 
   # G-E — ANCHORING. The sweep checks the simulator against the SystemVerilog the
   # transpiler emitted: two implementations of one source, which proves CONSISTENCY.

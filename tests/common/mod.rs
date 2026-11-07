@@ -709,9 +709,6 @@ pub struct EquivalenceTest {
     reset_row: bool,
     /// The sweep case's name, for the verdict ledger; `None` outside the sweep.
     case: Option<String>,
-    /// The plain-`Out` ports whose disagreement AT OBSERVATION 0 the signature class
-    /// excuses (build.rs `obs0_excuse`), with the class's sentence.
-    obs0_excuse: Option<(Vec<String>, String)>,
 }
 
 /// The simulator's run-time failure at one resumption (SPEC §III.2.4).
@@ -745,7 +742,6 @@ impl EquivalenceTest {
             seq_failure: Vec::new(),
             reset_row: false,
             case: None,
-            obs0_excuse: None,
             expected: Vec::new(),
             cycle: 0,
             src: Some(src.to_string()),
@@ -847,7 +843,6 @@ impl EquivalenceTest {
             seq_failure: Vec::new(),
             reset_row: false,
             case: None,
-            obs0_excuse: None,
             expected: Vec::new(),
             cycle: 0,
             src: None,
@@ -906,15 +901,6 @@ impl EquivalenceTest {
     /// and is still compared between the simulator and the reference.
     pub fn with_reset_row(mut self) -> Self {
         self.reset_row = true;
-        self
-    }
-
-    /// A signature class excuses an SV disagreement at observation 0 — and nowhere
-    /// else — on the listed ports (emitted names): it is reported EXCUSED with its
-    /// pattern and the class's sentence. A mismatch on any other port, or at any
-    /// later observation, still fails the case.
-    pub fn with_obs0_excuse(mut self, ports: &[String], sentence: &str) -> Self {
-        self.obs0_excuse = Some((ports.to_vec(), sentence.to_string()));
         self
     }
 
@@ -1334,32 +1320,6 @@ impl EquivalenceTest {
         let reference = self.reference_sv.as_ref().map(|path| {
             println!("=== {} vs INDEPENDENT reference {path} ===", self.name);
             match run_sv(path) {
-                Ok(Some(r)) if !r.passed => {
-                    // The observation-0 class excuse reaches the anchor too: a mismatch
-                    // only at observation 0 on an excused port is the simulator's
-                    // plain-`Out` startup transient, which the anchor shares with the
-                    // transpiled SV or not — said, never silently passed.
-                    let fails: Vec<&str> = r.output.lines().filter(|l| l.starts_with("FAIL: ")).collect();
-                    let excused = self.obs0_excuse.as_ref().is_some_and(|(ports, _)| {
-                        !fails.is_empty()
-                            && fails.iter().all(|l| {
-                                l.split_whitespace()
-                                    .nth(3)
-                                    .and_then(|t| t.strip_suffix("@obs0"))
-                                    .is_some_and(|p| ports.iter().any(|q| q == p))
-                            })
-                    });
-                    if excused {
-                        println!(
-                            "  independent reference: {} observation-0 mismatch(es), all on excused \
-                             plain-Out ports — EXCUSED by the same class sentence",
-                            fails.len()
-                        );
-                        (true, r.output)
-                    } else {
-                        (false, r.output)
-                    }
-                }
                 Ok(Some(r)) => (r.passed, r.output),
                 Ok(None) => (true, String::new()),
                 Err(e) => (false, format!("Verilator error (independent reference): {e}")),
@@ -1368,7 +1328,7 @@ impl EquivalenceTest {
 
         // 4. Each sequence's verdict.
         let mut sv_unexcused = false;
-        let mut excused_any = false;
+        let excused_any = false;
         for (k, sp) in spans.iter().enumerate() {
             let o = &mut outcomes[k];
             let cut = cuts[k];
@@ -1441,23 +1401,12 @@ impl EquivalenceTest {
                 }
                 _ => {}
             }
-            let mut obs0_excused = false;
-            if let Some((pat, wher, at0)) = first {
-                match &self.obs0_excuse {
-                    Some((ports, why))
-                        if at0
-                            && !sv_bad.1
-                            && sv_bad.0.iter().all(|p| ports.contains(p))
-                            && matches!(pat, Pattern::SimNeSvNoRef | Pattern::SimEqRefNeSv) =>
-                    {
-                        o.excused = Some((pat, format!("{wher} — {why}")));
-                        excused_any = true;
-                        obs0_excused = true;
-                    }
-                    _ => o.disagree = Some((pat, wher)),
-                }
+            // (The observation-0 plain-`Out` excuse class of Phase C step 1 is gone:
+            // it emptied with the D-8 rewrites and was deleted at the flip, step 3.)
+            if let Some((pat, wher, _at0)) = first {
+                o.disagree = Some((pat, wher));
             }
-            if sv_bad.1 || (!sv_bad.0.is_empty() && !obs0_excused) {
+            if sv_bad.1 || !sv_bad.0.is_empty() {
                 sv_unexcused = true;
             }
         }
@@ -1723,12 +1672,6 @@ impl ReferenceLeg {
     /// row's declaration concerns the SV pair only; `sim ≡ ref` compares
     /// observation 0 exactly, X included (SPEC §III.2.0).
     pub fn with_reset_row(self) -> Self {
-        self
-    }
-
-    /// Accepted for symmetry with [`EquivalenceTest::with_obs0_excuse`]: the class
-    /// excuses an SV disagreement; the reference leg is not excused by it.
-    pub fn with_obs0_excuse(self, _ports: &[String], _sentence: &str) -> Self {
         self
     }
 

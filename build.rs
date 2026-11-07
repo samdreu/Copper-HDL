@@ -51,6 +51,18 @@ use quote::ToTokens;
 /// fail" is a claim that should have an author and a sentence.
 const SKIP: &[(&str, &str)] = &[
     (
+        "regout_trailing_single_tick",
+        "OUTSIDE THE AGREEMENT RELATION (SPEC III.2.8, II.3 row (f4), ADMITTED-AND-DIVERGENT): \
+         `tick; let d = step.read(); acc = acc + d; q.write(acc)` reads after its only tick. \
+         The simulator and the reference interpreter read x_{N+1} there (the trailing region is \
+         the next resumption's head, SPEC I.0.2) and agree (obs_{N+1} = Σ x_2..x_{N+1}); the \
+         linear route's trailing fold still realizes the two-job reading, so sim = ref ≠ SV — \
+         pinned by tests/reference_leg_measurements.rs::regout_trailing_single_tick_is_the_\
+         trailing_fold. Became a SKIP row at the flip (Phase C step 3, 2026-11-06): before it, \
+         the two-job simulator agreed with the SV (sim = SV ≠ ref, a REF_SKIP row). Delete \
+         this row when the fold is fixed (D-20 step 4, the entry of I.9.2)",
+    ),
+    (
         "rv32i_cpu_pipelined",
         "ANCHORED OUTSIDE THIS SWEEP as of 2026-08-27: tests/rv32i_pipelined_verilator.rs \
          runs all 13 architectural programs on the simulator AND on the transpiled core \
@@ -336,19 +348,6 @@ const REF_SKIP: &[(&str, &str)] = &[
          2026-11-05), but the reference interpreter has no memory model yet — that model is a \
          later Phase C step (D-16's first Phase C item), not this one",
     ),
-    (
-        "regout_trailing_single_tick",
-        "MEASURED DISAGREEMENT, sim = SV ≠ ref (2026-11-05, 854 of 864 cycles, first at cycle 1): \
-         `tick; let d = step.read(); acc = acc + d; q.write(acc)` reads AFTER its only tick. \
-         Under the one-job body (D-8, SPEC I.0.2) the trailing region is the head of the next \
-         resumption and the read sees x_{N+1}, so obs_{N+1} = Σ x_1..x_{N+1}; today's simulator \
-         reads it immediately after the edge (x_N) and the linear route's trailing fold \
-         (I.6.9, I.3.8) realizes the same, so both show Σ x_1..x_N. Not a transpiler bug and not \
-         a simulator bug of its own: the two-job residue that Phase C removes from the simulator \
-         (one resumption per tick) — the first module the interpreter catches. Pinned as an \
-         expected divergence in tests/reference_leg_measurements.rs; delete this row when \
-         Phase C lands",
-    ),
 ];
 
 /// The PATTERN (SPEC §III.2.8) of every `REF_SKIP` row that excuses a MEASURED
@@ -356,7 +355,7 @@ const REF_SKIP: &[(&str, &str)] = &[
 /// pin test to have measured the same pattern this run — a row that excuses a
 /// disagreement nobody still measures, or one measured under another reading, fails
 /// the regression. Validated at build time against `REF_SKIP`.
-const REF_SKIP_PATTERN: &[(&str, &str)] = &[("regout_trailing_single_tick", "sim=SV≠ref")];
+const REF_SKIP_PATTERN: &[(&str, &str)] = &[];
 
 // ── The multi-sequence stimulus policy (2026-10-28) ────────────────────────────
 //
@@ -825,33 +824,6 @@ impl Module {
 }
 
 impl Module {
-    /// The plain-`Out` ports of a clocked module, and the sentence that excuses a
-    /// simulator–SV disagreement at OBSERVATION 0 on them (SPEC §III.2.1) — a
-    /// signature class like `ref_skip_reason`'s plain-`Out` class, and for the same
-    /// reason. Under the one-job body a sequential module has no plain `Out` (D-8,
-    /// I.2.2) and `obs_0 = init(q)` for every port (I.9.4); the plain-`Out` startup
-    /// items D-11 routed away (the continuous-assign transient, `init(o)` at startup)
-    /// are vacuous there. Today's two-job simulator and the transpiler's plain-`Out`
-    /// forms read that instant differently, and the 2026-11-06 measurement
-    /// (MEASUREMENTS §E.1) found 25 modules / 131 sequences disagreeing there and
-    /// nowhere else. The excuse covers observation 0 on these ports only: a
-    /// disagreement at any later observation, or on a `RegOut`, still fails.
-    fn obs0_excuse(&self) -> Option<(Vec<&str>, &'static str)> {
-        if !matches!(self.mode.as_str(), "sequential" | "synchronizer") {
-            return None;
-        }
-        let plain: Vec<&str> =
-            self.ports.iter().filter(|p| p.kind == Kind::Out).map(|p| p.name.as_str()).collect();
-        (!plain.is_empty()).then_some((
-            plain,
-            "a plain `Out` at observation 0 on a clocked module: under the one-job body there is \
-             none and obs_0 = init(q) (D-8, SPEC I.2.2, I.9.4); today's two-job simulator shows \
-             the creation zero where the write runs at t_1+ and the SV's continuous assign shows \
-             the expression, or shows the head's pre-edge write where the SV shows the hold \
-             register — awaits the Phase C rewrite to RegOut (MEASUREMENTS §E.1)",
-        ))
-    }
-
     /// Why the reference-interpreter leg cannot run on this module, if it cannot —
     /// the classes `copper_ref::Module::new` defers, decided here from the
     /// signature so the generated case is `#[ignore]`d with the sentence rather
@@ -1171,16 +1143,6 @@ fn emit_test(code: &mut String, m: &Module, body: bool, leg: Leg, wrapper: &str)
     let mut relation = format!("\n            .sweep_case(\"{wrapper}::{name}\")");
     if RESET.iter().any(|(n, _, _)| *n == m.name) {
         relation.push_str("\n            .with_reset_row()");
-    }
-    if let Some((ports, why)) = m.obs0_excuse() {
-        let ports: Vec<String> =
-            ports.iter().map(|p| format!("copper_codegen::legalized_port_name(\"{p}\")")).collect();
-        let _ = write!(
-            relation,
-            "\n            .with_obs0_excuse(&[{}], \"{}\")",
-            ports.join(", "),
-            escape(why)
-        );
     }
     match leg {
         Leg::Differential => {

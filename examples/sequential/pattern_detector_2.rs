@@ -1,5 +1,5 @@
 use copper_core::types::{Logic, Clock, ClockDomain};
-use copper_core::port::{In, RegOut, wire, registered_wire};
+use copper_core::port::{In, RegOut, wire};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 

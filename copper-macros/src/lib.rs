@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
-use std::collections::{HashMap, HashSet};
-use syn::{parse_macro_input, visit::Visit, visit_mut::VisitMut, Error, FnArg, ItemFn, Pat, ReturnType, Type};
+use quote::quote;
+use std::collections::HashSet;
+use syn::{parse_macro_input, visit::Visit, Error, FnArg, ItemFn, Pat, ReturnType, Type};
 
 enum HardwareMode {
     Sequential,
@@ -87,26 +87,6 @@ fn clock_domain_type(ty: &Type) -> Option<Type> {
     })
 }
 
-/// The `D` in an `In<T, D>` parameter's type — `()` for the one-arg shorthand
-/// `In<T>`, whose domain defaults to the unit domain.
-fn in_port_domain_type(ty: &Type) -> Type {
-    let unit: Type = syn::parse_quote!(());
-    let Type::Path(tp) = ty else { return unit };
-    let Some(seg) = tp.path.segments.last() else { return unit };
-    let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else { return unit };
-    let type_args: Vec<Type> = ab
-        .args
-        .iter()
-        .filter_map(|a| match a {
-            syn::GenericArgument::Type(t) => Some(t.clone()),
-            _ => None,
-        })
-        .collect();
-    match type_args.len() {
-        0 | 1 => unit, // `In<T>` — the one type arg is `T`; domain is the default.
-        _ => type_args.last().unwrap().clone(),
-    }
-}
 
 // ── Clock-domain-crossing (CDC) enforcement ─────────────────────────────────
 //
@@ -637,83 +617,14 @@ fn find_unprotectable_in_uses(block: &syn::Block, in_params: &HashSet<String>) -
     finder.found
 }
 
-/// Rewrites every `<param>.read()` call — for `<param>` one of this function's
-/// `In<T, D>` parameters — according to its **static edge-phase classification**
-/// (`copper_analysis::classify_reads`, item 3), the compile-time replacement for
-/// the old runtime read-freshness oracle:
-///
-/// * [`ReadTiming::Deferred`] — a leading/pre-tick read whose result registers at
-///   an upcoming edge: emit `{ pre_edge_barrier::<D>().await; port.read() }`, so it
-///   samples at the next pre-edge settle (the registering edge), matching the
-///   transpiled FSM's input register.
-/// * [`ReadTiming::Immediate`] — a trailing/post-tick read that consumes the value
-///   the just-past edge produced: emit a plain `port.read()`.
-///
-/// `D` is `tick_domain_of[name]` — the clock domain whose phase gates this read
-/// (usually the port's own domain; see `inject_synced_reads`). Tags are consumed by
-/// **index** in source order: `timings[i]` is the i-th `In`-param read this rewriter
-/// reaches (its read leaves are visited left-to-right, the order `classify_reads`
-/// emits). There is no per-read runtime state — no wrap counter, tracker, or
-/// call-id — so at runtime the read is just the accepted phase machinery.
-///
-/// Only call after confirming (via `find_unprotectable_in_uses`) that every use of
-/// every `In` parameter is one of these recognized `.read()` call sites.
-///
-/// [`ReadTiming::Deferred`]: copper_analysis::ReadTiming::Deferred
-/// [`ReadTiming::Immediate`]: copper_analysis::ReadTiming::Immediate
-struct ReadRewriter<'a> {
-    in_params: &'a HashSet<String>,
-    tick_domain_of: &'a HashMap<String, Type>,
-    /// Static edge-phase tags, in source order — consumed by `next`.
-    timings: &'a [copper_analysis::ReadTiming],
-    /// Index of the next `In`-param read; must reach `timings.len()` when done.
-    next: usize,
-}
-
-impl<'a> VisitMut for ReadRewriter<'a> {
-    fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
-        syn::visit_mut::visit_expr_mut(self, expr);
-
-        let matched_name = if let syn::Expr::MethodCall(mc) = &*expr {
-            (mc.method == "read" && mc.args.is_empty())
-                .then(|| match &*mc.receiver {
-                    syn::Expr::Path(p) => p.path.get_ident().map(|id| id.to_string()),
-                    _ => None,
-                })
-                .flatten()
-                .filter(|name| self.in_params.contains(name))
-        } else {
-            None
-        };
-
-        if let Some(name) = matched_name {
-            let timing = self.timings.get(self.next).copied();
-            self.next += 1;
-
-            let port_ident = format_ident!("{}", name);
-            let tick_domain = &self.tick_domain_of[&name];
-            *expr = match timing {
-                Some(copper_analysis::ReadTiming::Deferred) => syn::parse_quote! {
-                    {
-                        ::copper_sim::pre_edge_barrier::<#tick_domain>().await;
-                        #port_ident.read()
-                    }
-                },
-                // Immediate — or, defensively, an unclassified index: a plain read.
-                _ => syn::parse_quote! { #port_ident.read() },
-            };
-        }
-    }
-}
-
-/// Injects the per-read freshness check into a `#[hardware(sequential)]`
-/// function body: a hidden wrap counter, one hidden tracker per `In<T, D>`
-/// parameter, and a rewrite of every recognized `.read()` call site to go
-/// through them. No-op if the function has no `In` parameters at all — a
-/// free-running module has nothing to protect. Returns an error (without
-/// modifying `f`) if any `In` parameter is used in a way that can't be
-/// rewritten — see `find_unprotectable_in_uses`.
-fn inject_synced_reads(f: &mut ItemFn, cfg: Option<&copper_analysis::Cfg>) -> Result<(), Error> {
+/// SPEC II.1 R19's remaining reason (D-12, II.3.4): an `In<T, D>` parameter is used
+/// only as the receiver of `.read()` — `let t = x.read()` is the one read form; a
+/// clone, a rebinding or a helper taking `&In` is refused. Until Phase C step 3
+/// this was the precondition for the per-read barrier injection (`ReadRewriter`,
+/// which rewrote a deferred read to `{ pre_edge_barrier::<D>().await; x.read() }`);
+/// the injection and the barrier were deleted with the two-job executor (D-8), so
+/// the body now runs as written.
+fn check_in_param_uses(f: &ItemFn) -> Result<(), Error> {
     let in_params: HashSet<String> = in_param_names(&f.sig).into_iter().collect();
     if in_params.is_empty() {
         return Ok(());
@@ -737,94 +648,6 @@ fn inject_synced_reads(f: &mut ItemFn, cfg: Option<&copper_analysis::Cfg>) -> Re
         }
         return Err(err);
     }
-
-    // Each `In<T, D>` parameter's reads are gated by whichever clock domain's
-    // phase/call-id they should be read against. Usually that is the port's own
-    // declared `D` — the normal case for both single-clock modules and a
-    // multi-clock module with one real `Clock<D>` parameter per domain its ports
-    // use, since each domain really is ticked (by this function's own
-    // `.tick().await` on that clock) and so its phase genuinely tracks this
-    // read's freshness.
-    //
-    // It is NOT the port's own domain when nothing in this function ticks that
-    // domain at all — a domain-agnostic `In<T>` port (declared domain `()`,
-    // which nothing ever ticks), or a `#[hardware(synchronizer)]` module's
-    // sanctioned foreign-domain input (its whole point is to read a domain this
-    // reactor doesn't share). In both cases the read is actually happening
-    // inside whichever clock's reactor is executing this code, so we fall back
-    // to that: this function's own (single) `Clock<D>` parameter. That fallback
-    // is unambiguous today because every function reaching it is sequential-like
-    // and CDC-restricted to exactly one *native* clock parameter feeding its
-    // ports — `check_cdc` requires it for plain sequential modules, and every
-    // shipped synchronizer (e.g. `sync_2ff`) likewise has exactly one real
-    // `Clock<D>` (its `Dst`) with possibly-many foreign-domain `In` ports. A
-    // module with several real, independently-ticked clocks and an *additional*
-    // domain-agnostic/foreign port would be ambiguous here — rejected below
-    // rather than guessed at.
-    let clock_domains: Vec<Type> = f
-        .sig
-        .inputs
-        .iter()
-        .filter_map(|a| match a {
-            FnArg::Typed(pt) if outer_type_name(&pt.ty).as_deref() == Some("Clock") => {
-                clock_domain_type(&pt.ty)
-            }
-            _ => None,
-        })
-        .collect();
-    let clock_domain_strs: HashSet<String> = clock_domains
-        .iter()
-        .map(|t| quote!(#t).to_string())
-        .collect();
-
-    let mut tick_domain_of: HashMap<String, Type> = HashMap::new();
-    for arg in &f.sig.inputs {
-        let FnArg::Typed(pt) = arg else { continue };
-        if outer_type_name(&pt.ty).as_deref() != Some("In") {
-            continue;
-        }
-        let Pat::Ident(pi) = &*pt.pat else { continue };
-        let name = pi.ident.to_string();
-        let port_domain = in_port_domain_type(&pt.ty);
-        let tick_domain = if clock_domain_strs.contains(&quote!(#port_domain).to_string()) {
-            port_domain
-        } else if let [only] = clock_domains.as_slice() {
-            only.clone()
-        } else {
-            return Err(Error::new_spanned(
-                &pt.ty,
-                format!(
-                    "`{name}`'s clock domain isn't ticked by any `Clock<D>` parameter of this \
-                     function, and the function has {} `Clock<D>` parameters — need exactly one \
-                     to infer which clock gates this read. This port shape isn't supported yet.",
-                    clock_domains.len(),
-                ),
-            ));
-        };
-        tick_domain_of.insert(name, tick_domain);
-    }
-
-    // Static edge-phase classification (item 3): computed on `f` as it stands here
-    // — pristine, before any read rewrite — in the same source order the rewriter
-    // reaches read leaves, so tag `i` lines up with the i-th rewritten read.
-    let timings = copper_analysis::classify_reads_with(f, cfg);
-
-    let mut rewriter = ReadRewriter {
-        in_params: &in_params,
-        tick_domain_of: &tick_domain_of,
-        timings: &timings,
-        next: 0,
-    };
-    rewriter.visit_block_mut(&mut f.block);
-    debug_assert_eq!(
-        rewriter.next,
-        timings.len(),
-        "read-timing tags ({}) != rewritten In-param reads ({}) — classify_reads and \
-         the macro rewriter disagree on the read set",
-        timings.len(),
-        rewriter.next,
-    );
-
     Ok(())
 }
 
@@ -1021,10 +844,10 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 inferred_registers
             );
 
-            let mut f = input_fn;
-            if let Err(err) = inject_synced_reads(&mut f, cfg.as_ref()) {
+            if let Err(err) = check_in_param_uses(&input_fn) {
                 return err.to_compile_error().into();
             }
+            let mut f = input_fn;
             wrap_in_module(&mut f);
             quote! { #f }.into()
         }

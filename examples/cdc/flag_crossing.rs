@@ -15,7 +15,7 @@
 // Both illegal paths are shown commented-out below with the error they produce.
 
 use copper::sync_2ff;
-use copper_core::port::{registered_wire, wire, In, Out, RegOut};
+use copper_core::port::{registered_wire, wire, In, Out};
 use copper_core::{Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::{HardwareExecutor, HardwareTest, SimulationTrace, make_cycle};

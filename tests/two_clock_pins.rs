@@ -13,19 +13,20 @@
 //!   hierarchy under Verilator, per domain: the fast trace per fast edge and the slow
 //!   trace per slow edge.
 //!
-//! Both run under each resumption mode (`ResumptionMode`, `COPPER_RESUMPTION`), set
-//! explicitly per executor, so the pins state both today's two-job behaviour and the
-//! one-resumption protocol, whatever the compiled default. Each known divergence is
-//! pinned as measured: when the default flips (Phase C step 3) the `Two` arm is the
-//! old path and the `One` arm is the language.
+//! Phase C step 2 ran both under each resumption mode; since the flip (step 3) the
+//! executor has one protocol, so the `Two` arms (the never-ticked startup's
+//! sim≠ref,SV=ref pin and the two-job interleavings) are gone. With the hierarchy
+//! rewritten to the one-job spelling, the simulator agrees with the transpiled
+//! hierarchy on both domains under P, Q and R (an interleaving with empty slow
+//! periods, MEASUREMENTS §F.3 / F.8 item 1).
 
 mod common;
 
-use common::{verilator_available, EquivalenceTest, Pattern};
+use common::{verilator_available, EquivalenceTest};
 use copper_core::port::{registered_wire, wire, In, Out, RegOut};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
-use copper_sim::{HardwareExecutor, ResumptionMode};
+use copper_sim::HardwareExecutor;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -71,13 +72,13 @@ async fn a_counter(clk: Clock<ClkA>, q: RegOut<Bits<8>, ClkA>) {
 /// The schedule of D-17 (i): x = 1; A ×3; x = 2; B; x = 3; B; x = 4; B. Returns the
 /// resumption count after each step and the B-domain trace (obs_0, obs_1, …) with
 /// the input each B instant saw, recorded through the relation harness.
-fn never_ticked(mode: ResumptionMode) -> (Vec<usize>, Vec<u8>, common::Verdicts) {
+fn never_ticked() -> (Vec<usize>, Vec<u8>, common::Verdicts) {
     RESUMPTIONS.with(|c| c.set(0));
     let mut eq = EquivalenceTest::differential_only("b_reg", PROBES_SRC, Some("b_reg"))
         .with_reference_interpreter();
     let mut clk_a = Clock::<ClkA>::new();
     let mut clk_b = Clock::<ClkB>::new();
-    let mut exec = HardwareExecutor::new().with_resumption_mode(mode);
+    let mut exec = HardwareExecutor::new();
     let (x_drv, x_in) = wire::<Bits<8>, ClkB>(Bits::zero());
     let (q_out, q_obs) = registered_wire::<Bits<8>, ClkB>(&clk_b, Bits::zero());
     let dh = q_out.dirty_handle();
@@ -121,7 +122,7 @@ fn never_ticked_startup_one_resumption_agrees_on_all_three_legs() {
     if !verilator_available() {
         panic!("Verilator is absent: this pin needs the SV leg and cannot be skipped silently");
     }
-    let (counts, trace, v) = never_ticked(ResumptionMode::One);
+    let (counts, trace, v) = never_ticked();
     // B's coroutine ran nothing during A's three ticks (SPEC §I.12.2), then once per B tick.
     assert_eq!(counts, vec![0, 0, 0, 0, 1, 2, 3], "resumption counts under One");
     // obs_0 = init(q); obs_1 = x_1 of B = 2 (the input standing before B's edge 1).
@@ -131,38 +132,6 @@ fn never_ticked_startup_one_resumption_agrees_on_all_three_legs() {
     assert_eq!(v.pattern, None, "{}", v.report);
 }
 
-/// Today's two-job executor, pinned as the known divergence D-17 (i) measured: B's
-/// first resumption runs in A's first settle and reads x = 1, so `q = 1` after B's
-/// edge 1 where the flop and the reference show 2. Pattern sim≠ref, SV=ref (a
-/// simulator bug, SPEC §III.2.8). When the default flips, this arm documents the
-/// old path; delete it with the `Two` executor.
-#[test]
-fn never_ticked_startup_two_job_is_the_pinned_divergence() {
-    if !verilator_available() {
-        panic!("Verilator is absent: this pin needs the SV leg and cannot be skipped silently");
-    }
-    let (counts, trace, v) = never_ticked(ResumptionMode::Two);
-    assert_eq!(counts, vec![0, 1, 1, 1, 2, 3, 4], "resumption counts under Two (first one in A's settle)");
-    assert_eq!(trace, vec![0, 1, 3, 4], "B's trace under Two: q = 1 after B's edge 1");
-    assert!(!v.transpiled, "sim ≠ SV under Two (the startup divergence)");
-    assert!(matches!(v.interpreter, Some(Err(_))), "sim ≠ ref under Two: {:?}", v.interpreter);
-    assert_eq!(v.pattern, Some(Pattern::SimNeRefSvEqRef), "{}", v.report);
-    // obs_1 is recorded cycle 0: every failing line, on either leg, names it.
-    let fails: Vec<&str> = v.report.lines().filter(|l| l.starts_with("FAIL: Cycle")).collect();
-    assert!(!fails.is_empty(), "{}", v.report);
-    assert!(
-        fails.iter().all(|l| l.starts_with("FAIL: Cycle 0 ")),
-        "the divergence is at obs_1 only:\n{}",
-        v.report
-    );
-    v.record_pin("b_reg: never-ticked startup under the two-job executor (D-17 (i), P11)");
-}
-
-// ── (vi) two interleavings on two_domain_counter ──────────────────────────────
-
-// Kept identical to `examples/cdc/two_domain_hierarchy.rs`; the transpiler reads
-// that file from disk, so the two never silently drift (the same arrangement as
-// `tests/two_domain_hierarchy_cdc.rs`).
 #[hardware(sequential)]
 async fn fast_counter(
     clk: Clock<ClkA>,
@@ -221,10 +190,10 @@ struct Traces {
     slow: Vec<u8>,
 }
 
-fn sim_traces(mode: ResumptionMode, sched: &[usize]) -> Traces {
+fn sim_traces(sched: &[usize]) -> Traces {
     let mut clk_a = Clock::<ClkA>::new();
     let mut clk_b = Clock::<ClkB>::new();
-    let mut exec = HardwareExecutor::new().with_resumption_mode(mode);
+    let mut exec = HardwareExecutor::new();
     let (count_port, count_obs) = registered_wire::<Bits<8>, ClkA>(&clk_a, Bits::zero());
     let (flag_port, flag_in) = registered_wire::<Logic, ClkA>(&clk_a, Logic::Zero);
     let (sync_q_port, sync_in) = registered_wire::<Logic, ClkB>(&clk_b, Logic::Zero);
@@ -328,26 +297,19 @@ fn sv_traces(sched: &[usize]) -> Traces {
 /// the slow trace per slow edge is the same under P and Q because the flag standing
 /// at each slow edge is (D-17 (vi), measured on the two-job executor 2026-11-05).
 #[test]
-fn interleavings_give_one_trace_per_domain_under_both_modes() {
-    for mode in [ResumptionMode::Two, ResumptionMode::One] {
-        let p = sim_traces(mode, &P);
-        let q = sim_traces(mode, &Q);
-        let n = p.fast.len().min(q.fast.len());
-        assert_eq!(p.fast[..n], q.fast[..n], "{mode:?}: fast trace per fast edge");
-        assert_eq!(p.slow, q.slow, "{mode:?}: slow trace per slow edge");
-        println!("{mode:?}: fast P {:?}", p.fast);
-        println!("{mode:?}: slow P {:?} Q {:?}", p.slow, q.slow);
-    }
+fn interleavings_give_one_trace_per_domain() {
+    let p = sim_traces(&P);
+    let q = sim_traces(&Q);
+    let n = p.fast.len().min(q.fast.len());
+    assert_eq!(p.fast[..n], q.fast[..n], "fast trace per fast edge");
+    assert_eq!(p.slow, q.slow, "slow trace per slow edge");
 }
 
-/// The simulator against the transpiled two-clock hierarchy under P and Q, per
-/// domain. Under the two-job executor the two agree (the 2:1 case is the anchored
-/// `two_domain_hierarchy_cdc`). Under one resumption the design's modules are still
-/// in the two-job spelling — `fast_counter`'s `count_out`/`flag_out` and
-/// `flag_sync`'s `q` and `slow_consumer`'s `out` are plain `Out`s written at the
-/// loop head after a tick — and the macro step (Phase C step 3) rewrites them; the
-/// arm measures what the one-resumption executor does with them as they stand and
-/// pins it.
+/// The simulator against the transpiled two-clock hierarchy, per domain, under P,
+/// Q and R (R has empty slow periods). Measured under the two-job executor as
+/// equal (step 2), under one resumption with the hierarchy still two-job as
+/// lagging (step 2, F.3), and with the one-job rewrite as equal in both modes
+/// (step 3, G.1) — the arm that remains after the flip.
 #[test]
 fn interleavings_sim_against_the_transpiled_hierarchy() {
     if !verilator_available() {
@@ -355,13 +317,7 @@ fn interleavings_sim_against_the_transpiled_hierarchy() {
     }
     for (name, sched) in [("P", &P[..]), ("Q", &Q[..]), ("R", &R[..])] {
         let sv = sv_traces(sched);
-        let two = sim_traces(ResumptionMode::Two, sched);
-        assert_eq!(two, sv, "Two, interleaving {name}: sim ≡ SV per domain");
-        // Phase C step 3 (D-8): the hierarchy is rewritten in the one-job spelling
-        // (every clocked output a `RegOut`, the consumer a combinational module), so
-        // the lag F.3 pinned under `One` is gone: both modes agree with the SV on
-        // both domains under P, Q and R (R's empty slow periods included).
-        let one = sim_traces(ResumptionMode::One, sched);
-        assert_eq!(one, sv, "One, interleaving {name}: sim ≡ SV per domain");
+        let sim = sim_traces(sched);
+        assert_eq!(sim, sv, "interleaving {name}: sim ≡ SV per domain");
     }
 }

@@ -10,7 +10,7 @@
 //! Run with:  cargo test --test probe_timing_investigation -- --nocapture
 mod common;
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+use copper_core::port::{wire, In, RegOut, registered_wire};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain};
 use copper_macros::hardware;

@@ -7,7 +7,7 @@
 //! sim sampled one cycle early on 2+-tick loops).
 mod common;
 use common::EquivalenceTest;
-use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+use copper_core::port::{wire, In, RegOut, registered_wire};
 use copper_core::types::Bits;
 use copper_core::{Clock, ClockDomain};
 use copper_macros::hardware;

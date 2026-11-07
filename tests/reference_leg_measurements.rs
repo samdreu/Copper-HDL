@@ -20,11 +20,11 @@
 mod common;
 
 use common::{verilator_available, EquivalenceTest, Pattern, Rng};
-use copper_core::port::{registered_wire, wire, In, Out, RegOut};
+use copper_core::port::{registered_wire, wire, In, RegOut};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_ref::{Module, RefError};
-use copper_sim::{HardwareExecutor, ResumptionMode};
+use copper_sim::HardwareExecutor;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 struct MainClk;
@@ -150,9 +150,9 @@ fn trailing_fold_at_edge_1_is_spec_vs_transpiler() {
 }
 
 /// `regout_trailing_single_tick` (`loop { tick; q.write(acc + step.read()) … }`)
-/// under one resumption mode: the simulator's trace, and the relation's verdicts
-/// against the transpiled SV and the reference interpreter.
-fn regout_trailing_single_tick_under(mode: ResumptionMode) -> (Vec<u8>, Vec<u8>, common::Verdicts) {
+/// under the one-resumption executor: the simulator's trace, and the relation's
+/// verdicts against the transpiled SV and the reference interpreter.
+fn regout_trailing_single_tick_run() -> (Vec<u8>, Vec<u8>, common::Verdicts) {
     let mut eq = EquivalenceTest::differential_only(
         "regout_trailing_single_tick",
         OUT_PHASE_SRC,
@@ -160,7 +160,7 @@ fn regout_trailing_single_tick_under(mode: ResumptionMode) -> (Vec<u8>, Vec<u8>,
     )
     .with_reference_interpreter();
     let mut clk = Clock::<MainClk>::new();
-    let mut exec = HardwareExecutor::new().with_resumption_mode(mode);
+    let mut exec = HardwareExecutor::new();
     let (s_drv, s_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     let (q_out, q_obs) = registered_wire::<Bits<8>, MainClk>(&clk, Bits::zero());
     let dh = q_out.dirty_handle();
@@ -188,37 +188,18 @@ fn prefix_sums(xs: &[u8], from: usize, through: impl Fn(usize) -> usize) -> Vec<
         .collect()
 }
 
-/// The one corpus disagreement the leg found (its `REF_SKIP` row in build.rs), under
-/// the two-job executor: sim = SV ≠ ref — both implementations read the trailing
-/// `step.read()` at t_N⁺ (x_N) where the one-job body reads x_{N+1} (I.0.2). The pin
-/// that keeps the row honest while `ResumptionMode::Two` is the default.
+/// P12 (its `REF_SKIP` row in build.rs): the simulator reads the trailing
+/// `step.read()` at t_{N+1}⁻ (obs_{N+1} = Σ x_2..x_{N+1}) and agrees with the
+/// reference interpreter; the transpiled SV still realizes the two-job reading
+/// (the linear route's trailing fold, II.3 row (f4), step 4 of D-20's list), so
+/// the pattern is sim = ref ≠ SV. Measured 2026-11-06 (Phase C step 2), the pin
+/// since the flip (step 3), when the two-job arm (sim = SV ≠ ref) was deleted.
 #[test]
-fn regout_trailing_single_tick_is_the_two_job_residue() {
+fn regout_trailing_single_tick_is_the_trailing_fold() {
     if !verilator_available() {
         panic!("Verilator is absent: this measurement needs the SV leg and cannot be skipped silently");
     }
-    let (xs, qs, v) = regout_trailing_single_tick_under(ResumptionMode::Two);
-    // The two-job reading: obs_{N+1} = Σ x_1..x_N (this cycle's input not yet added).
-    assert_eq!(qs, prefix_sums(&xs, 0, |n| n), "the two-job simulator shows Σ x_1..x_N at obs_{{N+1}}");
-    println!("regout_trailing_single_tick (Two): transpiled {} interpreter {:?}", v.transpiled, v.interpreter);
-    assert!(v.transpiled, "sim = SV under Two (the sweep passes this module)");
-    assert!(matches!(v.interpreter, Some(Err(_))), "the one-job interpreter reads x_{{N+1}}: Σ x_1..x_{{N+1}}");
-    // SPEC §III.2.8: sim = SV ≠ ref — the two-job residue (P12); its REF_SKIP row
-    // in build.rs names the same pattern, and G-G matches the two.
-    assert_eq!(v.pattern, Some(Pattern::SimEqSvNeRef), "{}", v.report);
-    v.record_pin("regout_trailing_single_tick: the two-job residue (P12), REF_SKIP row");
-}
-
-/// P12 under one resumption per tick (Phase C step 2): the simulator reads the
-/// trailing `step.read()` at t_{N+1}⁻ (obs_{N+1} = Σ x_2..x_{N+1}) and agrees with the reference interpreter;
-/// the transpiled SV still realizes the two-job reading (the trailing fold, step 4
-/// of D-20's list), so the pattern flips to sim = ref ≠ SV. Measured 2026-11-06.
-#[test]
-fn regout_trailing_single_tick_under_one_resumption_agrees_with_the_reference() {
-    if !verilator_available() {
-        panic!("Verilator is absent: this measurement needs the SV leg and cannot be skipped silently");
-    }
-    let (xs, qs, v) = regout_trailing_single_tick_under(ResumptionMode::One);
+    let (xs, qs, v) = regout_trailing_single_tick_run();
     // The first resumption runs to the head tick and writes nothing (cycle 0's
     // input is read by no one); the resumption ending at edge N+1 adds x_{N+1}.
     assert_eq!(qs, prefix_sums(&xs, 1, |n| n + 1), "the one-job simulator shows Σ x_2..x_{{N+1}} at obs_{{N+1}}");
@@ -226,6 +207,7 @@ fn regout_trailing_single_tick_under_one_resumption_agrees_with_the_reference() 
     assert!(matches!(v.interpreter, Some(Ok(48))), "sim ≡ ref under One: {:?}", v.interpreter);
     assert!(!v.transpiled, "sim ≠ SV under One: the SV keeps the two-job reading");
     assert_eq!(v.pattern, Some(Pattern::SimEqRefNeSv), "{}", v.report);
+    v.record_pin("regout_trailing_single_tick: II.3 row (f4), the trailing fold (P12), REF_SKIP row");
 }
 
 // ── corpus walk shared by (ii) and (iii) ───────────────────────────────────

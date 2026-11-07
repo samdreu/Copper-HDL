@@ -34,7 +34,7 @@ include!("../examples/memory/dual_port_ram.rs");
 // classifies it close+reg+mem+out[fwd]). Single source of truth: the fixture.
 // (Since Phase C step 3 the example is an array register and no longer imports
 // `Memory`; the ROM fixture needs it.)
-use copper_core::{Memory, port::Out};
+use copper_core::Memory;
 include!("fixtures/preloaded_rom_dut.rs");
 
 /// Verilate `sv` as `top` and run a **per-cycle stimulus**: for each cycle, set
