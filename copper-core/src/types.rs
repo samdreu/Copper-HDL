@@ -21,7 +21,7 @@ pub enum Logic {
 /// A single hardware logic value with 3-state logic (0, 1, X)
 impl Logic {
     /// Create a new Logic from a boolean
-    pub fn from_bool(b: bool) -> Self {
+    pub const fn from_bool(b: bool) -> Self {
         if b { Self::One } else { Self::Zero }
     }
     
@@ -152,7 +152,7 @@ impl<const N: usize> Bits<N> {
     /// Its counterpart is [`Bits::all_ones`], deliberately not named `one`:
     /// all-ones is `2^N - 1`, not 1. For the value 1, use
     /// `Bits::from_lit::<1>()`.
-    pub fn zero() -> Self {
+    pub const fn zero() -> Self {
         Self { bits: [Logic::Zero; N] }
     }
 
@@ -170,17 +170,17 @@ impl<const N: usize> Bits<N> {
     /// assert_eq!(Bits::<3>::all_ones().as_u128(), 7);
     /// assert_eq!(Bits::<3>::from_lit::<1>().as_u128(), 1);
     /// ```
-    pub fn all_ones() -> Self {
+    pub const fn all_ones() -> Self {
         Self { bits: [Logic::One; N] }
     }
     
     /// Create a bit vector with all X (unknown)
-    pub fn x() -> Self {
+    pub const fn x() -> Self {
         Self { bits: [Logic::X; N] }
     }
 
     /// Create from an array of Logic values
-    pub fn from_array(bits: [Logic; N]) -> Self {
+    pub const fn from_array(bits: [Logic; N]) -> Self {
         Self { bits }
     }
     
@@ -192,36 +192,40 @@ impl<const N: usize> Bits<N> {
         Self { bits }
     }
     
-    pub fn from_u8(val: u8) -> Self {
+    pub const fn from_u8(val: u8) -> Self {
         const { assert!(N >= 8, "Bits<N> too small for u8; N must be >= 8") };
         Self::from_uint(val as u128)
     }
 
-    pub fn from_u16(val: u16) -> Self {
+    pub const fn from_u16(val: u16) -> Self {
         const { assert!(N >= 16, "Bits<N> too small for u16; N must be >= 16") };
         Self::from_uint(val as u128)
     }
 
-    pub fn from_u32(val: u32) -> Self {
+    pub const fn from_u32(val: u32) -> Self {
         const { assert!(N >= 32, "Bits<N> too small for u32; N must be >= 32") };
         Self::from_uint(val as u128)
     }
 
-    pub fn from_u64(val: u64) -> Self {
+    pub const fn from_u64(val: u64) -> Self {
         const { assert!(N >= 64, "Bits<N> too small for u64; N must be >= 64") };
         Self::from_uint(val as u128)
     }
 
-    pub fn from_u128(val: u128) -> Self {
+    pub const fn from_u128(val: u128) -> Self {
         const { assert!(N >= 128, "Bits<N> too small for u128; N must be >= 128") };
         Self::from_uint(val)
     }
 
     /// Convert a runtime `usize` to `Bits<N>` — equivalent to SV's `N'(expr)` cast.
     /// Panics if `val` doesn't fit in `N` bits.
-    pub fn from_usize(val: usize) -> Self {
+    ///
+    /// A `const fn` since 2026-11-07 (D-21 A3: a register initializer is judged by
+    /// rustc in a `const { }` block), so the panic message cannot format the value
+    /// or `N` — a const fn's panic takes a literal message only.
+    pub const fn from_usize(val: usize) -> Self {
         let fits = N >= 64 || val < (1usize << N);
-        assert!(fits, "value {val} does not fit in Bits<{N}>");
+        assert!(fits, "value does not fit in Bits<N> (from_usize)");
         Self::from_uint(val as u128)
     }
 
@@ -244,16 +248,20 @@ impl<const N: usize> Bits<N> {
     /// use copper_core::Bits;
     /// let _: Bits<4> = Bits::from_lit::<31>(); // 31 needs 5 bits — compile error
     /// ```
-    pub fn from_lit<const VAL: u128>() -> Self {
+    pub const fn from_lit<const VAL: u128>() -> Self {
         const { assert!(N >= 128 - VAL.leading_zeros() as usize,
             "constant value does not fit in Bits<N>: N is too narrow for this literal") };
         Self::from_uint(VAL)
     }
 
-    fn from_uint(val: u128) -> Self {
+    // A `while`, not a `for`: a `const fn` cannot drive an iterator.
+    const fn from_uint(val: u128) -> Self {
         let mut bits = [Logic::Zero; N];
-        for i in 0..N.min(128) {
+        let top = if N < 128 { N } else { 128 };
+        let mut i = 0;
+        while i < top {
             bits[i] = if (val >> i) & 1 == 1 { Logic::One } else { Logic::Zero };
+            i += 1;
         }
         Self { bits }
     }

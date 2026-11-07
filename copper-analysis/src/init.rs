@@ -1,48 +1,49 @@
-//! Register power-on values (2026-10-29).
+//! Register power-on values — R11 (2026-10-29; rustc the judge since D-21, 2026-11-07).
 //!
 //! A pre-loop `let mut` the liveness inference calls a register is a flip-flop,
 //! and its initializer is the flip-flop's **power-on value**: the simulator starts
 //! the binding there, and the transpiler states the same value in the emitted
 //! SystemVerilog as an `initial` assignment (`emit::reg_inits`). That is only
-//! possible for a value the transpiler can state without running Rust — a
-//! **constant** ([`is_constant_expr`]: a literal, `Bits::from_u32(k)`,
-//! `Bits::<N>::from_u8(k)`, `Bits::from_lit::<K>()`, `Bits::zero()`, an enum
-//! variant, arithmetic over those) — or for `Bits::x()`, which says the register
-//! starts *undefined*: there is nothing to state, and the design needs a reset
-//! before the register is read. Anything else — an input read, a local, a call
-//! through a free function — is a value the hardware does not have at power-on.
-//! Until this rule the transpiler dropped such an initializer silently, and so,
-//! worse, every constructor-call constant: `lfsr`'s `Bits::from_u32(1)` never
-//! reached its SV (found by the multi-sequence sweep 2026-10-28), and the ~120
-//! `Bits::zero()` registers in the corpus agreed with Verilator only because its
-//! two-state model zero-fills. Refused in **both** front-ends, with no opt-out.
+//! possible for a **constant** — or for `Bits::x()`, which says the register starts
+//! *undefined*: there is nothing to state, and the design needs a reset before the
+//! register is read. Refused in **both** front-ends, with no opt-out.
 //!
-//! **One definition of "constant".** The predicate here is the syntactic one
-//! `Cfg::out_first_driven_late` already applies to a write's operand, exported so
-//! the transpiler asks the same question. Codegen then *evaluates* the constant
-//! (`chir_lower::lower_register_init`) to a literal of the register's width. The
-//! evaluator folds every spelling the corpus uses; a shape this predicate accepts
-//! but the evaluator cannot fold — a `const` item whose value is not an integer
-//! literal, an associated const, a const generic as a value, a constant free
-//! function — is a lowering limitation the transpiler reports as an unsupported
-//! construct, never a dropped value. The corpus audit
-//! (`copper-analysis/tests/register_initializer_corpus.rs`) pins that every
-//! swept module's initializers pass here, and the sweep itself proves they fold
-//! there (a refused module fails its case).
+//! **What "constant" means (D-21 A3).** Rust's constant: the macro emits every
+//! pre-loop register initializer inside an inline `const { … }` block
+//! ([`preloop_register_initializers`] names them), so rustc admits exactly what it
+//! can evaluate at compile time — a literal, a file `const`, an associated const
+//! (`T::K`), a const generic, a call to a `const fn` (every `Bits`/`Logic`
+//! constructor is one, and so is a user's `const fn f`), arithmetic over those — and
+//! refuses everything else (E0015 for a call to a non-`const` fn, E0435 for a
+//! non-constant value). Until D-21 the rule was the syntactic [`is_constant_expr`],
+//! which refused a `const fn f(3)` and admitted a non-`const` `T::bubble()`.
+//!
+//! What stays syntactic, in both front-ends ([`check_register_initializers`]):
+//! an initializer that **reads a run-time value** — a parameter (an input port, the
+//! clock) or an earlier pre-loop binding. rustc refuses that too (E0435), but its
+//! message talks about `const` items; this one says why a register needs a constant.
+//!
+//! The transpiler cannot see rustc's verdict, so it keeps its own fold
+//! (`chir_lower::lower_register_init`, over `consts::ConstEnv`) and asks one more
+//! syntactic question here, [`check_register_initializer_calls`]: every call in the
+//! initializer is to a `const fn` it knows — a `Bits`/`Logic` constructor
+//! ([`is_core_const_ctor`]) or a `const fn` of the file. That is the half of rustc's
+//! judgement the fold alone would miss: the fold inlines an associated ctor
+//! structurally (`Latch::bubble()`) whether or not it is `const`.
+
+use std::collections::BTreeSet;
 
 use syn::spanned::Spanned;
-use syn::{Expr, ItemFn, Pat, Stmt};
+use syn::visit::Visit;
+use syn::{Expr, FnArg, ItemFn, Pat, Stmt};
 
 pub use crate::cfg::is_constant_expr;
 
-/// Pre-loop register bindings whose initializer is **not** a constant: every
-/// `let mut <name> = <init>;` before the module's top-level `loop` with `name` in
-/// `registers` (the liveness inference's set, [`crate::Cfg::registers`]) and
-/// `!is_constant_expr(init)`, as `(name, init)` in source order. A binding the
-/// inference calls a wire (never reassigned in the loop) is a combinational
-/// constant/wire and not asked about; a register born *inside* the loop is
-/// assigned before it is read on every path and has no power-on value to state.
-pub fn non_constant_register_initializers<'a>(
+/// Every pre-loop `let` in the register set with an initializer, in source order:
+/// `(name, init)`. These are the initializers the macro evaluates in a `const { }`
+/// block (D-21 A3). A pre-loop binding the inference calls a wire is a wire of the
+/// first resumption (SPEC I.2.3 / I.7.2(c), D-21 C2) and is not one of them.
+pub fn preloop_register_initializers<'a>(
     f: &'a ItemFn,
     registers: &[String],
 ) -> Vec<(String, &'a Expr)> {
@@ -55,10 +56,86 @@ pub fn non_constant_register_initializers<'a>(
                 if !registers.iter().any(|r| *r == name) {
                     continue;
                 }
-                let Some(init) = &l.init else { continue };
-                if !is_constant_expr(&init.expr) {
+                if let Some(init) = &l.init {
                     out.push((name, &*init.expr));
                 }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The names a pre-loop register initializer cannot read: the fn's parameters and
+/// the pre-loop bindings before it.
+fn runtime_names(f: &ItemFn) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for arg in &f.sig.inputs {
+        if let FnArg::Typed(pt) = arg {
+            pat_names(&pt.pat, &mut names);
+        }
+    }
+    names
+}
+
+fn pat_names(p: &Pat, out: &mut BTreeSet<String>) {
+    match p {
+        Pat::Ident(pi) => {
+            out.insert(pi.ident.to_string());
+        }
+        Pat::Type(pt) => pat_names(&pt.pat, out),
+        Pat::Tuple(t) => t.elems.iter().for_each(|e| pat_names(e, out)),
+        Pat::TupleStruct(t) => t.elems.iter().for_each(|e| pat_names(e, out)),
+        Pat::Reference(r) => pat_names(&r.pat, out),
+        _ => {}
+    }
+}
+
+/// The first run-time name `e` reads, if any.
+fn reads_runtime(e: &Expr, runtime: &BTreeSet<String>) -> Option<String> {
+    struct V<'r> {
+        runtime: &'r BTreeSet<String>,
+        found: Option<String>,
+    }
+    impl<'ast> Visit<'ast> for V<'_> {
+        fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+            if self.found.is_none() && p.qself.is_none() && p.path.segments.len() == 1 {
+                let name = p.path.segments[0].ident.to_string();
+                if self.runtime.contains(&name) {
+                    self.found = Some(name);
+                }
+            }
+            syn::visit::visit_expr_path(self, p);
+        }
+    }
+    let mut v = V { runtime, found: None };
+    v.visit_expr(e);
+    v.found
+}
+
+/// Pre-loop register bindings whose initializer **reads a run-time value** (a
+/// parameter or an earlier pre-loop binding), as `(name, init)` in source order.
+/// The syntactic half of R11 both front-ends run; the rest of "constant" is
+/// rustc's (the macro's `const { }`) and the transpiler's fold.
+pub fn non_constant_register_initializers<'a>(
+    f: &'a ItemFn,
+    registers: &[String],
+) -> Vec<(String, &'a Expr)> {
+    let mut runtime = runtime_names(f);
+    let mut out = Vec::new();
+    for s in &f.block.stmts {
+        match s {
+            Stmt::Expr(Expr::Loop(_), _) => break,
+            Stmt::Local(l) => {
+                let Some(name) = local_name(&l.pat) else { continue };
+                if registers.iter().any(|r| *r == name) {
+                    if let Some(init) = &l.init {
+                        if reads_runtime(&init.expr, &runtime).is_some() {
+                            out.push((name.clone(), &*init.expr));
+                        }
+                    }
+                }
+                pat_names(&l.pat, &mut runtime);
             }
             _ => {}
         }
@@ -74,10 +151,9 @@ fn local_name(p: &Pat) -> Option<String> {
     }
 }
 
-/// The rule: `Err` (spanned at the initializer) for the first register whose
-/// initializer is not a constant, with [`register_init_message`]. `registers` is
-/// the module's inferred register set, so a caller holding a built
-/// [`crate::Cfg`] does not rebuild it (the macro builds one graph per module).
+/// The rule's syntactic half: `Err` (spanned at the initializer) for the first
+/// register whose initializer reads a run-time value, with
+/// [`register_init_message`]. `registers` is the module's inferred register set.
 pub fn check_register_initializers(f: &ItemFn, registers: &[String]) -> Result<(), syn::Error> {
     match non_constant_register_initializers(f, registers).first() {
         None => Ok(()),
@@ -85,37 +161,134 @@ pub fn check_register_initializers(f: &ItemFn, registers: &[String]) -> Result<(
     }
 }
 
-/// The message both front-ends print, verbatim.
+/// The message both front-ends print, verbatim, for an initializer that reads a
+/// run-time value.
 pub fn register_init_message(name: &str, init: &Expr) -> String {
     format!(
-        "register `{name}` is initialized from {what}, which is not a constant, so the \
+        "register `{name}` is initialized from {what} that reads a run-time value, so the \
          hardware has no power-on value for it: the simulator would start `{name}` at \
          whatever the expression evaluates to, and the emitted SystemVerilog cannot state \
-         that value. Initialize `{name}` with a constant — an integer literal, \
-         `Bits::from_u32(k)`, `Bits::<N>::from_u8(k)`, `Bits::from_lit::<K>()`, \
-         `Bits::zero()`, an enum variant — or with `Bits::x()` to say it starts undefined \
-         and must be reset before it is read",
+         that value. Initialize `{name}` with a Rust constant — a literal, a `const` item or \
+         associated const, a call to a `const fn` such as `Bits::zero()`, \
+         `Bits::from_u32(k)` or `Bits::from_lit::<K>()` — or with `Bits::x()` to say it \
+         starts undefined and must be reset before it is read",
         what = describe(init)
     )
 }
 
-/// What kind of non-constant the initializer is, for the message.
+/// What kind of expression the initializer is, for the message.
 fn describe(e: &Expr) -> &'static str {
     match e {
         Expr::MethodCall(_) => "a method call",
-        Expr::Call(_) => "a call through a single-segment path (a free function)",
+        Expr::Call(_) => "a call",
         Expr::Path(_) => "a local or parameter",
         Expr::Field(_) => "a field read",
         Expr::Index(_) => "an index expression",
         Expr::Macro(_) => "a macro invocation",
         Expr::If(_) | Expr::Match(_) | Expr::Block(_) => "a block or branch expression",
-        Expr::Binary(_) | Expr::Unary(_) | Expr::Cast(_) | Expr::Paren(_) => {
-            "an expression over non-constants"
-        }
-        Expr::Array(_) | Expr::Repeat(_) => "an array expression over non-constants",
+        Expr::Binary(_) | Expr::Unary(_) | Expr::Cast(_) | Expr::Paren(_) => "an expression",
+        Expr::Array(_) | Expr::Repeat(_) => "an array expression",
         Expr::Struct(_) => "a struct literal",
-        _ => "a non-constant expression",
+        _ => "an expression",
     }
+}
+
+/// The path of a call, generic arguments dropped: `Bits::<8>::from_u8` →
+/// `Bits::from_u8`, `Latch::bubble` → `Latch::bubble`. `None` for a call through
+/// something other than a plain path.
+pub fn call_path_text(c: &syn::ExprCall) -> Option<String> {
+    let Expr::Path(p) = &*c.func else { return None };
+    if p.qself.is_some() {
+        return None;
+    }
+    Some(p.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"))
+}
+
+/// `copper_core`'s value constructors, every one a `const fn` since D-21:
+/// `Bits::{zero, all_ones, x, from_array, from_u8 … from_u128, from_usize, from_lit}`
+/// and `Logic::from_bool`. `path` as [`call_path_text`] gives it.
+pub fn is_core_const_ctor(path: &str) -> bool {
+    let mut segs = path.rsplit("::");
+    let (Some(f), Some(ty)) = (segs.next(), segs.next()) else { return false };
+    match ty {
+        "Bits" => matches!(
+            f,
+            "zero"
+                | "all_ones"
+                | "x"
+                | "from_array"
+                | "from_u8"
+                | "from_u16"
+                | "from_u32"
+                | "from_u64"
+                | "from_u128"
+                | "from_usize"
+                | "from_lit"
+        ),
+        "Logic" => f == "from_bool",
+        _ => false,
+    }
+}
+
+/// Pre-loop register initializers that call something that is not a `const fn` the
+/// caller knows: `(register, callee)` in source order. A callee is known when it is
+/// a core constructor ([`is_core_const_ctor`]) or `is_const_fn(path)` (the
+/// transpiler passes `ConstEnv::is_const_fn`, the file's `const fn`s).
+pub fn non_const_calls_in_register_initializers(
+    f: &ItemFn,
+    registers: &[String],
+    is_const_fn: &dyn Fn(&str) -> bool,
+) -> Vec<(String, String, proc_macro2::Span)> {
+    struct V<'a> {
+        is_const_fn: &'a dyn Fn(&str) -> bool,
+        found: Option<(String, proc_macro2::Span)>,
+    }
+    impl<'ast> Visit<'ast> for V<'_> {
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            if self.found.is_none() {
+                let path = call_path_text(c).unwrap_or_else(|| "<a non-path callee>".to_string());
+                if !is_core_const_ctor(&path) && !(self.is_const_fn)(&path) {
+                    self.found = Some((path, c.span()));
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+    }
+    let mut out = Vec::new();
+    for (name, init) in preloop_register_initializers(f, registers) {
+        let mut v = V { is_const_fn, found: None };
+        v.visit_expr(init);
+        if let Some((callee, span)) = v.found {
+            out.push((name, callee, span));
+        }
+    }
+    out
+}
+
+/// The transpiler's half of rustc's judgement: `Err` for the first register whose
+/// initializer calls a fn that is not `const` (rustc refuses that in the macro's
+/// `const { }` block with E0015), with [`register_init_call_message`].
+pub fn check_register_initializer_calls(
+    f: &ItemFn,
+    registers: &[String],
+    is_const_fn: &dyn Fn(&str) -> bool,
+) -> Result<(), syn::Error> {
+    match non_const_calls_in_register_initializers(f, registers, is_const_fn).first() {
+        None => Ok(()),
+        Some((name, callee, span)) => Err(syn::Error::new(*span, register_init_call_message(name, callee))),
+    }
+}
+
+/// The transpiler's message for a call to a non-`const` fn in a register
+/// initializer (the simulator's is rustc's E0015 on the macro's `const { }`).
+pub fn register_init_call_message(name: &str, callee: &str) -> String {
+    format!(
+        "register `{name}` is initialized by a call to `{callee}`, which is not a `const fn`, \
+         so the initializer is not a constant and the hardware has no power-on value for it \
+         (rustc refuses the same initializer in the simulator: E0015). Make `{callee}` a \
+         `const fn`, initialize `{name}` with another Rust constant, or with `Bits::x()` to \
+         say it starts undefined and must be reset before it is read"
+    )
 }
 
 #[cfg(test)]
@@ -138,8 +311,12 @@ mod tests {
             .collect()
     }
 
+    fn reg_body(init: &str) -> String {
+        format!("let mut r = {init}; loop {{ clk.tick().await; r = r + a.read(); o.write(r); }}")
+    }
+
     #[test]
-    fn every_constant_spelling_is_accepted() {
+    fn no_constant_spelling_reads_a_runtime_value() {
         for init in [
             "0",
             "0u8",
@@ -157,18 +334,23 @@ mod tests {
             "SEED",
             "Bits::from_u32(1 << 31)",
             "Latch::bubble()",
+            // D-21 A3: R11 no longer refuses these syntactically; rustc judges them.
+            "f(3)",
+            "Cfg::K",
+            "seed()",
         ] {
-            let body = format!("let mut r = {init}; loop {{ clk.tick().await; r = r + a.read(); o.write(r); }}");
-            assert_eq!(flagged(&body), Vec::<String>::new(), "{init}");
+            assert_eq!(flagged(&reg_body(init)), Vec::<String>::new(), "{init}");
         }
     }
 
     #[test]
-    fn a_non_constant_initializer_on_a_register_is_flagged() {
-        for init in ["a.read()", "seed()", "k", "a.read() + 1", "if x { 1 } else { 0 }"] {
-            let body = format!("let mut r = {init}; loop {{ clk.tick().await; r = r + a.read(); o.write(r); }}");
-            assert_eq!(flagged(&body), vec!["r".to_string()], "{init}");
+    fn an_initializer_reading_a_runtime_value_is_flagged() {
+        for init in ["a.read()", "a.read() + 1", "clk.cycle()", "Bits::from_u32(a.read().as_u32())"] {
+            assert_eq!(flagged(&reg_body(init)), vec!["r".to_string()], "{init}");
         }
+        // An earlier pre-loop binding is a run-time value too.
+        let body = "let k = a.read(); let mut r = k; loop { clk.tick().await; r = r + a.read(); o.write(r); }";
+        assert_eq!(flagged(body), vec!["r".to_string()]);
     }
 
     #[test]
@@ -186,9 +368,28 @@ mod tests {
         let f = fn_of("let mut r = a.read(); loop { clk.tick().await; r = r + a.read(); o.write(r); }");
         let err = check_register_initializers(&f, &crate::infer_registers(&f)).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.starts_with("register `r` is initialized from a method call"), "{msg}");
+        assert!(msg.starts_with("register `r` is initialized from a method call that reads a run-time value"), "{msg}");
         assert!(msg.contains("`Bits::x()`"), "{msg}");
         let f = fn_of("let mut r = Bits::zero(); loop { clk.tick().await; r = r + a.read(); o.write(r); }");
         assert!(check_register_initializers(&f, &crate::infer_registers(&f)).is_ok());
+    }
+
+    #[test]
+    fn calls_must_be_const_fns_the_transpiler_knows() {
+        let known = |p: &str| p == "f" || p == "Latch::bubble";
+        let calls = |init: &str| {
+            let f = fn_of(&reg_body(init));
+            let regs = crate::infer_registers(&f);
+            non_const_calls_in_register_initializers(&f, &regs, &known)
+                .into_iter()
+                .map(|(_, c, _)| c)
+                .collect::<Vec<_>>()
+        };
+        for ok in ["Bits::zero()", "Bits::<8>::from_u8(f(3))", "Latch::bubble()", "Logic::from_bool(true)", "7"] {
+            assert_eq!(calls(ok), Vec::<String>::new(), "{ok}");
+        }
+        assert_eq!(calls("seed()"), vec!["seed".to_string()]);
+        assert_eq!(calls("Other::bubble()"), vec!["Other::bubble".to_string()]);
+        assert_eq!(calls("Bits::from_u32(g(1))"), vec!["g".to_string()]);
     }
 }

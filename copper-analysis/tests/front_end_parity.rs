@@ -259,3 +259,47 @@ fn the_step_8_data_rules_refuse_their_witnesses_and_admit_their_twins() {
         copper_analysis::check_memory_port_index(&f).expect("admitted");
     }
 }
+
+/// R11 under D-21 A3 (2026-11-07, MEASUREMENTS §N). The macro has rustc judge a
+/// register initializer (a `const { }` block); the transpiler runs the same syntactic
+/// half (`check_register_initializers`: no run-time read) and a call half
+/// (`check_register_initializer_calls_in`, rustc's E0015 — given the file's `const fn`s)
+/// before its fold. Both halves are pinned here on witnesses and twins; the
+/// end-to-end parity (the macro's ui cases transpiled) is
+/// `copper-codegen/tests/register_init_parity.rs`.
+#[test]
+fn r11_halves_refuse_their_witnesses_and_admit_their_twins() {
+    let parse = |body: &str| {
+        syn::parse_str::<ItemFn>(&format!(
+            "async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {{ {body} }}"
+        ))
+        .expect("witness parses")
+    };
+    let reg = |init: &str| format!("let mut r = {init}; loop {{ clk.tick().await; r = r + a.read(); o.write(r); }}");
+    let file_const_fns = |p: &str| p == "seed_of" || p == "Cfg::twice" || p == "Latch::bubble";
+    // (initializer, syntactic half refuses, call half refuses)
+    let rows = [
+        ("a.read()", true, false),
+        ("Bits::from_u8(a.read().as_u8())", true, false),
+        ("seed()", false, true),
+        ("Other::bubble()", false, true),
+        ("Bits::from_u8(seed_of(3))", false, false),
+        ("Bits::from_u8(Cfg::twice(Cfg::K))", false, false),
+        ("Latch::bubble()", false, false),
+        ("Bits::zero()", false, false),
+        ("SEED", false, false),
+    ];
+    for (init, syn_refuses, call_refuses) in rows {
+        let f = parse(&reg(init));
+        assert_eq!(copper_analysis::check_register_initializers(&f).is_err(), syn_refuses, "syntactic half, {init}");
+        assert_eq!(
+            copper_analysis::check_register_initializer_calls_in(&f, &file_const_fns).is_err(),
+            call_refuses,
+            "call half, {init}"
+        );
+    }
+    // A wire is asked neither (C2): `w` is rewritten before every later read.
+    let f = parse("let mut w = a.read(); loop { o.write(w); clk.tick().await; w = a.read(); }");
+    assert!(copper_analysis::check_register_initializers(&f).is_ok());
+    assert!(copper_analysis::check_register_initializer_calls_in(&f, &|_| false).is_ok());
+}

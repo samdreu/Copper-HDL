@@ -1188,10 +1188,12 @@ enum RegisterInit {
 /// register's own type `ty` — `Ok(None)` for `Bits::x()` (undefined, unstated),
 /// `Err` for an initializer that cannot be folded.
 ///
-/// The front-end rule (`copper_analysis::check_register_initializers`, enforced by
-/// the macro and by `transpile_target` before lowering) has already required the
-/// initializer to be a syntactic constant, so what arrives here is one; this folds
-/// it. Until 2026-10-29 only an integer literal, `true`/`false`, `Logic::One/Zero`
+/// The front-end rule R11 has already run: in the macro rustc judges the initializer
+/// (a `const { }` block, D-21 A3); in `transpile_target` its syntactic half (no
+/// run-time read) and its call half (every callee a `const fn`) ran before lowering.
+/// So what arrives here is a Rust constant; this folds it — the transpiler's own
+/// evaluator, pinned against rustc by the sweep (sim = rustc) and against the
+/// interpreter's by `tests/const_evaluators_agree.rs` (D-21 B2). Until 2026-10-29 only an integer literal, `true`/`false`, `Logic::One/Zero`
 /// or an enum variant was carried, and every constructor call — `Bits::zero()`,
 /// `Bits::from_lit::<0>()`, `Bits::from_u32(1)` — returned `None` and the
 /// register's `initial` assignment was silently omitted: `lfsr` started at 1 in

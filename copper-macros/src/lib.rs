@@ -676,6 +676,41 @@ fn wrap_combinational(mut f: ItemFn) -> ItemFn {
 /// `HardwareModule`, the only thing the executor's spawn APIs accept. A bare
 /// `async fn` produces a plain `Future` and cannot be spawned — you can't forget
 /// the attribute.
+/// Wrap each pre-loop register initializer (`copper_analysis::preloop_register_initializers`)
+/// in an inline `const { … }` block, spanned at the initializer so rustc's verdict
+/// points at the user's expression (D-21 A3).
+fn const_wrap_register_initializers(f: &mut ItemFn, registers: &[String]) {
+    use syn::spanned::Spanned;
+    let names: HashSet<String> = copper_analysis::preloop_register_initializers(f, registers)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    for s in f.block.stmts.iter_mut() {
+        match s {
+            syn::Stmt::Expr(syn::Expr::Loop(_), _) => break,
+            syn::Stmt::Local(l) => {
+                let name = match &l.pat {
+                    Pat::Ident(pi) => Some(pi.ident.to_string()),
+                    Pat::Type(pt) => match &*pt.pat {
+                        Pat::Ident(pi) => Some(pi.ident.to_string()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if !name.is_some_and(|n| names.contains(&n)) {
+                    continue;
+                }
+                if let Some(init) = &mut l.init {
+                    let e = &init.expr;
+                    let span = e.span();
+                    *init.expr = syn::parse_quote_spanned!(span=> const { #e });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn wrap_in_module(f: &mut ItemFn) {
     let body = f.block.clone();
     // A clocked module (one `Clock<D>` parameter: `sequential`, `synchronizer`) is
@@ -865,6 +900,12 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
                 return err.to_compile_error().into();
             }
             let mut f = input_fn;
+            // R11, D-21 A3 (2026-11-07): rustc judges a register's power-on value.
+            // Every pre-loop register initializer is evaluated in an inline
+            // `const { }` block, so "constant" is Rust's constant — a file `const`,
+            // `T::K`, a const generic, any `const fn` call — and a call to a
+            // non-`const` fn is rustc's E0015. A wire's initializer is untouched.
+            const_wrap_register_initializers(&mut f, &inferred_registers);
             wrap_in_module(&mut f);
             quote! { #f }.into()
         }

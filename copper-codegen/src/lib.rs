@@ -437,12 +437,22 @@ fn checked_fir_for_target(
     // a default-then-override the macro admitted; that check stays as defence in
     // depth (it also covers the wires and memory nets this rule does not see).
     copper_analysis::check_definite_assignment(target).map_err(|e| e.to_string())?;
-    // A pre-loop register's initializer is its power-on value and must be a
-    // constant or `Bits::x()` (2026-10-29, same rule and message as the macro).
-    // `chir_lower::lower_register_init` then folds the constant into the
-    // register's `initial` assignment; what it cannot fold is an error there, never
-    // a dropped value.
+    // R11: a pre-loop register's initializer is its power-on value and must be a
+    // Rust constant or `Bits::x()` (2026-10-29; D-21 A3, 2026-11-07). The macro has
+    // rustc judge it (a `const { }` block); the transpiler cannot see that verdict,
+    // so it runs the syntactic half both share (no run-time read, same message),
+    // then refuses a call to a fn that is not `const` (rustc's E0015 — the fold
+    // alone would inline a non-`const` associated ctor structurally), and
+    // `chir_lower::lower_register_init` folds the rest; what it cannot fold is an
+    // error there, never a dropped value.
     copper_analysis::check_register_initializers(target).map_err(|e| e.to_string())?;
+    {
+        let env = copper_analysis::consts::ConstEnv::from_items(
+            prepared.file_scope.const_source.iter().map(String::as_str),
+        );
+        copper_analysis::check_register_initializer_calls_in(target, &|p| env.is_const_fn(p))
+            .map_err(|e| e.to_string())?;
+    }
     // SPEC II.1 R8 (D-8, Phase C step 3, 2026-11-06): a clocked module has no
     // plain `Out` — the macro's rule, same function, same message. The pre-tick
     // alignment family (rules 9–15) and `multi_write_collapse` (rule 8), which

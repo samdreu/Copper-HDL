@@ -2,8 +2,9 @@
 //! 2026-10-29), in the style of `pretick_alignment_corpus.rs`.
 //!
 //! Every pre-loop `let mut` the liveness inference calls a register must be
-//! initialized from a constant or from `Bits::x()`; both front-ends refuse anything
-//! else. The rule has no opt-out, so a corpus module it flags could not have
+//! initialized from a Rust constant or from `Bits::x()`; since D-21 A3 rustc judges
+//! that in the macro (a `const { }` block) and this pins the syntactic half both
+//! front-ends share — an initializer reading a run-time value. The rule has no opt-out, so a corpus module it flags could not have
 //! compiled — the expected set is **empty**, and this test exists so that a new
 //! shape of initializer shows up as a diff here (and a false positive shows up as a
 //! module name) rather than as a build failure somewhere in the tree. It also counts
@@ -131,10 +132,9 @@ fn register_power_on_rule_flags_exactly_the_expected_modules() {
     assert!(
         unexpected.is_empty(),
         "NEW register(s) initialized from a non-constant: {unexpected:#?}\n\
-         Both front-ends refuse this, so the module cannot compile as written. Initialize \
-         the register with a constant, or with `Bits::x()` and a reset; if the initializer \
-         IS a constant the predicate does not recognize, extend `is_constant_expr` (and the \
-         codegen evaluator `lower_register_init`) in the same change."
+         Both front-ends refuse an initializer that reads a run-time value (R11's \
+         syntactic half, D-21 A3), so the module cannot compile as written. Initialize \
+         the register with a Rust constant, or with `Bits::x()` and a reset."
     );
     assert!(
         missing.is_empty(),

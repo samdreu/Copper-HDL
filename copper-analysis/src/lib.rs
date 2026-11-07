@@ -42,8 +42,11 @@ mod shape;
 
 pub use cfg::{Cfg, DerivationFacts, EdgeKind, PhaseFacts};
 pub use init::{
+    call_path_text, check_register_initializer_calls,
     check_register_initializers as check_register_initializers_with, is_constant_expr,
-    non_constant_register_initializers, register_init_message,
+    is_core_const_ctor, non_const_calls_in_register_initializers,
+    non_constant_register_initializers, preloop_register_initializers, register_init_call_message,
+    register_init_message,
 };
 pub use shape::{
     check_awaits, check_counted_for_nesting, check_nested_loop_shape, check_no_preloop_tick,
@@ -112,16 +115,32 @@ pub fn clocked_out_message(port: &str) -> String {
     )
 }
 
-/// The register power-on rule (`init`, 2026-10-29): every pre-loop `let mut` the
-/// liveness inference calls a register must be initialized from a constant
-/// ([`is_constant_expr`]) or from `Bits::x()`. The initializer is the flip-flop's
-/// power-on value, which the transpiler states as an `initial` assignment; a value
-/// it cannot state used to be dropped silently. `Ok` for a module with no top-level
-/// loop. [`check_register_initializers_with`] takes an already-inferred register
-/// set, for a caller holding a built [`Cfg`].
+/// The register power-on rule R11 (`init`, 2026-10-29; D-21 A3, 2026-11-07): every
+/// pre-loop binding the liveness inference calls a register must be initialized from
+/// a Rust constant or from `Bits::x()`. The initializer is the flip-flop's power-on
+/// value, which the transpiler states as an `initial` assignment. This is the
+/// syntactic half both front-ends run — an initializer that reads a run-time value
+/// (a parameter, an earlier pre-loop binding) is refused with R11's message; the
+/// rest of "constant" is rustc's (the macro evaluates the initializer in a
+/// `const { }` block) and, in the transpiler, [`check_register_initializer_calls_in`]
+/// plus its fold. `Ok` for a module with no top-level loop.
+/// [`check_register_initializers_with`] takes an already-inferred register set.
 pub fn check_register_initializers(f: &ItemFn) -> Result<(), syn::Error> {
     match Cfg::build(f) {
         Some(cfg) => init::check_register_initializers(f, &cfg.registers()),
+        None => Ok(()),
+    }
+}
+
+/// The transpiler's stand-in for rustc's E0015 (D-21 A3): every call in a pre-loop
+/// register initializer is to a core `Bits`/`Logic` constructor or to a fn
+/// `is_const_fn` names (the file's `const fn`s). `Ok` for a module with no loop.
+pub fn check_register_initializer_calls_in(
+    f: &ItemFn,
+    is_const_fn: &dyn Fn(&str) -> bool,
+) -> Result<(), syn::Error> {
+    match Cfg::build(f) {
+        Some(cfg) => init::check_register_initializer_calls(f, &cfg.registers(), is_const_fn),
         None => Ok(()),
     }
 }

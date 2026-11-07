@@ -36,7 +36,7 @@ struct Latch {
 }
 
 impl Latch {
-    fn bubble() -> Self {
+    const fn bubble() -> Self {
         Self { valid: false, data: Bits::zero() }
     }
 }

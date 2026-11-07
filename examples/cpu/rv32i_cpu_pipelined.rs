@@ -58,7 +58,7 @@ struct IFIDReg {
 }
 
 impl IFIDReg {
-    fn bubble() -> Self {
+    const fn bubble() -> Self {
         Self { valid: false, pc: Bits::zero(), instr: Bits::zero() }
     }
 }
@@ -93,7 +93,7 @@ struct IDEXReg {
 }
 
 impl IDEXReg {
-    fn bubble() -> Self {
+    const fn bubble() -> Self {
         Self {
             valid: false, pc: Bits::zero(),
             rs1: 0, rs2: 0, rd: 0,
@@ -122,7 +122,7 @@ struct EXMEMReg {
 }
 
 impl EXMEMReg {
-    fn bubble() -> Self {
+    const fn bubble() -> Self {
         Self {
             valid: false,
             alu_result: Bits::zero(), rs2_val: Bits::zero(),
@@ -143,7 +143,7 @@ struct MEMWBReg {
 }
 
 impl MEMWBReg {
-    fn bubble() -> Self {
+    const fn bubble() -> Self {
         Self { valid: false, result: Bits::zero(), rd: 0, writes_reg: false, is_ecall: false }
     }
 }
