@@ -2426,6 +2426,18 @@ every run.
    its body's last statement (the walker errs, by name, if a back edge is reached without that
    tick). Both front-ends refuse the other shape (II.1), so no admitted module is outside it.
 
+### L.4b The bare regression — measured
+
+`tools/regression.sh` on `aee5bcd` (the code as committed; later commits are documentation and a
+comment): **REGRESSION OK (515 s)**. 1221 passed / 0 failed / 89 ignored across 142 binaries; G-C
+115 files; G-D 186 differential cases (3 ignored-with-reason); **G-I ok: 137 clocked modules
+related (41 extracted, 17 linear, 79 single-tick), 51 combinational, 1 structural, 0 uncovered;
+|R| = 455 pairs, 831 transitions**; G-F 113 modules; **G-G differential 1467 PASS / 0 DISAGREE,
+reference 967 PASS**, pinned 0, excused none; G-E 5 anchored; examples 32/32 (BaseJump, the two
+CPUs' 13 programs, the CDC pins, `sync_2ff`). No code path that emits SV changed
+(`lower_source_module` and `lower_fir_to_chir` are a split of the existing pipeline), so every
+anchored trace is unchanged by construction and measured passing.
+
 ### L.5 For the coordinator — SPEC items (SPEC files untouched)
 
 1. **P1 — row status: MEASURED (consistency), true on the corpus.** Evidence:
