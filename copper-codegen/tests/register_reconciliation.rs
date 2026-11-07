@@ -55,9 +55,16 @@
 //! is defined post-tick and read pre-tick, so its live range crosses the loop back
 //! edge but no tick edge). A sweep with the filter lifted showed that was the only
 //! divergence in the corpus — 41 modules, three copies of the same synchronizer —
-//! and it is fixed by the back-edge clause in `Cfg::registers`. With that fix all
+//! and it was fixed by a back-edge clause in `Cfg::registers`. With that fix all
 //! 41 clocked modules that transpile agree. The filter is now lifted permanently so
-//! the shape stays covered.
+//! the shape stays covered. (The clause was right for the two-job body and was
+//! deleted in Phase C step 6, 2026-11-07: under D-8 the anchored `sync_2ff` is
+//! spelled tick-last, `ff2` is a wire, and the second flop is the `RegOut` `q`.)
+//!
+//! **Nested loops (Phase C step 6).** The inference descends into a nested loop's
+//! own control flow; `tests/fixtures/nested_loop_registers_dut.rs` holds one fixture
+//! for each shape the old fold got wrong (a local it missed, a local it added).
+//! `corpus_realized_registers_are_inferred` below is P13 over the whole corpus.
 
 use std::collections::BTreeSet;
 use std::fs;

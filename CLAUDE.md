@@ -196,7 +196,10 @@ entries in `Cargo.toml`.
   agree. See `design_docs/SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md` (item 2). Provides
   `Cfg` (a real control-flow graph over `syn::ItemFn`, `E_comb`/`E_tick` edges),
   `infer_registers` (backward-liveness register inference — a local is a register
-  iff it is defined-in-loop ∧ live-across-a-tick), `check_reachability` (every loop
+  iff it is defined-in-loop ∧ live at a tick, SPEC I.7.1; since Phase C step 6 it is
+  computed on a register graph that descends into nested loops, and the old
+  live-at-the-loop-head clause is gone; the transpiler's hoisted and promoted locals
+  are pinned ⊆ it corpus-wide by `register_reconciliation.rs`), `check_reachability` (every loop
   path must reach a `clk.tick().await`, enforced as a hard spanned compile error in
   **both** front-ends), the G2 structural reg-match helpers, and `consts` — the shared constant evaluator of SPEC
   I.14.4 (Phase C step 5: `ConstEnv` over const items, associated consts and `const fn`s;

@@ -31,8 +31,11 @@
 //! **Finding, since fixed:** writing these tests surfaced a real under-approximation
 //! in the shared register inference — it reported one flip-flop for the 2-FF
 //! synchronizer where the sim, independent hardware, and codegen all have two.
-//! Fixed 2026-08-21 by the back-edge clause in `Cfg::registers`; the structural
-//! check is now `register_inference_matches_the_independent_reference`.
+//! Fixed 2026-08-21 by a back-edge clause in `Cfg::registers`, which was right for
+//! the two-job body; under D-8's one resumption the anchored spelling is tick-last,
+//! `ff2` is a wire, the second flop is the `RegOut` `q`, and the clause was deleted
+//! (Phase C step 6, 2026-11-07). The structural check is
+//! `register_inference_matches_the_independent_reference`.
 //!
 //! If Verilator is not installed the Verilator arms are skipped (the sim arms
 //! still run), mirroring the rest of the suite.
@@ -310,8 +313,8 @@ fn register_inference_matches_the_independent_reference() {
     // one flip-flop here where the simulator's behaviour, this reference, and
     // codegen all have two: `ff2` is defined post-tick and read pre-tick, so its
     // live range crosses the loop back edge but no tick, and the rule keyed only on
-    // ticks. Fixed by adding the back-edge clause to `Cfg::registers` (which see for
-    // why such a local is a genuine flip-flop and not a wire). Synchronizers had
+    // ticks. Fixed by adding a back-edge clause to `Cfg::registers` — deleted in
+    // Phase C step 6 (2026-11-07), see below and `Cfg::registers`. Synchronizers had
     // never been reconciled because `register_reconciliation.rs` filtered on
     // `#[hardware(sequential)]`; that filter is now lifted, so this shape is covered
     // corpus-wide too.
