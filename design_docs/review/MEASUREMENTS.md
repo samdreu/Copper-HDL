@@ -1097,3 +1097,135 @@ gets no `started_r`.
   predicted byte-identical, not merely trace-identical.
 - (T-g) G-G 0 DISAGREE; one more swept case (161 differential, 3 ignored); the reference leg
   count grows by `regout_trailing_single_tick`'s sequences.
+
+### H.1 (a) The plain-`Out` forms and the drive tagging deleted (`4b51ec6`) — measured
+
+sv-baseline against `663bbe2`: **1 of 224 modules changed — `seq6`**, the three
+`bK <= 1'b0` lines over the state `case` — **as predicted (P-b, P-c)**. Every one of the 68
+combinational and structural modules in the corpus is byte-identical, as is every other
+clocked module. `seq6`'s differential case and `fsm_six_state_equivalence` pass (T-e).
+
+What the deletion found: `transpile_item_fn` (the unit tests' entry point) runs none of the
+front-end rules, so 8 `vlir_lower` unit tests had been feeding `lower_seq` a plain-`Out`
+clocked body. A `debug_assert` caught it; the lowering now returns
+`VLIRLowerError::PlainOutOnClockedBody` (a release build would otherwise have dropped the
+drive silently). The tests that test something else were re-spelled `RegOut`; the one that
+tested F1's two-`assign` conflict was deleted.
+
+### H.2 (b) The trailing fold removed — predicted, then measured
+
+sv-baseline against `663bbe2` after (b): **21 of 224 changed — exactly the 20 trailing
+modules and `seq6`; nothing else (P-a, P-c as predicted).** The emitted forms are the
+predicted ones, with one design change made after the first measurement: the guard is
+emitted as STRUCTURE, `if (__copper_started) begin … end` in `always_ff` (the trailing
+region's register updates in `SHIRPhase::guarded_post_edge`), not as a `started ? v : r`
+mux on every update. The mux spelling (measured first) was correct but hid a trailing
+`match` next-state from `lower_reg_updates`' `case` lifting, so an FSM's next state came out
+as nested ternaries (`enum_state_machine_golden_output`). The forwarded value segment 0
+reads through the guard is still the mux (one walk over `if started { T }`); the emitted
+updates come from a second walk over `T`, by the same function.
+
+Two things the prediction did not name:
+- **A head wire read after the tick is now promoted** (`find_promoted_wires`): it crosses an
+  edge even in a single-tick body. The promotion test compared PHASES with the trailing
+  segment mapped to the last phase; it now compares segments. Measured by diffing the `_r`
+  declarations of the 224 modules: one gains a promoted register, `trailing_fold`, whose
+  pre-loop `let r = 5` CHIR carries as a segment-0 wire — now `r_r`, captured at edge 1 and
+  read by the guarded drive from edge 2 (correct; one register more than the constant needs —
+  pre-loop statements are step 5's entry). Also `shir_lower::tests::test_promoted_wire_renamed_in_later_phase`
+  (rewritten: `step1` is promoted and read as `step1_r` from phase 0).
+- **The 12 memory modules' read registers**: a module that only used the combinational read
+  net now declares `<m>_rd0_q0`/`_v0` capture registers (`ram_read_first_mem`:
+  `data <= (mem_rd0_v0 ? mem_rd0_q0 : q)` under the guard, from `data <= q` and
+  `q <= (mem_rd0_en ? mem_rd0_data : q)`).
+
+Traces:
+- `regout_trailing_single_tick` (T-a): swept, its `SKIP` row deleted — **sim = ref = SV**,
+  864 cycles on 6 sequences, observation 0 agreed on 6 of 6.
+  `regout_trailing_single_tick_agrees_on_three_legs` (was `…_is_the_trailing_fold`) asserts
+  the Σ x_2..x_{N+1} trace and agreement. **As predicted.**
+- `trailing_fold` (T-b): **agrees** (`trailing_fold_at_edge_1_agrees_on_three_legs`, was
+  `…_is_spec_vs_transpiler`), obs_1 = 0 on all three legs. **As predicted** — (f4) is closed by
+  this step, not step 5.
+- `preloop_probe` (f2), `preloop_linear` (f3) (T-c): **still sim = ref ≠ SV**, pinned. **As
+  predicted** — they are step 5's.
+- The other 18 trailing modules and `seq6` (T-d, T-e): their differential cases pass on every
+  sequence (`corpus_generated`, 21 cases run, 13 reference-leg cases `#[ignore]`d by their
+  existing `REF_SKIP` rows — memory). **As predicted.**
+
+### H.3 (c) `classify_reads` deleted (`21db6a5`)
+
+No consumer in either front-end since step 3 (the macro's barrier injection was its only
+user). The remaining callers were its own 10 tests and the `analysis-time` bin, which times
+"the macro's checks in the macro's order" — it now matches the macro again, so
+`tools/stats/analysis.py`'s per-module analysis time drops by `classify_reads`'s share the
+next time it is regenerated (not re-measured here). `in_param_names` stays (`Cfg::build`).
+
+### H.4 Deletions, against the step's brief
+
+| item | where | deleted |
+|---|---|---|
+| F1 for a clocked body (continuous `assign`, `MultiplyDrivenOutput`) | `vlir_lower`, `VLIRSeqBody::output_assigns` | yes; the combinational arm of `lower_flat_stmts` kept |
+| F2's clocked pieces (every-path routing, Moore hoist) | `vlir_lower` | yes (`nested_port_drives` kept: combinational) |
+| F4 mux + `<port>_hold`, `comb_defaults`, `hold_form_ports` | `vlir_lower`, `copper-core::vlir`, `copper_codegen::hold_form_ports` | yes (`comb_defaults` was clocked-only) |
+| F5 phase-scoped flop | `vlir_lower::phase_scoped_output_ports` | yes |
+| opening/closing tagging, `seen_in_read` | `shir_lower::Forwarding`, `PortDrive::opening`, `PortAssign::opening` | yes |
+| the second drive form (`edge_value`) | `SHIRStmt::PortDrive`, `VLIRStmt::PortAssign` | yes — one value |
+| the trailing fold, `trailing_reg_outs` | `shir_lower` | yes; plus `merge_trailing_before_head`, `lower_pre_edge_stmts`, `phase_for_segment` |
+| the same-edge memory binding | `vlir_lower::mem_binding`, `MemPortUse` | yes (found by H.0's probe; the fold's dependent) |
+| `classify_reads` | `copper-analysis` | yes, with `ReadTiming` and 6 private helpers |
+| `phase_sensitive_checks.rs` entries for the removed forms | — | none existed (step 3 had pruned them); `vlir_lower::lower_seq` stays listed |
+| pins of the removed forms | `register_reconciliation.rs` `<port>_hold` allowance | yes |
+
+Source lines in `copper-codegen/src`, `copper-core/src`, `copper-analysis/src`:
++413 / −2203.
+
+### H.6 The bare regression — measured
+
+Bare `tools/regression.sh` on `23e8283` (laptop): **REGRESSION OK (254 s)**.
+- 1164 passed, 0 failed, 87 ignored, 140 test binaries; G-C 114 test files; examples 32/32
+  (every BaseJump self-check, `dual_port_ram`, both CPUs, the two-domain and CDC examples).
+- G-D **161** differential cases (160 at G.6), 3 ignored-with-reason (`SKIP` =
+  `rv32i_cpu_pipelined`, `two_domain_top`, `mod8`; `regout_trailing_single_tick`'s row gone).
+- G-F 90 modules through the interpreter (89 at G.6), 74 skipped with a sentence.
+- **G-G differential 1240 PASS / 0 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE; reference
+  750 PASS** (1234 / 744 at G.6: +6 sequences each, P12's six) — predicted (T-g): **as predicted**.
+- **Pinned disagreements: 2** (4 at G.6), `preloop_linear` and `preloop_probe`, both
+  `sim=ref≠SV` — (f4) `trailing_fold` and P12 left the list, **as predicted** (T-b, T-a, T-c).
+- `rv32i_pipelined_verilator` (the 13 programs) passes; `cdc_synchronizer_anchor`,
+  `det_010_independent_golden`, `two_clock_pins`, the golden traces and the `REFERENCE` rows
+  pass — every anchor's SV is byte-identical to `663bbe2` (none is among the 21 changed
+  modules), so its trace cannot have moved (T-f).
+- G-E 5 anchored, 159 transpiler-only (unchanged).
+- New `SKIP` / `REF_SKIP` rows: **none**; one `SKIP` row deleted.
+
+**Misses:** none in the emitted set or the traces. Not predicted: the guard's mux spelling
+hiding `case` lifting (changed to structure before committing, H.2), the promotion of
+`trailing_fold`'s pre-loop `let` (H.2), and the 8 unit tests feeding `lower_seq` plain-`Out`
+IR through `transpile_item_fn` (H.1).
+
+### H.5 For the coordinator — SPEC items (SPEC files untouched)
+
+1. **I.6.9's implementation map is stale** (`SPEC.md:827-853`): `trailing_reg_outs`, the
+   committed-value trailing drive and the "trailing region's register updates at edge N" are
+   gone; the trailing region lowers into phase 0 under `__copper_started` with every drive's
+   value the forwarded one. The line numbers it cites for `split_output_regs` moved.
+2. **I.0.7's transpiler obligations** ("the transpiler's single port form … with the five
+   plain-`Out` forms and the opening/closing tagging removed") are met; `classify_reads` is
+   removed (its entry in I.0.7's "Today" paragraph and the `cfg.rs:3804` pointer are stale).
+3. **II.3 row (f4)** (`SPEC.md:3424`, "the trailing region folded before the head at edge 1")
+   is CLOSED by this step, not by the I.9.2 entry: its fix direction named the entry, but the
+   mechanism was the fold. D-20's step (5) list should drop (f4); (f2), (f3) and P15 stay.
+4. **III.1 P12** (`SPEC.md:3560`): "false today on a read after the last tick" is now true —
+   `regout_trailing_single_tick` sim = ref = SV, swept. III.2's disagreement table
+   (`SPEC.md:3715`, "sim = SV ≠ ref … `regout_trailing_single_tick`") has no instance left.
+5. **I.10.1(d) in the emitted text**: every `data()`/`is_ready()` binds the registered
+   capture; the combinational binding existed only for the fold. Worth a sentence in I.10's
+   implementation map.
+6. **The trailing region's guard is a realization of I.0.2's first resumption** ("the first
+   resumption runs `s_pre` and the head only") for the trailing region only. Step 5's entry
+   (pre-loop statements, (f2)/(f3)) can reuse `__copper_started` as its run-once bit — it is
+   0 exactly during the first resumption.
+7. **A pre-loop non-`mut` `let` is a segment-0 wire in CHIR** (`trailing_fold`'s `r`), so a
+   trailing read of it is promoted to a register (`r_r`) rather than folded to a constant —
+   correct, one register more. Belongs with step 5's pre-loop handling.
