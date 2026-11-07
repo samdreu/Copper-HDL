@@ -324,6 +324,11 @@ pub fn held_preloop_values(f: &ItemFn) -> Vec<(String, &Expr)> {
             Stmt::Expr(Expr::Loop(_), _) => break,
             Stmt::Local(l) => {
                 let Some(init) = &l.init else { continue };
+                // A memory binding is I.10's `let m = Memory(init)`, its preload judged
+                // there ("Initial contents must be constant"), not a held value.
+                if is_memory_binding(&init.expr) {
+                    continue;
+                }
                 let reads_value = reads_runtime(&init.expr, &valued).is_some();
                 let mut names = BTreeSet::new();
                 pat_names(&l.pat, &mut names);
@@ -340,6 +345,16 @@ pub fn held_preloop_values(f: &ItemFn) -> Vec<(String, &Expr)> {
         }
     }
     out
+}
+
+/// `Memory::…(…)`, possibly followed by a method chain (`.read_first()`).
+fn is_memory_binding(e: &Expr) -> bool {
+    match e {
+        Expr::MethodCall(m) => is_memory_binding(&m.receiver),
+        Expr::Call(c) => matches!(&*c.func, Expr::Path(p)
+            if p.path.segments.first().is_some_and(|s| s.ident == "Memory")),
+        _ => false,
+    }
 }
 
 /// The names the loop body assigns (an assignment's or compound assignment's root,
@@ -537,6 +552,8 @@ mod tests {
         assert!(held("let x = a.read(); let mut r = Bits::zero(); loop { o.write(r); clk.tick().await; r = r + a.read(); }").is_empty());
         // A clock or memory binding.
         assert!(held("let c2 = clk.clone(); let m = Memory::new(clk.clone(), 4); loop { o.write(m.data()); c2.tick().await; }").is_empty());
+        // A memory whose preload reads a port is I.10's refusal, not this one.
+        assert!(held("let m = Memory::from_fn(clk.clone(), 4, |i| a.read()); loop { o.write(m.data()); clk.tick().await; }").is_empty());
         // A constant held binding is a constant (I.7.2(b)).
         assert!(held("let k = Bits::from_u8(3); loop { o.write(k); clk.tick().await; }").is_empty());
     }
