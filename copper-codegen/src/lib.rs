@@ -40,8 +40,8 @@ pub fn transpile_fir(
 }
 
 /// [`transpile_fir`] up to the VLIR — the whole lowering pipeline (control
-/// extraction, CHIR, SHIR, VLIR) without the text emission, so a caller can read
-/// the lowering's recorded decisions (`VLIRSeqBody::hold_form_ports`).
+/// extraction, CHIR, SHIR, VLIR) without the text emission, so a caller can
+/// inspect the lowered module.
 pub fn lower_fir_to_vlir(
     fir: &copper_core::FrontendModuleIR,
     hardware_fns: &std::collections::HashSet<String>,
@@ -140,27 +140,6 @@ pub fn transpile_source(
     let prepared = prepare_source(src)?;
     let target = prepared.select_target(module)?;
     transpile_target(target, &prepared, config)
-}
-
-/// The conditionally driven plain `Out` ports of `module` that `vlir_lower` emits
-/// in the forwarded mux + `<port>_hold` form, with each one's opening / closing
-/// drive counts (`VLIRHoldFormPort::closing > 0` marks a MIXED-anchor port, the
-/// drive-level form of 2026-10-29). Runs every front-end rule and the full
-/// lowering exactly as [`transpile_source`] does, so a module the transpiler
-/// refuses is an `Err` here too. Empty for a combinational or structural module.
-/// This is the corpus audit's view of the emission decision — the declared set
-/// an `sv-baseline diff` is checked against (`copper-codegen/tests/hold_form_audit.rs`).
-pub fn hold_form_ports(
-    src: &str,
-    module: Option<&str>,
-) -> Result<Vec<copper_core::vlir::VLIRHoldFormPort>, String> {
-    let prepared = prepare_source(src)?;
-    let target = prepared.select_target(module)?;
-    let vlir = vlir_for_target(target, &prepared)?;
-    Ok(match &vlir.body {
-        copper_core::vlir::VLIRBody::Sequential(seq) => seq.hold_form_ports.clone(),
-        _ => Vec::new(),
-    })
 }
 
 /// Like [`transpile_source`], but emits the selected module **plus every

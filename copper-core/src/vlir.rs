@@ -115,45 +115,19 @@ pub struct VLIRSeqBody {
     /// Memory arrays declared by this module, with their read-port output nets.
     pub memories: Vec<VLIRMemDecl>,
     pub submodules: Vec<VLIRSubmoduleInst>,
-    /// Assignments at the TOP of the `always_comb` block, before and outside every
-    /// phase guard: the `<port> = <port>_hold` default of each plain `Out` emitted
-    /// in the mux + hold form (phase C). Until 2026-11-02 the default was the
-    /// first statement of the port's own phase, so in a multi-phase body it sat
-    /// inside `if (phase_r == K)` and the port was assigned nowhere else — a latch
-    /// outside its phase, which Verilator refuses under `-Wall`
-    /// (`design_docs/CYCLE_DATAFLOW_SEMANTICS.md` §10.9). A single-phase body has
-    /// one unguarded phase, where the top of the block is the same place.
-    pub comb_defaults: Vec<VLIRStmt>,
-    /// One `always_comb` block per phase (pre-edge wires + conditional port
-    /// drives). Single-phase modules have exactly one, with `phase_guard: None`.
+    /// One `always_comb` block per phase (the phase's wires and memory nets; its
+    /// port drives are in `always_ff`). Single-phase modules have exactly one,
+    /// with `phase_guard: None`.
     pub comb_phases: Vec<VLIRCombPhase>,
     /// Single `always_ff` block — all register updates.
     pub always_ff: VLIRAlwaysFF,
-    pub output_assigns: Vec<VLIRContinuousAssign>,
-    /// Output ports the module drives from `always_ff` — a `RegOut` flop, or the
-    /// edge-sampled register of a conditionally driven plain `Out` — with their
-    /// widths. Each gets `<port> = 0` in the module's `initial` block (2026-10-29):
-    /// a port's power-on value is its wire's, which the harness starts at zero and
-    /// which the simulator shows until the first write; the `<port>_hold` register
-    /// of the opening-drive form states the same value through `reg_decls`. Not
-    /// declared here (the port list declares them), so they are not `VLIRRegDecl`s.
+    /// The output ports — every one a `RegOut` flop, driven from `always_ff`
+    /// (SPEC II.1 R8; I.6.9) — with their widths. Each gets `<port> = 0` in the
+    /// module's `initial` block (2026-10-29): a port's power-on value is its
+    /// wire's, which the harness starts at zero and which the simulator shows
+    /// until the first write. Not declared here (the port list declares them), so
+    /// they are not `VLIRRegDecl`s.
     pub port_inits: Vec<(String, Width)>,
-    /// The conditionally driven plain `Out` ports this body emits in the forwarded
-    /// mux + `<port>_hold` form (phase C, drive-level since 2026-10-29), with the
-    /// number of opening and closing drives each had. A record of a lowering
-    /// decision, consumed by the corpus audit of mixed-anchor ports
-    /// (`copper_codegen::hold_form_ports`); the emitter does not read it.
-    pub hold_form_ports: Vec<VLIRHoldFormPort>,
-}
-
-/// One port emitted in the mux + hold form — see `VLIRSeqBody::hold_form_ports`.
-/// `closing > 0` is a MIXED-anchor port: its comb copy muxes only the opening
-/// drives, and the hold register is loaded by every drive.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VLIRHoldFormPort {
-    pub port: String,
-    pub opening: usize,
-    pub closing: usize,
 }
 
 #[derive(Debug)]
@@ -280,30 +254,17 @@ pub enum VLIRStmt {
         outer_dim: Option<Width>,
         value: VLIRExpr,
     },
-    /// Drive an output port from within combinational logic (`out = <expr>;`).
-    ///
-    /// `edge_value` is the same drive in PRE-edge terms, used only if
-    /// `split_output_reg` moves this assignment into `always_ff` (where it becomes
-    /// `out <= …`, sampled before the edge rather than read after it). Equal to
-    /// `value` unless the segment assigns a register the drive reads. See
-    /// `SHIRStmt::PortDrive`, which explains why both forms are carried this far.
+    /// Drive an output port (`out = <expr>;` in a combinational module). On a
+    /// clocked body every drive is a `RegOut`'s and `split_output_reg` moves it
+    /// into `always_ff` as `out <= <expr>`; `value` is already in pre-edge terms
+    /// there (see `SHIRStmt::PortDrive`).
     PortAssign {
         port_name: String,
         value: VLIRExpr,
-        edge_value: VLIRExpr,
-        /// See `SHIRStmt::PortDrive::opening`. Decides, per DRIVE, the emitted
-        /// form of a conditionally driven plain `Out`: a port with at least one
-        /// opening drive takes the mux + hold form, in which this drive stays in
-        /// the comb copy when opening and moves to the hold register's
-        /// `always_ff` load alone when closing (every drive loads the hold
-        /// register); a port with no opening drive is edge-sampled at the edge.
-        /// Hoisted defaults carry `false`; they are never split.
-        opening: bool,
     },
-    /// `edge_condition` is `condition` in PRE-edge terms, carried for the same
-    /// reason `PortAssign` carries `edge_value`: `split_output_reg` may move the
-    /// drives inside this branch into `always_ff`, and that copy of the test is
-    /// sampled before the edge rather than read after it. Equal to `condition`
+    /// `edge_condition` is `condition` in PRE-edge terms: `split_output_reg`
+    /// moves the drives inside this branch into `always_ff`, and that copy of the
+    /// test is sampled before the edge rather than read after it. Equal to `condition`
     /// unless the segment assigns a register the test reads. See `SHIRStmt::If`.
     If {
         condition: VLIRExpr,

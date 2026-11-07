@@ -24,13 +24,6 @@ pub fn lower_to_shir(chir: &CHIRModule) -> Result<SHIRModule, SHIRLowerError> {
             SHIRBody::Combinational(lower_comb_body(comb)?)
         }
         CHIRBody::Sequential(seq) => {
-            let in_ports: std::rc::Rc<HashSet<String>> = std::rc::Rc::new(
-                chir.ports
-                    .iter()
-                    .filter(|p| matches!(p.direction, copper_core::chir::CHIRPortDir::Input))
-                    .map(|p| p.name.clone())
-                    .collect(),
-            );
             // `RegOut` ports: a trailing write to one is emitted from the committed
             // register, not the forwarded next-state (see `Forwarding::trailing_reg_outs`).
             let reg_out_ports: std::rc::Rc<HashSet<String>> = std::rc::Rc::new(
@@ -40,7 +33,7 @@ pub fn lower_to_shir(chir: &CHIRModule) -> Result<SHIRModule, SHIRLowerError> {
                     .map(|p| p.name.clone())
                     .collect(),
             );
-            SHIRBody::Sequential(lower_seq_body(seq, in_ports, reg_out_ports, chir.span)?)
+            SHIRBody::Sequential(lower_seq_body(seq, reg_out_ports, chir.span)?)
         }
         CHIRBody::Structural(st) => {
             SHIRBody::Structural(lower_structural_body(st)?)
@@ -142,26 +135,16 @@ fn collect_wire_types(
 /// different meanings, one silently wrong by a cycle. `TODO` records this as cause
 /// L, with the measured sim ≢ SV trace.
 ///
-/// # Why BOTH forms are produced, and neither is chosen here
+/// # Where the forwarded value goes
 ///
-/// Whether a drive is sampled at the edge is not a property of the port type. A
-/// `RegOut` always is; a plain `Out` is too when it is written CONDITIONALLY, since
-/// `vlir_lower` turns that into an implicit-hold register. And an output that looks
-/// conditional can be un-registered again by `hoist_moore_output_defaults`. So the
-/// answer is not a function of this IR, and predicting it here would be a second
-/// implementation to keep in step with the real one — the failure mode that produced
-/// this bug in the first place.
-///
-/// So every `PortDrive` carries both: `value` (read after the edge, unforwarded) and
-/// `edge_value` (sampled before it, forwarded). `vlir_lower::split_output_reg` picks,
-/// at the one point where a drive actually becomes a non-blocking assignment.
-///
-/// * a drive emitted as a continuous `assign o = <expr>` is read AFTER the edge, when
-///   the flop already holds the assigned value → `value`, unforwarded; forwarding it
-///   would apply the update twice (measured on `lfsr`);
-/// * a drive emitted as `o <= <expr>` inside `always_ff` is evaluated with pre-edge
-///   register values → `edge_value`; without it the drive lands a full cycle late
-///   (measured on the cause-L repro, and on a conditional plain `Out` for L-1).
+/// Every output of a clocked body is a `RegOut` (SPEC II.1 R8), emitted as
+/// `o <= <expr>` inside `always_ff` and so evaluated with PRE-edge register values:
+/// a `PortDrive`'s value is the forwarded one, and so is a branch's
+/// `edge_condition` (its `always_ff` copy). A branch's plain `condition` stays
+/// unforwarded, for the `always_comb` copy that computes its wires. Until Phase C
+/// step 4 (2026-11-06) a drive also carried an unforwarded form for the plain-`Out`
+/// continuous `assign` (read after the edge — forwarding it applied the update
+/// twice, measured on `lfsr`), chosen in `vlir_lower`; R8 removed that form.
 ///
 /// # Why advancing it is delegated
 ///
@@ -180,26 +163,6 @@ struct Forwarding {
     map: Option<HashMap<String, SHIRExpr>>,
     reg_names: HashSet<String>,
     span: SourceSpan,
-    /// The module's `In`-port names, for the opening-prefix tracking below.
-    in_ports: std::rc::Rc<HashSet<String>>,
-    /// Cycle-dataflow phase B (`design_docs/PAIRED_IMPLEMENTATION_SCOPE.md`):
-    /// true once any `In`-port read has appeared earlier in this segment's walk
-    /// (conservatively: anywhere in an already-walked statement, including inside
-    /// its branches). A plain-`Out` drive BEFORE this point executes at the
-    /// cycle's OPENING instant in the simulator — ahead of any `pre_edge_barrier`
-    /// — so its continuous-assign form must be the FORWARDED expression
-    /// (`edge_value`); a drive after it executes behind the barrier, where the
-    /// unforwarded committed form is correct (V8b/lfsr, measured). The two forms
-    /// are equal unless the segment assigned a register the drive reads, which is
-    /// what confines the emission change to the measured witness set (F1).
-    /// `false` when the selection is disabled (trailing segments, comb path).
-    seen_in_read: bool,
-    /// Whether the opening-drive selection applies at all: true for pre-tick /
-    /// head segments, false for TRAILING segments (their drives publish values
-    /// whose registers commit at the same opening edge, so the committed
-    /// unforwarded form is the model's emission — m2's measured target) and for
-    /// the combinational path.
-    forward_opening_drives: bool,
     /// The module's `RegOut` ports, **only** when this is a TRAILING segment
     /// (empty otherwise). A `RegOut` write takes effect at the first clock edge
     /// after it executes. A trailing write executes after the edge that opened
@@ -222,9 +185,6 @@ impl Forwarding {
             map: None,
             reg_names: HashSet::new(),
             span: SourceSpan::default(),
-            in_ports: std::rc::Rc::new(HashSet::new()),
-            seen_in_read: false,
-            forward_opening_drives: false,
             trailing_reg_outs: std::rc::Rc::new(HashSet::new()),
         }
     }
@@ -234,8 +194,6 @@ impl Forwarding {
     /// the register itself, not the expression that fed it.
     fn for_segment(
         reg_names: HashSet<String>,
-        in_ports: std::rc::Rc<HashSet<String>>,
-        forward_opening_drives: bool,
         trailing_reg_outs: std::rc::Rc<HashSet<String>>,
         span: SourceSpan,
     ) -> Self {
@@ -243,9 +201,6 @@ impl Forwarding {
             map: Some(HashMap::new()),
             reg_names,
             span,
-            in_ports,
-            seen_in_read: false,
-            forward_opening_drives,
             trailing_reg_outs,
         }
     }
@@ -315,28 +270,6 @@ fn lower_stmt_list(
 ) -> Result<Vec<SHIRStmt>, SHIRLowerError> {
     let mut out = Vec::new();
     for stmt in stmts {
-        // Opening-prefix tracking: mark BEFORE lowering, so a drive whose own
-        // expression reads an `In` port counts as behind its read's barrier
-        // (`leading_read_reaches` includes the write's own reads).
-        //
-        // The mark is ARM-GRANULAR for a branch (2026-10-26, `e9`): an `if` or
-        // `match` seeds each arm's walk from the reads of its condition or
-        // scrutinee (and guards) alone, because the simulator runs ONE arm per
-        // cycle and a read in a sibling arm parks nothing before this arm's
-        // drive. Under control extraction the whole body is one `match pc`, so
-        // the former statement-granular mark — a read anywhere inside the
-        // statement — made every drive closing in any module that reads an
-        // input anywhere, and phase C's mux + hold form was reached only by
-        // input-free extracted modules (`e9_read_in_another_state_opening_write`
-        // and `e2x_two_registers_plus_unrelated_read`, measured one cycle late).
-        // AFTER the branch the walk carries the whole-statement mark as before:
-        // a later drive cannot know which arm ran, and that keeps it on the
-        // edge-sampled emission, the conservative side.
-        let tracking = fwd.forward_opening_drives && !fwd.seen_in_read;
-        let stmt_reads_input = tracking && stmt_reads_in(stmt, &fwd.in_ports);
-        if tracking && !matches!(stmt, CHIRStmt::If { .. } | CHIRStmt::Match { .. }) {
-            fwd.seen_in_read = stmt_reads_input;
-        }
         match stmt {
             // A reassignment of a known combinational wire → another blocking
             // assign to it (`name = value;`). The single `logic` declaration is
@@ -360,30 +293,12 @@ fn lower_stmt_list(
                 // A trailing `RegOut` write commits at the NEXT edge, after this
                 // segment's updates have committed: its edge form is the committed
                 // register (see `Forwarding::trailing_reg_outs`).
-                let edge_value = if fwd.trailing_reg_outs.contains(port_name) {
-                    value.clone()
+                let value = if fwd.trailing_reg_outs.contains(port_name) {
+                    value
                 } else {
                     fwd.at_edge(&value)
                 };
-                // Cycle-dataflow phase B: an OPENING-prefix drive (no In-port
-                // read precedes it in this segment) executes at the cycle's
-                // opening in the simulator, publishing the forwarded value — so
-                // its continuous-assign form is `edge_value`. Registered
-                // emission (`split_output_regs`, hold outputs) keeps using
-                // `edge_value` as before either way.
-                let assign_form = if fwd.forward_opening_drives && !fwd.seen_in_read {
-                    edge_value.clone()
-                } else {
-                    value
-                };
-                out.push(SHIRStmt::PortDrive {
-                    port_name: port_name.clone(),
-                    value: assign_form,
-                    edge_value,
-                    // Same predicate as `assign_form`: an opening-prefix drive is
-                    // one the simulator runs at the cycle's opening instant.
-                    opening: fwd.forward_opening_drives && !fwd.seen_in_read,
-                });
+                out.push(SHIRStmt::PortDrive { port_name: port_name.clone(), value });
             }
             CHIRStmt::If { condition, then_body, else_body, .. } => {
                 // The condition is read BEFORE either branch runs, so it resolves
@@ -391,17 +306,12 @@ fn lower_stmt_list(
                 // its own copy — an assignment in one arm must not leak into the
                 // other. Merging the two back afterwards is `advance`'s job.
                 //
-                // Both forms travel on, exactly as a `PortDrive`'s value does: the
-                // drives inside may be split between `always_comb` and `always_ff`,
-                // and only `vlir_lower::split_output_reg` knows which. Emitting the
-                // unforwarded test in the `always_ff` copy is `TODO` cause N — it
-                // made `c = c + 1; if c == 3 { … }` fire a cycle late.
-                // The arms' opening-prefix walk starts from the condition's
-                // reads alone (arm-granular, see the top of the loop).
-                let mut arm_fwd = fwd.clone();
-                if tracking {
-                    arm_fwd.seen_in_read = expr_reads_in(condition, &fwd.in_ports);
-                }
+                // Both forms travel on: the branch is split between `always_comb`
+                // (its wires) and `always_ff` (its drives) by
+                // `vlir_lower::split_output_reg`. Emitting the unforwarded test in
+                // the `always_ff` copy is `TODO` cause N — it made
+                // `c = c + 1; if c == 3 { … }` fire a cycle late.
+                let arm_fwd = fwd.clone();
                 let condition = rename_vars(lower_expr(condition)?, renames);
                 let edge_condition = fwd.at_edge(&condition);
                 let then_stmts =
@@ -432,15 +342,7 @@ fn lower_stmt_list(
             }
             CHIRStmt::Match { scrutinee, arms, .. } => {
                 // Both forms, for the reason given on the `If` arm above.
-                // The arms' opening-prefix walk starts from the scrutinee's and
-                // the guards' reads alone (arm-granular, see the top of the loop).
-                let mut arm_fwd = fwd.clone();
-                if tracking {
-                    arm_fwd.seen_in_read = expr_reads_in(scrutinee, &fwd.in_ports)
-                        || arms.iter().any(|arm| {
-                            arm.guard.as_ref().is_some_and(|g| expr_reads_in(g, &fwd.in_ports))
-                        });
-                }
+                let arm_fwd = fwd.clone();
                 let scrutinee = rename_vars(lower_expr(scrutinee)?, renames);
                 let edge_scrutinee = fwd.at_edge(&scrutinee);
                 let shir_arms = arms.iter()
@@ -490,7 +392,7 @@ fn lower_stmt_list(
             // to be sampled at the edge (the capture registers, the write
             // pipeline, an owner's array), so a register assigned earlier in
             // the segment must appear as the value it was assigned — exactly a
-            // `PortDrive`'s `edge_value` reasoning. The pipelined CPU is the
+            // `PortDrive`'s value reasoning. The pipelined CPU is the
             // measured witness: it stages the NEXT fetch with the pc it just
             // committed (`pc = new_pc; … read(pc >> 2)`), and the unforwarded
             // form fetched one instruction behind, forever.
@@ -514,29 +416,9 @@ fn lower_stmt_list(
             // this segment see the value it produced.
             _ => {}
         }
-        // Past the statement the walk carries its whole mark — for a branch,
-        // a read in any arm (see the top of the loop).
-        if tracking {
-            fwd.seen_in_read = stmt_reads_input;
-        }
         fwd.advance(stmt, renames)?;
     }
     Ok(out)
-}
-
-/// Whether a CHIR statement reads any of the module's `In` ports, anywhere
-/// inside it (branches included).
-fn stmt_reads_in(stmt: &CHIRStmt, ins: &HashSet<String>) -> bool {
-    let mut hit = false;
-    collect_expr_vars_in_stmt(stmt, &mut |v: &str| hit |= ins.contains(v));
-    hit
-}
-
-/// Whether a CHIR expression reads any of the module's `In` ports.
-fn expr_reads_in(expr: &CHIRExpr, ins: &HashSet<String>) -> bool {
-    let mut hit = false;
-    collect_expr_vars(expr, &mut |v: &str| hit |= ins.contains(v));
-    hit
 }
 
 fn lower_submodule(sub: &CHIRSubmoduleInst) -> Result<SHIRSubmoduleInst, SHIRLowerError> {
@@ -569,7 +451,6 @@ fn lower_structural_body(st: &CHIRStructuralBody) -> Result<SHIRStructuralBody, 
 
 fn lower_seq_body(
     seq: &CHIRSeqBody,
-    in_ports: std::rc::Rc<HashSet<String>>,
     reg_out_ports: std::rc::Rc<HashSet<String>>,
     module_span: SourceSpan,
 ) -> Result<SHIRSeqBody, SHIRLowerError> {
@@ -661,8 +542,6 @@ fn lower_seq_body(
             &promoted_names,
             &no_renames,
             &seq.registers,
-            &in_ports,
-            false, // trailing segment: committed unforwarded emission (m2)
             &reg_out_ports,
             module_span,
         )?;
@@ -675,8 +554,6 @@ fn lower_seq_body(
             &promoted_names,
             &no_renames,
             &seq.registers,
-            &in_ports,
-            true, // head segment: opening-prefix drives get forwarded emission
             &no_reg_outs,
             module_span,
         )?;
@@ -738,8 +615,6 @@ fn lower_seq_body(
             &promoted_names,
             &phase_renames,
             &seq.registers,
-            &in_ports,
-            true, // pre-tick segment of its phase: opening-prefix selection on
             &no_reg_outs,
             module_span,
         )?;
@@ -786,8 +661,6 @@ fn lower_seq_body(
                     &promoted_names,
                     &phase_renames,
                     &seq.registers,
-                    &in_ports,
-                    false, // trailing segment: committed unforwarded emission (m2)
                     &reg_out_ports,
                     module_span,
                 )?;
@@ -1013,10 +886,7 @@ fn shir_stmt_uses(stmt: &SHIRStmt, out: &mut HashSet<String>) {
     use crate::vlir_lower::shir_expr_vars;
     match stmt {
         SHIRStmt::Wire { value, .. } => shir_expr_vars(value, out),
-        SHIRStmt::PortDrive { value, edge_value, .. } => {
-            shir_expr_vars(value, out);
-            shir_expr_vars(edge_value, out);
-        }
+        SHIRStmt::PortDrive { value, .. } => shir_expr_vars(value, out),
         SHIRStmt::IndexAssign { index, value, .. } => {
             shir_expr_vars(index, out);
             shir_expr_vars(value, out);
@@ -1171,10 +1041,6 @@ fn lower_pre_edge_stmts(
     promoted_names: &HashSet<String>,
     renames: &HashMap<String, String>,
     registers: &[CHIRRegDecl],
-    in_ports: &std::rc::Rc<HashSet<String>>,
-    // Pre-tick/head segments get the opening-drive selection; TRAILING segments
-    // must not (their committed unforwarded form is the model's emission — m2).
-    forward_opening_drives: bool,
     // The module's `RegOut` ports for a TRAILING segment, empty for any other
     // (see `Forwarding::trailing_reg_outs`).
     trailing_reg_outs: &std::rc::Rc<HashSet<String>>,
@@ -1192,8 +1058,6 @@ fn lower_pre_edge_stmts(
     collect_wire_types(stmts, &mut wire_types);
     let mut fwd = Forwarding::for_segment(
         reg_name_set(registers, promoted_names),
-        in_ports.clone(),
-        forward_opening_drives,
         trailing_reg_outs.clone(),
         span,
     );
@@ -1861,10 +1725,7 @@ fn lower_reg_decl(r: &CHIRRegDecl) -> Result<SHIRReg, SHIRLowerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use copper_core::chir::{
-        CHIRBody, CHIRLit, CHIRModule, CHIRPortDir, CHIRPortKind, CHIRSeqBody,
-        CHIRType, Width,
-    };
+    use copper_core::chir::{CHIRLit, CHIRType, Width};
     use copper_core::frontend_ir::SourceSpan;
 
     fn span() -> SourceSpan { SourceSpan::default() }

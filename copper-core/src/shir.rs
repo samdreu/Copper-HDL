@@ -163,54 +163,28 @@ pub enum SHIRStmt {
         value: SHIRExpr,
     },
     /// Drive an output port. May appear flat or inside If/Match for
-    /// conditional drives (e.g. Moore FSM output from match on state register).
+    /// conditional drives (e.g. a Moore output decoded from a state `match`).
     ///
-    /// Carries the drive in BOTH forms, because which one is correct depends on
-    /// where the drive is finally emitted — a decision `vlir_lower` makes, later
-    /// than this IR is built:
-    ///
-    /// * `value` — read as a continuous `assign`, i.e. AFTER the clock edge, when
-    ///   the registers this segment assigns already hold their new values;
-    /// * `edge_value` — the same drive written in PRE-edge terms (registers this
-    ///   segment assigns are substituted for the values it assigns them, and its
-    ///   `let` wires are inlined where that matters), for a drive that becomes a
-    ///   non-blocking assignment inside `always_ff` and is therefore sampled BEFORE
-    ///   the edge.
-    ///
-    /// The two are equal unless the segment assigns a register the drive reads.
-    /// Carrying both is what stops this stage from having to PREDICT the
-    /// registration decision — `vlir_lower` chooses at `split_output_reg`, the one
-    /// point where a drive actually becomes edge-sampled. Predicting it here was
-    /// tried and is not sound: `hoist_moore_output_defaults` un-registers some
-    /// outputs after the fact, so the answer is not a function of this IR alone.
-    /// See `TODO` causes L, L-1 and L-2.
+    /// One value. On a clocked body every output is a `RegOut` (SPEC II.1 R8),
+    /// emitted as a non-blocking assignment in `always_ff`, so the value is the
+    /// drive in PRE-edge terms: registers the resumption has already assigned
+    /// stand for the values it assigned them, and its `let` wires are inlined
+    /// where that matters (`shir_lower::Forwarding`; without it
+    /// `n = n + step; acc.write(n)` and its reverse emit the same SystemVerilog —
+    /// `TODO` cause L). On the combinational path the forwarding is the
+    /// identity, so the value is the drive as written. Until Phase C step 4
+    /// (2026-11-06) a drive carried a second, unforwarded form and an
+    /// opening/closing tag for the plain-`Out` emission forms of a clocked body,
+    /// which R8 made unreachable (`design_docs/review/MEASUREMENTS.md` §H).
     PortDrive {
         port_name: String,
         value: SHIRExpr,
-        edge_value: SHIRExpr,
-        /// Cycle-dataflow anchor of the drive. `true` when no `In`-port read
-        /// precedes the write in its segment walk (an *opening-prefix* drive):
-        /// the simulator executes it at the cycle's opening instant, so it is
-        /// visible from the observation right after the edge that opened the
-        /// cycle. `false` when a read precedes it (it executes behind that
-        /// read's `pre_edge_barrier`, in the closing settle) and for the
-        /// combinational path and the linear trailing segment, where the
-        /// selection does not apply. `vlir_lower` uses it to pick the emitted
-        /// form of a *conditional* plain-`Out` drive, per drive (phase C,
-        /// `design_docs/PAIRED_IMPLEMENTATION_SCOPE.md`; drive-level since
-        /// 2026-10-29, `CYCLE_DATAFLOW_SEMANTICS.md` §9.4): a port with any
-        /// opening drive takes the forwarded mux + hold-register form, whose
-        /// comb copy carries the opening drives only while every drive —
-        /// closing ones included — loads the hold register at the edge; a port
-        /// whose drives are all closing is an edge-sampled `always_ff` register.
-        opening: bool,
     },
-    /// A branch carries its test in BOTH forms, for exactly the reason
-    /// [`SHIRStmt::PortDrive`] carries its value in both: the drives inside it may
-    /// be split between a continuous `assign` and an `always_ff` non-blocking
-    /// assignment, and the two copies read the segment's registers in different
-    /// windows. `vlir_lower::split_output_reg` already makes that split; it now
-    /// picks the matching test for each half.
+    /// A branch carries its test in BOTH forms: the statements inside it are
+    /// split between `always_comb` (its wires, read after the edge) and
+    /// `always_ff` (its port drives, sampled before it), and the two copies read
+    /// the segment's registers in different windows. `vlir_lower::split_output_reg`
+    /// makes that split and picks the matching test for each half.
     ///
     /// A test that reads a register this segment has ALREADY assigned is the case
     /// that separates them — `c = c + 1; if c == 3 { … }` means the incremented

@@ -235,8 +235,7 @@ impl Emitter<'_> {
         }
 
         // always_comb (one guarded block covering all phases, or a bare block).
-        let has_comb =
-            !s.comb_defaults.is_empty() || s.comb_phases.iter().any(|p| !p.stmts.is_empty());
+        let has_comb = s.comb_phases.iter().any(|p| !p.stmts.is_empty());
         if has_comb {
             self.out.push_str(&format!("{}always_comb begin\n", self.indent(1)));
             // Multi-phase: each pre-edge wire is a *phase-local* combinational
@@ -251,11 +250,6 @@ impl Emitter<'_> {
                     self.out.push_str(&format!("{}{} = '0;\n", self.indent(2), name));
                 }
             }
-            // The hold-form ports' `<port> = <port>_hold` defaults, outside every
-            // phase guard for the same reason (`VLIRSeqBody::comb_defaults`).
-            for st in &s.comb_defaults {
-                self.comb_stmt(st, 2);
-            }
             for phase in &s.comb_phases {
                 self.comb_phase(phase);
             }
@@ -268,7 +262,6 @@ impl Emitter<'_> {
 
         self.always_ff(&s.always_ff);
         self.out.push('\n');
-        self.output_assigns(&s.output_assigns);
     }
 
     fn comb_phase(&mut self, phase: &VLIRCombPhase) {
