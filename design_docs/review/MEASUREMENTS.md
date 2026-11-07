@@ -1866,3 +1866,39 @@ asserts the same message for `0..cnt` and for a const-generic `0..N`, and its `c
 twin still transpiles; `front_end_parity.rs` test 1 runs the rule over the corpus, green (the
 UART's `0..CLKS_PER_BIT` inner loops are static by the rule). The REFUSED-one break of row 2
 becomes **REFUSED-both** (a dated II.3 row; fix direction: unroll the enclosing loop).
+
+### J.16 The bare regression after the second sitting — measured
+
+Bare `tools/regression.sh` on `c25f182` (laptop): **REGRESSION OK (345 s)**. 1214 passed, 0
+failed, 89 ignored, 140 test binaries; examples **32/32**; G-D **184** differential cases (180 at
+§J.11), 3 ignored-with-reason (unchanged `SKIP` rows); G-F 111 modules, 76 skipped (+1 by class);
+**G-G differential 1455 PASS / 0 DISAGREE, reference 955 PASS, pinned 0**; G-E 5 anchored, 182
+transpiler-only. New `SKIP` / `REF_SKIP` rows: none; new `PARAMS` row: `const_generic_init`
+(`START = 5`). Anchors: no anchored module is in any changed set of this sitting (every row's
+sv-baseline diff was NEW fixtures only), so their SV is byte-identical to `2aca023`.
+
+### J.17 For the coordinator — SPEC items of the second sitting (amending J.10)
+
+1. **R21 / (f6) — closed** (J.12): `copper_analysis::check_no_preloop_tick`, both front-ends,
+   one message; ui/fail `preloop_tick`; parity-audit row. II.1.2 R21 realized; J.10 item 9 is
+   superseded.
+2. **(d) — closed in the transpiler** (J.13): associated consts, `const fn`s, a const generic as a
+   power-on value (`initial n = W'(N)`, `CHIRRegDecl::init_param`). Fixtures
+   `const_eval_dut.rs::const_assoc_fn`, `::const_generic_init`. **Two decisions owed (stopped):**
+   R11's macro side cannot evaluate names (a proc macro is not given the file) — keep it
+   syntactic, or have the macro emit a rustc-checked `const` context (needs `const fn` `Bits`
+   constructors); and "one evaluator" — the interpreter's typed evaluator is the richer one, so
+   either it becomes the shared one (moves to `copper-analysis` or becomes a dependency of
+   `copper-codegen`) or the `i128` evaluator grows types. A single-segment `const fn` call as an
+   initializer stays refused by R11 in both front-ends until then (an I.14.4 under-admission,
+   no parity break). The interpreter learned impl consts (`T::K`) in its own evaluator.
+3. **(e) — 28 methods closed in all** (J.8: 12; J.14: 16), one III.3 line each. Open: `as_array_mut`,
+   `From` / `Logic::from_bool`, `saturating_add` / `saturating_sub` (IN, need a clamp form); the
+   `checked_*` four stay refused (OUTSIDE). The interpreter's refusal of an unsized `all_ones()`
+   is the I.14.4 parity item, still open.
+4. **The row-2 residue — REFUSED-both** (J.15): `copper_analysis::check_counted_for_nesting`;
+   a dated II.3 row: shape "a counted `for` with a non-static bound as the last statement of an
+   enclosing tick-bearing `for`", meaning I.8.4(b) (zero iterations, zero time), fix direction
+   "unroll the enclosing loop's zero-time iterations". ui/fail `nested_runtime_empty_for`.
+5. **Left alone, as asked:** the `as_usize` / `usize` width class (step 8, I.14.7 (3)); met again
+   in J.13 (`Bits::from_usize(n & 0xFF)` at 32 bits).

@@ -199,8 +199,9 @@ entries in `Cargo.toml`.
   iff it is defined-in-loop ∧ live-across-a-tick), `check_reachability` (every loop
   path must reach a `clk.tick().await`, enforced as a hard spanned compile error in
   **both** front-ends), the G2 structural reg-match helpers, and `consts` — the shared constant evaluator of SPEC
-  I.14.4 (started in Phase C step 5; the transpiler's counted-`for` bounds, `from_lit`
-  turbofish and `const` bodies use it; R11 and the interpreter do not yet). It is also where
+  I.14.4 (Phase C step 5: `ConstEnv` over const items, associated consts and `const fn`s;
+  the transpiler's counted-`for` bounds, `from_lit` turbofish and register initializers use
+  it; R11 and the interpreter do not — a decision owed, MEASUREMENTS §J.13). It is also where
   the checks that reason about **clock phases** live — `check_memory_staging` (and,
   until D-8 retired them, the plain-`Out` phase rules) — because a check
   downstream of `control_extract` cannot see the phases it is counting (that pass
