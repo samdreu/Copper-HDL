@@ -52,6 +52,11 @@
 #        (G-H, the sweep re-run under the one-resumption executor while it was behind
 #        `COPPER_RESUMPTION`, merged into G-G when it became the only executor —
 #        Phase C step 3, 2026-11-06)
+#   G-I  the PROJECTION (SPEC §III.1 P1/P15, tests/projection_relation.rs): the
+#        relation R between the emitted control state and the coroutine's
+#        continuations was built and every transition checked on every clocked module
+#        the sweep covers, the initial state included; its counts are printed
+#        (G-H is retired, see above)
 #
 # and it prints the `#[ignore]`d tests every run, because a skipped check that prints
 # nothing is indistinguishable from a passing one.
@@ -216,7 +221,11 @@ if [ "$RUN_TEST" -eq 1 ]; then
   # The verdict ledger G-G reads (tests/common/relation.rs): one file per case.
   LEDGER="$TMP/ledger"
   rm -rf "$LEDGER"; mkdir -p "$LEDGER"
-  COPPER_VERDICT_LEDGER="$LEDGER" cargo test --workspace > "$TMP/test.log" 2>&1
+  # G-I's coverage line (tests/projection_relation.rs writes it here; a passing
+  # test's stdout is captured).
+  PROJ_REPORT="$TMP/projection.txt"
+  rm -f "$PROJ_REPORT"
+  COPPER_VERDICT_LEDGER="$LEDGER" COPPER_PROJECTION_REPORT="$PROJ_REPORT" cargo test --workspace > "$TMP/test.log" 2>&1
   TEST_RC=$?
 
   grep -E "^test result:" "$TMP/test.log" | awk '
@@ -263,6 +272,22 @@ if [ "$RUN_TEST" -eq 1 ]; then
   echo "  G-D ok: corpus sweep ran $SWEPT differential cases ($SWEPT_SKIP ignored-with-reason), each under the pinned multi-sequence stimulus policy"
   POLICY_LINE=$(grep -h "stimulus policy:" "$TMP"/*.log 2>/dev/null | tail -1 | sed 's/.*stimulus policy: //')
   [ -n "$POLICY_LINE" ] && echo "       policy: $POLICY_LINE"
+
+  # G-I — the PROJECTION (SPEC III.1 P1, P15). A static test, no Verilator: for every
+  # clocked module the sweep covers it builds the relation R between the emitted
+  # machine's control state (`pc`, or the phase) and the coroutine's continuations,
+  # checks every transition of it path by path, and checks the initial state encodes
+  # the entry. It fails itself on a module it cannot relate without a listed reason,
+  # and on a sweep module it never examined; here it must have RUN, passed, and
+  # related a non-zero number of modules.
+  grep -q "^test the_projection_relation_holds_on_the_corpus \.\.\. ok" "$TMP/test.log" \
+    || fail "G-I: the projection test (tests/projection_relation.rs) did not run or did not pass"
+  [ -s "$PROJ_REPORT" ] || fail "G-I: the projection test wrote no coverage report"
+  PROJ_LINE=$(grep -h "^projection relation:" "$PROJ_REPORT" | tail -1 | sed 's/^projection relation: //')
+  [ -n "$PROJ_LINE" ] || fail "G-I: the projection report has no coverage line"
+  PROJ_N=$(echo "$PROJ_LINE" | sed -E 's/^([0-9]+) clocked.*/\1/')
+  [ "${PROJ_N:-0}" -gt 0 ] 2>/dev/null || fail "G-I: the projection relation covered zero modules"
+  echo "  G-I ok: projection relation — $PROJ_LINE"
 
   # G-F — the REFERENCE-INTERPRETER leg. copper-ref runs the kernel under SPEC
   # §I.0's one-resumption protocol with no rustc lowering and no executor, so it is

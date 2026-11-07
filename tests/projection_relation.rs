@@ -203,7 +203,7 @@ enum Frame<'a> {
     Seq { stmts: &'a [Stmt], next: usize, prefix: Vec<usize> },
     /// One control expression with no statement index of its own (an `else if`,
     /// a non-block `match` arm); `done` once it ran.
-    One { expr: &'a Expr, prefix: Vec<usize>, done: bool },
+    One { expr: &'a Expr, pos: Pos, prefix: Vec<usize>, done: bool },
     ModLoop,
     Loop { body: &'a [Stmt], prefix: Vec<usize> },
     While { pos: Pos, body: &'a [Stmt], prefix: Vec<usize> },
@@ -226,6 +226,12 @@ struct Src<'a> {
     sites: BTreeSet<Vec<usize>>,
     /// Sites inside a statically empty `for` — no continuation reaches them.
     dead_sites: BTreeSet<Vec<usize>>,
+}
+
+/// A `const { … }` block statement: evaluated by rustc, no statement of any
+/// resumption (`shift_register`'s width assertion; MEASUREMENTS §L.1).
+fn is_compile_time(s: &Stmt) -> bool {
+    matches!(s, Stmt::Expr(Expr::Const(_), _))
 }
 
 fn is_tick_expr(e: &Expr) -> bool {
@@ -297,6 +303,7 @@ impl<'a> Src<'a> {
             match s {
                 Stmt::Local(_) => src.init.push(range_of(s)),
                 Stmt::Item(_) => {}
+                s if is_compile_time(s) => src.init.push(range_of(s)),
                 _ => src.atomic.push(range_of(s)),
             }
         }
@@ -309,6 +316,7 @@ impl<'a> Src<'a> {
         for (i, s) in stmts.iter().enumerate() {
             prefix.push(i);
             match s {
+                s if is_compile_time(s) => self.init.push(range_of(s)),
                 Stmt::Expr(e, _) => self.classify_expr(e, range_of(s), prefix, consts, dead),
                 Stmt::Item(_) => {}
                 _ => self.atomic.push(range_of(s)),
@@ -352,7 +360,7 @@ impl<'a> Src<'a> {
                         Expr::Block(b) => self.classify_stmts(&b.block.stmts, prefix, consts, dead),
                         other => {
                             prefix.push(0);
-                            self.classify_expr(other, range_of(other), prefix, consts, dead);
+                            self.classify_expr(other, range_of(arm), prefix, consts, dead);
                             prefix.pop();
                         }
                     }
@@ -388,7 +396,7 @@ impl<'a> Src<'a> {
     fn entry(&self) -> (Vec<Frame<'a>>, Vec<Lab>) {
         let mut labs = Vec::new();
         for s in self.pre {
-            if !matches!(s, Stmt::Local(_) | Stmt::Item(_)) {
+            if !matches!(s, Stmt::Local(_) | Stmt::Item(_)) && !is_compile_time(s) {
                 push_lab(&mut labs, Lab::Run(pos_of(s)));
             }
         }
@@ -410,7 +418,7 @@ impl<'a> Src<'a> {
                 }
                 enum Act<'a> {
                     Stmt(&'a Stmt, Vec<usize>),
-                    One(&'a Expr, Vec<usize>),
+                    One(&'a Expr, Pos, Vec<usize>),
                     Pop,
                     Back,
                 }
@@ -423,9 +431,9 @@ impl<'a> Src<'a> {
                         path.push(i);
                         Act::Stmt(&stmts[i], path)
                     }
-                    Some(Frame::One { expr, prefix, done }) if !*done => {
+                    Some(Frame::One { expr, pos, prefix, done }) if !*done => {
                         *done = true;
-                        Act::One(expr, prefix.clone())
+                        Act::One(expr, *pos, prefix.clone())
                     }
                     Some(Frame::Seq { .. } | Frame::One { .. }) => Act::Pop,
                     Some(_) => Act::Back,
@@ -442,13 +450,14 @@ impl<'a> Src<'a> {
                     }
                     Act::Stmt(s, path) => match s {
                         Stmt::Item(_) => Step::Go,
+                        s if is_compile_time(s) => Step::Go,
                         Stmt::Expr(e, _) => self.expr(e, pos_of(s), path, &mut stack, &mut labs, &mut work, steps)?,
                         _ => {
                             push_lab(&mut labs, Lab::Run(pos_of(s)));
                             Step::Go
                         }
                     },
-                    Act::One(e, path) => self.expr(e, pos_of(e), path, &mut stack, &mut labs, &mut work, steps)?,
+                    Act::One(e, pos, path) => self.expr(e, pos, path, &mut stack, &mut labs, &mut work, steps)?,
                 };
                 if let Step::Parked(site) = step {
                     for (extra, cont_stack, last) in lookahead(&stack) {
@@ -537,7 +546,7 @@ impl<'a> Src<'a> {
                 if let Some((_, other)) = &i.else_branch {
                     match &**other {
                         Expr::Block(b) => es.push(Frame::Seq { stmts: &b.block.stmts, next: 0, prefix: with(&path, 1) }),
-                        other => es.push(Frame::One { expr: other, prefix: with(&path, 1), done: false }),
+                        other => es.push(Frame::One { expr: other, pos: pos_of(other), prefix: with(&path, 1), done: false }),
                     }
                 }
                 work.push((es, el, steps));
@@ -552,7 +561,7 @@ impl<'a> Src<'a> {
                     push_lab(&mut l2, Lab::Test(mp, k));
                     match &*arm.body {
                         Expr::Block(b) => s2.push(Frame::Seq { stmts: &b.block.stmts, next: 0, prefix: with(&path, k) }),
-                        other => s2.push(Frame::One { expr: other, prefix: with(&with(&path, k), 0), done: false }),
+                        other => s2.push(Frame::One { expr: other, pos: pos_of(arm), prefix: with(&with(&path, k), 0), done: false }),
                     }
                     if k == 0 {
                         *stack = s2;
@@ -1099,7 +1108,15 @@ fn relate(file_src: &str, f: &syn::ItemFn, consts: &dyn Fn(&str) -> Option<i128>
     }
 
     // ── route and the emitted initial state ──
-    let (route, init_ctl) = match extracted_shape(seq) {
+    // Which route the source calls for, decided on the source: extraction iff some
+    // tick is not a top-level statement of the module loop (a user's own `match pc`
+    // on a linear body is atomic, `if_tick_explicit` and its twins; §L.1).
+    let wants_extraction = src.sites.iter().any(|s| s.len() != 3);
+    let shape = extracted_shape(seq);
+    if wants_extraction && shape.is_none() {
+        return Err("a tick inside a branch or nested loop, but no extraction `match pc` in the CHIR".into());
+    }
+    let (route, init_ctl) = match shape.filter(|_| wants_extraction) {
         Some((pc, entry, m_arms)) => {
             rep.route = "extracted";
             if n_ticks != 1 || !segs[1].is_empty() {
@@ -1481,7 +1498,7 @@ fn the_projection_relation_holds_on_the_corpus() {
         }
     }
     let related: usize = by_route.values().sum();
-    println!(
+    let summary = format!(
         "projection relation: {related} clocked modules related ({}), {trivial_comb} combinational (no H(M) state), \
          {structural} structural (no coroutine), {} uncovered with a reason; |R| = {pairs} pairs, {transitions} \
          transitions checked; sweep modules examined: {}/{}",
@@ -1490,6 +1507,20 @@ fn the_projection_relation_holds_on_the_corpus() {
         SWEEP_MODULES.iter().filter(|m| seen.contains(**m)).count(),
         SWEEP_MODULES.len()
     );
+    println!("{summary}");
+    // tools/regression.sh's G-I reads this (a passing test's stdout is captured).
+    if let Ok(p) = std::env::var("COPPER_PROJECTION_REPORT") {
+        let mut body = format!("{summary}\n");
+        for n in &notes {
+            body += &format!("note: {n}\n");
+        }
+        for (k, why) in &uncovered {
+            body += &format!("UNCOVERED {k}: {why}\n");
+        }
+        if failures.is_empty() {
+            std::fs::write(&p, body).expect("write the projection report");
+        }
+    }
     assert!(failures.is_empty(), "{} module(s) fail P1/P15:\n  {}", failures.len(), failures.join("\n  "));
     assert!(related > 100, "the corpus walk stopped reaching the corpus: {related} related");
 }
