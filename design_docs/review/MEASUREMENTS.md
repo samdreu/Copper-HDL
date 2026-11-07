@@ -1796,3 +1796,65 @@ Not re-measured: that each new shape was refused before (by reading: the fold's
 (`let mut n = f(3);`) is still refused by **both** front-ends — no parity break, an
 under-admission against I.14.4 that lands with R11's form decision.
 `tools/regression.sh --no-examples`: **PARTIAL OK (325 s)**; G-F 110; G-G differential 1443 PASS / 0 DISAGREE, reference 948, pinned 0. Row status: **(d) closed in the transpiler** (associated consts, `const fn`, const generics as a power-on value); **stopped**: R11 and the interpreter on the shared evaluator (above).
+
+### J.14 Row 8, the remaining `Bits` methods
+
+**The forms** (each I.14.3(d)'s meaning in 2-state SV; X is outside every SV pair, III.2.2):
+`a.concat(b)` → `{a, b}` (`a` high); `x.part_select::<LEN>(lo)` → `x[lo+LEN-1:lo]` (a constant
+`lo`) or `LEN'(x >> lo)`; `x.replicate::<OUT>()` → `{k{x}}` as `k` copies (a receiver of known
+concrete width); `x.set(i, l)` → the element assignment `x[i] = l` (a statement); `Bits::mux(s, a,
+b)` → `s ? a : b`; `x.with_lsb(l)` / `x.with_msb(l)` → `{x[W-1:1], l}` / `{l, x[W-2:0]}` (concrete
+width); `is_valid()` → `1` (a 2-state value is always valid; the simulator's X answer is outside
+the SV pairs); `eq_logic`, `ne_logic`, `lt_logic`, `le_logic`, `gt_logic`, `ge_logic` → `==`,
+`!=`, `<`, `<=`, `>`, `>=` (unsigned, one bit); `as_array()` → the receiver (the packed vector
+is the array, as `from_array` already is); `Bits::all_ones()` → all ones at the turbofish width,
+or `~0` retyped by context; in an initializer the fold states it. **Kept refused:**
+`as_array_mut` (a `&mut` into the vector — element writes are `x[i] = l` / `set`), `From`
+(`Logic::from(bool)`; not a `Bits` method of the row's spelling), and the `checked_*` four
+(OUTSIDE by I.14.3(d)); `saturating_add`/`_sub` (IN by I.14.3(d)) not reached — they need a
+clamp form, recorded. **Predicted:** no corpus change (each was refused); the fixture
+`tests/fixtures/bits_methods_dut.rs` gains `bits_methods_rest_comb` (combinational, sim ≡ SV)
+and `bits_methods_rest_seq` (`set`, `all_ones` initializer, a register through `concat` /
+`part_select`; both legs) — agree.
+
+**Measured.** sv-baseline: **no corpus change** (245 = 243 + the 2 new) — as predicted. The two
+fixture modules **agree** (the combinational one sim ≡ SV; the sequential one on both legs) after
+four fixture-side corrections the first runs found, none in the lowerings: (i) the interpreter
+refuses an unsized `Bits::all_ones()` (I.14.4's recorded parity item) — the sequential module
+uses `Bits::<8>::all_ones()`, the combinational one (no interpreter leg) keeps the unsized
+spelling; (ii) Verilator `-Wall` refused my first sequential fixture for an unread register
+half (`UNUSEDSIGNAL`) — the fixture now reads it; (iii) `Logic::from_bool(…)` is not lowered (the
+row's `From` family, not reached) — `is_valid()` is used as a test; (iv) the unsized `all_ones()`
+first emitted `~64'd0` into an 8-bit wire (`WIDTHTRUNC`): `expr_width` now gives `~<literal>`
+its literal's width so the assignment resizes it — that one shape only, measured not to move
+any corpus module. **Not reached / kept refused:** `as_array_mut`, `From` / `Logic::from_bool`,
+`saturating_add` / `saturating_sub` (IN by I.14.3(d), need a clamp form), the `checked_*` four
+(OUTSIDE). Each method that closed is one III.3 ledger line: `concat`, `part_select`,
+`replicate`, `set`, `mux`, `with_lsb`, `with_msb`, `is_valid`, `eq_logic`, `ne_logic`,
+`lt_logic`, `le_logic`, `gt_logic`, `ge_logic`, `as_array`, `all_ones` (16).
+
+`tools/regression.sh --no-examples`: **PARTIAL OK (300 s)**; G-F 111 (76 skipped: +1, `bits_methods_rest_comb`, by class); G-G differential 1455 PASS / 0 DISAGREE, reference 955, pinned 0.
+
+### J.15 The row-2 residue: a run-time-empty counted `for` ending an enclosing ticking `for`
+
+**Decided on the evidence: refuse in both front-ends, not realize.** With the inner range empty,
+each iteration of the enclosing `for` takes zero time, so a realization must run several enclosing
+iterations' work inside one resumption — an unrolling of the enclosing loop. With a run-time
+enclosing bound there is no finite unrolling; with a constant one it is a new lowering (copies of
+the enclosing body chained in zero time, each guarded on the inner range being empty) whose state
+count grows with the bound, for a shape no corpus module has (0 of 245; the transpiler has
+refused it since row 2 and nothing broke). The refusal is a dated II.3 limitation (REFUSED-both),
+its fix direction the unrolling.
+
+**The rule** (`copper_analysis::check_counted_for_nesting`, both front-ends, one message, the
+transpiler's gate keeping its copy): a tick-bearing `for` whose body's last statement is a
+tick-bearing `for` with a bound that is not **static** — static meaning an integer literal or an
+expression over constant-shaped names (I.14.4's syntactic test, `is_constant_expr`) none of which
+is a const generic of the module or a local. The macro cannot evaluate a `const`, so a static
+bound that evaluates to an empty range is still admitted — and is then dropped by the transpiler
+as a statically empty range (zero work, zero time: the same meaning), never refused. A static
+bound the transpiler cannot evaluate (a `const fn` outside the evaluator's grammar) stays a
+transpiler-only refusal (recorded). **Predictions:** sv-baseline no change; a ui/fail case
+`nested_runtime_empty_for.rs`; `front_end_parity.rs` gains the rule, green over the corpus; the
+`unsupported_constructs.rs` pin asserts the shared message; its constant-bound twin still
+transpiles; a const-generic inner bound (`0..N`) is refused by both.

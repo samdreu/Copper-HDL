@@ -59,3 +59,68 @@ async fn bits_methods_seq(
         clk.tick().await;
     }
 }
+
+/// The rest of the row's methods (MEASUREMENTS §J.14), combinational.
+#[hardware(combinational)]
+fn bits_methods_rest_comb(
+    a: In<Bits<8>, MainClk>,
+    b: In<Bits<4>, MainClk>,
+    s: In<Logic, MainClk>,
+    lo: In<Bits<2>, MainClk>,
+    cat: Out<Bits<12>, MainClk>,
+    ps: Out<Bits<4>, MainClk>,
+    psd: Out<Bits<4>, MainClk>,
+    rep: Out<Bits<16>, MainClk>,
+    mx: Out<Bits<8>, MainClk>,
+    lsb: Out<Bits<8>, MainClk>,
+    msb: Out<Bits<8>, MainClk>,
+    cmp: Out<Bits<7>, MainClk>,
+    ones: Out<Bits<8>, MainClk>,
+    ones_ctx: Out<Bits<8>, MainClk>,
+) {
+    let x = a.read();
+    let y = b.read();
+    let c: Bits<12> = x.concat(&y);
+    cat.write(c);
+    ps.write(x.part_select::<4>(2));
+    psd.write(x.part_select::<4>(lo.read().as_usize()));
+    rep.write(y.replicate::<16>());
+    mx.write(Bits::mux(s.read(), &x, &Bits::from_u8(0x5A)));
+    lsb.write(x.with_lsb(s.read()));
+    msb.write(x.with_msb(s.read()));
+    let z = Bits::<8>::from_u8(0x40);
+    let mut r = [Logic::Zero; 7];
+    r[0] = x.eq_logic(&z);
+    r[1] = x.ne_logic(&z);
+    r[2] = x.lt_logic(&z);
+    r[3] = x.le_logic(&z);
+    r[4] = x.gt_logic(&z);
+    r[5] = x.ge_logic(&z);
+    if x.is_valid() {
+        r[6] = Logic::One;
+    }
+    cmp.write(Bits::from_slice(&r));
+    ones.write(Bits::<8>::all_ones() ^ Bits::from_slice(x.as_array()));
+    // Unsized: the width is the context's (the interpreter refuses this spelling,
+    // an I.14.4 parity item; this module has no interpreter leg by class).
+    let o: Bits<8> = Bits::all_ones();
+    ones_ctx.write(o ^ x);
+}
+
+/// `set`, an `all_ones` power-on value, a register through `concat` / `part_select`.
+#[hardware(sequential)]
+async fn bits_methods_rest_seq(
+    clk: Clock<MainClk>,
+    a: In<Bits<4>, MainClk>,
+    i: In<Bits<3>, MainClk>,
+    q: RegOut<Bits<8>, MainClk>,
+) {
+    let mut acc: Bits<8> = Bits::<8>::all_ones();
+    loop {
+        let mut t = acc.part_select::<4>(4).concat(&(a.read() ^ acc.part_select::<4>(0)));
+        t.set(i.read().as_usize(), Logic::One);
+        acc = t;
+        q.write(acc);
+        clk.tick().await;
+    }
+}

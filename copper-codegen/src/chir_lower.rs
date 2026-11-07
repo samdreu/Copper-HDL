@@ -254,7 +254,23 @@ fn infer_type_from_expr(
             | "as_usize" | "as_bits" => infer_type_from_expr(&mc.receiver, span, symbols, enums),
             "as_bool" => Ok(CHIRType::Bool),
             "and_reduce" | "or_reduce" | "xor_reduce" | "nand_reduce" | "nor_reduce"
-            | "xnor_reduce" | "get" => Ok(CHIRType::UInt { width: Width::Concrete(1) }),
+            | "xnor_reduce" | "get" | "eq_logic" | "ne_logic" | "lt_logic" | "le_logic"
+            | "gt_logic" | "ge_logic" => Ok(CHIRType::UInt { width: Width::Concrete(1) }),
+            "is_valid" => Ok(CHIRType::Bool),
+            "part_select" | "replicate" if mc.turbofish.len() == 1 => {
+                match copper_analysis::consts::parse_int_lit(mc.turbofish[0].trim()) {
+                    Some(m) => Ok(CHIRType::UInt { width: Width::Concrete(m as usize) }),
+                    None => Err(CHIRLowerError::AmbiguousWidth { span }),
+                }
+            }
+            "concat" if mc.args.len() == 1 => {
+                let a = infer_type_from_expr(&mc.receiver, span, symbols, enums)?;
+                let b = infer_type_from_expr(&mc.args[0], span, symbols, enums)?;
+                match (width_of_type_concrete(&a), width_of_type_concrete(&b)) {
+                    (Some(x), Some(y)) => Ok(CHIRType::UInt { width: Width::Concrete(x + y) }),
+                    _ => Err(CHIRLowerError::AmbiguousWidth { span }),
+                }
+            }
             "zero_extend" | "sign_extend" | "truncate" if mc.turbofish.len() == 1 => {
                 match copper_analysis::consts::parse_int_lit(mc.turbofish[0].trim()) {
                     Some(m) => Ok(CHIRType::UInt { width: Width::Concrete(m as usize) }),
@@ -1276,6 +1292,13 @@ fn fold_const_init(
                 .ok_or_else(|| "is a call through something other than a path".to_string())?;
             if path == "x" || path.ends_with("::x") {
                 return Ok(Undefined);
+            }
+            if path.ends_with("all_ones") && call.args.is_empty() {
+                return match type_turbofish_width(&path).or(width) {
+                    Some(w) if w < 128 => Ok(Value((1u128 << w) - 1)),
+                    Some(128) => Ok(Value(u128::MAX)),
+                    _ => Err("is `all_ones()` with no width the fold can see".to_string()),
+                };
             }
             // A `const fn` of the file (`f(c, …)`, `T::f(c, …)`), its arguments folded
             // first (SPEC I.14.4; II.3 (d), MEASUREMENTS §J.13).
@@ -3533,6 +3556,21 @@ fn lower_expr_stmt(
             out.push(CHIRStmt::MemRead { mem, port, addr, span });
         }
 
+        // `x.set(i, l)` is the element assignment `x[i] = l` (I.14.3(d); II.3 (e),
+        // Phase C step 5, MEASUREMENTS §J.14).
+        ExprType::MethodCall(mc) if mc.method == "set" && mc.args.len() == 2 => {
+            let rewritten = ExprType::Assign(copper_core::frontend_ir::ExprAssign {
+                left: Box::new(ExprType::Index(copper_core::frontend_ir::ExprIndex {
+                    base: mc.receiver.clone(),
+                    index: Box::new(mc.args[0].clone()),
+                    span,
+                })),
+                right: Box::new(mc.args[1].clone()),
+                span,
+            });
+            return lower_expr_stmt(&rewritten, span, ctx, out);
+        }
+
         // port.write(value) → PortWrite
         ExprType::MethodCall(mc) if mc.method == "write" && mc.args.len() == 1 => {
             let port_name = match mc.receiver.as_ref() {
@@ -3956,6 +3994,29 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
             } else if call_path(call).as_deref().is_some_and(|n| ctx.fns.contains_key(n)) {
                 // Call to a file-scope free function (#7b): inline it.
                 lower_inlined_fn_call(call, ctx)
+            } else if call_path(call).as_deref().is_some_and(|p| p.ends_with("::mux")) && call.args.len() == 3 {
+                // `Bits::mux(sel, a, b)`: `sel ? a : b` (I.14.3(d); MEASUREMENTS §J.14).
+                let cond = lower_expr(&call.args[0], ctx)?;
+                let a = lower_expr(strip_ref(&call.args[1]), ctx)?;
+                let b = lower_expr(strip_ref(&call.args[2]), ctx)?;
+                Ok(CHIRExpr::Mux { cond: Box::new(cond), then_val: Box::new(a), else_val: Box::new(b) })
+            } else if call_path(call).as_deref().is_some_and(|p| p.ends_with("all_ones")) && call.args.is_empty() {
+                // `Bits::<W>::all_ones()`: W ones; without a width, `~0` sized by its
+                // context (MEASUREMENTS §J.14).
+                let path = call_path(call).unwrap_or_default();
+                Ok(match type_turbofish_width(&path) {
+                    Some(w) if w <= 128 => CHIRExpr::Lit(CHIRLit {
+                        ty: CHIRType::UInt { width: Width::Concrete(w) },
+                        value: if w == 128 { u128::MAX } else { (1u128 << w) - 1 },
+                    }),
+                    _ => CHIRExpr::UnOp {
+                        op: CHIRUnOp::BitNot,
+                        expr: Box::new(CHIRExpr::Lit(CHIRLit {
+                            ty: CHIRType::UInt { width: Width::Concrete(DEFAULT_LIT_WIDTH) },
+                            value: 0,
+                        })),
+                    },
+                })
             } else if let Some(inner) = identity_pack_call(call) {
                 // `Bits::from_array` / `from_slice` move no bits — lower the
                 // argument in place of the call.
@@ -4608,6 +4669,12 @@ fn expr_width(e: &CHIRExpr, ctx: &LowerCtx) -> Option<Width> {
         CHIRExpr::DynBit { .. } => Some(Width::Concrete(1)),
         CHIRExpr::MemIndex { mem, .. } => ctx.memories.get(mem).map(|m| type_width(&m.elem_ty)),
         CHIRExpr::Resize { width, .. } => Some(width.clone()),
+        // `~<literal>` — the unsized `all_ones()` (`~0` at the default width) — has
+        // its literal's width, so an assignment resizes it to the target
+        // (MEASUREMENTS §J.14). Deliberately this one shape only.
+        CHIRExpr::UnOp { op: CHIRUnOp::BitNot, expr } if matches!(**expr, CHIRExpr::Lit(_)) => {
+            expr_width(expr, ctx)
+        }
         _ => None,
     }
 }
@@ -5166,6 +5233,65 @@ fn lower_method_call(
             };
             Ok(CHIRExpr::Resize { expr: Box::new(expr), width })
         }
+        "concat" if mc.args.len() == 1 => {
+            let hi = lower_expr(&mc.receiver, ctx)?;
+            let lo = lower_expr(strip_ref(&mc.args[0]), ctx)?;
+            Ok(CHIRExpr::Concat(vec![hi, lo]))
+        }
+        "part_select" if mc.args.len() == 1 && mc.turbofish.len() == 1 => {
+            let len = turbofish_usize(&mc.turbofish[0], mc)?;
+            let base = lower_expr(&mc.receiver, ctx)?;
+            match lit_usize(&mc.args[0]) {
+                Some(lo) => Ok(CHIRExpr::Slice { expr: Box::new(base), high: lo + len - 1, low: lo }),
+                None => {
+                    let lo = lower_expr(&mc.args[0], ctx)?;
+                    Ok(CHIRExpr::Resize {
+                        expr: Box::new(CHIRExpr::BinOp { left: Box::new(base), op: CHIRBinOp::Shr, right: Box::new(lo) }),
+                        width: Width::Concrete(len),
+                    })
+                }
+            }
+        }
+        "replicate" if mc.args.is_empty() && mc.turbofish.len() == 1 => {
+            let out_w = turbofish_usize(&mc.turbofish[0], mc)?;
+            let base = lower_expr(&mc.receiver, ctx)?;
+            match expr_width(&base, ctx) {
+                Some(Width::Concrete(n)) if n > 0 && out_w % n == 0 => {
+                    Ok(CHIRExpr::Concat(vec![base; out_w / n]))
+                }
+                _ => Err(method_unsupported(mc, "the receiver's width is not a known divisor of the target width")),
+            }
+        }
+        "with_lsb" | "with_msb" if mc.args.len() == 1 => {
+            let base = lower_expr(&mc.receiver, ctx)?;
+            let bit = lower_expr(&mc.args[0], ctx)?;
+            match expr_width(&base, ctx) {
+                Some(Width::Concrete(1)) => Ok(bit),
+                Some(Width::Concrete(w)) => Ok(CHIRExpr::Concat(if mc.method == "with_lsb" {
+                    vec![CHIRExpr::Slice { expr: Box::new(base), high: w - 1, low: 1 }, bit]
+                } else {
+                    vec![bit, CHIRExpr::Slice { expr: Box::new(base), high: w - 2, low: 0 }]
+                })),
+                _ => Err(method_unsupported(mc, "the receiver's width is not a known constant")),
+            }
+        }
+        // A 2-state value is always valid; the simulator's `false` for an X is
+        // outside every pair with the SV (III.2.2).
+        "is_valid" if mc.args.is_empty() => Ok(CHIRExpr::Lit(CHIRLit { ty: CHIRType::Bool, value: 1 })),
+        "eq_logic" | "ne_logic" | "lt_logic" | "le_logic" | "gt_logic" | "ge_logic" if mc.args.len() == 1 => {
+            let left = lower_expr(&mc.receiver, ctx)?;
+            let right = lower_expr(strip_ref(&mc.args[0]), ctx)?;
+            let op = match mc.method.as_str() {
+                "eq_logic" => CHIRBinOp::Eq,
+                "ne_logic" => CHIRBinOp::Neq,
+                "lt_logic" => CHIRBinOp::Lt,
+                "le_logic" => CHIRBinOp::Lte,
+                "gt_logic" => CHIRBinOp::Gt,
+                _ => CHIRBinOp::Gte,
+            };
+            Ok(CHIRExpr::BinOp { left: Box::new(left), op, right: Box::new(right) })
+        }
+        "as_array" if mc.args.is_empty() => lower_expr(&mc.receiver, ctx),
         _ => Err(CHIRLowerError::UnsupportedConstruct {
             description: format!("method `{}` is not supported in hardware expressions", mc.method),
             span: mc.span,
@@ -8274,4 +8400,36 @@ fn first_tick_span(stmts: &[CHIRStmt]) -> Option<SourceSpan> {
         CHIRStmt::ForLoop { body, .. } => first_tick_span(body),
         _ => None,
     })
+}
+
+/// `&e` → `e` (a method argument passed by reference: `a.concat(&b)`).
+fn strip_ref(e: &ExprType) -> &ExprType {
+    match e {
+        ExprType::Reference(r) => &r.expr,
+        other => other,
+    }
+}
+
+/// An integer literal argument, any base.
+fn lit_usize(e: &ExprType) -> Option<usize> {
+    match e {
+        ExprType::Lit(l) => copper_analysis::consts::parse_int_lit(&l.text).and_then(|v| usize::try_from(v).ok()),
+        _ => None,
+    }
+}
+
+/// A method turbofish that must be an integer literal.
+fn turbofish_usize(t: &str, mc: &copper_core::frontend_ir::ExprMethodCall) -> Result<usize, CHIRLowerError> {
+    copper_analysis::consts::parse_int_lit(t.trim())
+        .and_then(|v| usize::try_from(v).ok())
+        .filter(|&v| v > 0)
+        .ok_or_else(|| method_unsupported(mc, "its width turbofish is not a positive integer literal"))
+}
+
+fn method_unsupported(mc: &copper_core::frontend_ir::ExprMethodCall, why: &str) -> CHIRLowerError {
+    CHIRLowerError::UnsupportedConstruct {
+        description: format!("method `{}`: {why}", mc.method),
+        span: mc.span,
+        suggested_rewrite: None,
+    }
 }
