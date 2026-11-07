@@ -2016,8 +2016,9 @@ against today's sets:
   set is empty and the trace unchanged; forcing `v` into it is caught (`Poisoned("v")`) — the
   probe keeps its teeth as a positive. The pin was inverted accordingly. The modules whose sets
   shrank are in the clean set: `we`/`wa`/`wd`/`ra`/`xv`/`fetched`/`mem_load` are poisoned at every
-  tick and no read sees the poison (the CPU is leg-eligible only where the interpreter runs it;
-  `ex_regfile`/`ex_reg_then_wire` are).
+  tick and no read sees the poison for `ex_regfile`/`ex_reg_then_wire`, which are leg-eligible.
+  The pipelined CPU is not (a `SKIP` row: anchored by its own 13-program test), so for its
+  `fetched`/`mem_load` the evidence is the byte-identical SV, not the poison run.
 - `copper-codegen/tests/register_reconciliation.rs`: 110 clocked fixtures, no violation (the
   `ex_*` locals were absorbed comb wires before and still are).
 
@@ -2161,3 +2162,34 @@ state assigns it", `mac_pipeline`'s `product_r`) was wrong twice over: nothing f
 `product_r` is a promoted wire of the linear route, not a hoisted local; the comment now says so.
 The probe switch stays (`chir_lower::P14_PROBE_ENV`), off unless set, so the measurement can be
 repeated. Not covered: a seed other than 1, and the CPUs (neither has a hoisted register).
+
+### K.10 A third over-inference: a `let` inside an expression block (found, fixed)
+
+Found while reading the K.0 modules, not in the brief: `struct_latch_cond` inferred `{bumped,
+latch}` and `tuple_destructure` `{doubled, latch, target}`. `bumped` is a `let` inside the block
+of `let next = if c { let bumped = …; Latch { …, data: bumped } } else { … }`: `collect_reads`
+counted every path identifier of the initializer, so the outer `let`'s node used `bumped` with no
+definition, it was live back to the previous tick, and `DefinedInLoop` (which sees the inner
+`let`) made it a candidate. Dead at every tick — a wire of I.7.1, the third over-inference of P3
+besides the head clause and the fold. The reconciliation test passed because the single-phase
+absorption allowance accepted the comb nets `next_bumped`/`doubled`.
+
+Fix: `collect_reads` returns the FREE reads only — names bound by an inner block's `let`, an arm or
+closure pattern, a `for` binding or an `if let`/`while let` pattern are out of their scope; a
+shadowing read before its binding (`{ let x = x + 1; … }`) is visited first and stays a read of the
+outer local; macro tokens still all count (over, never under). Outside liveness, `uses` feeds only
+`derivation_facts`, a report. Pinned by `cfg::tests::a_let_inside_an_expression_block_is_scoped`.
+
+**Not predicted in writing before the run** (a miss of method: I ran the inferred-set diff before
+writing this subsection; my working note had named the CPU's decode temporaries as the likely
+bulk). Measured:
+
+- **register-baseline: 3 of 177** — `rv32i_cpu_pipelined` `−{addr, b, f3, f7, from_ex_mem,
+  from_mem_wb, instr, link, op, rd, result, rs1, rs1_val, rs2, rs2_val, taken, tgt, w,
+  writes_reg}` (19 decode/execute temporaries bound inside `let … = if/match { let … }` blocks),
+  `struct_latch_cond` `−bumped`, `tuple_destructure` `−doubled`.
+- **sv-baseline: 0 of 247.** The CPU's SV is byte-identical (its anchor untouched); the transpiler
+  realized these as wires already.
+- Poison run: **113 clean, 0 flagged, 77 not eligible** (the two new fixtures added). None of the
+  three changed modules is leg-eligible (`SKIP` / `REF_SKIP`), so the evidence for them is the
+  unchanged SV. Reconciliation 112 / P13 146 modules: no violation, 0 surplus.

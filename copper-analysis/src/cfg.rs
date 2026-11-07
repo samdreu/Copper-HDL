@@ -1800,18 +1800,114 @@ fn assign_lhs(left: &Expr, defs: &mut BTreeSet<String>, uses: &mut BTreeSet<Stri
 /// scanned for idents (over-approx, but only affects vars that are also
 /// assigned-in-loop, which is rare enough to be harmless in v1).
 fn collect_reads(expr: &Expr, out: &mut BTreeSet<String>) {
-    struct Reads<'a>(&'a mut BTreeSet<String>);
+    // The FREE reads of `expr`: a name bound inside it — a `let` of an inner block,
+    // a match-arm or closure pattern, a `for` binding, an `if let`/`while let`
+    // pattern — and read in that binding's scope is not a read of the outer local
+    // (Phase C step 6, MEASUREMENTS §K.10). Until then every path identifier counted,
+    // so `let next = if c { let bumped = …; f(bumped) } else { … }` made `bumped` a
+    // use with no definition, live back to the previous tick, and a "register".
+    // A shadowing read before its binding (`{ let x = x + 1; … }`) is visited
+    // before the binding opens, so it stays a read of the outer `x`.
+    struct Reads<'a> {
+        out: &'a mut BTreeSet<String>,
+        scopes: Vec<BTreeSet<String>>,
+    }
+    impl Reads<'_> {
+        fn bound(&self, n: &str) -> bool {
+            self.scopes.iter().any(|s| s.contains(n))
+        }
+        fn bind(&mut self, p: &Pat) {
+            let mut b = BTreeSet::new();
+            pat_bindings(p, &mut b);
+            self.scopes.last_mut().expect("a scope is open").extend(b);
+        }
+        /// An `if`/`while` condition: its `let` patterns bind in the open scope.
+        fn cond(&mut self, c: &Expr) {
+            match c {
+                Expr::Let(l) => {
+                    self.visit_expr(&l.expr);
+                    self.bind(&l.pat);
+                }
+                Expr::Binary(b) if matches!(b.op, BinOp::And(_)) => {
+                    self.cond(&b.left);
+                    self.cond(&b.right);
+                }
+                other => self.visit_expr(other),
+            }
+        }
+    }
     impl<'ast> Visit<'ast> for Reads<'_> {
         fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
             if p.qself.is_none() && p.path.segments.len() == 1 {
-                self.0.insert(p.path.segments[0].ident.to_string());
+                let n = p.path.segments[0].ident.to_string();
+                if !self.bound(&n) {
+                    self.out.insert(n);
+                }
             }
         }
         fn visit_macro(&mut self, m: &'ast syn::Macro) {
-            collect_token_idents(&m.tokens, self.0);
+            // Tokens cannot be scoped: every identifier counts (over, never under).
+            collect_token_idents(&m.tokens, self.out);
+        }
+        fn visit_block(&mut self, b: &'ast syn::Block) {
+            self.scopes.push(BTreeSet::new());
+            for st in &b.stmts {
+                match st {
+                    Stmt::Local(l) => {
+                        if let Some(init) = &l.init {
+                            self.visit_expr(&init.expr);
+                            if let Some((_, d)) = &init.diverge {
+                                self.visit_expr(d);
+                            }
+                        }
+                        self.bind(&l.pat);
+                    }
+                    other => self.visit_stmt(other),
+                }
+            }
+            self.scopes.pop();
+        }
+        fn visit_arm(&mut self, a: &'ast syn::Arm) {
+            self.scopes.push(BTreeSet::new());
+            self.bind(&a.pat);
+            if let Some((_, g)) = &a.guard {
+                self.visit_expr(g);
+            }
+            self.visit_expr(&a.body);
+            self.scopes.pop();
+        }
+        fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
+            self.scopes.push(BTreeSet::new());
+            for i in &c.inputs {
+                self.bind(i);
+            }
+            self.visit_expr(&c.body);
+            self.scopes.pop();
+        }
+        fn visit_expr_for_loop(&mut self, f: &'ast syn::ExprForLoop) {
+            self.visit_expr(&f.expr);
+            self.scopes.push(BTreeSet::new());
+            self.bind(&f.pat);
+            self.visit_block(&f.body);
+            self.scopes.pop();
+        }
+        fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
+            self.scopes.push(BTreeSet::new());
+            self.cond(&i.cond);
+            self.visit_block(&i.then_branch);
+            self.scopes.pop();
+            if let Some((_, e)) = &i.else_branch {
+                self.visit_expr(e);
+            }
+        }
+        fn visit_expr_while(&mut self, w: &'ast syn::ExprWhile) {
+            self.scopes.push(BTreeSet::new());
+            self.cond(&w.cond);
+            self.visit_block(&w.body);
+            self.scopes.pop();
         }
     }
-    Reads(out).visit_expr(expr);
+    Reads { out, scopes: vec![BTreeSet::new()] }.visit_expr(expr);
 }
 
 /// Insert every identifier token appearing in a macro's token stream.
@@ -2499,6 +2595,33 @@ mod tests {
     /// sees the `ff2 = ff1` of its own resumption, `sync_2ff_ref.sv`'s second flop is
     /// the `RegOut` `q`, and this spelling is one cycle late against the reference
     /// (I.7.5) — so the anchored `sync_2ff` is spelled tick-last, below.
+    /// A `let` bound inside an expression block is not a read of an outer local
+    /// (Phase C step 6, MEASUREMENTS §K.10): `bumped` is consumed where it is born.
+    /// A shadowing read BEFORE the inner binding still reads the outer local: `acc`
+    /// is read after the tick inside the block's own `let acc = acc + …`.
+    #[test]
+    fn a_let_inside_an_expression_block_is_scoped() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, x: In<Bits<8>, C>, o: RegOut<Bits<8>, C>) {
+                let mut acc: Bits<8> = Bits::zero();
+                loop {
+                    let next = if x.read()[0] == Logic::One {
+                        let bumped = x.read() + Bits::from_lit::<1>();
+                        let acc = acc + bumped;
+                        acc
+                    } else {
+                        Bits::zero()
+                    };
+                    o.write(next);
+                    acc = next;
+                    clk.tick().await;
+                }
+            }
+        "#;
+        assert_eq!(regs(src), ["acc"]);
+    }
+
     #[test]
     fn post_tick_def_read_pre_tick_is_a_wire() {
         let src = r#"
