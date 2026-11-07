@@ -43,6 +43,12 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     // (tests/fixtures/nested_continue_dut.rs).
     "nested_continue",
     "nested_continue_match",
+    // Added 2026-11-06 with the modules (Phase C step 5, II.3 (b)): nested loops whose
+    // ticks lie only inside arms — extracted whole; the sweep pins their timing
+    // (tests/fixtures/arms_only_loop_dut.rs).
+    "arms_only_b1",
+    "arms_only_b2",
+    "arms_only_match",
     // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
     // counted `for` over the data bits, each with its tick inside) and the one-tick
     // handshake (two `while` waits). Every tick sits inside a loop, so both extract

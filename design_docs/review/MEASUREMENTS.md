@@ -1473,3 +1473,41 @@ legs, every sequence**. sv-baseline: no corpus change (as predicted). The pin wa
 reference 866, pinned 0**. (a) closes — the REFUSED-one break is gone; a labelled `continue`
 and a `continue` of a tick-bearing counted `for` stay refused with their own messages
 (transpiler only; the macro admits both — SPEC item J.10).
+
+### J.5 Row 5 — (b) a nested loop whose ticks lie only inside arms
+
+**The form.** The row's fix: at every `AfterTick` fall-through of an arms-only loop, inline the
+head's lowered body instead of `pc = head`. In `lower_into` that is exactly a `ZeroTime`
+fall-through — a zero-time goto to the head, spliced after every state exists (the head state of
+an arms-only loop holds the body as written, unrotated) — so the change is the fall-through kind
+of the arms-only branch, plus lifting clause 4 of `check_nested_loop_shape` (both front-ends,
+one function) and the gate `body_ends_at_a_clock_boundary` in `control_extract`. The same branch
+also serves a nested loop whose body ends in a nested loop (no top-level tick); its fall-through
+becomes zero-time too, which is the coroutine's meaning (falling off the body returns to the
+head in the same resumption).
+
+**Predictions, two steps.** (A) clause 4 and the gate lifted, fall-through unchanged — D-13 §0
+(ii)'s measurement reproduced: `arms_only_b1` **agrees**, `arms_only_b2` **diverges**,
+`arms_only_match` (a tick-free continuation after two arms and a two-tick arm) **diverges**.
+(B) the zero-time fall-through: all three **agree on both legs, every sequence**. Emission diff
+over the corpus (232 modules): **none** at either step — no admitted module has an arms-only
+nested loop, and none has a nested loop ending in a nested loop with no top-level tick (if one
+does, it changes at (B), and its trace must not). The pin
+`ticks_only_inside_branches_has_its_own_diagnostic` flips at (A) and is rewritten as the
+admitted shape; no ui/fail case exists for clause 4 (none to delete).
+
+**Measured.** (A) clause 4 and the gate lifted, fall-through unchanged: `arms_only_b1`
+**agrees**; `arms_only_b2` and `arms_only_match` **diverge** (differential FAIL, reference leg
+pass — `sim = ref ≠ SV`), D-13 §0 (ii) reproduced in the tree. (B) the zero-time fall-through:
+**all three agree on both legs, every sequence. As predicted at both steps.** sv-baseline: **no
+corpus module changes at either step** (235 = 232 + the 3 fixtures; the 3 are NEW) — as
+predicted, including no module with a nested loop ending in a nested loop. Pins:
+`ticks_only_inside_branches_has_its_own_diagnostic` → `ticks_only_inside_branches_of_a_nested_loop_transpile`;
+the `shape.rs` unit test now admits the `loop` and keeps clause 4's message for a `while` of the
+shape (not this row: the row names a nested `loop`; `while` stays refused in both front-ends, one
+message). `timing_model_derivations` gained the 3 fixtures (the extracted class; a miss of the
+prediction — I had not predicted this pin after row 4 showed it). `tools/regression.sh
+--no-examples`: **PARTIAL OK (141 s)**; G-F 103; **G-G differential 1376 PASS / 0 DISAGREE,
+reference 886, pinned 0**. (b) closes: REFUSED-both → admitted, the clause lifted in both
+front-ends together (one function), no ui/fail case existed; `front_end_parity.rs` sweeps the
+fixtures under the shared rule.

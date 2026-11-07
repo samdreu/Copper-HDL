@@ -1407,13 +1407,19 @@ fn lower_into(stmts: &[RawStmt], target: &mut Vec<RawStmt>, sm: &mut StateMachin
         if let Some(loop_expr) = as_nested_loop(stmt) {
             let rest = &stmts[i + 1..];
             let head = sm.new_state();
+            let rotated = loop_expr.body.iter().any(is_tick_stmt);
             let inner = LoopCtx {
                 head,
                 break_stmts: rest.to_vec(),
                 outer: Some(ctx),
                 // A nested loop's body is lowered with its trailing tick removed
                 // (rotated, below), so running off its end stands for that tick.
-                fallthrough: FallThrough::AfterTick,
+                // A body with NO top-level tick (ticks only in arms, or ending in a
+                // nested loop) is lowered as written: running off its end is a
+                // zero-time return to the head, the next iteration's work in the
+                // same resumption — `pc = head` there spent a cycle the coroutine
+                // does not (D-13 §0 (ii), `b2`; II.3 (b), MEASUREMENTS §J.5).
+                fallthrough: if rotated { FallThrough::AfterTick } else { FallThrough::ZeroTime },
                 lowered_break: std::cell::RefCell::new(None),
                 // Only a NON-trivial rotation needs the entry copy: when the tick is
                 // the body's last statement (`C` empty — the only shape
@@ -1915,14 +1921,15 @@ pub(crate) fn body_ends_at_a_clock_boundary(body: &[RawStmt]) -> bool {
         // that also visits the inner loop, never looser, so the two halves of the
         // gate cannot drift into disagreeing about what is admissible.
         //
-        // Still declined here: ticks that live only inside `if`/`match` arms of the
-        // body (`loop { if c { tick; } else { tick; } }`). There is no single last
-        // statement that is the boundary, and no hardware-anchored check that the
-        // shape lowers correctly.
-        None => body
-            .last()
-            .and_then(as_nested_loop)
-            .is_some_and(|inner| body_ends_at_a_clock_boundary(&inner.body)),
+        // Ticks that live only inside `if`/`match` arms of the body (`loop { if c {
+        // tick; } else { tick; } }`): admitted since Phase C step 5 (II.3 (b),
+        // MEASUREMENTS §J.5) — the lowering returns to the head in zero time.
+        None => {
+            body.last()
+                .and_then(as_nested_loop)
+                .is_some_and(|inner| body_ends_at_a_clock_boundary(&inner.body))
+                || ticks_only_in_arms(body)
+        }
     }
 }
 
@@ -2146,3 +2153,13 @@ fn ends_in_guarded_hoisted_tick(body: &[RawStmt]) -> bool {
         ExprType::If(f) if f.else_branch.is_none() && f.then_block.len() == 1 && is_tick_stmt(&f.then_block[0])))
 }
 
+
+/// Every top-level statement that contains a tick is an `if` or a `match`, and one
+/// does (`copper_analysis`'s `check_nested_loop_shape` admits the same shape).
+fn ticks_only_in_arms(body: &[RawStmt]) -> bool {
+    let ticking: Vec<&RawStmt> = body.iter().filter(|s| stmt_contains_tick(s)).collect();
+    !ticking.is_empty()
+        && ticking.iter().all(|s| {
+            matches!(&s.kind, RawStmtKind::Expr(es) if matches!(es.expr, ExprType::If(_) | ExprType::Match(_)))
+        })
+}

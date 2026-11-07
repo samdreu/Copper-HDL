@@ -138,6 +138,13 @@ fn check_nested(body: &[Stmt], span: Span, kind: LoopKind) -> Result<(), syn::Er
         ));
     }
     let has_statement_tick = body.iter().any(is_tick_stmt);
+    // Ticks only inside `if`/`match` arms of a nested `loop`: each is a suspension
+    // site like any other (SPEC I.8.2); the extraction lowers the loop with a
+    // zero-time return to its head. Refused here ("clause 4") until Phase C step 5
+    // (2026-11-06, II.3 (b), MEASUREMENTS §J.5).
+    if !has_statement_tick && kind == LoopKind::Loop && ticks_only_in_arms(body) {
+        return Ok(());
+    }
     if has_statement_tick {
         Err(syn::Error::new(
             span,
@@ -177,6 +184,13 @@ fn ends_at_clock_boundary(body: &[Stmt]) -> bool {
             _ => false,
         }),
     }
+}
+
+/// Every top-level statement that contains a tick is an `if` or a `match`.
+fn ticks_only_in_arms(body: &[Stmt]) -> bool {
+    body.iter().filter(|s| stmt_contains_tick(s)).all(|s| {
+        matches!(s, Stmt::Expr(Expr::If(_), _) | Stmt::Expr(Expr::Match(_), _))
+    })
 }
 
 fn is_tick_stmt(s: &Stmt) -> bool {
@@ -253,10 +267,16 @@ mod tests {
         assert!(check_nested_loop_shape(&f).is_ok());
     }
 
+    /// Clause 4 lifted (Phase C step 5, II.3 (b)): a nested `loop` whose ticks lie only
+    /// in arms is admitted; a `while` of that shape keeps the clause's message.
     #[test]
-    fn ticks_only_in_arms_are_refused() {
+    fn ticks_only_in_arms_of_a_loop_are_accepted_and_of_a_while_refused() {
         let f = parse(
             "async fn m(clk: Clock<C>, c: In<Logic, C>) { loop { loop { if c.read() == Logic::One { clk.tick().await; } else { clk.tick().await; } } } }",
+        );
+        assert!(check_nested_loop_shape(&f).is_ok());
+        let f = parse(
+            "async fn m(clk: Clock<C>, c: In<Logic, C>) { loop { while c.read() == Logic::One { if c.read() == Logic::One { clk.tick().await; } else { clk.tick().await; } } clk.tick().await; } }",
         );
         let msg = check_nested_loop_shape(&f).unwrap_err().to_string();
         assert!(msg.contains("no clock boundary of its own"), "{msg}");

@@ -211,14 +211,14 @@ async fn m(clk: Clock<MainClk>, a: In<Logic, MainClk>, b: In<Logic, MainClk>) {
     );
 }
 
-/// Ticks that live only inside `if`/`match` arms of a nested loop's body: there is no
-/// single "code between two ticks" segment, so there is no state to build.
-///
-/// Its own message since 2026-08-24. It used to report the tick-ORDERING rule ("the
-/// tick has to be the LAST statement"), which is unfollowable here — the body has no
-/// tick in statement position to move.
+/// Ticks that live only inside `if`/`match` arms of a nested loop's body. Refused in
+/// both front-ends ("no clock boundary of its own", `check_nested_loop_shape` clause
+/// 4) from 2026-08-24 until Phase C step 5 (2026-11-06, II.3 (b), MEASUREMENTS §J.5):
+/// the lowering behind the clause spent a cycle on every fall-through to the head.
+/// The fall-through is now zero-time and the shape transpiles; its behaviour is swept
+/// by `tests/fixtures/arms_only_loop_dut.rs` (D-13's `b1`, `b2`, and a `match`).
 #[test]
-fn ticks_only_inside_branches_has_its_own_diagnostic() {
+fn ticks_only_inside_branches_of_a_nested_loop_transpile() {
     let src = r#"
 #[hardware(sequential)]
 async fn m(clk: Clock<MainClk>, c: In<Logic, MainClk>, o: RegOut<Bits<8>, MainClk>) {
@@ -233,16 +233,9 @@ async fn m(clk: Clock<MainClk>, c: In<Logic, MainClk>, o: RegOut<Bits<8>, MainCl
     }
 }
 "#;
-    let err = transpile(src).expect_err("ticks only inside branches must be refused");
-    assert!(
-        err.contains("no clock boundary of its own"),
-        "must not fall back to the tick-ordering message, which cannot be acted on \
-         when the body has no tick in statement position: {err}"
-    );
+    transpile(src).expect("ticks only inside branches of a nested loop transpile (II.3 (b) closed)");
 }
 
-/// `continue` is refused: jumping to the loop head mid-cycle needs the head's
-/// *lowered* body at a point where it is still being lowered.
 #[test]
 fn continue_in_a_wait_is_unsupported() {
     let src = r#"
