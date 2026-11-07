@@ -37,6 +37,12 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     // pass hiding phases from a module that used to be visible; a new module of the
     // shape this set exists to name. tests/det_for_probe.rs pins its timing.
     "det_for",
+    // Added 2026-11-06 with the modules (Phase C step 5, II.3 (a)): a nested loop whose
+    // `continue` follows a tick inside a branch — every tick in a loop or a branch, so
+    // the body is extracted into one `match pc`; the sweep pins their timing
+    // (tests/fixtures/nested_continue_dut.rs).
+    "nested_continue",
+    "nested_continue_match",
     // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
     // counted `for` over the data bits, each with its tick inside) and the one-tick
     // handshake (two `while` waits). Every tick sits inside a loop, so both extract

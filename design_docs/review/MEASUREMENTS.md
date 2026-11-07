@@ -1426,3 +1426,50 @@ sequence**; `rv32i_pipelined_verilator` (13 programs) and the example 13/13 — 
 trace-identical. `tools/regression.sh --no-examples`: **PARTIAL OK (191 s)**; G-F 98 (+4);
 **G-G differential 1332 PASS / 0 DISAGREE, reference 842 PASS, pinned 0**. No new
 `SKIP`/`REF_SKIP` row. (f5) closed with its family.
+
+### J.4 Row 4 — (a) a nested `continue` as the loop's entry copy
+
+**The form** (the row's fix direction): a `continue` of a nested loop `W ; tick ; C` runs the
+loop's entry copy — `W` lowered in the loop's context, ending in `pc = head` — which is what
+entering the loop runs (`lower_into` already emits it there), instead of a zero-time goto to
+the head state, which holds the rotated `C ; W`. Lowered once and shared, like a `break`'s
+continuation. Kept refused: a **labelled** `continue` (the CFG models a label as the innermost
+loop's, D-10) and a `continue` of a tick-bearing counted `for` (it is the next *iteration* —
+increment, test — and skips the iteration's tick, so the hoisted tick would no longer stand for
+the last iteration's; now with its own message instead of the nested-loop one). A `continue`
+inside `W` itself is a zero-time loop that reachability refuses before this pass; the pass
+declines if it ever meets one.
+
+**Predicted emission diff:** none in the corpus (230 modules; the three `continue`s in it —
+`uart_rx_dut`, `uart/system.rs`, `uart/rx.rs` — and `continue_skip_dut` all target the module
+loop). **Measured: 230 modules, no changes — as predicted.** **Predicted traces:** the new
+fixture `tests/fixtures/nested_continue_dut.rs` — `nested_continue` (a non-empty `W`: a `let`
+read and a `RegOut` write before the tick, `continue` in `C` under an input test, a second tick
+and a `break`) and `nested_continue_empty_w` (an empty `W`, the `continue` right after the
+loop's first tick) — transpiles and **agrees on both legs, every sequence**. The pin
+`continue_inside_a_nested_loop_is_unsupported` (a tick-less nested loop with a `continue`)
+predicted **still refused**, by the nested-loop shape rule (no clock boundary), not by the
+retired `continue` message.
+
+**Measured — the fixture had to change, and so did the form's reach.** The first fixture
+(`W ; tick ; C` with the `continue` in `C`) does not compile: the macro's
+`check_nested_loop_shape` admits a nested loop only when its one top-level tick is the LAST
+statement ("a repeating wait must be written as …" — the tick-last rule, whose two-job
+justification D-10 schedules for retirement, not this row). So in every admitted shape `C` is
+empty, the rotation is trivial, the head state holds `W` as written, and the zero-time goto to
+it **is** the entry copy — the refusal was over-broad, not the goto. The form landed as: entry
+copy only for a non-trivial rotation (unreachable until the tick-last rule changes; kept so a
+retirement cannot silently re-open the defect), the shared goto otherwise. The fixture is the
+shape the macro admits — D-10's parity probe, a `continue` after a tick inside a branch of
+`W`: `nested_continue` (an `if`) and `nested_continue_match` (a `match` arm, with a register
+update and a write before the `continue`). Before the change both were refused ("`continue`
+inside a NESTED loop …", checked by reverse-applying the patch); after it both **agree on both
+legs, every sequence**. sv-baseline: no corpus change (as predicted). The pin was rewritten as
+`a_tickless_nested_loop_with_a_continue_is_refused_by_the_shape_rule` (it is refused by "a nested
+`loop` with no `clk.tick().await` would never terminate", as predicted).
+`timing_model_derivations` gained both fixtures in its extraction-hides-phases set (the
+`det_for` class: every tick in a loop or a branch), recorded there. `tools/regression.sh
+--no-examples`: **PARTIAL OK (135 s)**; G-F 100; **G-G differential 1356 PASS / 0 DISAGREE,
+reference 866, pinned 0**. (a) closes — the REFUSED-one break is gone; a labelled `continue`
+and a `continue` of a tick-bearing counted `for` stay refused with their own messages
+(transpiler only; the macro admits both — SPEC item J.10).

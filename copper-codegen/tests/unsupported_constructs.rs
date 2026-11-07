@@ -875,13 +875,14 @@ async fn m(clk: Clock<MainClk>, halt: In<Logic, MainClk>, o: RegOut<Bits<8>, Mai
     );
 }
 
-/// Inside a NESTED loop it is still refused, and the reason is the rotation: that
-/// loop's head state holds `C ; W` — the post-tick tail wrapped onto the pre-tick
-/// prefix — so re-entering it would run statements the source places AFTER the
-/// tick this `continue` never reached. The right target is the start of `W`, which
-/// is inlined into whatever precedes the loop rather than being a state.
+/// A `continue` inside a NESTED loop was refused outright until Phase C step 5
+/// (II.3 (a), 2026-11-06): that loop's head state holds the rotated `C ; W`. It is
+/// now lowered (a zero-time goto to the head when `C` is empty, the loop's entry
+/// copy otherwise; swept by `tests/fixtures/nested_continue_dut.rs`). THIS module
+/// stays refused for another reason: its nested loop has no tick at all, so the
+/// `continue` path is a zero-time loop — the nested-loop shape rule's message.
 #[test]
-fn continue_inside_a_nested_loop_is_unsupported() {
+fn a_tickless_nested_loop_with_a_continue_is_refused_by_the_shape_rule() {
     let src = r#"
 #[hardware(sequential)]
 async fn m(clk: Clock<MainClk>, go: In<Logic, MainClk>, o: RegOut<Bits<8>, MainClk>) {
@@ -897,10 +898,10 @@ async fn m(clk: Clock<MainClk>, go: In<Logic, MainClk>, o: RegOut<Bits<8>, MainC
     }
 }
 "#;
-    let err = transpile(src).expect_err("`continue` in a nested loop must be refused");
+    let err = transpile(src).expect_err("a tick-less nested loop must be refused");
     assert!(
-        !err.is_empty() && !err.starts_with("0:0:"),
-        "the `continue` diagnostic must carry a span: {err}"
+        err.contains("would never terminate") && !err.starts_with("0:0:"),
+        "the shape rule's diagnostic, with a span: {err}"
     );
 }
 

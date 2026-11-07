@@ -365,6 +365,10 @@ fn expand_counted_for(
     // leaves a well-formed loop behind.
     let boundary = f.body.last().filter(|s| is_tick_stmt(s))?.clone();
     let work = &f.body[..f.body.len() - 1];
+    // A `continue` of this `for` (see `unflattenable_in_expr`): declined.
+    if stmts_continue_enclosing_loop(work) {
+        return None;
+    }
 
     // A statically empty range is zero cycles and zero work: drop it, rather than
     // emit a loop that breaks at once and then takes the hoisted tick anyway.
@@ -645,6 +649,9 @@ pub fn extract_control(fir: &mut FrontendModuleIR) {
     let mut sm = StateMachine::new();
     let mut state0 = Vec::new();
     lower_into(&loop_body, &mut state0, &mut sm, &LoopCtx::module());
+    if sm.declined {
+        return;
+    }
     sm.set_body(0, state0);
 
     // A `let` in one state that is read in another cannot stay where it is: a
@@ -1199,6 +1206,9 @@ fn expr_mentions(e: &ExprType, name: &str) -> bool {
 /// States are indexed by their `pc` value; `states[0]` is the loop head.
 struct StateMachine {
     states: Vec<Vec<RawStmt>>,
+    /// Set when the lowering met a shape it must not guess at; the pass then
+    /// declines and the linear path reports the module.
+    declined: bool,
 }
 
 impl StateMachine {
@@ -1206,6 +1216,7 @@ impl StateMachine {
         // Reserve state 0 (the head) up front; its body is set last.
         StateMachine {
             states: vec![Vec::new()],
+            declined: false,
         }
     }
 
@@ -1251,6 +1262,17 @@ struct LoopCtx<'a> {
     lowered_break: std::cell::RefCell<Option<Vec<RawStmt>>>,
     /// What it MEANS to run off the end of this loop's body without ticking.
     fallthrough: FallThrough,
+    /// A nested loop's ENTRY copy: its pre-tick prefix `W` (body `W ; tick ; C`),
+    /// which is what a `continue` of this loop runs — a zero-time return to the
+    /// loop's head (SPEC I.8.3), whose state holds the ROTATED `C ; W` and so is
+    /// not a target. `None` for the module's loop (its head is state 0, unrotated)
+    /// and for a loop whose ticks lie only in arms (its head holds the body as
+    /// written).
+    entry: Option<Vec<RawStmt>>,
+    /// `entry` after lowering, computed once and cloned at every `continue`, the
+    /// same sharing as `lowered_break`; `entry_lowering` guards re-entry.
+    lowered_entry: std::cell::RefCell<Option<Vec<RawStmt>>>,
+    entry_lowering: std::cell::Cell<bool>,
 }
 
 /// Why control reached the end of a body without a tick — and therefore whether
@@ -1292,6 +1314,9 @@ impl LoopCtx<'_> {
             outer: None,
             fallthrough: FallThrough::ZeroTime,
             lowered_break: std::cell::RefCell::new(None),
+            entry: None,
+            lowered_entry: std::cell::RefCell::new(None),
+            entry_lowering: std::cell::Cell::new(false),
         }
     }
 }
@@ -1323,11 +1348,37 @@ fn lower_into(stmts: &[RawStmt], target: &mut Vec<RawStmt>, sm: &mut StateMachin
         }
 
         if is_continue_stmt(stmt) {
-            // Back to the enclosing loop's head, in the SAME cycle. Anything after
-            // the `continue` is unreachable. Only a `continue` targeting the
-            // MODULE's own loop reaches here — the gate refuses one inside a nested
-            // loop, whose head state holds the ROTATED body (`C ; W`) and would
-            // re-run the post-tick tail. See `unflattenable_in_expr`.
+            // Back to the enclosing loop's head, in the SAME cycle (SPEC I.8.3).
+            // Anything after the `continue` is unreachable. For the module's loop
+            // the head is state 0 and a zero-time goto reaches it. A NESTED loop's
+            // head state holds the ROTATED body (`C ; W`), so re-entering it would
+            // re-run the post-tick tail `C` this `continue` never reached; its
+            // continue runs the loop's ENTRY copy instead — `W` lowered, ending in
+            // `pc = head` — exactly what entering the loop runs (II.3 (a), Phase C
+            // step 5, MEASUREMENTS §J.4; refused before 2026-11-06).
+            if let Some(w) = &ctx.entry {
+                if ctx.entry_lowering.get() {
+                    // A `continue` inside `W` itself: a return to the head with no
+                    // tick, a zero-time loop that reachability refuses in both
+                    // front-ends. Decline rather than guess.
+                    sm.declined = true;
+                    return;
+                }
+                let cached = ctx.lowered_entry.borrow().clone();
+                let lowered = match cached {
+                    Some(l) => l,
+                    None => {
+                        ctx.entry_lowering.set(true);
+                        let mut v = Vec::new();
+                        lower_into(w, &mut v, sm, ctx);
+                        ctx.entry_lowering.set(false);
+                        *ctx.lowered_entry.borrow_mut() = Some(v.clone());
+                        v
+                    }
+                };
+                target.extend(lowered);
+                return;
+            }
             target.push(goto_marker(ctx.head, stmt.span));
             return;
         }
@@ -1364,6 +1415,19 @@ fn lower_into(stmts: &[RawStmt], target: &mut Vec<RawStmt>, sm: &mut StateMachin
                 // (rotated, below), so running off its end stands for that tick.
                 fallthrough: FallThrough::AfterTick,
                 lowered_break: std::cell::RefCell::new(None),
+                // Only a NON-trivial rotation needs the entry copy: when the tick is
+                // the body's last statement (`C` empty — the only shape
+                // `check_nested_loop_shape` admits today), the head state holds `W`
+                // as written and the zero-time goto to it IS the entry copy, sharing
+                // its states.
+                entry: loop_expr
+                    .body
+                    .iter()
+                    .position(is_tick_stmt)
+                    .filter(|&t| t + 1 < loop_expr.body.len())
+                    .map(|t| loop_expr.body[..t].to_vec()),
+                lowered_entry: std::cell::RefCell::new(None),
+                entry_lowering: std::cell::Cell::new(false),
             };
             let body = &loop_expr.body;
             // A state is "the code between two ticks", so for a body `W ; tick ; C`
@@ -1873,13 +1937,14 @@ fn unflattenable_in_expr(e: &ExprType, in_loop: bool) -> Option<Unflattenable> {
         // so re-entering it would run `C` — code the source places AFTER the tick
         // this `continue` never reaches. The right target is the start of `W`, which
         // is not a state; it is inlined into whatever precedes the loop.
-        ExprType::Continue(_) if in_loop => named(
-            "`continue` inside a NESTED loop — the loop's head state holds its body \
-             ROTATED around the tick, so re-entering it would re-run the statements \
-             that follow the tick, which this `continue` never reached",
+        // A `continue` of a NESTED loop runs that loop's entry copy (`lower_into`,
+        // since Phase C step 5). A LABELLED one names a loop this pass does not
+        // track (the CFG models it as the innermost loop's, D-10), so it stays
+        // refused.
+        ExprType::Continue(c) if in_loop && c.label.is_some() => named(
+            "a labelled `continue` inside a nested loop",
             e.span(),
-            "restructure so the path falls through to the loop's end instead, e.g. \
-             `if ok { <work> }` rather than `if !ok { continue; } <work>`",
+            "use an unlabelled `continue` of the innermost loop, or restructure with a flag",
         ),
         ExprType::Continue(_) => None,
         ExprType::Break(b) if !in_loop => named(
@@ -1917,6 +1982,16 @@ fn unflattenable_in_expr(e: &ExprType, in_loop: bool) -> Option<Unflattenable> {
         // no unconditional last tick to hoist. An empty inner range makes each of
         // the enclosing loop's iterations take zero time, which a state machine
         // advancing one state per tick cannot run (MEASUREMENTS §J.2).
+        // A `continue` of a tick-bearing counted `for` is the next ITERATION —
+        // increment, test — and skips the iteration's tick, so the desugared loop's
+        // hoisted tick would no longer stand for the last iteration's. The desugar
+        // declines such a `for`.
+        ExprType::ForLoop(f) if stmts_contain_tick(&f.body) && stmts_continue_enclosing_loop(&f.body) => named(
+            "a `continue` inside a tick-bearing counted `for`",
+            f.span,
+            "restructure the body so the path falls through to the iteration's tick, e.g. \
+             `if ok { <work> }` rather than `if !ok { continue; } <work>`",
+        ),
         ExprType::ForLoop(f) if ends_in_guarded_hoisted_tick(&f.body) => named(
             "a counted `for` whose range may be empty at run time is the last statement \
              of an enclosing tick-bearing `for`: with an empty inner range the enclosing \
@@ -2070,3 +2145,4 @@ fn ends_in_guarded_hoisted_tick(body: &[RawStmt]) -> bool {
     matches!(&body[n - 1].kind, RawStmtKind::Expr(es) if matches!(&es.expr,
         ExprType::If(f) if f.else_branch.is_none() && f.then_block.len() == 1 && is_tick_stmt(&f.then_block[0])))
 }
+
