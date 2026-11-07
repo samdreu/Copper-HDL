@@ -2467,3 +2467,337 @@ anchored trace is unchanged by construction and measured passing.
 6. **I.9.2's "a `const { … }` block before the loop"**: no clause names it. It is admitted by both
    front-ends and is no statement of the first resumption (compile-time). I.2.3's `s_pre` grammar or
    I.9.3 could say so.
+
+## M. Phase C step 8 — SPEC I.14.7 (1)–(10): data, X, widths (2026-11-07)
+
+Branch `claude/phase-c-data-14b4e6` (worktree `phase-c-data-14b4e6`, from `paper` at `df02f00`).
+D-20 step 8: "I.14.7 (1)–(10)". Instrument for every emission claim: `sv-baseline` (snapshot of
+the untouched tree at `df02f00`, 247 modules; `SV_BASELINE_DIR` added so two snapshots can be
+`diff -r`'d). The D-19 probes are D-19 session spec-packet-i14's, verbatim, now
+`tests/fixtures/data_i14_dut.rs` (swept) or `copper-ref/tests/interp_data.rs` (integer ports,
+which the sweep's generator cannot stimulate). Predictions were written to the session's
+scratch `predictions.md` before each measurement and are restated here with the outcome.
+
+### M.1 (1) `eq_logic` / `ne_logic` IEEE-exact; P6 as a recorded table (`b54018d`)
+
+`Bits::eq_logic` (`copper-core/src/types.rs`) and `RefBits::eq_logic` now return 0 when a known
+bit pair differs, else X if any bit is X, else 1 (I.14.2(h)). **P6, standing:**
+`tests/ieee1800_table.rs` + `tests/data/ieee1800_4state.txt` — 36 operators × 400 X-sprinkled rows
+(D-19 (i-b)'s generator and seed, plus `derived !=`, `nor`/`xnor_reduce`, `zero_extend`), the
+IEEE result recorded from Icarus 12.0. `copper_matches_the_recorded_ieee_table` needs no tool;
+`the_recorded_table_is_what_icarus_computes` re-runs Icarus when installed (absent = a printed
+skip, broken = a failure) so the file cannot drift; `COPPER_IEEE_TABLE_REGENERATE=1` rewrites it.
+**Predicted / measured:** after — EQUAL on all 14 400 rows ✓; the same table against the old
+`eq_logic` (negative control, `types.rs` reverted) — `eq_logic` and `ne_logic` 191 EQUAL / **209
+DIFFER** each, every other operator 400/400 ✓ (exactly D-19's 209). `bits_property.rs` green
+after both changes ✓. sv-baseline: no change ✓ (the transpiler already emits `==`). The derived
+`==` is pinned against `===` only (it is IEEE's `===`, I.14.2(b)).
+
+### M.2 (5) `/`, (6) the X literal, (4) width 1 — emission
+
+- **`/`** lowers as `%` does: CHIR/VLIR `Div`, `(a / b)`, signed operands through `signed_binop`'s
+  `%` arm. The macro admitted `/` all along (D-19: "the macro admits every probe"), so R15 had no
+  macro-side refusal to keep; the interpreter's R15 refusal is replaced by `RefBits::div` (M.6).
+- **X literal:** `Bits::x()` / `Bits::<W>::x()` / `Logic::X` as a value lower to a new
+  CHIR/SHIR/VLIR `XLit` (`'x` context-sized, `W'bx` sized). A **comparison** with one
+  (`v == Logic::X`) stays refused by the transpiler with its own message — it asks whether a value
+  is X, `is_valid()`'s class (I.14.3(d)); the macro admits it: a REFUSED-one break, recorded
+  (M.9 item 4), pinned in `unsupported_constructs.rs`.
+- **Width 1:** `v[0]` (or a dynamic index) on a width-1 operand lowers to the operand;
+  `Logic::from`, `Bits::from`, `Bits::<1>::from`, `Logic::from_bool`, `.into()` to the identity
+  (a type-turbofish width resizes).
+- **Predicted:** no corpus module changes (none uses these; every corpus module transpiles).
+  **Measured:** one change, a miss — `tests/x_propagation_and_reset.rs::resettable` (not swept;
+  an inline test module) flipped from REFUSED to emitted: its pre-loop `let mut r = Bits::x()` is
+  a wire since step 6 (assigned on every path before any read) and was refused as an expression;
+  it now emits nothing for it (the dead X is never observed). Its test's assertion (the
+  `held` module carries no X initializer) is unaffected.
+
+### M.3 (3) integer widths — predicted, then measured
+
+The change: `as_u8 … as_u128` / `as_usize` lower to a zero-extension to the integer's width (a
+`Resize`, none when the receiver already has it); `usize`/`isize` are 64 bits (`resolve_type`,
+the suffix tables, `from_usize`); integer casts are width-explicit (`as` truncates or
+zero-extends by Rust's rule, I.14.3(c)). At an **index, a memory address or a shift amount** the
+view is peeled syntactically (`peel_index_views`: `x.as_usize()`, `x.as_u128() as usize`) —
+value-identical, since an in-range index is below 2^64 and a view never truncates — so a direct
+`arr[x.as_usize()]` emits as before.
+
+**Predicted** (scan `scan_usize.py`: 71 candidate modules with an `as_*`/`usize`/`from_usize` in
+the body): changed ⊆ the 71; unchanged where the view is only a direct index; anchors —
+`dual_port_ram` unchanged, the two RV32I CPUs change (`usize` lets) and stay trace-identical,
+`bsg_mux_one_hot` may change; lint risk (UNUSEDSIGNAL / WIDTHEXPAND where 64 meets narrower).
+
+**First measurement — 27 changed, 4 sweep failures (lint).** Each was a width collision the
+64-bit `usize` exposed, not a meaning change; fixed in the transpiler, each fix re-measured:
+1. `mux`: `data_i[128'(sel_i)]` — the CHIR-level peel cannot compare a parametric receiver's
+   width → the syntactic peel above. 27 → 27 modules but `mux` back to byte-identical.
+2. **The unsized-literal sentinel was 64** (`DEFAULT_LIT_WIDTH`): every literal balanced against
+   a 64-bit `usize` looked unsized and was re-sized by its context (`r != 0` → `r != 1'b0`,
+   `back & 0xff` → `back & 8'd255` on a 64-bit `back`, `i * 3` → `i * 16'd3`). The sentinel is now
+   129 (no `Bits<N>` has it, I.14.1(c)), emitted as 64 by `vlir_lower::width_of` — **measured zero
+   emission change on every existing module** (sv-baseline against the 64-sentinel tree); the
+   comparison operands are no longer re-sized by a value context; `from_usize`'s argument keeps
+   its literals' balanced width; a `from_uN` type turbofish names the result's width, not the
+   argument's.
+3. Verilator gives a size cast's width to its operand's leaves (`64'((w >> 7) & 31)` →
+   WIDTHEXPAND on `w`): a widening of an operator tree is emitted `64'(32'(…))` (`widening_resize`).
+4. A 64-bit dynamic select index (`data[(64'(i) + rot) % 64'(N)]`, WIDTHTRUNC): cast to 32 bits
+   (`select_index`; an in-range index is below 2^32 — the width `usize` index arithmetic had).
+5. An operand narrower than a `usize` it meets (the SV `int` loop variable, `parameter int`):
+   zero-extended (`widen_to_usize`); a provably wider operator tree written to a narrower target
+   is narrowed explicitly (`resize_to_target`).
+
+**Measured after the fixes — 18 modules changed by (3)–(6), the sweep green (317 passed / 0).**
+Every change is one of four shapes, all value-preserving:
+- a `usize` local or register declared 64 bits instead of 32, its literals `64'd…`:
+  `rv32i_cpu_pipelined`, `rv32i_cpu_transpilable`, `dynamic_shift`, `manual_sra`,
+  `const_generic_init`, `ifchain_on_usize`, `match_on_usize`, `wide_index_into_narrow_addr`,
+  `rotate_right` ×2 (`rot`, plus `64'(i)` / `64'(N)` against it), `arr_same_element`
+  (`j = 2'(64'(i))`);
+- a view in a match scrutinee takes the integer's width (`case (8'(sel)) 8'd0:` for `as_u8()`,
+  `case (64'(s)) 64'd0:` for `as_usize()`): `arms_only_match`, `nested_continue_match`,
+  `cdo_match_default_arm`, `cdo_match_every_arm`;
+- a view's zero-extension in a non-index operand: `bits_methods_rest_comb` (`x >> 64'(lo)` in a
+  dynamic `part_select`), `wide_index_sole_consumer` (`10'(64'(…))`);
+- `resettable` (M.2).
+**Anchors:** `dual_port_ram`, `bsg_mux_one_hot` and every other BaseJump/golden anchor
+byte-identical by this item ✓ (`bsg_mux_one_hot` predicted "may change" — it did not: its view
+is a direct index); the two CPUs changed as predicted; their 13-program checks are in the
+regression (M.8). **Probes:** `usize_width` and `usize_annot` (ADMITTED-AND-DIVERGENT, 64/64
+cycles) **agree on all three legs** ✓; `c_narrow`, `c_narrow2` (lint-refused as emitted) **agree**
+✓; the step-5 `as_usize` width note in `bits_methods_dut.rs` and step 6's `from_usize(n & 0xFF)`
+note (K.7) are this class, now closed.
+
+### M.4 (7) the remaining row-(e) methods; `checked_*` / `is_valid` OUTSIDE
+
+- `saturating_add` / `_sub` / `_mul` on an **unsigned** integer: `s = a + b; s < a ? MAX : s`,
+  `a < b ? 0 : a - b`, the product at 2N bits clamped (`lower_saturating`). A signed operand, or
+  one wider than 64 bits, is refused by the transpiler (the macro admits): REFUSED-one, recorded
+  (M.9 item 4); corpus 0.
+- `x.as_array_mut()[i] = l` is the element write `x[i] = l`; `as_array_mut()` as a value is the
+  receiver. `from_array` / `from_slice` were already the identity (step 5); `Logic::from_bool`
+  (M.2).
+- **`checked_*` and `is_valid()` refused as OUTSIDE in both front-ends:**
+  `copper_analysis::check_outside_methods` (new `data.rs`), one message each
+  (`CHECKED_METHOD_MESSAGE`, `IS_VALID_MESSAGE`), run first in the macro (all modes, before the
+  `Option` idiom check so the message is the shared one) and in `checked_fir_for_target`; the
+  transpiler's lowering keeps a defensive copy. Step 5 had lowered `is_valid()` to `1`; that is
+  retired. **Predicted:** the corpus passes except the one fixture that used `is_valid()`;
+  **measured:** exactly `bits_methods_rest_comb` (rewritten to use `Logic::from_bool`) ✓.
+  Witnesses: ui/fail `outside_checked_add`, `outside_is_valid`; transpiler pins in
+  `unsupported_constructs.rs`; parity audit `front_end_parity.rs` (new tests 3–4, every
+  `#[hardware]` fn in every mode).
+- Fixture `data_methods_seq` (saturating ×3, `from_bool`, `as_array_mut`, `Bits::from(Logic)`):
+  agrees on all three legs, 12/12 sequences.
+
+### M.5 (8) width constraints as elaboration-time checks; (9) the memory port index
+
+- **(8)** `copper-codegen/src/width_checks.rs`: each `const { assert!(c, "msg") }` becomes
+  `if (!(c')) begin : __copper_width_check_k $error("msg"); end` in the module body, `c'`
+  translated from Rust (parameters and consts by name, literals, `+ - * / %`, comparisons,
+  `&& || !`, and a file `const fn` the shared evaluator measures equal to `$clog2` on 0..=4096 —
+  the corpus's `safe_clog2`); an assertion outside that grammar emits no check and stays under
+  III.2.3's precondition. **Predicted:** every corpus constraint translates (7 files, the
+  `safe_clog2` and `N - 1 == N_1` forms), changing exactly those modules by the check block;
+  **measured:** 7/7 checks emitted; sv-baseline changes `mux`, `priority_encode` ×2,
+  `rotate_right` ×2, `shift_register` ×2 by the block only ✓ (anchored modules — their example
+  self-checks run in the regression). Fixture `tests/width_constraint_check.rs`: `rotate_right`
+  at `N = 8, N_LOG = 2` is **refused by Verilator** at elaboration (`%Warning-USERERROR … N_LOG
+  must equal safe_clog2(N)`, exit 1); at the sweep's `N = 8, N_LOG = 3` it lints clean. Measured
+  on the side: **Icarus 12 ignores an elaboration-time `$error` in a generate block** (exit 0, no
+  message) — the check binds Verilator, the sweep's tool.
+- **(9)** `copper_analysis::check_memory_port_index`, both front-ends, one message: a literal
+  `read_port::<k>()` / `write_port::<k>()` with `k ≥ R` / `≥ W` of the memory's literal generic
+  arguments (declared `Memory::<…>::new`, annotated `let`, or a `Memory<…>` parameter); a count or
+  index that is a const generic is the instance's (rustc's run-time index panic in the simulator
+  remains for that case). ui/fail `memory_port_index`; transpiler pin with its in-range twin;
+  parity audit. Corpus: 0 refused ✓ (predicted 0).
+
+### M.6 (10) the interpreter; P7
+
+- `copper-ref`: integer and `bool` port payloads (`Ty::bit_width`, `Value::to_bits`/`from_bits`:
+  two's complement LSB first, an X bit on such a port refused — it has no X, I.14.2(a)); `/` on
+  `Bits` (`RefBits::div`); `Logic::from`, `Bits::from` (`Logic`, an integer, an array), `.into()`;
+  the unsized `Bits::all_ones()` as `Value::LitOnes`, sized at first contact (D-19 (iv)'s parity
+  item); integer `saturating_mul`; the `as_array_mut()[i] = l` place.
+- `copper-ref/tests/interp_data.rs` (new): D-19's `int_wrapping` (u8 ports, modular, value and
+  bit interfaces), `int_overflow` (`200 + 100` on `u8` a run-time failure — the simulator panics
+  likewise, D-19 (i)), a `bool`/`i16`/`u8` module with `saturating_*` and `/`, and `From` / `/` /
+  unsized `all_ones` on `Bits` — each against Rust's arithmetic. 4/4 pass.
+- **P7** `copper-ref/tests/bits_property_p7.rs` (new) — I.14.8's list: the constructors (`zero`,
+  `all_ones`, `x`, `from_lit` incl. hex/underscore/`u128::MAX`, `from_u8 … from_u128` at widths
+  where they compile, `from_usize`, `from_array`, `from_slice`), the views `as_u8 … as_usize`
+  (and the panic on X ↔ `None`), shift amounts to 3N+5 (logical, arithmetic, operator and method
+  spellings), `Logic`'s `!` and `as_bool`, `From`/`Into` between `Logic` and `Bits<1>`,
+  `as_array`, the operator set at widths {2, 3, 5, 7, 12, 33, 63, 65, 100, 127}, and the
+  interpreter's integer/`bool`/array port values. 6/6 pass. What P7 still does not cover: N > 128
+  (OUTSIDE), the interpreter's integer *operators* beyond the four kernels (they are the
+  interpreter's own Rust `i128` code, compared to the simulator by the sweep only on `Bits`
+  ports).
+
+### M.7 (2) the constant evaluator — what landed, what waits on (A)–(C)
+
+Landed (independent of the decisions): `eval_const_usize` — the transpiler's constant-index
+evaluator, integer literals only until now — and `Bits::get(k)` fold I.14.4's constants through
+the same `fold_const_init` / `ConstEnv` the register fold uses (file consts, associated consts,
+`const fn`s, any base, underscores). **Predicted** 0–3 corpus modules change; **measured 0** (every
+corpus constant index is a literal); fixture `const_index` (`x[DI_K]`, `x[DI_HI]`,
+`x[di_half(DI_HI) - 1]`, `x.get(1_0 / 5)`) emits static selects and agrees on all three legs.
+The six `k_*` probes of I.14.7 (2) (`k_hex_body`, `k_hex_init`, `k_underscore`, `k_ones_nowidth`,
+`k_ones_width`, `k_ones_init`) **all agree on all three legs** — five closed by step 5's fold;
+`k_ones_nowidth` needed the unsized `all_ones` sized by its sibling (`x ^ ~64'd0` was a lint
+failure) and the interpreter's `LitOnes`. **Not done (the decisions):** R11 and the interpreter
+on one evaluator. Packet: M.10.
+
+### M.8 The fixture and the bare regression
+
+`tests/fixtures/data_i14_dut.rs`: 20 modules (the 16 D-19 probes of (3)–(6) verbatim —
+`w1_index`, `w1_from`, `w1_comb`, the six `k_*`, `c_narrow`, `c_narrow2`, `c_signed`,
+`usize_width`, `usize_annot`, `xp_div`, `xw_port` — plus `xp_div_nz`, `data_methods_seq`,
+`w1_from_comb`, `const_index`). **Predicted** all agree; `xp_div`'s SV pair OUTSIDE from a zero
+divisor in some sequences; `xw_port` OUTSIDE from obs 1 on every sequence (its `ql` is X);
+`k_ones_nowidth` a lint failure (it was, and was fixed). **Measured:** every module PASS on every
+leg it has, except `xp_div` 4 PASS / **4 OUTSIDE** of 8 and `xw_port` 0 PASS / **8 OUTSIDE** of 8 —
+never DISAGREE; the two combinational modules have no reference leg (by class, no row).
+
+**Bare `tools/regression.sh` on `a01bd15` (laptop): REGRESSION OK (372 s).** 1280 passed, 0 failed,
+91 ignored, 146 test binaries (G-C: 119 test files); examples **32/32** (both RV32I CPUs, every
+BaseJump anchor, `mux`, `rotate_right`, `priority_encode`, `shift_register` with their width
+checks); G-D **206** differential cases (3 ignored-with-reason, unchanged `SKIP` rows); G-F 131
+modules, 78 skipped with a reason; **G-G differential 1578 PASS / 12 OUTSIDE / 0 TRUNCATED / 0
+EXCUSED / 0 DISAGREE** — the 12 OUTSIDE are exactly `xp_div`'s 4 and `xw_port`'s 8; **G-G reference
+1088 PASS / 0 DISAGREE**; **G-I 155 clocked modules related** (41 extracted, 17 linear, 97
+single-tick), 0 uncovered, |R| 491, 867 transitions; G-E 5 anchored, 204 transpiler-only. New
+`SKIP` / `REF_SKIP` / `PARAMS` rows: none. Not run remotely (no push in this step), so the
+372 s is a laptop number, not a paper number. sv-baseline against `df02f00`: 23 changed (M.2,
+M.3, M.4, M.5, each explained there), 20 new (the fixture).
+
+### M.9 For the coordinator — SPEC items (SPEC files untouched)
+
+1. **I.14.2(h) realized**: `eq_logic`/`ne_logic` IEEE-exact; I.14.2's anchor sentence ("209/400
+   rows more X") is history now — the standing check is `tests/ieee1800_table.rs` (P6: recorded,
+   tool-optional). III.1's P6 row can move to MEASURED with that evidence.
+2. **II.3 rows to close (the next II.3 edit, I.14.8's list):** `/` (R15) — lowered; II.1's R15
+   becomes no rule (the macro never refused it; the interpreter's refusal is gone). `Bits::x()` /
+   `Logic::X` in an expression — emitted as a value. The passthrough/`usize` widths
+   (`usize_width`, `usize_annot`, `c_narrow`, `c_narrow2`) — closed. The width-1 select
+   (`w1_index`, `w1_comb`) — closed. Row (e): `eq_logic`, `ne_logic` (step 5), `as_array_mut`,
+   `from_array`, `from_slice`, the `From` conversions, `Logic::from_bool`, `saturating_*`
+   (unsigned), `all_ones` (every spelling) — closed. Row (g)'s underscores — closed (step 5).
+3. **II.1 rows to add:** the memory port index (I.14.6(c), `check_memory_port_index`);
+   `checked_*` and `is_valid` (OUTSIDE, `check_outside_methods`). R16's N bound (`Bits<N>` N > 128
+   or 0) is still not a rule in either front-end — not reached here.
+4. **New REFUSED-one breaks, recorded, not fixed** (the macro admits, the transpiler refuses;
+   corpus 0 each): (a) a comparison with the X literal (`v == Logic::X`) — the `is_valid` class;
+   the natural fix is to refuse it in `check_outside_methods` too (a decision: is `== Logic::X` the
+   derived `==`'s structural question and therefore OUTSIDE like `is_valid`?); (b)
+   `saturating_*` on a signed integer or on more than 64 bits — fix: a signed clamp form.
+5. **I.14.1(b) realized**: `usize`/`isize` 64 bits in the transpiler. I.14.5(b) realized: the views
+   are zero-extensions. Flag for I.14.5(a) or I.14.7's map: the emitted SV keeps the `int` (32-bit)
+   loop variable and `parameter int`, zero-extended where they meet a `usize`, and narrows a
+   64-bit dynamic select index to 32 bits — a realization note, not a meaning.
+6. **I.14.5(d) realized** for the corpus's constraint forms; the translation grammar (above) is
+   narrower than I.14.4's; an untranslatable assertion leaves III.2.3's precondition in force for
+   that module (none in the corpus). Icarus does not run the check (measured).
+7. **The unsized-literal sentinel** (M.3 fix 2) is a transpiler internal, no SPEC text; recorded
+   because it was a latent defect class that any 64-bit type would have hit.
+8. **III.2.3's "≤ 64-bit harness port"** and the sweep's generator: the generator stimulates
+   `Logic`/`Bits` ports only, so the five `u8` payload ports of the corpus and every integer- or
+   `bool`-port probe are outside the sweep; the interpreter now supports them (M.6). Teaching the
+   generator is a separate item.
+
+### M.10 Decision packet — (A) constants in the macro, (B) one evaluator, (C) R11's scope (STOPPED)
+
+Nothing below is implemented; each needs your decision. Measurements by a scratch scan over
+`examples/`, `src/`, `tests/` (`syn` + `copper_analysis::{is_constant_expr, infer_registers}`):
+**195 clocked modules; 243 pre-loop `let` initializers** (memories and clock clones excluded),
+**all 243 constant-shaped** by R11's test, **0 non-constant** (register or wire). By kind: a
+`Bits` constructor 166 (`zero` 130, `from_lit` 17 — three non-decimal/underscore, `x` 5,
+`from_u32` 4, `all_ones` 2, `from_u8` 1), integer literal 35, `Logic` variant 14, enum variant or
+associated const 14, array 9, a const/const-generic name 4, an associated-fn call 8 (7 are the
+**non-`const`** `T::bubble()` struct constructors of `rv32i_cpu_pipelined` and
+`struct_pipeline_dut`, 1 the `const fn` `CeCfg::half`). Constants: **93 `const` items in 35
+hardware files** (`usize` 38, `u32` 22, `&str` 16 — test text, `u8` 4, arrays 8, `bool` 1),
+**8 `const fn`s, 0 `Bits`/`Logic`-typed const items.**
+
+**(A) Constants in the macro.** R11 (`check_register_initializers`) runs in the macro on the
+annotated `ItemFn` only — a proc macro is not given the file — so it decides constant-*shape*
+(`is_constant_expr`), not constant-*value*. Today it under-admits a single-segment `const fn`
+call (`let mut n = f(3)`, refused by both; corpus 0) and over-admits a non-`const` associated fn
+(`T::bubble()`, 7 corpus initializers, which the transpiler folds structurally).
+- **A1 — keep the syntactic test** (status quo). Changes: nothing. Cost: the `f(3)` under-admission
+  stays (corpus 0); the over-admission stays (7 initializers, harmless today: the transpiler folds
+  them).
+- **A2 — admit a single-segment call with constant-shaped arguments** in `is_constant_expr`
+  (symmetric with the associated-fn case). Changes: one arm in `copper-analysis`. Effect: `f(3)`
+  admitted by both; a call to a *non*-`const` free fn is then admitted by the macro and refused
+  by the transpiler's `ConstEnv` (a REFUSED-one break, corpus 0). Cost 0 modules.
+- **A3 — make rustc the judge: the macro emits each register initializer in a const context**
+  (`let mut n = const { <init> };`, an inline const block, which may name the fn's const
+  generics), keeping the syntactic test only for its message. Changes: every `Bits`/`Logic`
+  constructor in `copper-core/src/types.rs` a `const fn` (`zero`, `all_ones`, `x`, `from_lit`,
+  `from_u8 … from_u128`, `from_usize`, `from_array`; their loops as `while`); the 7 `bubble()`
+  constructors `const fn` (2 files, one the anchored pipelined CPU — source-only change, its SV
+  unaffected); the macro's expansion of every pre-loop register initializer (243; the simulated
+  values are unchanged). Effect: R11 exact — every I.14.4 constant admitted (file consts, `T::K`,
+  `const fn`s), every non-constant refused by rustc. The transpiler still needs its own fold
+  (rustc's evaluation is not visible to it); parity between the two is then measured by the
+  sweep (sim = rustc). **Not prototyped**: whether every constructor compiles as `const fn` on the
+  workspace's toolchain (the `from_lit` post-mono assert and the `[Logic; N]` loops are the risk).
+- **A4 — give the macro the file's items** (a file- or module-level registration macro, e.g.
+  `copper::consts! { … }`, or an attribute on an enclosing `mod`). Changes: how users write a
+  hardware file; the macro evaluates with `ConstEnv`. Cost: a new authoring form; every corpus
+  file with consts (35) would opt in to benefit.
+- **Recommendation: A3**, with A2 as the fallback if A3's `const fn` constructors do not compile.
+  A3 is the only option where "constant" means rustc's constant — D-19's 4A ("Rust's constants")
+  and the overview's "the simulator is rustc" — and it closes both directions (the `f(3)`
+  under-admission and the `bubble()` over-admission) at a measured corpus cost of 7 `const`
+  keywords.
+
+**(B) One evaluator (I.14.4's direction, I.14.7 (2)).** Two evaluators exist: the interpreter's
+(`copper-ref` `Exec::eval_const` / `lookup_const`: typed `Value`s, `Bits` widths, X, coercion to the
+declared type) and `copper_analysis::consts` (`i128`, checked, integer/`bool`, `ConstEnv` over
+const items, associated consts, `const fn`s), which the transpiler's fold, its counted-`for`
+bounds and (since this step) its constant indices use; R11 uses neither (A).
+- **B1 — the interpreter's typed evaluator becomes the shared one** (moved into `copper-analysis`
+  or a new crate both depend on, with `RefBits`/`Value`). Changes: ~1 000 lines move; the
+  transpiler's fold and `eval_const_usize` call it. Effect, measured on the sweep's patterns
+  (G-G): a defect in the shared evaluator would then make the interpreter and the SV agree
+  against the simulator (rustc), and the ledger would print it as `sim≠ref,SV=ref` — "simulator
+  /macro" — a misattribution: the reference leg stops being independent of the transpiler for
+  constants. The typed power (X and `Bits` widths in a constant) is used by **0** corpus const
+  items.
+- **B2 — one grammar, two evaluators, pinned against each other**: keep the interpreter's
+  evaluator independent; the `copper-analysis` one is the front-ends' and the transpiler's;
+  add a standing differential test evaluating every corpus constant both ways (93 const items,
+  243 initializers, the counted-`for` bounds and constant indices) — and the sweep already
+  compares both against rustc through the simulator. Changes: one test; I.14.4's sentence "one
+  evaluator … used by R11, the transpiler's fold and the interpreter" reworded to "one grammar,
+  the interpreter's evaluator independent of the front-ends'" (SPEC text — flagged, not edited).
+  Cost 0 modules.
+- **B3 — status quo** (two evaluators, no pin). Changes: nothing; I.14.4's direction stays unmet.
+- **Recommendation: B2.** The reference leg's value is that it shares no code with the
+  transpiler (`copper-ref`'s header; III.2's patterns attribute a disagreement by which legs
+  agree); B1 trades that for a unification no corpus constant needs.
+
+**(C) R11's scope.** Since step 6 (§K.12 item 6), R11 asks only about pre-loop `let`s in the
+register set, so a pre-loop `let mut w = a.read()` that is a one-resumption wire is admitted by
+both front-ends and agrees on all three legs (step 6's throwaway fixture, 6/6 PASS, 864
+interpreter cycles) — but I.2.3's `s_pre` grammar has no non-constant `let`, and I.7.4(c) / D-12
+said R11 is to be widened to every pre-loop `let`. Measured here: **0 corpus modules have a
+non-constant pre-loop `let`** of either kind.
+- **C1 — widen R11 to every pre-loop `let`** (the grammar as written). Changes: `init.rs`'s
+  candidate set (all pre-loop `let`s, not the register set) and its message (it names a
+  register today); both front-ends; a ui/fail case. Effect: the wire shape is refused although
+  it has a meaning and agrees. Cost 0 corpus modules.
+- **C2 — widen I.2.3 instead**: `s_pre` admits `let x = e` with `e` pure over the first
+  resumption's inputs when `x` is not a register (it is then a wire of the first resumption,
+  I.7.2(c); D-11 already put the pre-loop statements in the first resumption); R11 stays the
+  power-on rule for registers. Changes: SPEC I.2.3 / I.7.4(c) text only; a fixture pinning the
+  shape (step 6's, made permanent). Effect: admission of a non-constant pre-loop `let` depends
+  on register inference — as R11's verdict already does.
+- **C3 — status quo**: the code admits what the grammar does not — a recorded spec/code mismatch.
+- **Recommendation: C2** — the shape has the coroutine's meaning, all three legs compute it, and
+  R11's reason (a register needs a power-on value the SV can state) does not apply to a wire.
+  C1 is the choice if `s_pre` should stay minimal by design.

@@ -212,8 +212,13 @@ entries in `Cargo.toml`.
   path must reach a `clk.tick().await`, enforced as a hard spanned compile error in
   **both** front-ends), the G2 structural reg-match helpers, and `consts` — the shared constant evaluator of SPEC
   I.14.4 (Phase C step 5: `ConstEnv` over const items, associated consts and `const fn`s;
-  the transpiler's counted-`for` bounds, `from_lit` turbofish and register initializers use
-  it; R11 and the interpreter do not — a decision owed, MEASUREMENTS §J.13). It is also where
+  the transpiler's counted-`for` bounds, `from_lit` turbofish, register initializers and
+  (step 8) constant bit indices use it; R11 and the interpreter do not — decisions (A)–(C)
+  owed, MEASUREMENTS §M.10), and `data` — the I.14 shape rules both front-ends run
+  (`check_outside_methods`: `checked_*`/`is_valid()` OUTSIDE; `check_memory_port_index`;
+  Phase C step 8). `usize`/`isize` are 64 bits in the transpiler since step 8 (SPEC
+  I.14.1(b)), and `eq_logic`/`ne_logic` are IEEE 1800 `==`/`!=`, pinned with every other
+  operator by the recorded table `tests/ieee1800_table.rs` (P6). It is also where
   the checks that reason about **clock phases** live — `check_memory_staging` (and,
   until D-8 retired them, the plain-`Out` phase rules) — because a check
   downstream of `control_extract` cannot see the phases it is counting (that pass
