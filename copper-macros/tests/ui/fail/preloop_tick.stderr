@@ -1,0 +1,19 @@
+error: `clk.tick().await` before the module's `loop`: the statements before the loop are the first resumption's and run in no time (SPEC I.2.2, I.9.3). Move the tick into the loop
+  --> tests/ui/fail/preloop_tick.rs:15:5
+   |
+15 |     clk.tick().await;
+   |     ^^^
+
+warning: unused imports: `Bits` and `Clock`
+ --> tests/ui/fail/preloop_tick.rs:1:19
+  |
+1 | use copper_core::{Bits, Clock, ClockDomain};
+  |                   ^^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/preloop_tick.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^

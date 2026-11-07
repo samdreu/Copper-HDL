@@ -1718,3 +1718,29 @@ Bare `tools/regression.sh` on `b2eeea3` (laptop): **REGRESSION OK (248 s)**.
    `shir_lower::lower_stmt_list`, (a) `control_extract::LoopCtx::entry`, (b)
    `control_extract::ticks_only_in_arms` and `copper-analysis/src/shape.rs::ticks_only_in_arms`,
    (c) `chir_lower` `array_written`/`array_write_ports`, (e) `chir_lower::lower_method_call`.
+
+## J (continued). The open rows, second sitting (2026-11-07)
+
+Same branch, from `2aca023`. Same method: prediction before code, fixture, sv-baseline against
+the previous row's snapshot, anchors trace-identical.
+
+### J.12 Row 9 — R21 / (f6): a `tick` before the module loop, refused in both front-ends
+
+**The form** (the row's direction, II.1.2 R21): one shared rule, `copper_analysis::check_no_preloop_tick`
+— any `<clock>.tick().await` in a statement before the module's top-level `loop` is refused with
+one message, citing I.2.2 (`s_pre` is tick-free) and I.9.3 — called by the macro's behavioural
+arms and by `transpile_target`, beside `check_awaits`. The `chir_lower` refusal row 1 added stays
+as defence in depth, now carrying the same message. **Predictions:** sv-baseline **no change**
+(every corpus module transpiles, and since row 1 the transpiler refuses a pre-loop tick, so none
+has one); a new `copper-macros/tests/ui/fail/preloop_tick.rs` case (the macro admitted it before:
+`validate_hardware_fn` counts any tick of the clock); `front_end_parity.rs` test 1 gains the rule
+and stays green; `unsupported_constructs.rs` gains the transpiler's twin, asserting the same
+message text.
+
+**Measured.** sv-baseline: **no corpus change** (the 2 NEW were row 8's fixtures, not in the
+previous snapshot) — as predicted. `copper-macros/tests/ui/fail/preloop_tick.rs` refuses with
+the shared message (its `.stderr` the only file `TRYBUILD=overwrite` wrote — no other case moved);
+`unsupported_constructs.rs::a_tick_before_the_module_loop_is_refused_by_r21_on_both_routes` asserts
+the same text on a linear-route and an extraction-route module; `front_end_parity.rs` test 1 runs
+the rule over the corpus, green. **(f6) closed, R21 in both front-ends with one message.**
+`tools/regression.sh --no-examples`: **PARTIAL OK (282 s)**; G-G differential 1431 PASS / 0 DISAGREE, reference 936, pinned 0.

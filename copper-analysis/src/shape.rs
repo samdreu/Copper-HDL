@@ -203,6 +203,29 @@ fn is_tick_stmt(s: &Stmt) -> bool {
 /// with whatever the executor happens to do, and the transpiler refuses it
 /// (`chir_lower`: "await on non-clock value"). Checked on the pristine function,
 /// before the macro injects its own `pre_edge_barrier::<D>().await`.
+/// SPEC II.1.2 **R21**: a `tick` before the module's top-level `loop` is OUTSIDE —
+/// the statements before the loop are the first resumption's and are tick-free
+/// (I.2.2's `s_pre`, I.9.3). One message for both front-ends (the transpiler's
+/// `chir_lower` keeps a copy as defence in depth). Before Phase C step 5
+/// (2026-11-07) the macro admitted it and the linear route dropped the tick (II.3
+/// (f6)); MEASUREMENTS §J.12.
+pub fn check_no_preloop_tick(f: &ItemFn) -> Result<(), syn::Error> {
+    for s in &f.block.stmts {
+        if matches!(s, Stmt::Expr(Expr::Loop(_), _)) {
+            return Ok(());
+        }
+        if stmt_contains_tick(s) {
+            return Err(syn::Error::new(s.span(), PRELOOP_TICK_MESSAGE));
+        }
+    }
+    Ok(())
+}
+
+/// R21's message, shared by both front-ends.
+pub const PRELOOP_TICK_MESSAGE: &str = "`clk.tick().await` before the module's `loop`: the \
+    statements before the loop are the first resumption's and run in no time (SPEC I.2.2, \
+    I.9.3). Move the tick into the loop";
+
 pub fn check_awaits(f: &ItemFn) -> Result<(), syn::Error> {
     struct Awaits(Option<syn::Error>);
     impl<'ast> syn::visit::Visit<'ast> for Awaits {

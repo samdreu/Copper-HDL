@@ -131,6 +131,9 @@ fn every_corpus_module_passes_the_rules_the_transpiler_alone_used_to_enforce() {
         if let Err(e) = copper_analysis::check_awaits(f) {
             why.push(format!("await: {e}"));
         }
+        if let Err(e) = copper_analysis::check_no_preloop_tick(f) {
+            why.push(format!("R21 (tick before the module loop): {e}"));
+        }
         if let Err(e) = copper_analysis::check_register_initializers(f) {
             why.push(format!("register power-on value: {e}"));
         }

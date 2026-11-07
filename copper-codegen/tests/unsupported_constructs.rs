@@ -991,3 +991,38 @@ async fn arr_for_writes(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, k: In<Bits
     let err = transpile(src).expect_err("NOW SUPPORTED: an element write in a comb `for` transpiles — sweep it");
     assert!(err.contains("inside a combinational `for`"), "a different error: {err}");
 }
+
+/// SPEC II.1.2 R21 (Phase C step 5, 2026-11-07): a `tick` before the module's `loop`
+/// is refused by the transpiler with the macro's message
+/// (`copper_analysis::PRELOOP_TICK_MESSAGE`; the macro's witness is
+/// `copper-macros/tests/ui/fail/preloop_tick.rs`), on both routes — the linear route
+/// dropped the tick until then (II.3 (f6)).
+#[test]
+fn a_tick_before_the_module_loop_is_refused_by_r21_on_both_routes() {
+    let linear = r#"
+#[hardware(sequential)]
+async fn r21_linear(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, q: RegOut<Bits<8>, MainClk>) {
+    clk.tick().await;
+    loop {
+        q.write(a.read() + Bits::from_lit::<1>());
+        clk.tick().await;
+    }
+}
+"#;
+    let extracted = r#"
+#[hardware(sequential)]
+async fn r21_extracted(clk: Clock<MainClk>, go: In<Logic, MainClk>, q: RegOut<Bits<8>, MainClk>) {
+    let mut n: Bits<8> = Bits::zero();
+    clk.tick().await;
+    loop {
+        if go.read() == Logic::One { clk.tick().await; n = n + Bits::from_lit::<1>(); }
+        q.write(n);
+        clk.tick().await;
+    }
+}
+"#;
+    for src in [linear, extracted] {
+        let err = transpile(src).expect_err("a pre-loop tick must be refused (R21)");
+        assert!(err.contains(copper_analysis::PRELOOP_TICK_MESSAGE), "not R21's message: {err}");
+    }
+}

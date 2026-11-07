@@ -2134,10 +2134,9 @@ fn lower_seq_body(
     if entry_guard {
         if let Some(span) = first_tick_span(&pre) {
             return Err(CHIRLowerError::UnsupportedConstruct {
-                description: "`clk.tick().await` before the module's `loop`: the statements \
-                              before the loop are the first resumption's and run in no time \
-                              (SPEC I.2.2, I.9.3)"
-                    .to_string(),
+                // Defence in depth: `copper_analysis::check_no_preloop_tick` (R21)
+                // refuses this first in both front-ends, with this message.
+                description: copper_analysis::PRELOOP_TICK_MESSAGE.to_string(),
                 span,
                 suggested_rewrite: Some("move the tick into the loop".to_string()),
             });

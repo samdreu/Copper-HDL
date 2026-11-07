@@ -808,6 +808,11 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             if let Err(err) = copper_analysis::check_awaits(&input_fn) {
                 return err.to_compile_error().into();
             }
+            // SPEC II.1.2 R21: no tick before the module loop. Same function, same
+            // message, in `transpile_target` (Phase C step 5, 2026-11-07).
+            if let Err(err) = copper_analysis::check_no_preloop_tick(&input_fn) {
+                return err.to_compile_error().into();
+            }
             // A pre-loop register must start from a constant or from `Bits::x()`
             // (2026-10-29): its initializer is the flip-flop's power-on value, which
             // the transpiler states as an `initial` assignment — and a value it
