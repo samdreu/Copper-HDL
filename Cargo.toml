@@ -39,6 +39,9 @@ copper-analysis = { path = "copper-analysis" }
 # `tests/cdc_synchronizer_anchor.rs` parses a fixture to call `infer_registers`
 # directly (pinning the synchronizer register-inference gap).
 syn = { version = "2", features = ["full", "parsing"] }
+# `tests/projection_relation.rs` hands the file's const items to the shared
+# constant evaluator as text.
+quote = "1"
 
 [[example]]
 name = "one_bit_comparator"

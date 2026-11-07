@@ -60,6 +60,20 @@ pub fn lower_fir_to_shir(
     hardware_fns: &std::collections::HashSet<String>,
     registry: &ModuleRegistry,
 ) -> Result<copper_core::shir::SHIRModule, String> {
+    let chir = lower_fir_to_chir(fir, hardware_fns, registry)?;
+    lower_to_shir(&chir).map_err(|e| format!("{e}"))
+}
+
+/// [`transpile_fir`] up to the CHIR — control extraction, the register append and
+/// `chir_lower`, the passes [`lower_fir_to_shir`] runs before `lower_to_shir`. The
+/// last IR that carries source spans per statement, which is what the projection
+/// test (`tests/projection_relation.rs`, SPEC III.1 P1) reads the emitted state
+/// machine off.
+pub fn lower_fir_to_chir(
+    fir: &copper_core::FrontendModuleIR,
+    hardware_fns: &std::collections::HashSet<String>,
+    registry: &ModuleRegistry,
+) -> Result<copper_core::chir::CHIRModule, String> {
     // Control extraction (FIR→FIR): flatten async control-flow loops whose ticks
     // live inside branches into an explicit single-tick `match pc` FSM — the shape
     // the pipeline below already lowers correctly. No-op for linear modules.
@@ -128,14 +142,13 @@ pub fn lower_fir_to_shir(
     // reported its well-formed repeating wait (line 55) for a `continue` further
     // down the body. Prefer the construct that actually stopped the flattening,
     // with its own span.
-    let chir = lower_to_chir(fir, hardware_fns, registry).map_err(|e| {
+    lower_to_chir(fir, hardware_fns, registry).map_err(|e| {
         match (&declined, &malformed_loop) {
             (Some(reason), _) => format!("{reason}"),
             (None, Some(m)) => m.clone(),
             _ => format!("{e}"),
         }
-    })?;
-    lower_to_shir(&chir).map_err(|e| format!("{e}"))
+    })
 }
 
 /// The pre-loop `let mut` names of a FIR body — the declarations the FIR→FIR
@@ -359,6 +372,40 @@ fn vlir_for_target(
     target: &syn::ItemFn,
     prepared: &PreparedSource,
 ) -> Result<copper_core::vlir::VLIRModule, String> {
+    let fir = checked_fir_for_target(target, prepared)?;
+    lower_fir_to_vlir(&fir, &prepared.hardware_fns, &prepared.registry)
+}
+
+/// One module's lowered forms, for a test that inspects what the transpiler does
+/// with it rather than only what it emits: the captured FIR (file scope injected,
+/// before any FIR→FIR pass), the CHIR, the SHIR and the SystemVerilog text — each
+/// produced by the same passes, in the same order, as [`transpile_source`].
+pub struct LoweredModule {
+    pub fir: copper_core::FrontendModuleIR,
+    pub chir: copper_core::chir::CHIRModule,
+    pub shir: copper_core::shir::SHIRModule,
+    pub sv: String,
+}
+
+/// [`transpile_source`] for one named module, keeping every intermediate form (see
+/// [`LoweredModule`]). Every front-end rule runs first, so a module this returns
+/// is one `transpile_source` emits.
+pub fn lower_source_module(src: &str, module: &str) -> Result<LoweredModule, String> {
+    let prepared = prepare_source(src)?;
+    let target = prepared.select_target(Some(module))?;
+    let fir = checked_fir_for_target(target, &prepared)?;
+    let chir = lower_fir_to_chir(&fir, &prepared.hardware_fns, &prepared.registry)?;
+    let shir = lower_to_shir(&chir).map_err(|e| format!("{e}"))?;
+    let vlir = lower_to_vlir(&shir).map_err(|e| format!("{e}"))?;
+    let sv = emit_verilog(&vlir, &EmitConfig::default());
+    Ok(LoweredModule { fir, chir, shir, sv })
+}
+
+/// Every front-end rule on `target`, then its FIR with the file scope injected.
+fn checked_fir_for_target(
+    target: &syn::ItemFn,
+    prepared: &PreparedSource,
+) -> Result<copper_core::FrontendModuleIR, String> {
     // c2 (item 2): the transpiler enforces the SAME reachability well-formedness
     // the sim macro does, from the SAME shared analysis on the SAME `&syn::ItemFn`
     // — a tickless loop path is rejected here too (one authoritative check, both
@@ -417,7 +464,7 @@ fn vlir_for_target(
     let mut fir = capture_frontend_ir(target, &prepared.hardware_fns).map_err(|e| format!("{e:?}"))?;
     fir.enums.extend(prepared.file_enums.iter().cloned());
     inject_file_scope(&mut fir, &prepared.file_scope);
-    lower_fir_to_vlir(&fir, &prepared.hardware_fns, &prepared.registry)
+    Ok(fir)
 }
 
 /// Copy captured file-scope items into a module's FIR, mirroring the `enums`

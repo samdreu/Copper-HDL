@@ -2279,3 +2279,51 @@ in this run.
    byte-identical through all three inference changes). The consumers checked: R11 (item 6),
    `fir.registers` (sv-baseline per change), the G2 helpers (unchanged sets), the interpreter
    (consumes no register set; the poison run does, item 5).
+
+## L. Phase C step 7 — P1's relation `R` built per module, P15 (2026-11-07)
+
+Branch `claude/phase-c-projection-268525` (from `paper` at `eb980f5`). D-20 step 7: "The static
+test of P1's relation `R` per module (beside `pc_states_vs_tick_sites`), the initial state
+included (P15)." The test is `tests/projection_relation.rs::the_projection_relation_holds_on_the_corpus`;
+its header states the method in full. In short:
+
+- **Source side** — H(M) from the `syn::ItemFn`, by a continuation-stack walker of Rust control
+  flow written in the test; a continuation is a tick site (copper-ref's index-path names, the set
+  cross-checked against `copper_ref::static_tick_sites`) plus, per counted `for` the next
+  resumption leaves or re-enters, which. No `copper_codegen` code on this side; the one shared
+  piece is `copper_analysis::consts` (SPEC I.14.4), to decide a range's static (non-)emptiness.
+- **Emitted side** — CHIR from `copper_codegen::lower_source_module` (new: the same passes as
+  `transpile_source`, every intermediate form kept), SHIR for the phase register's next values,
+  `__copper_started`'s update and the power-on values, the SV text for the `initial` block.
+  Extraction route: state = the `match pc` arm; linear route: state = the SHIR phase (phase 0
+  runs the trailing segment first under `__copper_started`); single-tick = the linear route
+  with one phase, so `R` is `{(0,!started)~Entry, (0,started)~t₁}`, checked like any other.
+- **Comparison** — label sequences per path: `Run(p)` an atomic source statement (emitted
+  statements mapped to the outermost atomic source statement containing their span's start,
+  consecutive duplicates collapsed), `Test(p,k)` a control `if`/`match`/`while` outcome (emitted
+  `if`/`match` is control iff it assigns `pc`), `Count(p,·)` a counted `for`'s entry and
+  last-iteration outcomes (the source chooses `v+1 ≥ end` before the tick that ends the
+  iteration — the same program, since the test is pure; the emitted side abstract-interprets each
+  synthesized counter as `advanced?` × `at end?`). For each reached pair the two path sets must
+  be equal; matched paths give the successor pairs. `R` is the reachable product.
+- **P15** — the initial pair is (power-on `pc`/phase, power-on `__copper_started`) ~ `Entry`;
+  power-on 0 in SHIR and in the emitted `initial`; `__copper_started` declared whenever read, set
+  to 1 at phase 0's edge only; only the initial pair has `started = 0`; `Entry` in no other pair.
+
+### L.0 Predictions (written before the first run)
+
+1. **P1 holds on every clocked module both front-ends admit (0 transpiler control defects).**
+   Reason: the sweep is green on 186 cases (G-G 1467/0), step 5 closed the startup and counted-`for`
+   rows (f1)–(f6), and §D.3's ratio spread is the many-to-many shape `R` is meant to absorb.
+2. **P15 holds on both routes on every module** (step 5's `__copper_started`, `pc`/`phase_r` at 0).
+3. **The first run will NOT be clean, and the failures will be the test's own normalization, not
+   the transpiler**: (a) CHIR statements `chir_lower` synthesizes with the module span or a span
+   inside no source statement (submodule wires, memory capture plumbing) — "maps to no source
+   statement"; (b) source statements that lower to no CHIR statement (a statement macro, a
+   compile-time `const { assert!() }`, a `let _ = …`) — a `Run` only on the source side; (c) the
+   `while` guard's negation folded by `chir_lower` for `while !c` — "not a negation". Each will be
+   classified as one of: a normalization the test must state (fixed in the test, written below), or
+   a finding.
+4. **No unreachable `pc` state and no unreached tick site** outside a statically empty `for`.
+5. **`R` is many-to-many on the modules §D.3 named**: `det_010_awaits`, `if_tick`, `match_tick`
+   (several sites → `pc = 0`), `counted_repetition`, `uart_rx` (a site over several states).
