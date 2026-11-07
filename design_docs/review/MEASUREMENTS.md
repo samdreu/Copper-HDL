@@ -2801,3 +2801,170 @@ non-constant pre-loop `let`** of either kind.
 - **Recommendation: C2** — the shape has the coroutine's meaning, all three legs compute it, and
   R11's reason (a register needs a power-on value the SV can state) does not apply to a wire.
   C1 is the choice if `s_pre` should stay minimal by design.
+
+## N. D-21 — the constants decisions A3, B2, C2 implemented (2026-11-07)
+
+Branch `claude/phase-c-consts-867296` (from `paper` at `c1735ab`). The user decided §M.10 as
+recommended: **A3** (rustc judges a register initializer), **B2** (one grammar, two evaluators,
+pinned), **C2** (R11 for registers only; a non-register pre-loop `let` is a wire of the first
+resumption). Recorded as D-21 in `SPEC_DECISIONS.md`. Commits: `a4a32d0` (A3 + C2's fixture), `22771f0`
+(B2 + G-J), then docs.
+
+### N.1 A3 — the prototype, then the change
+
+**Prototype first (the packet's risk).** Every constructor of `copper-core/src/types.rs` became a
+`const fn` — `zero`, `all_ones`, `x`, `from_array`, `from_u8 … from_u128`, `from_usize`, `from_lit`,
+and `Logic::from_bool` — with `from_uint`'s `for` a `while` and `N.min(128)` an `if`. On rustc 1.92 all
+compile; a scratch example evaluated each inside `const { }`, including `Bits::<N>::zero()` under a
+fn's const generic, `U::Z` through a trait bound, `from_lit::<1>()` with `N` inferred from a later use,
+`[Bits::<8>::x(); 2]`, a file `const fn` and `S::W`. `from_lit`'s post-mono assert and the
+`[Logic; N]` repeat were no obstacle. **A3 held; no fallback to A2.** One cost: a `const fn`'s panic
+takes a literal message, so `from_usize`'s run-time panic no longer formats the value
+("value does not fit in Bits<N> (from_usize)"); no test matched the old text.
+
+**The change.** The macro (`copper-macros/src/lib.rs`, `const_wrap_register_initializers`) wraps the
+initializer of every pre-loop `let` in the register set in `const { … }`, spanned at the initializer.
+R11's shared half (`copper-analysis/src/init.rs`) now refuses only an initializer that **reads a
+run-time value** (a parameter or an earlier pre-loop binding), with R11's own message — rustc would
+refuse it too (E0435), but its text is about `const` items. The transpiler adds
+`check_register_initializer_calls_in`: every call in a register initializer must be a core
+constructor (`is_core_const_ctor`) or a `const fn` of the file (`ConstEnv::is_const_fn`) — rustc's
+E0015, which the fold alone would miss because it inlines an associated ctor structurally.
+
+**Predicted:** the workspace builds except the 5 `bubble()` definitions (the packet's "7" counted
+initializers: 4 in `rv32i_cpu_pipelined`, 3 in `struct_pipeline_dut`); simulated values unchanged; the
+emitted SV unchanged corpus-wide. **Measured:** the first build failed on exactly the 4 CPU
+`bubble()`s (E0015 at each `let mut … = X::bubble()`) and then the fixture's; with `const fn bubble()`
+the workspace builds. **sv-baseline against `c1735ab` (snapshot from a clean worktree of it): 267
+modules, no changes** — the anchored pipelined CPU byte-identical.
+
+**What a user sees** (ui `.stderr`s):
+- a non-`const` free fn (`register_init_not_constant.rs`, `let mut acc = seed();`):
+  `error[E0015]: cannot call non-const function `seed` in constants`, pointing at `seed()`, with
+  rustc's note "calls in constants are limited to constant functions, tuple structs and tuple variants";
+- a non-`const` associated ctor (`register_init_non_const_ctor.rs`): E0015 on `Latch::bubble()`;
+- an input read (`register_init_reads_input.rs`, `let mut acc = a.read();`): R11's message, "register
+  `acc` is initialized from a method call that reads a run-time value, so the hardware has no power-on
+  value for it: … Initialize `acc` with a Rust constant — a literal, a `const` item or associated const,
+  a call to a `const fn` … — or with `Bits::x()` …".
+A proc macro cannot attach a note to rustc's error, so E0015 stands alone; it names the call and says
+it must be `const`, which is the fix. Judged clear enough; the run-time read, where rustc's E0435 text
+("consider using `const` instead of `let`") misleads, keeps R11's message.
+
+**Parity, measured on the same inputs.** `copper-codegen/tests/register_init_parity.rs` transpiles the
+macro's own trybuild files: `ui/pass/register_init_rust_constants_ok.rs` (a file const, a free `const fn`
+`seed_of(3)`, `Cfg::K`, `Cfg::twice(Cfg::K)`, a `const fn bubble()` struct register) is admitted and
+its `initial` block states `via_fn = 8'd10`, `assoc = 8'd11`, `assoc_fn = 8'd22`, `from_const = 8'd7`;
+each `ui/fail/register_init_*.rs` is refused with R11's reason (the run-time read: the shared
+message; `seed`, `Latch::bubble`: "which is not a `const fn`"). The older
+`ui/pass/register_init_constants_ok.rs` is **not** transpilable, for two reasons unrelated to R11 (N.5).
+`front_end_parity.rs` gained `r11_halves_refuse_their_witnesses_and_admit_their_twins`.
+
+**Swept** (`tests/fixtures/const_init_dut.rs`, 3 modules): `init_const_fn` (`Bits::from_u8(ci_seed(3))`,
+`let mut k: u8 = ci_seed(5)` — refused by both before D-21), `init_file_const` (`CI_START`, and
+`CI_STEP = CI_START / 30`), `init_assoc_const` (`CiCfg::K`, `CiCfg::twice(CiCfg::K)`). Predicted all
+PASS on all three legs; measured all PASS (N.6).
+
+### N.2 C2 — the wire fixture
+
+`tests/fixtures/preloop_wire_dut.rs`: `preloop_wire_read` (step 6's throwaway, §K.12 item 6:
+`trailing_local_into_head` with `let mut w: Bits<8> = a.read();`) and `preloop_wire_first_head`
+(single tick: `let mut w = a.read(); loop { q.write(w); tick; w = a.read() + 1 }`). Both are I.7.2(c)'s
+wire — reassigned in the loop before any read that follows a tick. Predicted PASS on all three legs;
+measured PASS (and in N.6's regression). R11 asks neither (not registers); the macro does not wrap
+them (they are not in the register set).
+
+### N.3 B2 — the differential test
+
+`tests/const_evaluators_agree.rs`. Entry points added, sharing no code: `copper_ref::ConstScope`
+(`Module::new`'s item collection + `Exec::eval_const`, `eval_as` coercing to a `let`'s annotation) and
+`ConstEnv::eval_expr`. Over the 126 files of `examples/`, `src/`, `tests/` that define a `#[hardware]` fn:
+(1) every `const` item — file scope, `impl` blocks (`T::K`), and every nested container (a `mod`, a fn
+body, the harness's included) over the file's items plus its own; (2) every pre-loop initializer of a
+clocked module, against the transpiler's **stated** power-on value (the SHIR register's `init`, what the
+`initial` block prints; struct registers field by field; an X start against an unstated one; an enum by
+declaration index) and against `ConstEnv` wherever it evaluates; (3) every counted-`for` bound and
+every index (`x[e]`, `x.get(e)`, `x.set(e, _)`) of every `#[hardware]` fn, both ways. Both evaluate →
+equal or DISAGREE (fails); one only → an `ASYMMETRIC` row (exact set); neither → counted. Fails on an
+empty class. Writes `COPPER_CONST_EVAL_REPORT`, read by **G-J** in `tools/regression.sh`.
+
+**Predicted** (written before the first run, notes file `phase-c-consts-d21.md`): ~65 integer const
+items compared, 0 disagreements, the `&str`/array consts outside both, 0–5 asymmetries; ~200 register
+initializers vs the transpiler, 0 disagreements; ~30–60 bounds; 100+ indices, 0 disagreements.
+**Measured:** const items **68 compared**, 16 outside both (11 `&str` test-text consts and 5 `usize`
+arrays — two `RATIOS`, `two_clock_pins`' `P`/`Q`/`R`); 84 items in all against the packet's 93 (the
+packet's scratch scan is not in the tree, so the 9 are unidentified; every container this test walks
+is listed in its header); pre-loop initializers **221 stated registers vs the
+transpiler + 42 vs `ConstEnv`**, 1 a const generic (stated as the parameter, `init_param`), 45 not
+compared, each listed with its reason on every run (3 array-typed registers; 29 not constants — 27
+`Memory` bindings and the 2 C2 wires reading `a`; 16 non-register constant wires outside `ConstEnv`'s
+integer grammar — register files (memories in SHIR) and `Bits` constant wires; 4 in
+`mem_latency_probe.rs`'s 2 modules the transpiler refuses); **91 bounds** compared, 15 not constants;
+**68 indices** compared, 106 not constants; **0 DISAGREE**. Asymmetries: **7, pinned** — the 4
+`rv32i_cpu_pipelined` `X::bubble()` initializers and the 3 `struct_pipeline_dut` `Latch::bubble()`s,
+which the transpiler states field by field and the interpreter cannot evaluate ("unknown struct
+`Self`", a `Self { .. }` literal in an associated fn — the gap build.rs's `REF_SKIP` rows for
+`struct_latch` / `struct_latch_cond` / `tuple_destructure` already record). Prediction misses: indices
+fewer (most corpus indices are locals), no item/bound asymmetry at all.
+**Negative control:** `apply_binop`'s `+` changed to `a + b + 1` → **16 DISAGREE**, the test fails; reverted.
+
+### N.4 Found and STOPPED — the held pre-loop read (a decision for you)
+
+Writing C2's fixture, a second shape was probed: `preloop_held_read`,
+`let x = a.read(); loop { q.write(x); tick }`. **Predicted** (from I.7.1): `x` fails I.7.1 (i) (never
+assigned in the loop), so the analysis calls it no register and R11 does not ask; the transpiler emits a
+wire `x = a` of every resumption; the simulator and interpreter hold the first read → `sim=ref≠SV` from
+obs 2. **Measured** (a throwaway fixture, removed): `infer_registers` = `[]`; the SV is
+`always_comb x = a; … o <= x;`; agreement relation **6 sequences, 6 DISAGREE, pattern `sim=ref≠SV` at
+cycle 1** (e.g. sim 115 ref 115 SV 72); the reference leg 864 cycles agreed with the simulator. Both
+front-ends admit it today (since step 6 removed the head clause, §K.12 item 6 — before, `x` was live at
+the loop head, a register, and R11 refused the read); **corpus 0**.
+
+Why C2 does not settle it: C2's wire is I.7.2(c)'s (reassigned in the loop before any read after a
+tick); `preloop_held_read` is I.7.2(b)'s shape — "a constant" by I.7.1, a classification that assumed
+`s_pre`'s initializers were constants. With a non-constant initializer it is state the residue must
+carry. Recorded OPEN in SPEC I.2.3; options:
+- **H1 — refuse it**: R11 extended from "a register" to "a pre-loop `let` live at a tick" (registers ∪
+  the held shape); one shared function, R11's message; a ui/fail case; corpus 0.
+- **H2 — give it its coroutine meaning**: I.7.1 (i) counts a pre-loop `let` with a non-constant
+  initializer that is live at a tick as state — a register loaded by the first resumption (assigned
+  before any read, so no power-on value is needed, like I.7.2(d)'s loop-born register); the transpiler
+  captures it under `!__copper_started`; a swept fixture. Corpus 0; a transpiler and an analysis change.
+- **H3 — record it as an ADMITTED-AND-DIVERGENT II.3 row** until one of the above.
+Recommendation: **H1** — it is the smallest change, it is R11's own reason (a value the hardware must
+hold has to come from somewhere it can state), and it refuses nothing in the corpus; H2 if `s_pre`
+should mean everything the coroutine means.
+
+### N.5 Found on the way (recorded, not fixed)
+
+1. **A `u8` file const in a body expression emits as a 32-bit `localparam int`**:
+   `c = c.wrapping_add(CI_STEP)` → `c <= (c + CI_STEP)` with `localparam int CI_STEP`, a `-Wall`
+   WIDTHEXPAND/WIDTHTRUNC failure (the fixture uses `wrapping_add(1)` instead; the initializer path is
+   unaffected — it folds to `8'd3`). A REFUSED-one break (Verilator refuses the SV). Corpus: not
+   measured beyond the fixture.
+2. **`ui/pass/register_init_constants_ok.rs` does not transpile**: a `match` as an expression with no
+   wildcard arm ("unsupported construct"), and element writes `bits[0] = bits[1]` on a
+   `[Logic; 4]` register refused as "would infer a latch" (II.3 row (c)'s note: a packed vector of
+   one-bit elements). Both REFUSED-one; the second is the row-(c) class.
+3. **The interpreter's `Self { .. }` gap** (N.3's 7 asymmetries) — an interpreter front-end item
+   that would move three `REF_SKIP` rows; not touched here.
+4. **The transpiler's call half is narrower than rustc** where its fold is: a `const` method call
+   (`K.wrapping_add(1)`), a tuple-struct constructor, a `static` read — rustc admits each in
+   `const { }`, the transpiler refuses (a lowering error, never a dropped value). Corpus 0 each; II.2.2's
+   R11 row says so.
+
+### N.6 The bare regression
+
+**Bare `tools/regression.sh` on `22771f0` (the final code commit; laptop): REGRESSION OK (559 s).**
+1296 passed, 0 failed, 91 ignored, 148 test binaries (G-C: 121 test files); examples **32/32**; G-D
+**211** differential cases (3 ignored-with-reason, unchanged); G-F 136 modules, 78 skipped with a
+reason; **G-G differential 1608 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**; **G-G
+reference 1118 PASS / 0 DISAGREE**; **G-I 160 clocked modules related** (41 extracted, 18 linear, 101
+single-tick), 0 uncovered; **G-J** as N.3, 0 DISAGREE; G-E 5 anchored, 209 transpiler-only.
+**Predicted** against `a01bd15`'s numbers (§M.8): +5 swept modules (3 `const_init_dut`, 2
+`preloop_wire_dut`), each 6 sequences on both comparisons, nothing else moving. **Measured:** G-D +5
+(206 → 211), G-G differential +30 PASS (1578 → 1608), reference +30 (1088 → 1118), G-I +5 (155 →
+160, the two wire fixtures linear, the three init fixtures single-tick), G-F +5; the 12 OUTSIDE
+unchanged (`xp_div`, `xw_port`). New `SKIP` / `REF_SKIP` / `PARAMS` / `RESET` rows: none. Not run
+remotely (nothing pushed), so 559 s is a laptop number. sv-baseline: N.1 (267 modules, no changes;
+the fixtures are new modules, not changes).

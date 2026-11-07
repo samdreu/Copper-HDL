@@ -3505,3 +3505,58 @@ Coroutine terms: the coroutine is the one object with a trace; the simulator, th
 emitted machine are three ways of computing it, and the relation says when they compute the same
 thing — X included where both sides can hold it, up to where the coroutine stops, per domain under a
 stated interleaving. That they compute the right thing is what the anchors, and only they, decide.
+
+### D-21 — Constants: rustc judges R11, one grammar with two evaluators, R11 for registers only   (2026-11-07)
+Clause: SPEC §I.2.3 (`s_pre` gains the first resumption's wire, and an OPEN note), §I.7.4(c), the
+I.7.6 obligation list, §I.14.4 (evaluator (1), the direction), §I.14.7 (2), II.1's R11 row, II.2.2's
+R11 row, II.3.2's sort row 5, II.3.3 row (d) (closed). Nothing else normative changed.
+Question: (A) What decides that a register's initializer is a constant — a syntactic test the macro
+can run on one `ItemFn`, or rustc? (B) Should the interpreter and the front-ends share one constant
+evaluator? (C) Is R11 a rule about registers, or about every pre-loop `let`?
+Docs say: I.14.4 (D-19 4A: Rust's constants; "one evaluator … used by R11, the transpiler's fold and
+the interpreter"); I.2.3 (`s_pre ::= let v = c`); I.7.4(c) / D-12 R11 ("widens … to every pre-loop
+`let`"); `review/MEASUREMENTS.md` §K.12 item 6 and §M.10 (the packet).
+Code does (c1735ab): `copper-analysis/src/init.rs` (R11 = `is_constant_expr` on the register set,
+both front-ends); `chir_lower.rs` `lower_register_init` / `fold_const_init` over `ConstEnv`;
+`copper-ref` `Exec::eval_const` (typed `Value`s); `copper-core/src/types.rs` constructors not `const`.
+Anchor: none — decided. The sweep compares the simulator (rustc's value) against both evaluators.
+Prior work: no surveyed HDL lets the host compiler's constant evaluator decide a register's reset value;
+Rust's inline `const { }` (stable 1.79) is the mechanism.
+Measurements (§M.10, before): 195 clocked modules, 243 pre-loop `let` initializers, all constant-shaped,
+0 non-constant; 93 const items in 35 hardware files; 8 `const fn`s; R11 under-admits a single-segment
+`const fn` call (corpus 0), over-admits the non-`const` `T::bubble()` (7 initializers, 5 fn definitions);
+step 6's throwaway wire fixture 6/6 PASS on all three legs.
+Options: (A) A1 keep the syntactic test; A2 admit a single-segment call with constant arguments; A3 the
+macro emits each register initializer in a `const { }` block (rustc the judge); A4 give the macro the
+file's items. (B) B1 the interpreter's typed evaluator shared; B2 one grammar, two evaluators, pinned
+against each other; B3 status quo. (C) C1 widen R11 to every pre-loop `let`; C2 widen I.2.3 — a
+non-register pre-loop `let` is a wire of the first resumption; C3 status quo.
+Recommendation: A3 (A2 the fallback), B2, C2 (§M.10).
+Decision: **A3, B2, C2** — the user, as recommended (relayed by the coordinator, 2026-11-07).
+Changes (branch `claude/phase-c-consts-867296`, `review/MEASUREMENTS.md` §N): every `Bits`/`Logic`
+constructor a `const fn` (A3's prototype held on rustc 1.92: no fallback to A2); the 5 `bubble()`
+definitions `const fn`; the macro wraps each pre-loop register initializer in `const { }`; R11's shared
+syntactic half refuses only a run-time read, with its own message; the transpiler adds a call half
+(every callee a core constructor or a `const fn` of the file) before its fold — the `T::bubble()`
+over-admission closed, `f(3)` admitted by both. `copper_ref::ConstScope` and `ConstEnv::eval_expr` (entry
+points, no shared code) and `tests/const_evaluators_agree.rs`, guard G-J. Fixtures
+`tests/fixtures/const_init_dut.rs` (3) and `tests/fixtures/preloop_wire_dut.rs` (2, step 6's shape
+made permanent); ui `register_init_reads_input`, `register_init_non_const_ctor`,
+`register_init_rust_constants_ok`; `copper-codegen/tests/register_init_parity.rs`.
+Measured basis: (A) emitted SV byte-identical corpus-wide (sv-baseline against c1735ab: 267 modules,
+no changes — the pipelined CPU included); the new spellings agree on all three legs; the rustc error a
+user sees for a non-`const` callee is E0015 pointing at the call, and for a run-time read R11's own
+message. (B) the two evaluators agree on every corpus constant compared — 68 const items, 221 stated
+register initializers (vs the transpiler's SHIR value) + 42 vs `ConstEnv`, 91 counted-`for` bounds, 68
+indices — 0 DISAGREE; 7 initializers one-evaluator-only (the interpreter's `Self { .. }` gap, the
+`REF_SKIP` rows' class), pinned; an off-by-one injected into `ConstEnv`'s `+` gives 16 DISAGREE. (C) the
+wire shape agrees on all three legs (both fixtures PASS).
+Found, not decided (stopped): **the held pre-loop read** — `let x = a.read(); loop { q.write(x); tick }`.
+I.7.1 (i) calls `x` a constant (never assigned in the loop), the analysis agrees (not a register), both
+front-ends admit it, the transpiler emits a wire of each resumption, and the SV diverges: 6/6 sequences
+`sim=ref≠SV` (corpus 0). C2's wire is I.7.2(c)'s (reassigned in the loop); this is I.7.2(b)'s shape with
+a non-constant initializer, which neither C2 nor R11 now covers. Recorded OPEN in I.2.3; options in §N.4.
+Obligations: the user's decision on the held pre-loop read (§N.4); the follow-ups of §N.5.
+Coroutine terms: a register's power-on value is the value the coroutine's first resumption finds in it,
+and rustc is the one tool that computes Rust's constants; the transpiler and the interpreter each
+compute it again, and the sweep and G-J say whether all three agree.

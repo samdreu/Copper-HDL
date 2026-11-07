@@ -30,7 +30,7 @@ It lives in `tools/` **because it must be in version control**: `.gitignore` exc
 and lost on a fresh clone. If a local `run-copper` skill wrapper exists, it should be
 nothing more than an `exec` of this script — `tools/regression.sh` is the driver.
 
-It also enforces eight wiring guards, because "the check silently didn't run" has
+It also enforces nine wiring guards, because "the check silently didn't run" has
 been a recurring bug class here: **G-A** every `examples/**.rs` is registered as a
 `[[example]]`, **G-B** every registered example actually ran, **G-C** every
 `tests/*.rs` (root and per-crate) produced a test binary that ran, **G-D** the
@@ -49,7 +49,12 @@ sites, read off the `syn::ItemFn` by the test's own walker), checks every transi
 by path, and checks the initial state encodes the entry; its coverage line reaches the
 driver through `COPPER_PROJECTION_REPORT` (G-H's name is retired). A module it cannot
 relate needs an `UNCOVERED` row with a reason; there are none
-(`design_docs/review/MEASUREMENTS.md` §L). Since 2026-11-06 observation 0
+(`design_docs/review/MEASUREMENTS.md` §L), and **G-J** the constant-evaluator test
+(`tests/const_evaluators_agree.rs`, D-21 B2) ran and passed: the interpreter's evaluator and
+`copper_analysis::consts` evaluated every corpus const item, pre-loop initializer (also against the
+transpiler's stated power-on value), counted-`for` bound and index both ways with 0 DISAGREE, a
+one-evaluator-only expression a pinned `ASYMMETRIC` row; its line reaches the driver through
+`COPPER_CONST_EVAL_REPORT`. Since 2026-11-06 observation 0
 (after the first settle, before edge 1) is compared on all three legs. **OUTSIDE**: a
 simulator X at an observation compared against the 2-state SV takes that sequence's
 SV pair out of the relation from there — reported, never compared as 1 (the old
@@ -210,11 +215,13 @@ entries in `Cargo.toml`.
   live-at-the-loop-head clause is gone; the transpiler's hoisted and promoted locals
   are pinned ⊆ it corpus-wide by `register_reconciliation.rs`), `check_reachability` (every loop
   path must reach a `clk.tick().await`, enforced as a hard spanned compile error in
-  **both** front-ends), the G2 structural reg-match helpers, and `consts` — the shared constant evaluator of SPEC
+  **both** front-ends), the G2 structural reg-match helpers, and `consts` — the front-ends' constant evaluator of SPEC
   I.14.4 (Phase C step 5: `ConstEnv` over const items, associated consts and `const fn`s;
   the transpiler's counted-`for` bounds, `from_lit` turbofish, register initializers and
-  (step 8) constant bit indices use it; R11 and the interpreter do not — decisions (A)–(C)
-  owed, MEASUREMENTS §M.10), and `data` — the I.14 shape rules both front-ends run
+  (step 8) constant bit indices use it). D-21 B2: **one grammar, two evaluators** — the
+  interpreter (`copper-ref`) keeps its own, so the reference leg shares no constant code with
+  the transpiler, and `tests/const_evaluators_agree.rs` (G-J) pins the two against each other;
+  R11 is rustc's (see front-end parity below), and `data` — the I.14 shape rules both front-ends run
   (`check_outside_methods`: `checked_*`/`is_valid()` OUTSIDE; `check_memory_port_index`;
   Phase C step 8). `usize`/`isize` are 64 bits in the transpiler since step 8 (SPEC
   I.14.1(b)), and `eq_logic`/`ne_logic` are IEEE 1800 `==`/`!=`, pinned with every other
@@ -372,10 +379,20 @@ receive/clone one.
   macro's sequential arm and `transpile_target` run the same list from
   `copper-analysis`: the two source-shape rules (`check_nested_loop_shape` — a nested
   loop must end at a clock boundary; `check_awaits` — only `clk.tick().await` may be
-  awaited), reachability, the register power-on rule (`check_register_initializers`,
-  2026-10-29 — a pre-loop register's initializer must be a constant, which reaches the
-  SV as its `initial` value, or `Bits::x()`; no opt-out; `COPPER_VERILATOR_X_INITIAL=1`
-  randomizes Verilator's power-on values to measure what is left unstated), R8 (no
+  awaited), reachability, the register power-on rule R11 (2026-10-29; D-21 A3,
+  2026-11-07 — a pre-loop register's initializer must be a Rust constant, which reaches the
+  SV as its `initial` value, or `Bits::x()`; no opt-out). Since D-21 rustc judges it: the
+  macro wraps every pre-loop register initializer in `const { … }` (every `Bits`/`Logic`
+  constructor is a `const fn`, and a struct ctor like `bubble()` must be one too), so file
+  consts, `T::K`, const generics and any `const fn` call are admitted and a non-`const`
+  callee is rustc's E0015. Both front-ends share the syntactic half
+  (`check_register_initializers`: an initializer reading a run-time value — a parameter, an
+  earlier pre-loop binding — gets R11's message); the transpiler adds
+  `check_register_initializer_calls_in` (every callee a `const fn`) before its fold, and
+  `copper-codegen/tests/register_init_parity.rs` transpiles the macro's own ui cases. R11
+  is for registers only (D-21 C2): a pre-loop `let` that is a wire of the first resumption
+  may read an input. `COPPER_VERILATOR_X_INITIAL=1` randomizes Verilator's power-on values
+  to measure what is left unstated), R8 (no
   plain `Out` on a clocked module, one shared message) and the memory rules. A module
   that compiles therefore
   transpiles, or is refused by both. The standing audit is

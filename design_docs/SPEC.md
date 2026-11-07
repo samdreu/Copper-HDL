@@ -316,6 +316,7 @@ outputs `o`, registered outputs `q`, memories `m` with port index `k`, constants
 ```
 module ::= header { s_pre ; loop { s } }
 s_pre  ::= ε | s_pre ; let v = c                        c a constant of I.14, or Bits::x()  (D-19: I.14.4)
+         | s_pre ; let t = read x | s_pre ; let v = e   v not a register: a wire of the first resumption (D-21 C2)
          | s_pre ; let m = Memory(init)                 init a constant array (→ I.10; D-16: I.10.3)
 s      ::= ε | s ; s
          | let v = e | v = e                            e pure (→ I.14; D-19: I.14.3)
@@ -330,7 +331,18 @@ e      ::= pure expressions over v, t, c and observe results (→ I.14; D-19: I.
 ```
 
 A `read` appears only as the hoisted `let t = read x`; an input is never read inside
-an expression. `write o e` on a plain output appears only in a `combinational` module's
+an expression. (D-21 C2) A pre-loop `let v = e` whose `e` is not a constant is in the kernel
+when `v` is not a register — I.7.2(c)'s wire, reassigned in the loop before any read that
+follows a tick, so `e` is read by the first resumption alone (D-11: the pre-loop statements are
+the first resumption's); a register's initializer is a constant (I.7.4(c), R11). **OPEN
+(D-21, recorded, not decided):** the shape I.7.2(b) with a non-constant initializer — a
+pre-loop `let v = e` the loop never reassigns and reads after a tick (`preloop_held_read`:
+`let x = a.read(); loop { q.write(x); tick }`) — carries the first resumption's value into
+every later one, yet I.7.1 (i) calls it a constant (that classification assumed `s_pre`'s
+initializers constant). Both front-ends admit it today; the transpiler emits `x` as a wire of
+each resumption and the SV diverges (measured 6/6 sequences `sim=ref≠SV`; corpus 0;
+`review/MEASUREMENTS.md` §N.4). Its rule — refused (R11 extended to a pre-loop `let` live at a
+tick) or a register loaded by the first resumption — is owed. `write o e` on a plain output appears only in a `combinational` module's
 body (I.2.7, → I.11; D-14: I.11.2); in a sequential module every output is a `q` (D-8). `break` and `continue` target the innermost enclosing loop; `continue`
 of the module loop is in the kernel, `break` of it is outside (I.2.5). A nested `loop`
 must reach a `tick` on every path and end at one — a shape rule (→ II.1), stated here
@@ -989,11 +1001,17 @@ simulator (→ I.14 for what a read of it computes; D-19: I.14.2(b)–(c) — th
 (PO3), and a module with such a register is outside the agreement relation (→ III.2; D-20: III.2.2, III.2.5) until
 every such register has been assigned on every path — "until reset"; the sweep's `RESET`
 table is III.2's declaration (D-20: III.2.2, "from reset") of that for each such module, and `COPPER_VERILATOR_X_INITIAL=1`
-measures what a design leaves unstated. (c) A non-constant initializer is not in the
-kernel (I.2.3: `s_pre` is `let v = c` or `Bits::x()`) — a shape rule of II.1, today
-`check_register_initializers` (rule 5, both front-ends, no opt-out, PO4), which II.1 restates
-from I.2.3 and widens from "a register" to every pre-loop `let` (I.7.2(c) is reached by the
-grammar, not by the rule). (D-12: R11, S3.) (d) A register born inside the loop (I.7.2(d)) has no value
+measures what a design leaves unstated. (c) A register's initializer that is not a constant is not in
+the kernel (I.2.3: a register's `s_pre` is `let v = c` or `Bits::x()`) — the shape rule R11 of
+II.1, for **registers only** (D-21 C2: a pre-loop `let` that is a wire of the first resumption,
+I.7.2(c), may have any pure initializer, I.2.3). "Constant" is rustc's (D-21 A3): the macro
+evaluates every pre-loop register initializer in an inline `const { }` block, so rustc admits
+exactly I.14.4's constants and refuses the rest (E0015 for a call to a non-`const` fn); both
+front-ends share R11's syntactic half `check_register_initializers` — an initializer reading a
+run-time value (a parameter, an earlier pre-loop binding) is refused with R11's own message —
+and the transpiler, which cannot see rustc's verdict, adds `check_register_initializer_calls_in`
+(every callee a `Bits`/`Logic` constructor or a `const fn` of the file) before its fold. No
+opt-out (PO4). (D-12: R11, S3; D-21 A3, C2.) (d) A register born inside the loop (I.7.2(d)) has no value
 before its first assignment and cannot be read before it: a `let` opens its name after it
 (Rust scoping), so no execution reads it unassigned (D-9 A3-i; PO5 made precise — not X).
 What a realization powers its storage on at is III's (0 today, PO6, CODE 33). (e) Realization
@@ -1064,7 +1082,8 @@ into the nested loop's CFG; retire REG2/REG9/X9, SS's back-edge sentence, the un
 {ff1, ff2} (restated: reference flops = registers ∪ `RegOut` ports); `sync_2ff`,
 `flag_sync` and the fixture twin in the tick-last spelling; the array-element forwarding
 defect fixed; two reconciliation fixtures for the fold's shapes; rule 5 cited from II.1 as
-I.2.3's shape rule and widened to every pre-loop `let`. (D-12: R11.)
+I.2.3's shape rule for registers (D-12: R11; its widening to every pre-loop `let` retired by
+D-21 C2).
 
 **I.7.7 Carried NOT-YET list.**
 - The poison run for I.0.5(a) (→ III.1; D-20: P2 — measured, 47 modules clean): at every tick, every local not in the register set
@@ -2864,9 +2883,11 @@ c ::= integer literal (any base, underscores, a type suffix) | true | false
 with Rust's meaning, the width of a `Bits` constructor taken from Rust's inference when the turbofish
 is absent. `Bits::x()` (and `Logic::X`) as an initializer is the unstated value of I.7.4(b). A constant
 whose evaluation fails (overflow, `from_lit` too wide — `types.rs:247-251`'s post-mono assert) is a
-compile error. **The three evaluators against it:** (1) `is_constant_expr` (`copper-analysis/src/
-cfg.rs:3519-3550`, R11's test) is syntactic — over on calls (any multi-segment path with constant
-arguments passes, including a non-`const` associated function), under on a const generic or `const`
+compile error. **The three evaluators against it:** (1) R11 is rustc since D-21 A3 — the macro evaluates a
+register initializer in a `const { }` block, every `Bits`/`Logic` constructor a `const fn` — exact
+by construction; until D-21 it was `is_constant_expr` (`copper-analysis/src/cfg.rs`), syntactic —
+over on calls (any multi-segment path with constant arguments passed, including a non-`const`
+associated function), under on a single-segment `const fn` call, a const generic or a `const`
 spelled in lower case (refused); (2) the transpiler's fold (`chir_lower.rs:1158-1300`,
 `classify_value_ctor` `:654-706` with `trailing_const_param`'s decimal `parse::<u128>` `:698-707`) is
 under: no `all_ones` in any spelling, no hex or underscore literal in a `from_lit` turbofish, no
@@ -2878,9 +2899,13 @@ macro admits `from_lit::<0xA5>` (body, initializer), `from_lit::<1_000>`, `all_o
 width (body, initializer); simulator ≡ interpreter on each (the interpreter refusing the unsized
 `all_ones`); the transpiler refuses all six ("non-hardware function calls cannot appear in hardware
 expressions" in a body, "cannot infer bit width" as an initializer). Corpus: 264 `from_lit`, none
-non-decimal; `all_ones` 0; `Bits::x()` 5 initializers. **The direction:** one evaluator over this
-grammar in `copper-analysis`, used by R11, by the transpiler's fold and by the interpreter (I.14.7 (2));
-rows (d) and (g) close with it, and the syntactic test becomes that evaluator's success.
+non-decimal; `all_ones` 0; `Bits::x()` 5 initializers. **The direction (D-21 B2):** one grammar, the
+interpreter's evaluator independent of the front-ends': rustc judges R11 (A3);
+`copper_analysis::consts` serves the transpiler's fold, counted-`for` bounds and constant indices;
+the interpreter keeps its own, so the reference leg shares no constant code with the transpiler
+(III.2's attribution); the two are pinned against each other on every corpus constant
+(`tests/const_evaluators_agree.rs`, G-J) and both against rustc by the sweep. Rows (d) and (g) are
+closed (I.14.7 (2)).
 
 **I.14.5 Widths.** (a) **Expression widths are Rust's types:** `Bits<N> op Bits<N>` is `Bits<N>` for
 every operator of I.14.3(a) — no growth, the carry discarded (Clash's reading, not Spade's widening
@@ -2947,8 +2972,9 @@ and its turbofish parsers (`:640-720`), `lower_register_init`/`fold_const_init` 
 `copper-sim/src/verification.rs:330-340` (X compared as 1; a `u64` literal), `:497-560` (power-on).
 **Phase C obligations** (each with its probe from D-19 as a fixture): (1) `eq_logic`/`ne_logic`
 IEEE-exact in `types.rs` and `RefBits`, the property pin re-run, and an IEEE table pin beside it;
-(2) one constant evaluator over I.14.4's grammar in `copper-analysis`, used by R11, the transpiler's
-fold and `eval_const_usize`, and the interpreter — closes II.3 (d), (g), `all_ones` in every spelling,
+(2) I.14.4's grammar with two evaluators pinned against each other (D-21 B2: `copper_analysis::consts`
+for the transpiler's fold and `eval_const_usize`, the interpreter's own, `tests/const_evaluators_agree.rs`
+between them) and R11 judged by rustc (D-21 A3) — DONE (Phase C step 8, D-21) — closes II.3 (d), (g), `all_ones` in every spelling,
 underscores (`k_hex_body`, `k_hex_init`, `k_underscore`, `k_ones_*`); (3) the `as_*` passthroughs
 lowered as zero-extensions to the integer's width and `usize`/`isize` as 64 bits (`usize_width`,
 `usize_annot`, `c_narrow`, `c_narrow2`); (4) the width-1 select and `From` (`w1_index`, `w1_comb`,
@@ -3079,7 +3105,7 @@ refused now, in both front-ends, at a measured cost of 0 each.
 | R8 | a plain `Out` parameter on a `sequential` or `synchronizer` module | S5 (D-8) | none | none | both admit; D-8's Phase C rule; cost 88 (sweep) / 273 (all) — D-8's rewrites |
 | R9 | the flag `allow_pretick_alignment` | S0 (I.2.2) | none — parsed and honoured | none | both admit; Phase C; 3 (sweep) / 78 (all), the battery's |
 | R10 | a second `Clock` parameter on a `sequential` module | S0 (I.2.2: exactly one) / S2 (a second resumption protocol with no meaning until I.12; D-17: I.12.5 confirms the refusal) | none — the CDC check is skipped (:947) | none — measured accepted | both admit; **both owe** (D-12 A 2b); cost 0 |
-| R11 | a non-constant pre-loop `let` initializer | S3 (I.7.4(c), I.9.2; `s_pre ::= let v = c`) | `check_register_initializers` (:990; `init.rs`), registers only today | `lib.rs:377` | holds — one function, one message; ui `register_init_not_constant`; D-9 widens it to every pre-loop `let` (Phase C) |
+| R11 | a pre-loop register initializer that is not a constant (registers only, D-21 C2) | S3 (I.7.4(c), I.9.2; `s_pre ::= let v = c` for a register) | rustc: the initializer in a `const { }` block (D-21 A3); before it the shared `check_register_initializers` (`init.rs`): a run-time read, R11's message | the same function, then `check_register_initializer_calls_in` (a non-`const` callee) and the fold | holds — ui `register_init_reads_input` (R11's message), `register_init_not_constant`, `register_init_non_const_ctor` (E0015), `register_init_rust_constants_ok`; `copper-codegen/tests/register_init_parity.rs` transpiles those cases (D-21) |
 | R12 | a labelled or valued `break` | S0 (I.2.3; D-10 A5, I.8.3) | **none** | `control_extract.rs:1792`, `:1797` | **T-only** → M owes |
 | R13 | a macro in statement or expression position outside `const { }` (not `matches!`) | S0 (I.2.3: `e` pure, reads hoisted) | **none** | `parser.rs:275` → "macro invocation is not supported" | **T-only** → M owes; corpus 0 (one `vec!` inside a preload is DESUGARED, I.2.4) |
 | R14 | an input read inside macro tokens | S0 (I.2.3: `let t = read x` the only form; I.2.8, I.4.8) | **none** — the visitor does not enter tokens; `cfg.rs:2945` counts them as uses | refused with R13 | **T-only** → M owes (with R13) |
@@ -3265,7 +3291,7 @@ refuse a well-formed coroutine; *under* = may admit an ill-formed one; *exact* =
 | `check_nested_loop_shape` clauses 1–2 (`shape.rs`) | S3: a tick-free nested `loop`/`while` | exact (syntactic) | — |
 | `ends_at_clock_boundary` (clause 3) | D-10's spelling (I.8.2(b)) | exact — it is the definition of the spelling | — |
 | `infer_registers` (`cfg.rs:394-415`) | I.7.1: live at a `tick` | **over** by the head clause (8 wires in 7 modules, I.7.5) and by the fold's added local; **under** by the fold's missed local (a local assigned before a ticking `for` and read inside it after its tick); the poison run that decides I.0.5(a) → III.1 (D-20: P2, P3) | I.7.5, I.7.7 |
-| `check_register_initializers` / `is_constant_expr` (`init.rs`, `cfg.rs:3519-3550`) | I.14's constants (R11; D-19: I.14.4 — the evaluators' directions) | **over** by construction: a constant the syntactic test does not recognise (an associated `const`, a `const fn` call, a const generic as a value) is refused; codegen's evaluator (`chir_lower::lower_register_init`) is a second over-approximation, reported as a lowering error, never a dropped value | `init.rs` header; `register_initializer_corpus.rs` |
+| R11: rustc's `const { }` in the macro; `check_register_initializers` + `check_register_initializer_calls_in` and the fold in the transpiler (`init.rs`, D-21 A3) | I.14's constants (R11; D-19: I.14.4) | **exact** in the macro (rustc); in the transpiler **over** only where its fold's grammar is narrower than rustc's — a `const` method call (`K.wrapping_add(1)`), a tuple-struct ctor, a `static` — each reported as a lowering error, never a dropped value; corpus 0 each | `init.rs` header; `register_init_parity.rs`; `register_initializer_corpus.rs` |
 | `check_admissible` (`lib.rs:824-880`) | I.14's type set (R16; D-19: I.14.1) | **under** by design: unannotated `let`s and array lengths are not checked; calibrated never to over-reject (`admissible_calibration.rs`: admissible Err ⟹ transpile Err) | `tuple_local` (D-12 §0 (v)) |
 | `check_definite_assignment` (`cfg.rs:2514`) | D2: every path writes every output | **under**: a folded loop is taken to write every port; a port never written is not flagged (`TODO:1366`) | `comb_definite_assignment_parity.rs` |
 | `check_no_param_shadowing`, `check_no_clock_construction`, the idiom visitor, `find_unprotectable_in_uses` | S0 productions, R17, D3, R19 | exact (syntactic) on what they name; R19's visitor does not enter macro tokens (R13/R14 close that) | — |
@@ -3358,7 +3384,7 @@ decided here (D-13 A2).
 | 2 | `check_reachability` | II.1 R2 / R3 | R3 over-refuses (`livelock_a`/`livelock_b`) and under-admits the literal-empty `for` — Phase C (II.1.4, II.2.2) |
 | 3 | `check_nested_loop_shape` | clauses 1–2 → II.1 R4; clause 3 → II.2 D1; **clause 4 → II.3 row (b)** | clause 4 measured in D-13 §0 (ii) |
 | 4 | `check_awaits` | II.1 R1 | |
-| 5 | `check_register_initializers` | II.1 R11 | the codegen evaluator's residue is row (d) |
+| 5 | `check_register_initializers` | II.1 R11 | row (d) closed (D-21: rustc judges in the macro; the transpiler's fold covers I.14.4) |
 | 6 | `check_memory_staging` | I.10 (deferred) | its principle is I.10's to state (D-16: I.10.4 — (c) design, (d) one spelling, both II.2; (a) and (b) retired as lints) |
 | 7 | `memory_result_drives_plain_out` | **retired — vacuous** (D-13 A2) | its predicate requires ≥ 2 comb phases **and** a plain-`Out` write that observes a memory result (`cfg.rs`, `copper-analysis/src/lib.rs:537` in the transpiler): a sequential module has no plain `Out` (D-8, S5), and a `combinational` module has no phase and cannot observe a memory — I.2.7 excludes staging from the tick-free fragment and `check_memory_staging` (d) refuses an observe every staging reaches tick-free. Nothing survives for any mode; I.10 may re-derive a rule of its own if a memory ever reaches a `combinational` module (D-16: I.10.6 — none does; OUTSIDE). Its ui/fail case, its `cfg.rs` tests and the `vlir_lower::reject_memory_driven_comb_outputs` RULE entry of `phase_sensitive_checks.rs` go with it in Phase C |
 | 8 | `multi_write_collapse` | retired (II.2.1 D4) | |
@@ -3416,7 +3442,7 @@ unless the row says otherwise.
 | (a) | a nested `continue` | I.8.3 (D-10 A2-i): a zero-time return to the nested loop's head, in the same resumption | 2026-11-05 | `control_extract.rs:1777-1783` (the rotated head holds `C ; W`, so re-entering it would run `C`) | lower as the loop's entry copy `W ; pc = head` — the statements `lower_into` already emits for entering the loop (`:1278-1281`) | REFUSED-one (the transpiler; the macro admits, D-10 probe) |
 | (b) | a nested loop whose ticks lie only inside `if`/`match` arms | I.8.2: its tick sites are suspension sites like any other; the simulator runs it (measured: `b1`, `b2`) | 2026-11-05 | `copper-analysis/src/shape.rs:154-162` (`check_nested_loop_shape` clause 4, both front-ends, one message) gating off the lowering arm `control_extract.rs:1290-1300` at `unflattenable_in_expr` `:1804` | **measured on the gated arm** (D-13 §0 (ii), the clause and the gate turned off in a scratchpad copy of the toolchain): the arm **agrees** on the wait shape `loop { if c { tick } else { break } }` (`b1`, 48/48) and **diverges** on `loop { if c { n += 1; tick } else { n += 2; tick } if n[3] { break } }` (`b2`, 41 of 48 cycles) — each arm's tick allocates a state whose body is the post-tick continuation, and that continuation's fall-through to the nested head is a state transition costing a cycle, where the coroutine runs the continuation, the head test and the next arm's work in one resumption; `b1` agrees only because its continuation is empty. The fix: at every `AfterTick` fall-through of an arms-only loop, inline the head's lowered body (the clone the entry already uses) instead of `pc = head`, one clone per tick site; `b1` and `b2` as sweep fixtures when it lands. Until then the refusal stands with this measurement as its reason (D-13 A3) | REFUSED-both |
 | (c) | two element writes on an array register in one resumption (`arr[0] = a; arr[1] = b; tick`) | I.2.4's `arr[i] = e` row: two statements of one resumption, each an element assignment, the last write to an element winning (I.7.3) | 2026-11-05 | `chir_lower.rs:3467-3481`: a `[T; N]` local with an inferable element width > 1 that the inference calls a register lowers as an internal memory with **one** write port (`:1721-1745`), and a second element write in the same cycle is refused ("array register `arr` is written twice in one cycle; it has ONE write port"); one write agrees (`c_arr1`) | a second write port, or a priority mux of the cycle's element writes onto one port (last write wins); note the classification keys on the element's *inferable* width — `[Bits::zero(); 4]` with no turbofish is a packed vector and is refused as a latch by `check_no_latches`, a message that names the wrong thing | REFUSED-one (the macro admits: rustc runs both writes) |
-| (d) | a pre-loop constant initializer the evaluator cannot fold: a `const` whose body is not a literal (`const START: u8 = 1 + 2`), an associated const, a const generic used as a value, a constant free function | I.7.4(a), I.9.2: read once as a constant of I.14; `check_register_initializers` admits it (`is_constant_expr`: a SCREAMING_CASE identifier, a multi-segment path) | 2026-11-05 | `chir_lower.rs:1158-1198` (`lower_register_init`, `fold_const_init`: "register `n` has no power-on value the emitted SystemVerilog can state: its initializer names `const START`, whose value `1 + 2` is not an integer or boolean literal") | a constant evaluator over I.14's constant grammar — `ItemConst` bodies, associated consts, const generics, const fns — once I.14 states that grammar (D-19: I.14.4 — stated: Rust's constants, one evaluator for both front-ends and the interpreter; II.2.2 records the two over-approximations) | REFUSED-one (the macro admits) |
+| (d) | a pre-loop constant initializer the evaluator cannot fold: a `const` whose body is not a literal (`const START: u8 = 1 + 2`), an associated const, a const generic used as a value, a constant free function | I.7.4(a), I.9.2: read once as a constant of I.14; `check_register_initializers` admits it (`is_constant_expr`: a SCREAMING_CASE identifier, a multi-segment path) | 2026-11-05 | `chir_lower.rs:1158-1198` (`lower_register_init`, `fold_const_init`: "register `n` has no power-on value the emitted SystemVerilog can state: its initializer names `const START`, whose value `1 + 2` is not an integer or boolean literal") | a constant evaluator over I.14's constant grammar — `ItemConst` bodies, associated consts, const generics, const fns — once I.14 states that grammar (D-19: I.14.4 — stated: Rust's constants, one evaluator for both front-ends and the interpreter; II.2.2 records the two over-approximations) | **CLOSED** (D-21, 2026-11-07): the fold runs `ConstEnv` (Phase C step 5) — a non-literal `const` body, an associated const, a `const fn`, a const generic (stated as the parameter) — and since D-21 A3 the single-segment `f(c)`, refused by both until then, is admitted by both (rustc in the macro); swept: `tests/fixtures/const_eval_dut.rs`, `tests/fixtures/const_init_dut.rs` |
 | (e) | a `Bits` method outside the transpiler's passthrough set — `and_reduce`, `or_reduce`, `xor_reduce`, `nand_reduce`, `nor_reduce`, `xnor_reduce`, `concat`, `part_select`, `replicate`, `sign_extend`, `zero_extend`, `truncate`, `shift_left`, `shift_right`, `get`, `set`, `mux`, `with_lsb`, `with_msb`, `is_valid`, `lt_logic`, `gt_logic`, `le_logic`, `ge_logic`, `as_array` (the simulator's `copper-core/src/types.rs:149-508`); and, refused by name, `saturating_add`, `saturating_sub`, `checked_add`, `checked_sub` | I.2.4's `Bits` methods row: a pure expression of I.14, each method's meaning pending I.14 (D-19: I.14.3(d) — every meaning stated; `checked_*` OUTSIDE, `saturating_*` IN; the row owes `eq_logic`, `ne_logic`, `as_array_mut`, `from_array`, `from_slice`, `From`, `all_ones`, I.14.8) | 2026-11-05 | `chir_lower.rs:4842-4937` (`lower_method_call`: passthroughs `read`, `as_bool`, `as_u8`…`as_u128`, `as_usize`, `as_bits`, `lock`, `unwrap`, `clone`; lowered `arithmetic_shift_right`, `wrapping_add`/`sub`/`mul`, the memory `data`/`is_ready`; `:4922` the named four; `:4934` "method `…` is not supported in hardware expressions" for the rest — measured on `or_reduce`, `concat`) | one lowering per method as I.14 gives it a meaning (a reduction → `|x`/`&x`/`^x`, `concat` → `{a, b}`, `part_select` → a slice, the extensions → width casts, …); the checked/saturating four are I.14's to admit with a meaning or to refuse as a shape (a maybe-value, I.2.5(a)) | REFUSED-one, one ledger line per method (III.3) |
 | (f1) | a tick-bearing counted `for` over a range empty only at run time | I.8.4(b) (D-10 A4-i): zero iterations, zero time | 2026-11-05 | `control_extract.rs:411-449` (the hoisted tick is taken after the first exit test breaks: one extra cycle per zero-count pass) | guard the hoisted tick on the counter having advanced (`c != a`, extending the author's-`break` guard `:435-449`), or lower I.8.5's kernel form through the rotation of I.8.2; D-10's probe (ii) as the fixture | ADMITTED-AND-DIVERGENT |
 | (f2) | pre-loop expression statements, extraction route | I.9.3 (D-11 A): statements of the first resumption, executed once | 2026-11-05 | `control_extract.rs:532-549` (moved into state 0 and re-run at every return to it) | the entry of I.9.2 — an entry state or a started carrier, the form Phase C measures; D-11's probe (i) as the fixture | ADMITTED-AND-DIVERGENT |
