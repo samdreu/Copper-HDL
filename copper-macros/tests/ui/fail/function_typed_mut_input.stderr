@@ -1,4 +1,4 @@
-error: hardware function parameters must be Clock<D>, In<T>, Out<T>, RegOut<T>, or Memory<T, R, W, D, RL, WL> (SPEC II.1 S0, R20; I.2.2)
+error: hardware function parameters must be Clock<D>, In<T, D>, Out<T, D>, RegOut<T, D>, or Memory<T, R, W, D, RL, WL> (SPEC II.1 S0, R20; I.2.2)
   --> tests/ui/fail/function_typed_mut_input.rs:10:46
    |
 10 | async fn counter(clk: Clock<MainClk>, input: u8, out: RegOut<u8, MainClk>) {

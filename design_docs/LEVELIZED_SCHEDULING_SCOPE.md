@@ -165,6 +165,18 @@ and because a convergent SCC is iterated rather than rejected (below), a Moore d
    `non_convergent_combinational_loop_is_detected`. `comb_cycles()` is detection, not rejection —
    nothing calls it to refuse a design.
 
+   > **Reversed (D-14, SPEC §I.11.4 / §I.13.2; Phase C step 10, 2026-11-07,
+   > `review/MEASUREMENTS.md` §P.3).** A combinational cycle is now OUTSIDE the language and
+   > is **refused at spawn** under both schedulers: `HardwareExecutor::refuse_comb_cycle`
+   > computes this section's SCC plan and panics at the spawn that closes a multi-task
+   > component, naming its modules. `iterate_scc` is deleted, the levelized settle's
+   > multi-task branch is `unreachable!`, and a convergent latch is refused like an
+   > oscillating one. The tests named above became refusal pins
+   > (`simulator_corner_cases.rs::non_convergent_combinational_loop_is_refused_at_spawn`,
+   > `levelized_differential.rs::convergent_comb_loop_is_refused_at_spawn_by_both_schedulers`);
+   > the fixpoint oracle keeps its run-time oscillation guard only for a cycle through reads
+   > the testbench does not declare. The text above is the 2026-08-03 design record.
+
 ## Validation strategy
 
 Anchored to the existing guardrails, which is exactly why they were built (G3): **frozen golden

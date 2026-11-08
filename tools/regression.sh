@@ -64,6 +64,11 @@
 #        evaluated every corpus const item, pre-loop initializer, counted-`for` bound
 #        and index both ways (initializers also against the transpiler's stated
 #        power-on value), 0 DISAGREE; its counts are printed
+#   G-K  the CONFORMANCE LEDGER (SPEC §III.3, tests/conformance_ledger.rs): every
+#        clause, rule and II.3 row has a CLOSED line naming fixtures that exist, or
+#        an OPEN line with an owner; and every CLOSED line's fixture RAN AND PASSED in
+#        this run — a swept module's `_differential` and `_reference_leg` cases, a
+#        named test's `ok` in its own binary, an example's PASS; its counts are printed
 #
 # and it prints the `#[ignore]`d tests every run, because a skipped check that prints
 # nothing is indistinguishable from a passing one.
@@ -237,8 +242,12 @@ if [ "$RUN_TEST" -eq 1 ]; then
   rm -f "$CONST_REPORT"
   REFLEG_REPORT="$TMP/ref_leg.txt"
   rm -f "$REFLEG_REPORT"
+  # G-K's report (tests/conformance_ledger.rs writes it on a pass).
+  LEDGER_REPORT="$TMP/conformance_ledger.txt"
+  rm -f "$LEDGER_REPORT"
   COPPER_VERDICT_LEDGER="$LEDGER" COPPER_PROJECTION_REPORT="$PROJ_REPORT" COPPER_CONST_EVAL_REPORT="$CONST_REPORT" \
-    COPPER_REF_LEG_REPORT="$REFLEG_REPORT" cargo test --workspace > "$TMP/test.log" 2>&1
+    COPPER_REF_LEG_REPORT="$REFLEG_REPORT" COPPER_LEDGER_REPORT="$LEDGER_REPORT" \
+    cargo test --workspace > "$TMP/test.log" 2>&1
   TEST_RC=$?
 
   grep -E "^test result:" "$TMP/test.log" | awk '
@@ -314,6 +323,44 @@ if [ "$RUN_TEST" -eq 1 ]; then
   [ -n "$CONST_LINE" ] || fail "G-J: the constant-evaluator report has no coverage line"
   echo "$CONST_LINE" | grep -q " 0 DISAGREE$" || fail "G-J: the constant evaluators disagree: $CONST_LINE"
   echo "  G-J ok: constant evaluators — $CONST_LINE"
+
+  # G-K — the CONFORMANCE LEDGER (SPEC §III.3). The test checks statically that every
+  # clause has a line and every CLOSED line's fixture exists and is swept; what it
+  # cannot see is that the fixture ran and passed in THIS run, so it writes one
+  # REQUIRE line per fixture and each is found here, in the run's own log. A test is
+  # matched inside the section of its own binary (`Running tests/<stem>.rs`), so a
+  # same-named test in another file cannot stand in for it. Examples are checked
+  # after step 4, against their PASS status.
+  grep -q "^test the_conformance_ledger_names_live_fixtures \.\.\. ok" "$TMP/test.log" \
+    || fail "G-K: the conformance-ledger test (tests/conformance_ledger.rs) did not run or did not pass"
+  [ -s "$LEDGER_REPORT" ] || fail "G-K: the conformance-ledger test wrote no report"
+  LEDGER_LINE=$(grep -h "^conformance ledger:" "$LEDGER_REPORT" | tail -1 | sed 's/^conformance ledger: //')
+  [ -n "$LEDGER_LINE" ] || fail "G-K: the conformance-ledger report has no summary line"
+  # One pass over the log: "<binary stem> <test name>" for every `ok` test.
+  awk '/^ *Running /{ f=$2; sub(/.*\//, "", f); sub(/\.rs$/, "", f) }
+       /^test .* \.\.\. ok$/ { n=$2; sub(/.*::/, "", n); print f " " n; print f " " $2 }' \
+    "$TMP/test.log" | sort -u > "$TMP/ok_tests.txt"
+  GK_MISSING=""; GK_N=0; GK_EXAMPLES=""
+  while read -r _ kind a b; do
+    case "$kind" in
+      sweep)
+        GK_N=$((GK_N + 1))
+        grep -qx "corpus_generated ${a}_differential" "$TMP/ok_tests.txt" \
+          || GK_MISSING="$GK_MISSING ${a}_differential"
+        grep -qx "corpus_generated ${a}_reference_leg" "$TMP/ok_tests.txt" \
+          || GK_MISSING="$GK_MISSING ${a}_reference_leg" ;;
+      test)
+        GK_N=$((GK_N + 1))
+        stem=$(basename "$a" .rs)
+        grep -qx "$stem $b" "$TMP/ok_tests.txt" || GK_MISSING="$GK_MISSING $a::$b" ;;
+      example)
+        GK_EXAMPLES="$GK_EXAMPLES $a" ;;
+      *) fail "G-K: unknown REQUIRE kind '$kind' in the ledger report" ;;
+    esac
+  done < <(grep '^REQUIRE ' "$LEDGER_REPORT")
+  [ -z "$GK_MISSING" ] || { echo "  did not pass in this run:$GK_MISSING" >&2; fail "G-K: a CLOSED ledger line's fixture did not run and pass"; }
+  echo "  G-K ok: conformance ledger — $LEDGER_LINE"
+  echo "       $GK_N swept/test fixture checks passed in this run; examples checked after step 4:${GK_EXAMPLES:- none}"
 
   # G-F — the REFERENCE-INTERPRETER leg. copper-ref runs the kernel under SPEC
   # §I.0's one-resumption protocol with no rustc lowering and no executor, so it is
@@ -475,6 +522,14 @@ else
     NREG=$(registered_examples | wc -l | tr -d ' ')
     [ "$TOTAL" -eq "$NREG" ] || fail "G-B: $NREG registered but only $TOTAL ran"
     echo "  G-B ok: all $NREG registered examples ran"
+    # G-K's example fixtures: each CLOSED line's example passed in this run.
+    if [ "$RUN_TEST" -eq 1 ]; then
+      for ex in ${GK_EXAMPLES:-}; do
+        [ "$(cat "$TMP/ex/$ex.status" 2>/dev/null)" = PASS ] \
+          || fail "G-K: the ledger's example fixture '$ex' did not pass in this run"
+      done
+      echo "  G-K ok: the ledger's example fixtures passed:${GK_EXAMPLES:- none}"
+    fi
   fi
 fi
 

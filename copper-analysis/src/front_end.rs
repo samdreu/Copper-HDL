@@ -705,7 +705,7 @@ pub fn check_header(input_fn: &ItemFn, hardware_mode: HardwareMode) -> Result<()
         if !matches!(&**ty, Type::Tuple(t) if t.elems.is_empty()) {
             return Err(Error::new_spanned(
                 &input_fn.sig.output,
-                "hardware functions must not have a return value — outputs go through Out<T> parameters (SPEC II.1 S0, R20; I.2.2)",
+                "hardware functions must not have a return value — outputs go through Out<T, D> or RegOut<T, D> parameters (SPEC II.1 S0, R20; I.2.2)",
             ));
         }
     }
@@ -761,8 +761,8 @@ pub fn check_header(input_fn: &ItemFn, hardware_mode: HardwareMode) -> Result<()
                     _ => {
                         return Err(Error::new_spanned(
                             &pat_ty.ty,
-                            "hardware function parameters must be Clock<D>, In<T>, Out<T>, \
-                             RegOut<T>, or Memory<T, R, W, D, RL, WL> (SPEC II.1 S0, R20; I.2.2)",
+                            "hardware function parameters must be Clock<D>, In<T, D>, Out<T, D>, \
+                             RegOut<T, D>, or Memory<T, R, W, D, RL, WL> (SPEC II.1 S0, R20; I.2.2)",
                         ));
                     }
                 }
@@ -801,7 +801,7 @@ pub fn check_header(input_fn: &ItemFn, hardware_mode: HardwareMode) -> Result<()
     if !has_out {
         return Err(Error::new_spanned(
             &input_fn.sig,
-            "hardware functions must have at least one Out<T> parameter (SPEC II.1 S0, R20; I.2.2)",
+            "hardware functions must have at least one Out<T, D> or RegOut<T, D> parameter (SPEC II.1 S0, R20; I.2.2)",
         ));
     }
 

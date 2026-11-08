@@ -321,8 +321,8 @@ impl<T, const R: usize, const W: usize, D: ClockDomain, const READ_LAT: usize, c
 {
     /// Set WriteFirst read-during-write mode. Returns self for chaining.
     ///
-    /// Called by the `#[hardware]` macro when it infers WriteFirst ordering from
-    /// the position of reads and writes in the loop body.
+    /// The mode is the author's, written at construction (`Memory::new(..).write_first()`);
+    /// nothing infers it from the position of reads and writes (SPEC I.10.2, D-16 A).
     pub fn write_first(self) -> Self {
         self.shared.write_first_mode.store(true, Ordering::Relaxed);
         self

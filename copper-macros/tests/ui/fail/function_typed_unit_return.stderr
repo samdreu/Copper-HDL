@@ -1,4 +1,4 @@
-error: hardware functions must not have a return value — outputs go through Out<T> parameters (SPEC II.1 S0, R20; I.2.2)
+error: hardware functions must not have a return value — outputs go through Out<T, D> or RegOut<T, D> parameters (SPEC II.1 S0, R20; I.2.2)
   --> tests/ui/fail/function_typed_unit_return.rs:10:89
    |
 10 | async fn counter(clk: Clock<MainClk>, input: In<u8, MainClk>, out: RegOut<u8, MainClk>) -> u8 {

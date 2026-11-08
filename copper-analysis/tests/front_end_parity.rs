@@ -239,6 +239,7 @@ fn the_step_8_data_rules_refuse_their_witnesses_and_admit_their_twins() {
     let parse = |s: &str| syn::parse_str::<ItemFn>(s).expect("witness parses");
     let refused = [
         ("checked_add", "async fn m(clk: Clock<C>, a: In<u8, C>, q: RegOut<u8, C>) { loop { q.write(a.read().checked_add(1).unwrap_or(0)); clk.tick().await; } }"),
+        ("checked_sub", "async fn m(clk: Clock<C>, a: In<u8, C>, q: RegOut<u8, C>) { loop { q.write(a.read().checked_sub(1).unwrap_or(0)); clk.tick().await; } }"),
         ("is_valid", "async fn m(clk: Clock<C>, a: In<Bits<8>, C>, q: RegOut<Logic, C>) { loop { q.write(if a.read().is_valid() { Logic::One } else { Logic::Zero }); clk.tick().await; } }"),
         ("read_port index", "async fn m(clk: Clock<C>, q: RegOut<Bits<8>, C>) { let mem = Memory::<Bits<8>, 1, 1, C, 1, 1>::new(clk.clone(), 4); loop { mem.read_port::<1>().read(0); q.write(mem.read_port::<0>().data()); clk.tick().await; } }"),
         ("write_port index", "async fn m(clk: Clock<C>, mem: Memory<Bits<8>, 2, 1, C, 1, 1>) { loop { mem.write_port::<1>().write(0, Bits::zero()); clk.tick().await; } }"),

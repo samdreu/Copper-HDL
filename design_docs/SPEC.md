@@ -1628,11 +1628,15 @@ relation, as every run-time failure is.
 (c) **The edge step** (I.0.2 (2), I.1.2: "every memory advances"). At edge N+1, in the
 instance's mode order (I.10.2): the **read step** shifts every `P_k` one stage toward its
 output and captures `A[s_k]` into stage 0 if `s_k` is set, else nothing, and clears `s_k`; the
-**write step** commits the oldest stage of every `Q_j` — `A[a] := e` — in ascending port
-order, so that of two ports committing one address the **higher index wins** (decided; sim ≡
+**write step** takes `w_j` into stage 0, shifting `Q_j`, and commits the stage that reaches
+`M-1` — `A[a] := e` — in ascending port order, so that of two ports committing one address the
+**higher index wins** (decided; sim ≡
 SV on `ram_wf_priority`, the rule at four ports in `tests/memory_multiport_arbitration.rs`,
-simulator only; no anchor), then shifts `Q_j`
-and takes `w_j` into stage 0. Hence a word staged in the resumption ending at edge N+1
+simulator only; no anchor). (Phase C step 11, wording only — `review/MEASUREMENTS.md` §O.7
+item 1: the earlier text committed the oldest stage *before* shifting `w_j` in, which read
+literally lands a write at edge N+M+1 and contradicts the consequence below; the interpreter's
+mutation of that literal order disagrees with the simulator on 8 RAMs, §O.1. The meaning — a
+write in `A` from edge N+M, so at M = 1 at the very edge that consumes it — is unchanged.) Hence a word staged in the resumption ending at edge N+1
 reaches the output stage at edge N+L and is observable in the resumption ending at edge
 N+L+1, and — if the port is not restaged — in no later one: with nothing behind it the
 output stage is empty one edge on ("the address must be re-presented every cycle", CODE
@@ -1856,6 +1860,23 @@ macro's refusal, and the mode owed to the parameter type (II.3.7, I.13; D-18: I.
 `data_comb` / `data_reg` binding reduced to the delivered register when the trailing fold goes
 (I.6.9, I.10.1(d)); (9) rule 7's code, ui case, `cfg.rs` tests and the vlir RULE pin deleted
 (II.3.2).
+(Phase C step 11, 2026-11-07, read off the tree at `924793e`; the line numbers above are the
+2026-11-05 snapshot and are kept as history.) **Done:** (1) the interpreter's memory model (step 9,
+`review/MEASUREMENTS.md` §O.1 — 18 memory modules on three legs; `Deferred` narrowed to the
+parameter, `copper-ref/src/module.rs:223-225`, and a `combinational` memory refused, `:195-197`);
+(8) the binding is the delivered register only (`data_reg`, step 4, §H.5 item 5); (9) rule 7's code,
+ui case and pins deleted (step 3, §G.4). **Open (III.3's ledger lines I.10.1, I.10.4–I.10.6):**
+(2) rule 6's clauses (a) and (b) still refuse (`check_memory_staging`, `cfg.rs:491`, its "accessed 2
+times in one cycle" arm) and (c) does not count `s_pre`'s stagings; (3) no I.10.6 header rule in
+either front-end; (4) `ReadMode` is still a field (`memory.rs:13`, `:38`, `:215`) and the
+simulator's type checks no `L ≥ 1`; (5) the inference comment at `memory.rs:323-325` stands;
+(6) no memory pre-loop-staging fixture (the entry itself landed, §J.1); (7) `WRITE_LAT ≠ 1` on a
+received memory refused by the transpiler only. Moved since the snapshot: `check_memory_staging`
+`cfg.rs:491-650`, `mem_accesses` :1644, `memory_locals` :1721; the macro's call
+`copper-macros/src/lib.rs:295`, the parameter allowlist and the CDC arm now
+`copper-analysis/src/front_end.rs` (`check_cdc` :188); `parse_memory_decl` `chir_lower.rs:6640`,
+`received_memory_decls` :1564; `lower_mem_access` `vlir_lower.rs:611`, `forward_ff_mem_index`
+:2361; `reject_memory_driven_comb_outputs` and `ui/fail/memory_result_drives_plain_out` gone.
 
 **I.10.8 Carried NOT-YET list.**
 - `Memory` in the CDC rule, and a memory crossing domains (a dual-clock RAM has no form) → I.12. (D-17: I.12.4(b) — closed; the dual-clock memory is a NOT-YET row of I.13. D-18: I.13.8 — carried with its direction.)
@@ -2698,6 +2719,19 @@ against the hand wiring — dated here, not owed; (8) `LEVELIZED_SCHEDULING_SCOP
 and (4) discharged in Phase C step 10 — the shape rules and their ui cases (`s6a` vacuous with `net`),
 `net::<T, D>()` and the one structural module rewritten to it, the cycle refusal at spawn and over the
 parent, §P.3–§P.4; (3) not done, §P.4; (8) the coordinator's.)
+(Phase C step 11, 2026-11-07, read off `924793e`; the map's line numbers above are the 2026-11-05
+snapshot, kept as history.) (5) is **realized** since steps 2–3 (`tick_clock::<D>`,
+`copper-sim/src/executor.rs:883`: the pre-edge settle resumes `D`'s coroutines once, the post-edge
+settle resumes none; `PreEdgeBarrier` gone, §F–§G). (8)'s `LEVELIZED_SCHEDULING_SCOPE.md` note is
+**applied** (step 11: "Reversed (D-14 …)" under its phase 5). `iterate_scc` (`:588-632` above) is
+**deleted** (§P.3); the refusal is `refuse_comb_cycle` (`executor.rs:568`) over the same SCC plan
+(`compute_scc_plan` :761), and the transpiler's is `chir_lower::refuse_structural_comb_cycle`
+(:2417). The macro's structural arm (now `copper-macros/src/lib.rs:340`) rewrites `net::<T, D>()` to
+`net::<T, D, _>()` and wraps each instance in `copper_sim::__instance` (§P.4); the header checks are
+`front_end::check_header` (:688). **(3) is open** — `spawn_child` (`executor.rs:508`), `spawn_child!`
+(`copper-sim/src/lib.rs:69-75`) and `lower_hardware_call` (`chir_lower.rs:5850`) stand, neither
+front-end refuses a `#[hardware]` call in a behavioural body, and `tests/module_composition_hybrid.rs`
+still spawns children; its III.3 line is OPEN with a decision packet (§R). (6) is open (I.10.5's line).
 
 **I.13.8 Carried NOT-YET list.**
 - The **dual-clock memory** — a memory with one port in each of two domains — is a
@@ -3117,6 +3151,18 @@ refuses **0** corpus modules (D-12 §0 (ii)) except where a count is given, and 
 in the parity column was measured on a probe (D-12 §0 (v)). Decided (D-12 A, sub-clauses
 2a–2b): `check_admissible` is R16, a shape rule with a parity obligation; R5, R10 and R15 are
 refused now, in both front-ends, at a measured cost of 0 each.
+(Phase C step 11, 2026-11-07: the M and T cells are the `ea54d26` snapshot, kept as history; the
+macro file is 359 lines since step 10 moved its rules to `copper_analysis::front_end`. Where the
+rows' functions live at `924793e` — R1 `check_awaits` `copper-analysis/src/shape.rs:297` (M
+`copper-macros/src/lib.rs:261`, T `copper-codegen/src/lib.rs:433`); R2 `Cfg::check_reachability`
+`cfg.rs:752` via `copper-analysis/src/lib.rs:194` (M :242, T :426), the header's every-clock-ticked
+clause `front_end::check_header` (:688); R3 `nested_loop_cfg` `cfg.rs:1358`, `may_exit_without_tick`
+:2192 and its all-paths walk `untick_seq` :2235 (`ticks_before_any_break` is gone), called as R2;
+R4 `check_nested_loop_shape` `shape.rs:37` (M :258, T :432); R11 `check_register_initializers`
+`init.rs:157` via `copper-analysis/src/lib.rs:131`, the call half `check_register_initializer_calls_in`
+:141 (T only, :458), `check_held_preloop_values` `init.rs:424` (M :287, T :453), and in the macro
+rustc's `const { }` (M :281); the shared list `front_end::check_front_end_rules` (:1600; M :221, T
+:419). Each row's state today is its ledger line in III.3.)
 
 | # | Rule | Clause | M | T | Parity |
 |---|---|---|---|---|---|
@@ -3127,8 +3173,8 @@ refused now, in both front-ends, at a measured cost of 0 each.
 | R5 | a tick-free `for` whose bound is not a constant of I.14 (D-19: I.14.4) | S3 (I.2.5(c), I.8.5) | **none** | **none** — emits `always_comb … for (…; _ < n; …)`, a loop with a run-time bound | both admit; **both owe** (D-12 A 2b) (D-22: **holds** — `front_end::check_tick_free_for_bounds`, a shared syntactic half, rustc's `const { }` in the macro, `ConstEnv` in the transpiler; ui `runtime_for_bound`; corpus 0; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
 | R6 | recursion through a helper `fn` | S3 (I.2.5(c)) | none (rustc admits non-`async` recursion) | the inliner (I.2.4), unmeasured | **unmeasured** → II-b (D-22: measured, M admits / T refuses — **the one named exception to II.1.3**, option (a): the macro holds the module's `ItemFn` only and cannot see a helper's body; the transpiler refuses when it inlines, `copper_analysis::front_end::RECURSIVE_HELPER_MESSAGE`, so no text is emitted for it, and a terminating recursion simulates as Rust runs it. Pins: `tests/recursive_helper_r6.rs` (simulated over all 256 inputs, refused with R6's message), ui/pass `recursive_helper_r6` with `front_end_parity_ui.rs`'s `NAMED_PARITY_EXCEPTION`, and `front_end_parity.rs::the_one_named_parity_exception_is_r6` — the tree's helper call graph, the witness the only module reaching a recursive helper; corpus 0) |
 | R7 | `break` of the module loop; `return` | S4 (I.2.5(d), I.8.1) | **none** — admitted; the simulator panics at run time | `control_extract.rs:1786`, `chir_lower.rs:3603`; "return is not supported" (`:3892`) | **T-only** → M owes (D-22: **holds** — `front_end::check_module_loop_exit`, one message; ui `module_loop_break`, `module_return`; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
-| R8 | a plain `Out` parameter on a `sequential` or `synchronizer` module | S5 (D-8) | none | none | both admit; D-8's Phase C rule; cost 88 (sweep) / 273 (all) — D-8's rewrites |
-| R9 | the flag `allow_pretick_alignment` | S0 (I.2.2) | none — parsed and honoured | none | both admit; Phase C; 3 (sweep) / 78 (all), the battery's |
+| R8 | a plain `Out` parameter on a `sequential` or `synchronizer` module | S5 (D-8) | none | none | both admit; D-8's Phase C rule; cost 88 (sweep) / 273 (all) — D-8's rewrites (Phase C step 11: **holds** since step 3 — `copper_analysis::check_no_plain_out` (`copper-analysis/src/lib.rs:94`), called by the macro and, through `check_clocked_outputs`, by the transpiler, one message naming R8; ui `plain_out_on_sequential`, `plain_out_on_synchronizer`; `review/MEASUREMENTS.md` §G.4) |
+| R9 | the flag `allow_pretick_alignment` | S0 (I.2.2) | none — parsed and honoured | none | both admit; Phase C; 3 (sweep) / 78 (all), the battery's (Phase C step 11: **holds** since step 3 — the flag is refused by `front_end::parse_hardware_args` in both front-ends, one message; ui `retired_pretick_opt_out`; `front_end_parity.rs::no_corpus_module_carries_the_retired_opt_out`) |
 | R10 | a second `Clock` parameter on a `sequential` module | S0 (I.2.2: exactly one) / S2 (a second resumption protocol with no meaning until I.12; D-17: I.12.5 confirms the refusal) | none — the CDC check is skipped (:947) | none — measured accepted | both admit; **both owe** (D-12 A 2b); cost 0 (D-22: **holds** — `front_end::check_one_clock`; ui `two_clocks_sequential`; corpus 0; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
 | R11 | a pre-loop register initializer that is not a constant (registers only, D-21 C2); and (D-21 H1) a held pre-loop value — a pre-loop `let` the loop never reassigns, read in the loop, whose initializer reads an input | S3 (I.7.4(c), I.9.2; `s_pre ::= let v = c` for a register) | rustc: the initializer in a `const { }` block (D-21 A3); before it the shared `check_register_initializers` (`init.rs`): a run-time read, R11's message | the same function, then `check_register_initializer_calls_in` (a non-`const` callee) and the fold | holds — ui `register_init_reads_input` (R11's message), `register_init_not_constant`, `register_init_non_const_ctor` (E0015), `register_init_rust_constants_ok`; `copper-codegen/tests/register_init_parity.rs` transpiles those cases (D-21); the held value: `check_held_preloop_values` in both front-ends, ui `held_preloop_read`, `front_end_parity::no_corpus_module_holds_a_preloop_read` (corpus 0) |
 | R12 | a labelled or valued `break` | S0 (I.2.3; D-10 A5, I.8.3) | **none** | `control_extract.rs:1792`, `:1797` | **T-only** → M owes (D-22: **holds** — `front_end::check_break_forms`; ui `labelled_break`, `valued_break`; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
@@ -3140,7 +3186,7 @@ refused now, in both front-ends, at a measured cost of 0 each.
 | R18 | a `let` that shadows a port parameter | S0 (I.2.3's name classes) | `check_no_param_shadowing` (:937, :383) | **accepts** (measured) | **M-only** → T owes (D-22: **holds** — `front_end::check_no_param_shadowing`; ui `param_shadowing`; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
 | R19 | an `In` handle used other than as the receiver of `.read()` (cloned, rebound, passed on) | S0 (I.2.3) | `find_unprotectable_in_uses` (:1365, via `inject_synced_reads`, which D-8 removes) | unmeasured | M; kept as a check of its own in Phase C; → II-b to measure T (D-22: **holds** — `front_end::check_in_param_uses`, its message no longer citing the retired injection; ui `sequential_unprotectable_read`; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
 | R20 | the header: `async`, no return type, named parameters, port types only, at least one `Clock`, at least one output, every `Clock` ticked, one top-level `loop`, last and only | S0 (I.2.2) | `validate_hardware_fn` (:1403-1576) | `has_hardware_signature` (`lib.rs:596-610`), `chir_lower.rs:1978` (the loop) | partial; T owes the same messages (D-22: **holds** — `front_end::check_header` with R9's flag parsed by one `parse_hardware_args`, and the port-domain clause `check_port_domains` (I.12.6 (4)); every `function_typed_*` case refused by both with the macro's message; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
-| R21 | a `tick` before the loop | S0 (I.2.2: `s_pre` tick-free; I.9.3) | none explicit (R2 sees it as a pre-loop statement) | unmeasured | corpus 0 → II-b to measure |
+| R21 | a `tick` before the loop | S0 (I.2.2: `s_pre` tick-free; I.9.3) | none explicit (R2 sees it as a pre-loop statement) | unmeasured | corpus 0 → II-b to measure (Phase C step 11: **holds** since step 5 — `copper_analysis::check_no_preloop_tick` (`shape.rs:212`), both front-ends, one message; ui `preloop_tick`; `unsupported_constructs.rs::a_tick_before_the_module_loop_is_refused_by_r21_on_both_routes`; II.3 (f6) closed with it; `review/MEASUREMENTS.md` §J.12) |
 | R22 | a second driver of a `RegOut` | S5 (I.6.8) | the type system (`RegOut` is not `Clone`) | the type system | holds by construction |
 
 Rows that are **not** shape rules, placed for II-b: the hex literal in a `from_lit` turbofish
@@ -3340,7 +3386,7 @@ refuse a well-formed coroutine; *under* = may admit an ill-formed one; *exact* =
 | `may_exit_without_tick` / `ticks_before_any_break` (`cfg.rs:3594-3640`), the fold's zero-time edge (`:2432`) | "the nested loop can be left with no `tick` behind it" (I.8.4(a)) | **both ways**. *Over*: the walk returns "exitable" at the first statement that contains a tick without being one (`:3634-3636`), whatever its arms do — `livelock_a` (an `if` with a tick, no `break`, the bare tick last) and `livelock_b` (an `if`/`else` whose both arms tick, then the `break`, then the tick) are refused by both front-ends though every path ticks (measured 2026-11-05; a `continue`-carrying wait of the same shape too). *Under*: a `for` over a literal-empty range is counted as a boundary (`:3594-3598`; RULES open 5, I.8.4(b)), so an enclosing loop whose only tick it holds passes and livelocks the simulator. | D-12 §0 (iii); Phase C: an all-paths walk of each arm, literal ranges evaluated (D-22: **narrowed both ways** in Phase C step 10 — an all-paths walk (`cfg.rs::untick_seq`): a `loop` is left untick'd only through a `break` reached before any tick, a `for` also through an untick'd fall-through or a literal-empty range. Still **over** by path-insensitivity (complementary `if`s) and **under** at a range empty only through a constant (`0..EMPTY`). Witnesses: ui/pass `livelock_a`, `livelock_b`; ui/fail `literal_empty_for_boundary`; the swept fixture `all_paths_boundary_dut.rs`; `static_predicate_directions.rs`; §P.5) |
 | `check_nested_loop_shape` clauses 1–2 (`shape.rs`) | S3: a tick-free nested `loop`/`while` | exact (syntactic) | — |
 | `ends_at_clock_boundary` (clause 3) | D-10's spelling (I.8.2(b)) | exact — it is the definition of the spelling | — |
-| `infer_registers` (`cfg.rs:394-415`) | I.7.1: live at a `tick` | **over** by the head clause (8 wires in 7 modules, I.7.5) and by the fold's added local; **under** by the fold's missed local (a local assigned before a ticking `for` and read inside it after its tick); the poison run that decides I.0.5(a) → III.1 (D-20: P2, P3) | I.7.5, I.7.7 |
+| `infer_registers` (`cfg.rs:394-415`) | I.7.1: live at a `tick` | **over** by the head clause (8 wires in 7 modules, I.7.5) and by the fold's added local; **under** by the fold's missed local (a local assigned before a ticking `for` and read inside it after its tick); the poison run that decides I.0.5(a) → III.1 (D-20: P2, P3) (Phase C step 11: since step 6 the head clause is deleted and the nested loop's CFG descended, so both fold defects are gone — **over** by path-insensitivity only, never under; `register_reconciliation.rs`, the poison run, `review/MEASUREMENTS.md` §K.1, §K.3, §P.5) | I.7.5, I.7.7 |
 | R11: rustc's `const { }` in the macro; `check_register_initializers` + `check_register_initializer_calls_in` and the fold in the transpiler (`init.rs`, D-21 A3) | I.14's constants (R11; D-19: I.14.4) | **exact** in the macro (rustc); in the transpiler **over** only where its fold's grammar is narrower than rustc's — a `const` method call (`K.wrapping_add(1)`), a tuple-struct ctor, a `static` — each reported as a lowering error, never a dropped value; corpus 0 each | `init.rs` header; `register_init_parity.rs`; `register_initializer_corpus.rs` |
 | `check_admissible` (`lib.rs:824-880`) | I.14's type set (R16; D-19: I.14.1) | **under** by design: unannotated `let`s and array lengths are not checked; calibrated never to over-reject (`admissible_calibration.rs`: admissible Err ⟹ transpile Err) | `tuple_local` (D-12 §0 (v)) |
 | `check_definite_assignment` (`cfg.rs:2514`) | D2: every path writes every output | **under**: a folded loop is taken to write every port; a port never written is not flagged (`TODO:1366`) | `comb_definite_assignment_parity.rs` (D-22: **narrowed** in Phase C step 10 — the combinational CFG expands its loops, and the never-written port is refused (D-14); still **over** by path-insensitivity. Witnesses: ui/fail `combinational_latch_in_for`, `combinational_never_written`; `static_predicate_directions.rs`; the cfg tests `comb_output_never_written_is_refused`, `comb_write_under_an_if_in_a_for_is_partial`; §P.5) |
@@ -3801,6 +3847,15 @@ A module outside a leg's coverage is excused only by a row with a sentence (`SKI
 ADMITTED-AND-DIVERGENT row of II.3.3 puts its shape outside the relation until its fix lands;
 its fixture joins the sweep then (II.3.7).
 
+(Phase C step 11, 2026-11-07 — the table's examples are the 2026-11-05 state, kept as the reading
+of each pattern.) **No instance of any pattern is live.** P12 holds (the one-resumption simulator,
+steps 2–3; `tests/reference_leg_measurements.rs::regout_trailing_single_tick_agrees_on_three_legs`
+asserts sim = SV = ref, so the `sim = SV ≠ ref` example is history, its `REF_SKIP` row deleted and
+`REF_SKIP` / `REF_SKIP_PATTERN` empty); P15 holds (step 5, the entry); every ADMITTED-AND-DIVERGENT
+row of II.3.3 is closed with its fixture swept (III.3); the excused class is empty (G-G's EXCUSED
+count is 0) and the pinned-disagreement count is 0. A disagreement found today is read by the table
+and fails G-G unless a `REF_SKIP` row with a sentence names its pattern and a pin measures it.
+
 **III.2.9 (i) Coverage: the stimulus policy.** Per swept clocked module, four seeded sequences
 of 200 cycles, plus a 32-cycle sequence from every initial input vector when the module has at
 most 4 input bits (the reset port excluded) or a fixed first-cycle pattern list otherwise; per
@@ -3875,4 +3930,259 @@ memory, combinational modules and designs; (6) the stale `REF_SKIP` sentences re
 language (III.2.3); whether to refuse them in the executor is Phase C's (I.1.6). The references of
 III.2.11 (the user's). The test-phase counts of G-C/G-D/G-F, to be read on the next full run.
 
-### III.3 Conformance ledger — TBD (Phase C)
+### III.3 Conformance ledger
+
+Decided: D-20 (2026-11-05), step (11) of its Phase C list, and the shape in II.3.7's first bullet
+(D-13). Written 2026-11-07 (Phase C step 11, `review/MEASUREMENTS.md` §R). Anchor: none of its own —
+a line records whether the code conforms to a clause, and the evidence it names is consistency
+(III.1.1) unless the line names an anchor. Decided by the shape: one line per normative clause of
+Parts I and II, per rule row of II.1.2, per derived rule of II.2.1, per row of II.3.3 (one per
+method for row (e)) and per retired rule (II.3.2 rules 7–15); each line names its fixture and the
+guard that runs it; a line is **CLOSED** only when its fixture passes under the sweep's full
+stimulus policy (III.2.9), otherwise **OPEN** with an owner and a reason. II.3.3 keeps every row
+with its date and status as recorded; this ledger is where a row is recorded as closed, and no
+history is deleted. Where a line's status needs a design decision rather than a measurement, the
+line is OPEN and its owner is "decision" (the packets are §R.6).
+
+In coroutine terms (D-7, D-8): every Part I clause says something about the coroutine or its trace;
+a CLOSED line says the three ways of computing that trace — rustc's lowering run by the executor,
+the emitted machine, the interpreter — agree on a module that exercises the clause, or that both
+front-ends refuse, with one message, a shape the clause puts outside.
+
+**III.3.1 The form of a line, and the check.** A line is a row `| id | clause | fixture | guard |
+status | owner / reason |`. The fixture cell holds backticked tokens: `sweep:<file>::<fn>` — a
+`#[hardware]` module of `tests/fixtures/` or `examples/` the sweep runs (its `_differential` and
+`_reference_leg` cases, every stimulus sequence of III.2.9); `ui:fail/<case>`, `ui:pass/<case>` — a
+`copper-macros` trybuild case, which `front_end_parity_ui.rs` also runs through the transpiler
+(the parity audits, "PA" below); `coreui:fail/<case>` — a `copper-core` trybuild case (rustc's
+refusal); `test:<file>::<fn>` — a named `#[test]`; `example:<name>` — a registered example
+binary; `gone:<fn>` — a retired rule's function, defined nowhere in the crates (never the only
+token of a CLOSED line). Guard abbreviations: **G-D/F/G** — the sweep's differential case (G-D),
+its reference leg (G-F) and the relation's verdict ledger (G-G); **G-C** — a test binary that
+ran; **PA** — `copper-analysis/tests/front_end_parity.rs` and
+`copper-codegen/tests/front_end_parity_ui.rs`; **G-I**, **G-J** as in CLAUDE.md; **G-B** — the
+example ran. **The check is G-K**: `tests/conformance_ledger.rs` reads this section and fails on a
+clause of Parts I–II, a II.1.2 rule, a II.2.1 rule, a II.3.3 row or method or a retired rule
+without exactly one line; on a line naming nothing of the SPEC; on a CLOSED line without a running
+fixture or a guard, or an OPEN one without an owner; and on any CLOSED token that does not resolve
+(a missing file or `fn`, a module the sweep emitted no case for or `SKIP`s, a trybuild case
+without its `.stderr`, a `#[test]` that is `#[ignore]`d, an unregistered example, a `gone:`
+function still defined). It writes one `REQUIRE` line per fixture to `COPPER_LEDGER_REPORT`, and
+`tools/regression.sh` finds each one's `... ok` in the same run's log (both cases of a swept
+module; an example's PASS), so a CLOSED line whose fixture did not run and pass in that run fails
+the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no line.
+
+**III.3.2 Part I.**
+
+| Line | Clause | Fixture | Guard | Status | Owner / reason |
+|---|---|---|---|---|---|
+| I.0.1 | the coroutine | `sweep:examples/sequential/pattern_detector_2.rs::det_010_awaits`, `test:copper-ref/tests/interp_smoke.rs::sync_2ff_one_job_is_two_flops`, `ui:fail/foreign_await` | G-D/F/G, G-C, PA | CLOSED | the body unchanged, one suspension kind (§G, §H.3) |
+| I.0.2 | the resumption protocol | `test:tests/two_clock_pins.rs::never_ticked_startup_one_resumption_agrees_on_all_three_legs`, `test:tests/cdc_synchronizer_anchor.rs::sync_2ff_observable_latency_is_one_destination_cycle` | G-C | CLOSED | one resumption per tick since step 3; the startup divergence closed (§F.2, §P.2) |
+| I.0.3 | the trace | `test:tests/sweep_sequence_restart.rs::every_sequence_starts_from_the_initial_state`, `sweep:tests/fixtures/preloop_entry_dut.rs::preloop_probe` | G-C, G-D/F/G | CLOSED | `obs_0` compared on all three legs since step 1 (§E.1) |
+| I.0.4 | the projection H(M) | `test:tests/projection_relation.rs::the_projection_relation_holds_on_the_corpus`, `test:tests/reference_leg_measurements.rs::pc_states_vs_tick_sites`, `sweep:tests/fixtures/control_extraction_dut.rs::branch_merge` | G-I, G-C, G-D/F/G | CLOSED | P1's relation built and checked per module (§L), many-to-many (III.1.3) |
+| I.0.5 | the register proposition | `test:tests/reference_leg_measurements.rs::poison_run_for_the_register_proposition`, `test:copper-codegen/tests/register_reconciliation.rs::corpus_realized_registers_are_inferred`, `test:tests/reference_leg_measurements.rs::future_size_bounds_the_register_storage` | G-C | CLOSED | P2 re-run clean, the head clause deleted (§K.1, §K.12) |
+| I.0.6 | the three admissibility principles | `test:copper-analysis/tests/front_end_parity.rs::every_corpus_module_passes_every_shared_rule_in_its_mode`, `test:copper-codegen/tests/front_end_parity_ui.rs::the_transpiler_refuses_every_shape_the_macro_refuses_with_the_same_message` | G-C, PA | CLOSED | every message names its clause (§P.1); the alignment rules retired (§G.4) |
+| I.1.1 | domains and edges | `test:tests/two_clock_pins.rs::interleavings_give_one_trace_per_domain`, `test:tests/cdc_synchronizer_anchor.rs::source_domain_ticks_do_not_advance_the_synchronizer` | G-C | CLOSED | `cycle::<D>()` per domain (§F) |
+| I.1.2 | instants | `test:tests/cdc_synchronizer_anchor.rs::sync_2ff_observable_latency_is_one_destination_cycle`, `test:copper-ref/tests/interp_smoke.rs::registered_passthrough_shows_this_cycles_input_next_observation` | G-C | CLOSED | the post-edge settle resumes no coroutine (§F) |
+| I.1.3 | state and wires | `test:tests/simulator_corner_cases.rs::acyclic_combinational_chain_converges_in_one_settle`, `test:copper-ref/tests/interp_design.rs::one_settle_evaluates_in_topological_order` | G-C | CLOSED | — |
+| I.1.4 | observation | `sweep:tests/fixtures/preloop_entry_dut.rs::preloop_linear`, `test:tests/sweep_sequence_restart.rs::every_sequence_starts_from_the_initial_state` | G-D/F/G, G-C | CLOSED | `obs_0` in the trace and compared (§E.1) |
+| I.1.5 | the environment | `test:tests/agreement_relation.rs::the_relation_testbench_never_compares_an_x`, `test:tests/sweep_sequence_restart.rs::every_sequence_starts_from_the_initial_state` | G-C | CLOSED | drive / tick / observe only; a mid-cycle drive and a settle outside a tick are outside the language, and refusing them in the executor is III.2.13's carried item, not this clause's |
+| I.2.1 | the object | `test:copper-codegen/tests/front_end_parity_ui.rs::the_transpiler_admits_every_shape_the_macro_admits`, `test:copper-analysis/tests/front_end_parity.rs::every_corpus_module_passes_every_shared_rule_in_its_mode` | G-C, PA | CLOSED | both front-ends hold one `ItemFn` and run one rule list (§P.1) |
+| I.2.2 | the module header | `ui:fail/plain_out_on_sequential`, `ui:fail/two_clocks_sequential`, `ui:fail/preloop_tick`, `ui:fail/missing_domain_port` | G-C, PA | CLOSED | R8, R10, R20, R21 and the port-domain clause in both front-ends (§G.4, §J.12, §P.1, §Q.1) |
+| I.2.3 | the kernel grammar | `ui:fail/held_preloop_read`, `sweep:tests/fixtures/preloop_wire_dut.rs::preloop_wire_read`, `test:copper-analysis/tests/front_end_parity.rs::no_corpus_module_holds_a_preloop_read` | G-C, PA, G-D/F/G | CLOSED | D-21 C2 and H1 (§N.2, §N.4); a pre-loop `const { }` block is not named in `s_pre`'s grammar (§L.5 item 6) — wording owed to I.2.3, no behaviour |
+| I.2.4 | the desugaring and the classification | `sweep:tests/fixtures/nested_continue_dut.rs::nested_continue`, `ui:fail/input_read_in_macro` | G-D/F/G, PA | OPEN | the front-ends (parity): a `continue` in a tick-bearing counted `for` is IN (I.8.3, I.8.5) and is refused by the transpiler only ("unsupported construct: a `continue` inside a tick-bearing counted `for`"), measured by probe 2026-11-07; and an element write to an array register inside a combinational `for` (line II.3 found array-for). The table's NOT YET / "today" cells predate steps 5–10 |
+| I.2.5 | outside the kernel, and why | `ui:fail/clock_construction`, `ui:fail/module_loop_break`, `ui:pass/recursive_helper_r6` | G-C, PA | CLOSED | R6 the named exception (D-22, §Q.2); the other reasons refused in both (§P.1) |
+| I.2.6 | types | `test:copper-codegen/tests/admissible_calibration.rs::grammar_never_rejects_what_the_transpiler_lowers`, `sweep:tests/fixtures/signedness_dut.rs::signed_lt_via_cast` | G-C, G-D/F/G | CLOSED | `check_admissible` shared (§P.1); R16's bound is its own line (II.1.2 R16) |
+| I.2.7 | the four modes | `sweep:tests/fixtures/sync_2ff_dut.rs::sync_2ff_concrete`, `sweep:tests/fixtures/one_bit_comparator_dut.rs::one_bit_comparator`, `ui:pass/structural_net_ok` | G-D/F/G, PA | CLOSED | — |
+| I.3.1 | executions | `sweep:tests/fixtures/counted_repetition_dut.rs::counted_repetition`, `sweep:tests/fixtures/wait_loop_dut.rs::waiter` | G-D/F/G | CLOSED | — |
+| I.3.2 | segments | `sweep:tests/fixtures/continue_skip_dut.rs::skip_on_halt`, `sweep:tests/fixtures/for_empty_dut.rs::for_empty`, `test:tests/continue_equivalence.rs::a_continue_costs_no_cycle_and_matches_transpiled_verilog` | G-D/F/G, G-C | CLOSED | a zero-trip `for` adds no boundary ((f1), §J.2) |
+| I.3.3 | the residue | `test:tests/projection_relation.rs::the_projection_relation_holds_on_the_corpus`, `sweep:tests/fixtures/control_extraction_dut.rs::branch_merge` | G-I, G-D/F/G | CLOSED | consistency only; the anchor of I.3.9 is the user's |
+| I.3.4 | instants: program order | `sweep:tests/fixtures/regout_forwarding_dut.rs::assign_then_write`, `sweep:tests/fixtures/array_forwarding_dut.rs::f5_guard` | G-D/F/G | CLOSED | every read forwarded ((f5), §J.3) |
+| I.3.5 | the trailing region | `sweep:tests/fixtures/trailing_statements_dut.rs::trailing_local_into_head`, `sweep:tests/fixtures/trailing_statements_dut.rs::trailing_out`, `test:tests/cdc_synchronizer_anchor.rs::independent_verilog_matches_sim` | G-D/F/G, G-C | CLOSED | the head of the next resumption, the fold removed (§H.2) |
+| I.3.6 | the back edge | `ui:fail/partial_tick_path`, `sweep:tests/fixtures/trailing_statements_dut.rs::trailing_local_into_head` | PA, G-D/F/G | CLOSED | — |
+| I.3.7 | cycle 0 | `sweep:tests/fixtures/preloop_entry_dut.rs::preloop_linear`, `test:tests/reference_leg_measurements.rs::preloop_statement_agrees_on_both_routes`, `test:copper-ref/tests/interp_smoke.rs::preloop_statement_runs_once` | G-D/F/G, G-C | CLOSED | (f2), (f3), P15 (§J.1) |
+| I.4.1 | the value of a read | `sweep:examples/basejump/sipo_block.rs::sipo_block`, `sweep:examples/sequential/lfsr.rs::lfsr`, `example:sipo_block` | G-D/F/G, G-B | CLOSED | `sipo_block` anchored (BaseJump) |
+| I.4.2 | one class of read | `test:tests/det_010_independent_golden.rs::det_010_awaits_matches_independent_verilog`, `sweep:tests/fixtures/read_timing_dut.rs::sample_hold_2` | G-C, G-D/F/G | CLOSED | `classify_reads` deleted (§H.3); anchored by the golden |
+| I.4.3 | trailing reads | `test:copper-ref/tests/interp_smoke.rs::trailing_read_belongs_to_the_next_resumption`, `test:tests/reference_leg_measurements.rs::regout_trailing_single_tick_agrees_on_three_legs`, `sweep:examples/basejump/bsg_counter_up_down.rs::bsg_counter_up_down` | G-C, G-D/F/G | CLOSED | P12 holds (§H.5 item 4) |
+| I.4.4 | cycle-0 reads | `sweep:tests/fixtures/preloop_wire_dut.rs::preloop_wire_first_head` | G-D/F/G | CLOSED | — |
+| I.4.5 | the passthrough | `ui:fail/plain_out_on_sequential`, `test:copper-ref/tests/interp_design.rs::the_mealy_pair_reads_the_committed_register_and_the_current_input` | PA, G-C | CLOSED | vacuous for a sequential module (D-8); the combinational spelling |
+| I.4.6 | no static approximation | `sweep:tests/fixtures/read_timing_dut.rs::accum_2`, `test:tests/read_timing_equivalence.rs::accum_2_sim_matches_verilog` | G-D/F/G, G-C | CLOSED | the read-site predicates deleted (§H.3, §H.4) |
+| I.6.1 | the write | `sweep:tests/fixtures/out_phase_dut.rs::regout_trailing_single_tick`, `test:tests/regout_forwarding_equivalence.rs::assign_then_write_sim_matches_transpiled_verilog` | G-D/F/G, G-C | CLOSED | one port form (§H.1) |
+| I.6.2 | several writes | `sweep:examples/sequential/pattern_detector_2.rs::det_010_awaits`, `ui:pass/multi_write_regout_ok` | G-D/F/G, PA | CLOSED | last write wins; an anchor with two distinct values is the user's (III.2.11 (2)) |
+| I.6.3 | hold | `sweep:examples/basejump/sipo_block.rs::sipo_block`, `sweep:examples/basejump/bsg_dff_en.rs::bsg_dff_en` | G-D/F/G | CLOSED | anchored (BaseJump) |
+| I.6.4 | observation | `sweep:tests/fixtures/handshake_dut.rs::handshake` | G-D/F/G | CLOSED | `handshake` anchored (`REFERENCE`) |
+| I.6.5 | cycle 0 | `sweep:tests/fixtures/preloop_entry_dut.rs::preloop_probe`, `sweep:tests/fixtures/preloop_entry_dut.rs::preloop_linear` | G-D/F/G | CLOSED | (f2)/(f3) closed (§J.1) |
+| I.6.6 | the initial value | `test:tests/reference_leg_measurements.rs::preloop_statement_agrees_on_both_routes`, `sweep:examples/basejump/sipo_block.rs::sipo_block` | G-C, G-D/F/G | CLOSED | `obs_0 = init(q)` compared (§E.1) |
+| I.6.7 | an input read after the tick | `sweep:examples/basejump/bsg_counter_up_down.rs::bsg_counter_up_down`, `sweep:tests/fixtures/sync_2ff_dut.rs::sync_2ff_concrete` | G-D/F/G | CLOSED | no carrier (§H) |
+| I.6.8 | composition and one driver | `coreui:fail/regout_is_not_clone`, `test:tests/two_clock_pins.rs::never_ticked_startup_one_resumption_agrees_on_all_three_legs` | G-C | CLOSED | — |
+| I.7.1 | the register: definition | `test:tests/reference_leg_measurements.rs::poison_run_for_the_register_proposition`, `test:copper-codegen/tests/register_reconciliation.rs::corpus_realized_registers_are_inferred` | G-C | CLOSED | P2, P13 (§K.5, §K.7) |
+| I.7.2 | what is a register | `sweep:tests/fixtures/struct_pipeline_dut.rs::tuple_destructure`, `sweep:tests/fixtures/mac_pipeline_dut.rs::mac_pipeline`, `sweep:tests/fixtures/array_forwarding_dut.rs::f5_sipo` | G-D/F/G | CLOSED | (h)'s forwarding defect closed (§J.3) |
+| I.7.3 | the value of a register | `sweep:tests/fixtures/sync_2ff_dut.rs::sync_2ff_concrete`, `test:tests/cdc_synchronizer_anchor.rs::register_inference_matches_the_independent_reference`, `sweep:tests/fixtures/array_two_writes_dut.rs::arr_same_element` | G-D/F/G, G-C | CLOSED | — |
+| I.7.4 | power-on | `test:tests/lfsr_equivalence.rs::before_reset_the_sv_holds_the_rust_initial_value_like_the_simulator`, `ui:fail/register_init_not_constant`, `test:copper-codegen/tests/register_init_parity.rs::the_transpiler_refuses_every_initializer_rustc_refuses` | G-C, PA | CLOSED | D-21 (§N); the transpiler's fold narrower than rustc is a REFUSED-one break, line II.3 found const-call |
+| I.7.5 | the back-edge clause, re-derived | `sweep:tests/fixtures/nested_loop_registers_dut.rs::nested_loop_missed`, `sweep:tests/fixtures/nested_loop_registers_dut.rs::nested_loop_added`, `sweep:tests/fixtures/trailing_statements_dut.rs::trailing_local_into_head` | G-D/F/G | CLOSED | head clause deleted, the nested CFG descended (§K.1, §K.3) |
+| I.8.1 | the module loop | `ui:fail/module_loop_break`, `ui:fail/module_return`, `sweep:tests/fixtures/continue_skip_dut.rs::skip_on_halt` | PA, G-D/F/G | CLOSED | R7 in both (§P.1) |
+| I.8.2 | nested tick-bearing loops | `ui:fail/for_break_before_tick`, `ui:fail/tick_first_wait`, `sweep:tests/fixtures/arms_only_loop_dut.rs::arms_only_match` | PA, G-D/F/G | CLOSED | (b) closed (§J.5) |
+| I.8.3 | `break` and `continue` of a nested loop | `sweep:tests/fixtures/nested_continue_dut.rs::nested_continue_match`, `ui:fail/labelled_break`, `ui:fail/valued_break` | G-D/F/G, PA | CLOSED | (a) closed (§J.4); R12 in both (§P.1); the counted-`for` case is I.8.5's line |
+| I.8.4 | the zero-iteration loop | `sweep:tests/fixtures/for_empty_dut.rs::for_empty`, `ui:fail/literal_empty_for_boundary`, `ui:pass/livelock_a` | G-D/F/G, PA | OPEN | copper-analysis (R3): a nested `for` over a range empty only through a constant (`0..EMPTY`) is still counted as a boundary — under-admission recorded in II.2.2 (§P.5); fix: evaluate the range with `ConstEnv` as R5 does. (f1) itself closed (§J.2) |
+| I.8.5 | the counted `for` as a desugaring | `test:tests/det_for_probe.rs::det_for_rtl_matches_the_simulator_cycle_for_cycle`, `sweep:tests/fixtures/counted_repetition_dut.rs::counted_repetition`, `ui:fail/runtime_for_bound` | G-C, G-D/F/G, PA | OPEN | the front-ends (parity): `continue` of a tick-bearing counted `for` — D-10 gives it a meaning (the test with the next `c`), the transpiler refuses, the macro admits (§J.10 item 4; probe 2026-11-07); decision packet §R.6 (2) |
+| I.9.1 | the first resumption | `sweep:tests/fixtures/preloop_entry_dut.rs::preloop_probe`, `test:tests/two_clock_pins.rs::never_ticked_startup_one_resumption_agrees_on_all_three_legs` | G-D/F/G, G-C | CLOSED | — |
+| I.9.2 | `s_pre`, the initializers and the entry | `test:tests/projection_relation.rs::the_projection_relation_holds_on_the_corpus`, `sweep:tests/fixtures/preloop_entry_dut.rs::preloop_linear`, `test:tests/reference_leg_measurements.rs::trailing_fold_at_edge_1_agrees_on_three_legs` | G-I, G-D/F/G, G-C | CLOSED | the started carrier; P15 on every clocked module (§J.1, §L) |
+| I.9.3 | pre-loop statements that are not a `let` | `test:tests/reference_leg_measurements.rs::preloop_statement_agrees_on_both_routes`, `ui:fail/preloop_tick`, `test:copper-codegen/tests/unsupported_constructs.rs::a_tick_before_the_module_loop_is_refused_by_r21_on_both_routes` | G-C, PA | CLOSED | (f2), (f3), (f6), R21 (§J.1, §J.12) |
+| I.9.4 | observation 0 | `sweep:tests/fixtures/preloop_entry_dut.rs::preloop_probe`, `test:tests/reference_leg_measurements.rs::preloop_statement_agrees_on_both_routes` | G-D/F/G, G-C | CLOSED | §E.1 |
+| I.9.5 | state the module did not declare | `sweep:tests/fixtures/shift_register_dut.rs::shift_register`, `sweep:tests/fixtures/counted_delay_dut.rs::counted_delay` | G-D/F/G | CLOSED | `RESET` rows with sentences (III.2.10) |
+| I.10.1 | the memory as a variable of H(M) | `sweep:tests/fixtures/pipelined_ram_dut.rs::ram_r2w2`, `test:copper-ref/tests/interp_memory.rs::write_latency_two_commits_at_edge_n_plus_m`, `test:copper-ref/tests/interp_memory.rs::unready_data_is_a_runtime_failure` | G-D/F/G, G-C | OPEN | Phase C follow-up (simulator, front-ends): (a) `ReadMode` not deleted and `L ≥ 1` not checked by the simulator's type (`memory.rs:13`, `:215`); (b) last-staging-wins is realized by the interpreter only — both front-ends still refuse a second staging (rule 6 (a)/(b), I.10.4's line). (c)'s wording corrected this step; (d) agrees on 18 memory modules (§O.1) |
+| I.10.2 | read-during-write | `test:tests/write_first_memory_equivalence.rs::read_first_and_write_first_actually_differ`, `sweep:tests/fixtures/write_first_ram_dut.rs::ram_write_first`, `sweep:tests/fixtures/pipelined_ram_dut.rs::ram_r1w2_wf` | G-C, G-D/F/G | CLOSED | the mode the author's; the stale inference comment (`memory.rs:323`) corrected this step |
+| I.10.3 | initial contents and the first resumption | `test:tests/preloaded_memory_equivalence.rs::from_fn_preload_sim_matches_transpiled_verilog`, `sweep:tests/fixtures/preloaded_rom_dut.rs::rom_from_contents`, `sweep:examples/cpu/rv32i_cpu_transpilable.rs::rv32i_cpu_transpilable` | G-C, G-D/F/G | CLOSED | the entry (§J.1); probes (iv) as fixtures are I.10.7 (6), not this clause's meaning |
+| I.10.4 | the memory rules and their principles | `test:copper-codegen/tests/unsupported_constructs.rs::memory_read_result_before_the_tick_is_rejected` | G-C | OPEN | Phase C follow-up (copper-analysis): D-16 retired rule 6's clauses (a) and (b), but `check_memory_staging` still refuses two stagings of one port in a cycle (`cfg.rs:491`, pins `two_accesses_*`), and (c) does not count `s_pre`'s stagings (I.10.7 (2)) |
+| I.10.5 | a received memory, sharing and the bus | `ui:pass/memory_parameter_ok`, `ui:fail/cdc_memory_parameter`, `test:tests/received_memory_abi.rs::received_memory_bus_matches_the_owned_memory_semantics` | PA, G-C | OPEN | Phase C follow-up (types, front-ends): the port set and mode are not in the parameter type and one owner per port is not enforced ("nothing enforces it today"); `WRITE_LAT ≠ 1` refused by the transpiler only (I.10.7 (7), I.13.7 (6)) |
+| I.10.6 | memory and the combinational module | `test:copper-ref/tests/interp_memory.rs::memory_binding_outside_s_pre_and_memory_parameter_are_refused` | G-C | OPEN | Phase C follow-up (front-ends): the header rule refusing a `Memory` in a `combinational` module is in neither front-end and has no ui case (I.10.7 (3)); corpus 0 |
+| I.11.1 | the combinational module as a function | `sweep:examples/basejump/bsg_mux_one_hot.rs::bsg_mux_one_hot`, `test:copper-ref/tests/interp_comb.rs::no_local_survives_an_evaluation`, `example:bsg_mux_one_hot` | G-D/F/G, G-C, G-B | CLOSED | 52 combinational modules on three legs (§O.2); anchored (BaseJump) |
+| I.11.2 | the wire rules | `sweep:tests/fixtures/comb_default_override_dut.rs::cdo_override_then_default`, `test:copper-ref/tests/interp_comb.rs::last_write_wins_and_the_dead_write_is_admitted` | G-D/F/G, G-C | OPEN | copper-codegen: (c) a port written twice at the top level is emitted as two `assign`s (measured 2026-11-07: `assign o = a; assign o = b;`, Verilator MULTIDRIVEN), admitted by both; fix the §10.12 routing into `always_comb` (line II.3 found comb-double-write) |
+| I.11.3 | definite assignment | `ui:fail/combinational_never_written`, `ui:fail/combinational_latch`, `test:copper-codegen/tests/comb_definite_assignment_parity.rs::both_front_ends_admit_and_refuse_the_same_rows` | PA, G-C | CLOSED | the never-written port in both (§P.5) |
+| I.11.4 | reads, the settle, the cycle refused | `test:tests/simulator_corner_cases.rs::non_convergent_combinational_loop_is_refused_at_spawn`, `test:tests/levelized_differential.rs::convergent_comb_loop_is_refused_at_spawn_by_both_schedulers`, `test:copper-codegen/tests/structural_hierarchy.rs::combinational_cycle_through_a_structural_parent_is_refused` | G-C | CLOSED | §P.3 |
+| I.11.5 | composition: the Mealy output | `test:copper-ref/tests/interp_design.rs::the_mealy_pair_reads_the_committed_register_and_the_current_input`, `sweep:tests/fixtures/q1_b_rewrites_dut.rs::q1_b_vr_sink` | G-C, G-D/F/G | CLOSED | D-14 (v)'s anchor is a probe not in the tree |
+| I.12.1 | the clock domain as the unit of time | `test:tests/two_clock_pins.rs::interleavings_give_one_trace_per_domain`, `ui:fail/missing_domain_port`, `coreui:fail/unit_domain_refused` | G-C, PA | CLOSED | `()` no domain (§Q.1) |
+| I.12.2 | the never-ticked domain | `test:tests/two_clock_pins.rs::never_ticked_startup_one_resumption_agrees_on_all_three_legs` | G-C | CLOSED | `q = 2` on three legs (§P.2); its anchor is the user's (III.2.11 (7)) |
+| I.12.3 | the synchronizer module | `ui:fail/sync_one_flop`, `test:tests/cdc_synchronizer_anchor.rs::a_one_flop_synchronizer_is_refused_by_both_front_ends`, `sweep:tests/fixtures/sync_2ff_dut.rs::sync_2ff_concrete` | PA, G-C, G-D/F/G | CLOSED | the two-flop rule (§P.2); `sync_2ff` anchored |
+| I.12.4 | what may cross | `coreui:fail/in_port_foreign_domain`, `ui:fail/cdc_crossing`, `ui:fail/combinational_two_domains`, `ui:fail/cdc_memory_parameter` | G-C, PA | OPEN | a fixture (anyone's, not an anchor): (e) — a multi-bit value through a synchronizer is per-bit — has no witness in the tree (corpus 0 multi-bit crossings); (a)–(d) hold in both front-ends (§P.1–§P.2) |
+| I.12.5 | the two-clock sequential module | `ui:fail/two_clocks_sequential` | PA | CLOSED | R10 (§P.1) |
+| I.13.1 | a design as coroutines over wires | `coreui:fail/out_is_not_clone`, `coreui:fail/regout_is_not_clone`, `test:copper-core/tests/port_and_type_edge_cases.rs::cloned_inputs_observe_the_same_wire` | G-C | CLOSED | — |
+| I.13.2 | the settle | `test:tests/levelized_differential.rs::diff_comb_chain`, `test:tests/poll_order_fuzz.rs::combinational_chain_is_poll_order_independent`, `test:copper-ref/tests/interp_design.rs::one_settle_evaluates_in_topological_order` | G-C | CLOSED | (b)'s order realized since steps 2–3 |
+| I.13.3 | the evaluation count and the dirty flag | `test:tests/golden_traces.rs::counter_trace_is_frozen`, `test:copper-core/tests/port_and_type_edge_cases.rs::dirty_flag_tracks_changing_writes` | G-C | CLOSED | — |
+| I.13.4 | the structural module | `test:tests/two_domain_hierarchy_cdc.rs::independent_reference_matches_sim_under_verilator`, `test:tests/two_domain_hierarchy_cdc.rs::reference_interpreter_design_matches_sim`, `ui:fail/structural_two_drivers`, `ui:fail/structural_undriven_net`, `ui:fail/structural_self_instance` | G-C, G-F, PA | OPEN | Phase C follow-up: (d)'s "every child port connected" row has no fixture (both refuse by an arity error, unpinned); (d)'s/(e)'s one owner per memory needs the port set in the parameter type (I.10.5's line). The rest of (a)–(d) closed (§P.4); the 2:1 design anchored |
+| I.13.5 | hierarchy inside a behavioural module | `test:tests/module_composition_hybrid.rs::sequential_modules_spawn_with_spawn_child` | G-C | OPEN | decision (§R.6 (1)): D-18 A2 makes instantiation structural-only, but `spawn_child`, `spawn_child!` and `lower_hardware_call` stand and neither front-end refuses a call; the refusal's syntactic form must exempt `&clk` passed to `Memory::new`/a helper (22 corpus uses, §P.4) — the fixture named exercises the form to be retired |
+| I.13.6 | the emitted hierarchy and its ABIs | `test:copper-codegen/tests/structural_hierarchy.rs::hierarchy_co_emits_children_deepest_first`, `test:tests/received_memory_abi.rs::received_memory_bus_matches_the_owned_memory_semantics`, `example:two_domain_hierarchy` | G-C, G-B | CLOSED | — |
+| I.14.1 | the type set | `sweep:tests/fixtures/signedness_dut.rs::signed_lt_via_cast`, `test:copper-ref/tests/interp_data.rs::int_wrapping_on_u8_ports`, `sweep:tests/fixtures/data_i14_dut.rs::usize_width` | G-D/F/G, G-C | CLOSED | `usize` 64 bits (§M.3); `Bits<N>`'s N bound is R16's line |
+| I.14.2 | values and X | `test:tests/ieee1800_table.rs::copper_matches_the_recorded_ieee_table`, `test:tests/x_propagation_and_reset.rs::x_on_a_control_input_panics`, `sweep:tests/fixtures/data_i14_dut.rs::xw_port` | G-C, G-D/F/G | CLOSED | P6 a standing pin (§M.1); `xw_port`'s X observations are OUTSIDE, counted by G-G |
+| I.14.3 | operators and methods | `sweep:tests/fixtures/data_i14_dut.rs::xp_div_nz`, `sweep:tests/fixtures/data_i14_dut.rs::data_methods_seq`, `test:copper-codegen/tests/unsupported_constructs.rs::checked_arithmetic_and_is_valid_are_outside_in_both_front_ends` | G-D/F/G, G-C | OPEN | decision (§R.6 (3)): `v == Logic::X` — admitted by the macro, refused by the transpiler (§M.9 4(a)): is the derived `==` on X the `is_valid` question (OUTSIDE) or a value? And copper-codegen: `saturating_*` on a signed or > 64-bit integer, refused by the transpiler only (§M.9 4(b)) |
+| I.14.4 | constants | `test:tests/const_evaluators_agree.rs::the_two_constant_evaluators_agree_on_every_corpus_constant`, `sweep:tests/fixtures/data_i14_dut.rs::k_hex_body`, `ui:pass/register_init_rust_constants_ok` | G-J, G-D/F/G, PA | CLOSED | D-21; the narrower transpiler fold is line II.3 found const-call |
+| I.14.5 | widths | `sweep:tests/fixtures/data_i14_dut.rs::usize_width`, `sweep:tests/fixtures/data_i14_dut.rs::w1_index`, `test:tests/width_constraint_check.rs::rotate_right_at_a_violating_parameter_is_refused_at_elaboration` | G-D/F/G, G-C | CLOSED | (b)–(d) realized (§M.2, §M.3, §M.5) |
+| I.14.6 | memory data and addresses | `ui:fail/memory_port_index`, `sweep:tests/fixtures/mem_address_width_dut.rs::wide_index_into_narrow_addr` | PA, G-D/F/G | CLOSED | the port index a shared rule (§M.5) |
+
+**III.3.3 Part II — II.1 and II.2.**
+
+| Line | Clause | Fixture | Guard | Status | Owner / reason |
+|---|---|---|---|---|---|
+| II.1.1 | what a shape rule is | `test:copper-codegen/tests/front_end_parity_ui.rs::the_transpiler_refuses_every_shape_the_macro_refuses_with_the_same_message`, `ui:fail/foreign_await` | G-C, PA | CLOSED | every message names its clause (§P.1) |
+| II.1.2 | the shape rules, enumerated | `test:copper-analysis/tests/front_end_parity.rs::every_corpus_module_passes_every_shared_rule_in_its_mode` | G-C, PA | CLOSED | the table, row by row below |
+| II.1.2 R1 | a non-tick `await` | `ui:fail/foreign_await` | PA | CLOSED | — |
+| II.1.2 R2 | a loop path reaching no tick | `ui:fail/tickless_loop`, `ui:fail/partial_tick_path` | PA | CLOSED | — |
+| II.1.2 R3 | a zero-time nested cycle | `ui:fail/for_break_before_tick`, `ui:fail/literal_empty_for_boundary`, `ui:pass/livelock_a`, `ui:pass/livelock_b` | PA | CLOSED | narrowed both ways (§P.5); its residual directions are II.2.2's, the constant-empty range I.8.4's line |
+| II.1.2 R4 | a tick-free nested `loop`/`while` | `test:copper-codegen/tests/unsupported_constructs.rs::nested_loop_without_a_tick_is_unsupported`, `test:copper-codegen/tests/unsupported_constructs.rs::a_tickless_nested_loop_with_a_continue_is_refused_by_the_shape_rule` | G-C | CLOSED | one function (`shape.rs`) |
+| II.1.2 R5 | a run-time tick-free `for` bound | `ui:fail/runtime_for_bound` | PA | CLOSED | §P.1 |
+| II.1.2 R6 | recursion through a helper | `ui:pass/recursive_helper_r6`, `test:tests/recursive_helper_r6.rs::the_transpiler_refuses_it_with_r6s_message`, `test:copper-analysis/tests/front_end_parity.rs::the_one_named_parity_exception_is_r6` | PA, G-C | CLOSED | the named exception (D-22) |
+| II.1.2 R7 | `break` of the module loop; `return` | `ui:fail/module_loop_break`, `ui:fail/module_return` | PA | CLOSED | — |
+| II.1.2 R8 | a plain `Out` on a clocked module | `ui:fail/plain_out_on_sequential`, `ui:fail/plain_out_on_synchronizer`, `test:copper-codegen/tests/unsupported_constructs.rs::a_plain_out_on_a_clocked_module_is_refused_by_r8` | PA, G-C | CLOSED | step 3 (§G.4); the row's "both admit" annotated this step |
+| II.1.2 R9 | the flag `allow_pretick_alignment` | `ui:fail/retired_pretick_opt_out`, `test:copper-analysis/tests/front_end_parity.rs::no_corpus_module_carries_the_retired_opt_out` | PA, G-C | CLOSED | step 3; annotated this step |
+| II.1.2 R10 | a second `Clock` on a sequential module | `ui:fail/two_clocks_sequential` | PA | CLOSED | — |
+| II.1.2 R11 | a non-constant register initializer; a held value | `ui:fail/register_init_reads_input`, `ui:fail/held_preloop_read`, `test:copper-codegen/tests/register_init_parity.rs::the_transpiler_refuses_every_initializer_rustc_refuses` | PA, G-C | CLOSED | D-21 |
+| II.1.2 R12 | a labelled or valued `break` | `ui:fail/labelled_break`, `ui:fail/valued_break` | PA | CLOSED | a labelled `continue` too (measured 2026-11-07) |
+| II.1.2 R13 | a macro in a body | `ui:fail/body_macro` | PA | CLOSED | `matches!`, `const { }` and `vec![…]` as a preload admitted (§P.1) |
+| II.1.2 R14 | an input read inside macro tokens | `ui:fail/input_read_in_macro` | PA | CLOSED | — |
+| II.1.2 R15 | `/` | `sweep:tests/fixtures/data_i14_dut.rs::xp_div_nz`, `test:copper-codegen/tests/unsupported_constructs.rs::division_operator_is_supported` | G-D/F/G, G-C | CLOSED | no rule: `/` has I.14.3(b)'s meaning and is emitted (§M.2) |
+| II.1.2 R16 | a type outside I.14's set | `test:copper-codegen/tests/admissible_calibration.rs::grammar_never_rejects_what_the_transpiler_lowers` | G-C | OPEN | the front-ends: `Bits<N>` with N = 0 or N > 128 is refused by neither (§M.9 item 3), and the rule has no ui/fail case (II.1.4) |
+| II.1.2 R17 | `Clock::new` in a body | `ui:fail/clock_construction` | PA | CLOSED | — |
+| II.1.2 R18 | a `let` shadowing a port | `ui:fail/param_shadowing` | PA | CLOSED | — |
+| II.1.2 R19 | an `In` handle used other than by `.read()` | `ui:fail/sequential_unprotectable_read` | PA | CLOSED | — |
+| II.1.2 R20 | the header | `ui:fail/function_typed_unit_return`, `ui:fail/multiple_top_level_loops`, `ui:fail/missing_domain_port` | PA | CLOSED | the messages spell `In<T, D>` / `Out<T, D>` / `RegOut<T, D>` since this step (2 `.stderr` files) |
+| II.1.2 R21 | a `tick` before the loop | `ui:fail/preloop_tick`, `test:copper-codegen/tests/unsupported_constructs.rs::a_tick_before_the_module_loop_is_refused_by_r21_on_both_routes` | PA, G-C | CLOSED | step 5 (§J.12); annotated this step |
+| II.1.2 R22 | a second driver of a `RegOut` | `coreui:fail/regout_is_not_clone`, `ui:fail/structural_two_drivers` | G-C, PA | CLOSED | by construction |
+| II.1.3 | the parity obligation | `test:copper-codegen/tests/front_end_parity_ui.rs::the_transpiler_admits_every_shape_the_macro_admits`, `test:copper-analysis/tests/front_end_parity.rs::every_corpus_module_passes_every_shared_rule_in_its_mode` | G-C, PA | OPEN | the front-ends: "any other shape one front-end admits and the other refuses is a break" — five REFUSED-one shapes outside the ui battery remain, each a line below (II.3 found continue-for, array-for, const-call) and I.14.3's two, plus the toolchain refusals II.3 found u8-const and comb-double-write; decision packet §R.6 (2) for the first |
+| II.2.1 | what a derived rule is | `ui:fail/tick_first_wait` | PA | CLOSED | — |
+| II.2.1 D1 | a nested loop ends at its tick | `ui:fail/tick_first_wait` | PA | CLOSED | — |
+| II.2.1 D2 | combinational definite assignment | `ui:fail/combinational_latch`, `ui:fail/combinational_never_written`, `test:copper-codegen/tests/comb_definite_assignment_parity.rs::both_front_ends_admit_and_refuse_the_same_rows` | PA, G-C | CLOSED | §P.5 |
+| II.2.1 D3 | `Option`, `?`, panics, `unwrap` | `ui:fail/unsupported_idiom_panic` | PA | CLOSED | shared (D-22) |
+| II.2.1 D4 | retired: `multi_write_collapse` | `ui:pass/multi_write_regout_ok`, `gone:multi_write_collapse` | PA | CLOSED | retired as vacuous; D-6 A1's pin stays |
+| II.2.2 | the direction of every static predicate | `test:copper-analysis/tests/static_predicate_directions.rs::r3_stays_over_by_path_insensitivity`, `test:copper-analysis/tests/static_predicate_directions.rs::d2_stays_over_by_path_insensitivity`, `test:copper-analysis/tests/static_predicate_directions.rs::two_flop_is_over_by_path_insensitivity`, `test:copper-codegen/tests/admissible_calibration.rs::grammar_never_rejects_what_the_transpiler_lowers` | G-C | CLOSED | every row's direction stated with a witness (P22); the `infer_registers` row's text annotated this step (the head clause is gone) |
+
+**III.3.4 Part II — II.3.**
+
+| Line | Clause | Fixture | Guard | Status | Owner / reason |
+|---|---|---|---|---|---|
+| II.3.1 | what a lowering limitation is | `test:copper-codegen/tests/unsupported_constructs.rs::a_runtime_empty_counted_for_ending_an_enclosing_for_has_its_own_diagnostic`, `ui:fail/nested_runtime_empty_for` | G-C, PA | CLOSED | the one dated REFUSED-both row today (§J.15) |
+| II.3.2 | the sort of the sixteen rules | `ui:fail/plain_out_on_sequential`, `test:copper-codegen/tests/phase_sensitive_checks.rs::no_new_phase_sensitive_check_in_the_transpiler` | PA, G-C | CLOSED | the deletions sized there done (§G.4); rules 7–15 below |
+| II.3.3 | the rows | `test:tests/projection_relation.rs::the_projection_relation_holds_on_the_corpus` | G-I | CLOSED | row by row below; no row's shape is outside the relation today |
+| II.3.4 | the three rows II.1.2 left unmeasured | `ui:pass/recursive_helper_r6`, `ui:fail/sequential_unprotectable_read`, `ui:fail/preloop_tick` | PA | CLOSED | R6 (D-22), R19, R21 measured and settled |
+| II.3.5 | the inventory's column, re-cut | `test:copper-analysis/tests/front_end_parity.rs::every_corpus_module_passes_every_shared_rule_in_its_mode` | G-C | CLOSED | a documentary clause: the pointer line is in `review/INVENTORY_RULES.md`; each placement it points to is the shared rule list |
+| II.3.3 (a) | a nested `continue` | `sweep:tests/fixtures/nested_continue_dut.rs::nested_continue`, `sweep:tests/fixtures/nested_continue_dut.rs::nested_continue_match` | G-D/F/G | CLOSED | Phase C step 5 (§J.4), 2026-11-06 |
+| II.3.3 (b) | a nested loop with ticks only in arms | `sweep:tests/fixtures/arms_only_loop_dut.rs::arms_only_b1`, `sweep:tests/fixtures/arms_only_loop_dut.rs::arms_only_b2`, `sweep:tests/fixtures/arms_only_loop_dut.rs::arms_only_match` | G-D/F/G | CLOSED | step 5 (§J.5); a `while` of the shape keeps clause 4's message in both |
+| II.3.3 (c) | two element writes on an array register | `sweep:tests/fixtures/array_two_writes_dut.rs::arr_two_writes`, `sweep:tests/fixtures/array_two_writes_dut.rs::arr_same_element`, `sweep:tests/fixtures/array_two_writes_dut.rs::arr_comb_read` | G-D/F/G | CLOSED | step 5 (§J.6); the write inside a combinational `for` is its own line |
+| II.3.3 (d) | a pre-loop constant the evaluator cannot fold | `sweep:tests/fixtures/const_eval_dut.rs::const_assoc_fn`, `sweep:tests/fixtures/const_eval_dut.rs::const_generic_init`, `sweep:tests/fixtures/const_init_dut.rs::init_const_fn` | G-D/F/G, G-J | CLOSED | D-21 (§J.13, §N) |
+| II.3.3 (f1) | a run-time-empty counted `for` | `sweep:tests/fixtures/for_empty_dut.rs::for_empty`, `sweep:tests/fixtures/for_empty_dut.rs::for_empty_start` | G-D/F/G | CLOSED | step 5 (§J.2); D-10 probe (ii) |
+| II.3.3 (f2) | pre-loop statements, extraction route | `sweep:tests/fixtures/preloop_entry_dut.rs::preloop_probe` | G-D/F/G | CLOSED | step 5 (§J.1); D-11 probe (i) |
+| II.3.3 (f3) | pre-loop statements, linear route | `sweep:tests/fixtures/preloop_entry_dut.rs::preloop_linear` | G-D/F/G | CLOSED | step 5 (§J.1); D-11 probe (i-b) |
+| II.3.3 (f4) | the trailing fold at edge 1 | `test:tests/reference_leg_measurements.rs::trailing_fold_at_edge_1_agrees_on_three_legs`, `sweep:tests/fixtures/trailing_statements_dut.rs::trailing_local_into_head` | G-C, G-D/F/G | CLOSED | step 4 (§H.2); D-11's (iv) is a reference-leg test, (iv-c) has no fixture — II.3.7's list, not a divergence |
+| II.3.3 (f5) | array-element forwarding | `sweep:tests/fixtures/array_forwarding_dut.rs::f5_sipo`, `sweep:tests/fixtures/array_forwarding_dut.rs::f5_guard`, `sweep:tests/fixtures/array_forwarding_dut.rs::f5_wire`, `sweep:tests/fixtures/array_forwarding_dut.rs::f5_branch_wire` | G-D/F/G | CLOSED | step 5 (§J.3); `f5_sipo` is `q1_c_sipo_block` |
+| II.3.3 (f6) | a pre-loop `tick` (R21) | `ui:fail/preloop_tick`, `test:copper-codegen/tests/unsupported_constructs.rs::a_tick_before_the_module_loop_is_refused_by_r21_on_both_routes` | PA, G-C | CLOSED | step 5 (§J.12) — not a limitation: OUTSIDE, refused by both |
+| II.3.3 (g) | a hex `from_lit` turbofish | `sweep:tests/fixtures/data_i14_dut.rs::k_hex_body`, `sweep:tests/fixtures/data_i14_dut.rs::k_hex_init`, `sweep:tests/fixtures/data_i14_dut.rs::k_underscore` | G-D/F/G | CLOSED | steps 5 and 8 (§J.7, §M) |
+| II.3.3 (e) and_reduce | `Bits::and_reduce` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb` | G-D/F/G | CLOSED | step 5 (§J.8) |
+| II.3.3 (e) or_reduce | `Bits::or_reduce` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb`, `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_seq` | G-D/F/G | CLOSED | §J.8 |
+| II.3.3 (e) xor_reduce | `Bits::xor_reduce` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb` | G-D/F/G | CLOSED | §J.8 |
+| II.3.3 (e) nand_reduce | `Bits::nand_reduce` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb`, `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_seq` | G-D/F/G | CLOSED | §J.8 |
+| II.3.3 (e) nor_reduce | `Bits::nor_reduce` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb` | G-D/F/G | CLOSED | §J.8 |
+| II.3.3 (e) xnor_reduce | `Bits::xnor_reduce` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb`, `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_seq` | G-D/F/G | CLOSED | §J.8 |
+| II.3.3 (e) concat | `Bits::concat` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb`, `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_seq` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) part_select | `Bits::part_select` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb`, `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_seq` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) replicate | `Bits::replicate` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) sign_extend | `Bits::sign_extend` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb` | G-D/F/G | CLOSED | §J.8 |
+| II.3.3 (e) zero_extend | `Bits::zero_extend` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb` | G-D/F/G | CLOSED | §J.8 |
+| II.3.3 (e) truncate | `Bits::truncate` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb` | G-D/F/G | CLOSED | §J.8 |
+| II.3.3 (e) shift_left | `Bits::shift_left` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb` | G-D/F/G | CLOSED | §J.8 |
+| II.3.3 (e) shift_right | `Bits::shift_right` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb`, `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_seq` | G-D/F/G | CLOSED | §J.8 |
+| II.3.3 (e) get | `Bits::get` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb`, `sweep:tests/fixtures/data_i14_dut.rs::const_index` | G-D/F/G | CLOSED | §J.8 |
+| II.3.3 (e) set | `Bits::set` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_seq` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) mux | `Bits::mux` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) with_lsb | `Bits::with_lsb` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) with_msb | `Bits::with_msb` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) is_valid | `is_valid` — OUTSIDE (I.14.3(d)) | `ui:fail/outside_is_valid`, `test:copper-codegen/tests/unsupported_constructs.rs::checked_arithmetic_and_is_valid_are_outside_in_both_front_ends` | PA, G-C | CLOSED | refused by both with one message (§M.4); step 5's `1` lowering retired |
+| II.3.3 (e) lt_logic | `lt_logic` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) gt_logic | `gt_logic` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) le_logic | `le_logic` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) ge_logic | `ge_logic` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) as_array | `as_array` | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb`, `sweep:examples/basejump/bsg_adder_one_hot.rs::bsg_adder_one_hot` | G-D/F/G | CLOSED | §J.14 |
+| II.3.3 (e) saturating_add | `saturating_add` — IN | `sweep:tests/fixtures/data_i14_dut.rs::data_methods_seq` | G-D/F/G | OPEN | copper-codegen: unsigned ≤ 64 bits lowered and swept (§M.4); a signed or wider operand is refused by the transpiler only (§M.9 4(b)); fix: a signed clamp form |
+| II.3.3 (e) saturating_sub | `saturating_sub` — IN | `sweep:tests/fixtures/data_i14_dut.rs::data_methods_seq` | G-D/F/G | OPEN | as `saturating_add` |
+| II.3.3 (e) checked_add | `checked_add` — OUTSIDE | `ui:fail/outside_checked_add`, `test:copper-codegen/tests/unsupported_constructs.rs::checked_arithmetic_and_is_valid_are_outside_in_both_front_ends` | PA, G-C | CLOSED | refused by both (§M.4) |
+| II.3.3 (e) checked_sub | `checked_sub` — OUTSIDE | `test:copper-analysis/tests/front_end_parity.rs::the_step_8_data_rules_refuse_their_witnesses_and_admit_their_twins` | G-C | CLOSED | one rule over every `checked_*` name (`copper-analysis/src/data.rs`); a `checked_sub` witness added to the test this step |
+| II.3.3 (e) eq_logic | `eq_logic` (owed by the row) | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb`, `test:tests/ieee1800_table.rs::copper_matches_the_recorded_ieee_table` | G-D/F/G, G-C | CLOSED | IEEE-exact (§M.1) |
+| II.3.3 (e) ne_logic | `ne_logic` (owed by the row) | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_rest_comb`, `test:tests/ieee1800_table.rs::copper_matches_the_recorded_ieee_table` | G-D/F/G, G-C | CLOSED | §M.1 |
+| II.3.3 (e) as_array_mut | `as_array_mut` (owed by the row) | `sweep:tests/fixtures/data_i14_dut.rs::data_methods_seq` | G-D/F/G | CLOSED | §M.4 |
+| II.3.3 (e) from_array | `from_array` (owed by the row) | `sweep:examples/combinational/ripple_carry_adder.rs::ripple_carry_adder` | G-D/F/G | CLOSED | identity since step 5 |
+| II.3.3 (e) from_slice | `from_slice` (owed by the row) | `sweep:tests/fixtures/bits_methods_dut.rs::bits_methods_comb`, `sweep:tests/fixtures/data_i14_dut.rs::const_index` | G-D/F/G | CLOSED | identity since step 5 |
+| II.3.3 (e) from | the `From` conversions (owed by the row) | `sweep:tests/fixtures/data_i14_dut.rs::data_methods_seq`, `sweep:tests/fixtures/data_i14_dut.rs::w1_from` | G-D/F/G | CLOSED | `Bits::from(Logic)`, `Logic::from_bool` (§M.2, §M.4) |
+| II.3.3 (e) all_ones | `all_ones` (owed by the row) | `sweep:tests/fixtures/data_i14_dut.rs::k_ones_nowidth`, `sweep:tests/fixtures/data_i14_dut.rs::k_ones_width`, `sweep:tests/fixtures/data_i14_dut.rs::k_ones_init` | G-D/F/G | CLOSED | every spelling (§M.9 item 2) |
+| II.3 found array-for | an element write to an array register inside a combinational `for` (2026-11-06, §J.10 item 6 (i)) | `test:copper-codegen/tests/unsupported_constructs.rs::an_array_register_element_write_inside_a_combinational_for_is_refused` | G-C | OPEN | copper-codegen (or both front-ends): REFUSED-one — the transpiler refuses, the macro admits; fix direction: unroll the `for`'s writes into the write-port form of (c), or refuse in both with one message |
+| II.3 found continue-for | a `continue` of a tick-bearing counted `for` (2026-11-06, §J.10 item 4; re-measured 2026-11-07) | — (no pin of the refusal; the probe is §R.3's) | G-C | OPEN | decision (§R.6 (2)): REFUSED-one — IN by D-10 (I.8.3, I.8.5), the transpiler refuses ("a `continue` inside a tick-bearing counted `for`"), the macro admits; realize it (the counter's increment then the test, as I.8.5 states) or refuse it in both as a dated row |
+| II.3 found const-call | a constant the transpiler's fold is narrower than rustc on (2026-11-07, §N.5 item 4): a `const` method call (`K.wrapping_add(1)`), a tuple-struct constructor, a `static` read | `test:copper-codegen/tests/register_init_parity.rs::the_transpiler_refuses_every_initializer_rustc_refuses` | G-C | OPEN | copper-analysis (`ConstEnv`): REFUSED-one, corpus 0 — rustc admits each in `const { }`, the transpiler refuses with a lowering error (never a dropped value); fix: widen the fold, II.2.2's R11 row |
+| II.3 found u8-const | a `u8` file const in a body expression (2026-11-07, §N.5 item 1) | `sweep:tests/fixtures/const_init_dut.rs::init_file_const` | G-D/F/G | OPEN | copper-codegen: emitted as a 32-bit `localparam int`, which Verilator `-Wall` refuses (WIDTHEXPAND) — REFUSED-by-the-toolchain, admitted by both front-ends; the fixture names the working spelling; fix: a sized `localparam` |
+| II.3 found comb-double-write | a combinational port written twice at the top level (2026-11-05, I.11.2(c), D-14; re-measured 2026-11-07) | `sweep:tests/fixtures/comb_default_override_dut.rs::cdo_default_then_override` | G-D/F/G | OPEN | copper-codegen: two `assign`s, Verilator MULTIDRIVEN; the fixture names the `if`-guarded override that is routed; fix: the §10.12 routing into `always_comb` for any port written more than once |
+| II.3 found nested-runtime-empty | a run-time-bounded counted `for` ending an enclosing tick-bearing `for` (2026-11-07, §J.15) | `ui:fail/nested_runtime_empty_for`, `test:copper-codegen/tests/unsupported_constructs.rs::a_runtime_empty_counted_for_ending_an_enclosing_for_has_its_own_diagnostic` | PA, G-C | CLOSED | REFUSED-both, a dated limitation (fix direction: unroll the enclosing loop's zero-time iterations) — closed as a refusal |
+| II.3 found usize-width | `x.as_usize()` arithmetic at the receiver's width (2026-11-06, §J.10 item 8) | `sweep:tests/fixtures/data_i14_dut.rs::usize_width`, `sweep:tests/fixtures/data_i14_dut.rs::usize_annot` | G-D/F/G | CLOSED | step 8 (§M.3): `usize` 64 bits |
+
+**III.3.5 The retired rules (II.3.2 rules 7–15).** Closed when the function is gone from every crate
+(`gone:`) and the shape it reasoned about is unexpressible (R8) or vacuous.
+
+| Line | Clause | Fixture | Guard | Status | Owner / reason |
+|---|---|---|---|---|---|
+| retired 7 | `memory_result_drives_plain_out` — vacuous | `gone:memory_result_drives_plain_out`, `gone:reject_memory_driven_comb_outputs`, `ui:fail/plain_out_on_sequential`, `test:copper-codegen/tests/phase_sensitive_checks.rs::no_new_phase_sensitive_check_in_the_transpiler` | PA, G-C | CLOSED | step 3 (§G.4); I.10.6's header rule is I.10.6's line |
+| retired 8 | `multi_write_collapse` | `gone:multi_write_collapse`, `ui:pass/multi_write_regout_ok` | PA | CLOSED | II.2.1 D4 |
+| retired 9 | `unprotected_pretick_out_write` | `gone:unprotected_pretick_out_write`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; step 3 |
+| retired 10 | `pretick_out_write_before_update` | `gone:pretick_out_write_before_update`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; step 3 |
+| retired 11 | `trailing_regout_reads_input` | `gone:trailing_regout_reads_input`, `test:tests/reference_leg_measurements.rs::regout_trailing_single_tick_agrees_on_three_legs` | G-C | CLOSED | vacuous under one job; the trailing read sees `x_{N+1}` on three legs |
+| retired 12 | `trailing_out_reads_input` | `gone:trailing_out_reads_input`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8 |
+| retired 13 | `linear_out_write_anchor_mismatch` | `gone:linear_out_write_anchor_mismatch`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; forms F1–F5 deleted (§H.1) |
+| retired 14 | `multi_phase_out_write` | `gone:multi_phase_out_write`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8 |
+| retired 15 | `out_first_driven_late` | `gone:out_first_driven_late`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; I.11's class vacuous (D-14) |
+
+**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §R
+(2026-11-07): COUNTS_PLACEHOLDER
+
+**III.3.7 Implementation map.** `tests/conformance_ledger.rs` (the parser, the completeness and
+token checks, `COPPER_LEDGER_REPORT`); `tools/regression.sh` G-K (the `REQUIRE` lines against the
+run's log and the examples' status); `build.rs`'s `corpus_manifest.rs` (the swept names) and `SKIP`.
+
+**III.3.8 Carried list.** Every OPEN line above, with its owner — the Phase C follow-up list; the
+decisions of §R.6 are the user's. A line that closes moves to CLOSED with its fixture, its OPEN
+reason kept in the commit that closes it; a new clause, row or rule of Parts I–II gains a line in
+the same change (G-K fails otherwise). The II.3 found lines are owed to II.3.3 as dated rows (the
+coordinator's edit).

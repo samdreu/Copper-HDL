@@ -3565,3 +3565,55 @@ found. Not run remotely (nothing pushed).
 `M`/`T` line references predate the move to `front_end.rs`; the header messages of R20 still spell ports
 `In<T>`, `Out<T>` (pinned by 13 `.stderr` files; a message change, not a rule change). I.13.7 (3)
 (instantiation refused in behavioural bodies) stays open (§P.4).
+
+## R. Phase C step 11 — the conformance ledger, SPEC §III.3 (2026-11-07)
+
+Session phase-c-ledger, branch `claude/phase-c-ledger-441ef3` (cut from `paper` at `924793e`; nothing
+pushed). D-20 step (11), in the shape II.3.7's first bullet decided. (`924793e`'s and `5b22062`'s
+subjects say "step 11" for what was D-22's work, §Q; that was step 10b — this section is step 11.)
+
+### R.1 Inventory
+
+Four read-only passes over SPEC Parts I–II (one per slice: I.0–I.4, I.5–I.9, I.10–I.12, I.13–II.2),
+each mapping every numbered clause to fixtures checked by grep against the tree, cross-read against
+§E–§Q; II.3.3's rows and the retired rules mapped from §G.4 and §J. The SPEC requires **168** lines:
+**91** numbered clauses of Parts I–II (the Implementation-map and Carried clauses excluded; I.5 has
+none), II.1.2's **22** rule rows, II.2.1's **4** derived rules, **11** II.3.3 rows other than (e), the
+**29** methods named in row (e)'s shape, and the **9** retired rules 7–15. Added beyond the required
+set: the **7** methods row (e) owes (`eq_logic`, `ne_logic`, `as_array_mut`, `from_array`,
+`from_slice`, `From`, `all_ones`) and **7** II.3 rows found in Phase C that II.3.3 does not carry —
+181 lines.
+
+### R.2 Predictions (written before the bare regression)
+
+~175 lines, ~150 CLOSED, ~25 OPEN. Predicted OPEN: I.10.1, I.10.4, I.10.5, I.10.6 (the memory
+obligations of I.10.7 (2)–(7)); I.11.2(c) (the double top-level write); I.12.4(e) (no multi-bit
+witness); I.13.4 and I.13.5 (I.13.7 (3), (6)); I.14.3 (`== Logic::X`, signed `saturating_*`); R16 (the
+N bound); II.1.3 (the parity breaks outside the battery); I.8.4 (R3 at a constant-empty range); I.2.4
+and I.8.5 (the `continue` of a counted `for`); the two `saturating_*` lines; the II.3 found
+REFUSED-one rows. Every II.3.3 row else CLOSED; the retired rules CLOSED. Regression numbers
+predicted equal to §Q.3's except the test totals (+2 tests, the ledger's two;
++1 binary; G-C 128 files) and the new G-K line.
+
+### R.3 Probes (measured before writing the lines; scratchpad, not in the tree)
+
+- **`continue` of a tick-bearing counted `for`** (`for _i in 0..4 { if a { tick; continue; } …; tick
+  }`): the macro **admits** (compiled as a root test target), the transpiler refuses ("unsupported
+  construct: a `continue` inside a tick-bearing counted `for`"). A live REFUSED-one break outside
+  `front_end_parity_ui.rs`'s battery — II.1.3's "one named exception" is not yet true.
+- **A labelled `continue 'w`** of a nested loop: refused by both with R12's message
+  (`front_end::check_break_forms`).
+- **A combinational port written twice at the top level**: `assign o = a; assign o = b;` — I.11.2(c)
+  still open.
+- **A `u8` file const in a body expression** (`c.wrapping_add(CI_STEP)`): `localparam int CI_STEP`,
+  Verilator 5.044 `-Wall` WIDTHEXPAND + WIDTHTRUNC — §N.5 item 1 still open.
+
+### R.4 The check — G-K
+
+`tests/conformance_ledger.rs` (two tests: the check, and its parsers against a hand-written ledger)
+and G-K in `tools/regression.sh`; see SPEC III.3.1. Its first run against the drafted ledger failed
+on **5** real faults, each fixed in the ledger or the test, not excused: `Bits` read as a row-(e)
+method (the parser now takes lowercase identifiers only); `async fn det_010_awaits (` and `async fn
+lfsr (` (a space before the parenthesis) unmatched by the `fn` finder; and `checked_sub`'s line named
+no fixture that mentions it — a `checked_sub` witness was added to
+`front_end_parity.rs::the_step_8_data_rules_refuse_their_witnesses_and_admit_their_twins`.
