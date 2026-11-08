@@ -3555,8 +3555,10 @@ Found, not decided (stopped): **the held pre-loop read** — `let x = a.read(); 
 I.7.1 (i) calls `x` a constant (never assigned in the loop), the analysis agrees (not a register), both
 front-ends admit it, the transpiler emits a wire of each resumption, and the SV diverges: 6/6 sequences
 `sim=ref≠SV` (corpus 0). C2's wire is I.7.2(c)'s (reassigned in the loop); this is I.7.2(b)'s shape with
-a non-constant initializer, which neither C2 nor R11 now covers. Recorded OPEN in I.2.3; options in §N.4.
-Obligations: the user's decision on the held pre-loop read (§N.4); the follow-ups of §N.5.
+a non-constant initializer, which neither C2 nor R11 then covered; options in §N.4, both H1 and H2
+prototyped and measured (§N.4.1). **DECIDED H1 (user, 2026-11-07): refused**, R11 widened to it in both
+front-ends (`check_held_preloop_values`, one message, ui/fail `held_preloop_read`, corpus 0); H2's branch
+is not merged. Obligations: the follow-ups of §N.5.
 Coroutine terms: a register's power-on value is the value the coroutine's first resumption finds in it,
 and rustc is the one tool that computes Rust's constants; the transpiler and the interpreter each
 compute it again, and the sweep and G-J say whether all three agree.

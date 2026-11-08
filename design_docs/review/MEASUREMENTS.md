@@ -2908,7 +2908,7 @@ which the transpiler states field by field and the interpreter cannot evaluate (
 fewer (most corpus indices are locals), no item/bound asymmetry at all.
 **Negative control:** `apply_binop`'s `+` changed to `a + b + 1` → **16 DISAGREE**, the test fails; reverted.
 
-### N.4 Found and STOPPED — the held pre-loop read (a decision for you)
+### N.4 Found, then DECIDED H1 — the held pre-loop read
 
 Writing C2's fixture, a second shape was probed: `preloop_held_read`,
 `let x = a.read(); loop { q.write(x); tick }`. **Predicted** (from I.7.1): `x` fails I.7.1 (i) (never
@@ -2952,8 +2952,8 @@ Predictions were written first (notes file `phase-c-consts-d21.md`).
 | Prototype limits | the detector is syntactic (a `let` in the loop that shadows the name counts as an assignment — under-refuses) | as H1's detector; the rewrite handles `Logic`/`Bits<N>` held values only, the type annotated or a port read; the projection test now uses the analysis's detector (a shared-code caveat for an independent check) |
 | SPEC text it needs | R11 (II.1) widened: "a register, or a pre-loop `let` live at a tick"; I.2.3's OPEN note closes as REFUSED | I.7.1 (i) amended: a pre-loop `let` with a non-constant initializer that is live at a tick is a register with no power-on value (assigned by the first resumption, like I.7.2(d)'s loop-born register); I.7.4 gains that case; I.2.3's OPEN note closes as IN |
 
-Neither branch is merged into `claude/phase-c-consts-867296`; each is one decision away. The
-recommendation stands at **H1** on size and on what it asks of the spec (R11's existing reason); H2
+**Decided H1 (user, 2026-11-07): merged into `claude/phase-c-consts-867296`**; H2's branch is kept, unmerged. The
+recommendation stood at **H1** on size and on what it asks of the spec (R11's existing reason); H2
 is measured to work and gives the shape its coroutine meaning at the cost of a second kind of
 register (one with no power-on value set before the loop).
 

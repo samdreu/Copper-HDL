@@ -334,15 +334,12 @@ A `read` appears only as the hoisted `let t = read x`; an input is never read in
 an expression. (D-21 C2) A pre-loop `let v = e` whose `e` is not a constant is in the kernel
 when `v` is not a register — I.7.2(c)'s wire, reassigned in the loop before any read that
 follows a tick, so `e` is read by the first resumption alone (D-11: the pre-loop statements are
-the first resumption's); a register's initializer is a constant (I.7.4(c), R11). **OPEN
-(D-21, recorded, not decided):** the shape I.7.2(b) with a non-constant initializer — a
-pre-loop `let v = e` the loop never reassigns and reads after a tick (`preloop_held_read`:
-`let x = a.read(); loop { q.write(x); tick }`) — carries the first resumption's value into
-every later one, yet I.7.1 (i) calls it a constant (that classification assumed `s_pre`'s
-initializers constant). Both front-ends admit it today; the transpiler emits `x` as a wire of
-each resumption and the SV diverges (measured 6/6 sequences `sim=ref≠SV`; corpus 0;
-`review/MEASUREMENTS.md` §N.4). Its rule — refused (R11 extended to a pre-loop `let` live at a
-tick) or a register loaded by the first resumption — is owed. `write o e` on a plain output appears only in a `combinational` module's
+the first resumption's); a register's initializer is a constant (I.7.4(c), R11). **REFUSED (D-21 H1, user decision 2026-11-07):** the shape I.7.2(b) with a non-constant
+initializer — a pre-loop `let v = e` the loop never reassigns and reads after a tick (`preloop_held_read`:
+`let x = a.read(); loop { q.write(x); tick }`) — would carry the first resumption's value into
+every later one, a register whose power-on value is an input's; R11's reason refuses it in both
+front-ends (`copper_analysis::check_held_preloop_values`, one message; ui/fail `held_preloop_read`;
+corpus 0; before the rule the SV diverged 6/6 sequences `sim=ref≠SV`, `review/MEASUREMENTS.md` §N.4). `write o e` on a plain output appears only in a `combinational` module's
 body (I.2.7, → I.11; D-14: I.11.2); in a sequential module every output is a `q` (D-8). `break` and `continue` target the innermost enclosing loop; `continue`
 of the module loop is in the kernel, `break` of it is outside (I.2.5). A nested `loop`
 must reach a `tick` on every path and end at one — a shape rule (→ II.1), stated here
@@ -3105,7 +3102,7 @@ refused now, in both front-ends, at a measured cost of 0 each.
 | R8 | a plain `Out` parameter on a `sequential` or `synchronizer` module | S5 (D-8) | none | none | both admit; D-8's Phase C rule; cost 88 (sweep) / 273 (all) — D-8's rewrites |
 | R9 | the flag `allow_pretick_alignment` | S0 (I.2.2) | none — parsed and honoured | none | both admit; Phase C; 3 (sweep) / 78 (all), the battery's |
 | R10 | a second `Clock` parameter on a `sequential` module | S0 (I.2.2: exactly one) / S2 (a second resumption protocol with no meaning until I.12; D-17: I.12.5 confirms the refusal) | none — the CDC check is skipped (:947) | none — measured accepted | both admit; **both owe** (D-12 A 2b); cost 0 |
-| R11 | a pre-loop register initializer that is not a constant (registers only, D-21 C2) | S3 (I.7.4(c), I.9.2; `s_pre ::= let v = c` for a register) | rustc: the initializer in a `const { }` block (D-21 A3); before it the shared `check_register_initializers` (`init.rs`): a run-time read, R11's message | the same function, then `check_register_initializer_calls_in` (a non-`const` callee) and the fold | holds — ui `register_init_reads_input` (R11's message), `register_init_not_constant`, `register_init_non_const_ctor` (E0015), `register_init_rust_constants_ok`; `copper-codegen/tests/register_init_parity.rs` transpiles those cases (D-21) |
+| R11 | a pre-loop register initializer that is not a constant (registers only, D-21 C2); and (D-21 H1) a held pre-loop value — a pre-loop `let` the loop never reassigns, read in the loop, whose initializer reads an input | S3 (I.7.4(c), I.9.2; `s_pre ::= let v = c` for a register) | rustc: the initializer in a `const { }` block (D-21 A3); before it the shared `check_register_initializers` (`init.rs`): a run-time read, R11's message | the same function, then `check_register_initializer_calls_in` (a non-`const` callee) and the fold | holds — ui `register_init_reads_input` (R11's message), `register_init_not_constant`, `register_init_non_const_ctor` (E0015), `register_init_rust_constants_ok`; `copper-codegen/tests/register_init_parity.rs` transpiles those cases (D-21); the held value: `check_held_preloop_values` in both front-ends, ui `held_preloop_read`, `front_end_parity::no_corpus_module_holds_a_preloop_read` (corpus 0) |
 | R12 | a labelled or valued `break` | S0 (I.2.3; D-10 A5, I.8.3) | **none** | `control_extract.rs:1792`, `:1797` | **T-only** → M owes |
 | R13 | a macro in statement or expression position outside `const { }` (not `matches!`) | S0 (I.2.3: `e` pure, reads hoisted) | **none** | `parser.rs:275` → "macro invocation is not supported" | **T-only** → M owes; corpus 0 (one `vec!` inside a preload is DESUGARED, I.2.4) |
 | R14 | an input read inside macro tokens | S0 (I.2.3: `let t = read x` the only form; I.2.8, I.4.8) | **none** — the visitor does not enter tokens; `cfg.rs:2945` counts them as uses | refused with R13 | **T-only** → M owes (with R13) |

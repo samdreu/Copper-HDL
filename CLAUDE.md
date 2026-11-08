@@ -391,7 +391,8 @@ receive/clone one.
   `check_register_initializer_calls_in` (every callee a `const fn`) before its fold, and
   `copper-codegen/tests/register_init_parity.rs` transpiles the macro's own ui cases. R11
   is for registers only (D-21 C2): a pre-loop `let` that is a wire of the first resumption
-  may read an input. `COPPER_VERILATOR_X_INITIAL=1` randomizes Verilator's power-on values
+  may read an input — but one the loop never reassigns and reads again would hold the input's
+  first value, so both refuse it (`check_held_preloop_values`, D-21 H1). `COPPER_VERILATOR_X_INITIAL=1` randomizes Verilator's power-on values
   to measure what is left unstated), R8 (no
   plain `Out` on a clocked module, one shared message) and the memory rules. A module
   that compiles therefore

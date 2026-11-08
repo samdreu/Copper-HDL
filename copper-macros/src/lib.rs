@@ -873,7 +873,7 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             }) {
                 return err.to_compile_error().into();
             }
-            // D-21 §N.4 H1 (prototype): a held pre-loop value is refused. Same
+            // D-21 H1 (decided 2026-11-07): a held pre-loop value is refused. Same
             // function, same message, in `transpile_target`.
             if let Err(err) = copper_analysis::check_held_preloop_values(&input_fn) {
                 return err.to_compile_error().into();

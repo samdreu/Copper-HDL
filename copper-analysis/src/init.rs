@@ -420,7 +420,7 @@ fn loop_names(body: &syn::Block) -> (BTreeSet<String>, BTreeSet<String>) {
     (v.assigned, v.mentioned)
 }
 
-/// H1 (D-21 §N.4, prototype): refuse a held pre-loop value, both front-ends.
+/// D-21 H1 (MEASUREMENTS §N.4, user decision 2026-11-07): refuse a held pre-loop value, both front-ends.
 pub fn check_held_preloop_values(f: &ItemFn) -> Result<(), syn::Error> {
     match held_preloop_values(f).first() {
         None => Ok(()),
