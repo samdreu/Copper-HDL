@@ -6,6 +6,7 @@ pub mod shir_lower;
 pub mod vlir_lower;
 pub mod emit;
 pub mod width_checks;
+mod const_fold;
 
 pub use parser::capture_frontend_ir;
 pub use chir_lower::{lower_to_chir, ModuleRegistry};

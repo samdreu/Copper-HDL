@@ -1427,6 +1427,14 @@ fn fold_const_init(
             }
             Ok(Value(acc))
         }
+        // A `const` integer method call and a tuple-struct field: the shared evaluator
+        // (2026-11-08, MEASUREMENTS §V.4, line `II.3 found const-call`).
+        e @ (ExprType::MethodCall(_) | ExprType::Field(_)) => CONST_ENV.with(|c| {
+            crate::const_fold::method_or_field(e, width, &c.borrow(), &|x, w| {
+                value_of(fold_const_init(x, w, enums, consts)?, "a `const` method or field")
+            })
+            .map(|v| Value(mask_to(v, width)))
+        }),
         other => Err(format!("is {}, which is not a constant", other.kind_name())),
     }
 }

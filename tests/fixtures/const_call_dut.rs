@@ -6,10 +6,9 @@
 // a `const` integer method (`CC_BASE.wrapping_add(10)`), a tuple-struct constructor and
 // its field (`CcPair(3, 5)`, `CC_PAIR.0`), an immutable `static`.
 //
-// The module starts a register from the `static` — the spelling that reaches the
-// emitted SV today. A register started from the method call or the tuple field is
-// still refused by the transpiler's register fold (`chir_lower::fold_const_init`, the
-// line's remaining half, owned by copper-codegen).
+// The modules start registers from each spelling; the transpiler's register fold
+// (`chir_lower::fold_const_init`) delegates the method call and the field to
+// `ConstEnv` (`copper-codegen/src/const_fold.rs`), and each value shows at obs_1.
 
 const CC_BASE: u8 = 250;
 const CC_WRAP: u8 = CC_BASE.wrapping_add(10); // 4
@@ -27,5 +26,30 @@ async fn cc_static_init(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, q: RegOut<
         q.write(Bits::from_u8(g));
         clk.tick().await;
         g = g ^ a.read().as_u8();
+    }
+}
+
+/// Registers started from a `const` method call (on a typed const, and on the
+/// register's own type), a tuple-struct constructor's field, and a tuple-struct
+/// const's field.
+#[hardware(sequential)]
+async fn cc_call_init(
+    clk: Clock<MainClk>,
+    a: In<Bits<8>, MainClk>,
+    o: RegOut<Bits<8>, MainClk>,
+    p: RegOut<Bits<8>, MainClk>,
+    s: RegOut<Bits<8>, MainClk>,
+) {
+    let mut m: u8 = CC_BASE.wrapping_add(7); // 1
+    let mut t: u8 = CcPair(9, 1).0; // 9
+    let mut f: u8 = CC_PAIR.1.wrapping_mul(CC_ONES as u8); // 30
+    loop {
+        o.write(Bits::from_u8(m));
+        p.write(Bits::from_u8(t));
+        s.write(Bits::from_u8(f));
+        clk.tick().await;
+        m = m.wrapping_add(1);
+        t = t ^ a.read().as_u8();
+        f = f.wrapping_add(3);
     }
 }

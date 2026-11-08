@@ -91,3 +91,16 @@ fn each_refusal_names_its_reason() {
     let e = transpile(&dir.join("register_init_non_const_ctor.rs")).unwrap_err();
     assert!(e.contains("initialized by a call to `Latch::bubble`, which is not a `const fn`"), "{e}");
 }
+
+/// Line `II.3 found const-call` (2026-11-08, MEASUREMENTS §V.4): the spellings rustc
+/// admits in `const { }` and the transpiler's fold refused until then — each folded to
+/// rustc's value (`255u8.wrapping_add(2) == 1`).
+#[test]
+fn the_transpiler_folds_const_calls_rustc_admits() {
+    let p = ui_dir().join("pass/register_init_const_calls_ok.rs");
+    let sv = transpile(&p).unwrap_or_else(|e| panic!("rustc admits it, the transpiler refuses: {e}"));
+    for (reg, value) in [("via_method", "8'd1"), ("via_ctor", "8'd7"), ("via_field", "8'd5"), ("via_static", "8'd33")] {
+        let line = format!("{reg} = {value};");
+        assert!(sv.contains(&line), "expected `{line}` in the initial block:\n{sv}");
+    }
+}

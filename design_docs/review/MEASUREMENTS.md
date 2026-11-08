@@ -3983,3 +3983,173 @@ fixtures PASS. Not run remotely (nothing pushed).
 After the run, docs only: D-24 (`SPEC_DECISIONS.md`), III.3.6's counts, this section, CLAUDE.md.
 Disk: the run needed the cargo `target/` dirs of six merged, idle worktrees deleted first (the user's
 approval, ~51 GiB; 4.2 GiB was free).
+
+## V. The front-end batch of SPEC §III.3's OPEN lines (2026-11-08)
+
+Branch `claude/open-lines-frontend-f6a287` (from `paper` at `e4a9aae`), one of three parallel batches
+(this one: the shared front-end rules and the constants; §U is the transpiler batch's). Code commits
+`0bd4007` and the const-call follow-up (V.4). Six lines in scope; the I.2.4 line's sub-lines (array-for, tickfree-continue) are the
+transpiler batch's. Baselines below were measured on a scratch worktree of `e4a9aae` (deleted after).
+
+### V.0 Predictions (written before any code change)
+
+1 body-wire: corpus 0 behavioural bodies call a net constructor; today macro admits, transpiler "cannot
+infer bit width"; after, both refuse with one message naming I.13.5. 2 R16: corpus 0 widths outside
+1..=128 (grep: 0; the widest is `Bits<128>`, twice); today both admit `Bits<0>`/`Bits<200>`. 3 I.8.4:
+today both admit a module whose only boundary is `for _ in 0..EMPTY { tick }`; after, both refuse with
+R3's message; 0 corpus verdict changes. 4 const-call: rustc admits the three spellings, the transpiler
+refuses each (measured on probes `cc_method`, `cc_tuple`, `cc_static` before predicting the rest).
+5 I.13.4(d): an unconnected child port — rustc E0061, the transpiler's port count. 6 I.12.4(e): a
+`Bits<4>` synchronizer agrees on three legs.
+
+**Measured against them:** 1, 2, 5, 6 as predicted. 3: one miss, the same as §P.5's — the baseline
+*transpiler* already refused the constant-empty case, by accident ("sequential module loop body has no
+clk.tick().await"); the macro admitted it. 4: the method call and the tuple field are refused inside
+`chir_lower::fold_const_init` (a lowering file, outside this batch), not in `ConstEnv` (V.4).
+Baseline of the macro on every new ui/fail case: compiled (trybuild "Expected test case to fail to
+compile, but it succeeded") — except `structural_unconnected_port`, already E0061.
+
+### V.1 `II.3 found body-wire` — CLOSED
+
+`front_end::check_no_body_nets`: a call whose callee path ends in `wire`, `registered_wire` or `net`,
+anywhere in the body (not in nested items), in every mode but `structural` (whose body rule reads `net`
+and refuses the other two with `RETIRED_NET_MESSAGE`). In `check_front_end_rules`, so both front-ends
+run it; message `BODY_NET_MESSAGE`, naming I.13.5. ui/fail `behavioural_net` (the §S.4 probe);
+`front_end_parity_ui.rs` requires the transpiler's message to equal the macro's. Witnesses and a twin
+(`wire_count(3)`, a helper whose name only starts with `wire`) in
+`front_end_parity.rs::the_2026_11_08_rules_refuse_their_witnesses_and_admit_their_twins`. Corpus: the
+shared-rule audit (277 fns) passes — 0 hits.
+
+### V.2 II.1.2 R16 — CLOSED
+
+`check_admissible` rule 1c: every `Bits` path segment with one generic argument written as a constant
+(a literal, arithmetic over literals, a `{ … }` block of one; `consts::eval_syn` with no names) must be
+1..=128 — a port, an annotated `let`, a turbofish (`Bits::<{ 2 * 128 }>::zero()`). Message
+`bits_width_message(n)`. ui/fail `bits_width_zero` (ports), `bits_width_over_128` (a local). Baseline:
+the transpiler admitted both (`bits_width_over_128` emitted `module m (`, `bits_width_zero` printed
+no error). Corpus 0 (grep, and the audit). `admissible_calibration.rs` passes (admissible Err ⟹
+transpile Err holds — the rule runs in both). **Not reached:** a width naming a const generic or a
+`const` item (`Bits<W>`) is not in the source; a generic module's width is chosen at instantiation
+(I.14.5(d)), and the sweep's `PARAMS` hold none outside the bound.
+
+### V.3 I.8.4 — CLOSED; the run-time case found
+
+**Mechanism.** The macro holds only the `ItemFn` and cannot fold a file `const`; rustc can. Measured
+first (rustc 1.92, `--emit=metadata`, i.e. what trybuild runs): an inline `const { assert!(..) }` in a
+fn body is **not** evaluated under `cargo check` (only at codegen), a body item
+`const _: () = assert!(..);` **is**, in a generic `async fn` too. So:
+- `cfg.rs` gains a thread-local range-emptiness oracle consulted where a ticking `for`'s exit is
+  decided (`literal_range_is_empty`), and `constant_ticking_for_ranges(f)`: ranges of ticking `for`s
+  both of whose bounds are literals, paths naming no binder of `f` (parameter, local, pattern binder,
+  const generic), operators, parentheses, casts, at least one path.
+- `empty_range_dependencies(f)`: R3 re-run with every such range assumed empty; if it still holds,
+  nothing; otherwise the minimal sets of ranges whose joint emptiness makes it fail (all subsets up to
+  10 ranges; singletons + the full set beyond — an under-approximation; the corpus has 7 ranges in 4 modules).
+- The macro emits one body item per set, `const _: () = assert!(!(<all empty>), NESTED_EXIT_MESSAGE);`,
+  a one-range set right before its `for` (so a `const` of that block is in scope — the first version put
+  every item at the top and the ui/pass twin failed with E0425; measured, fixed), a larger set at the
+  top. rustc prints `error[E0080]: evaluation panicked: <R3's message>`; `front_end_parity_ui.rs`
+  accepts that prefix as the macro's.
+- The transpiler (`copper-codegen/src/lib.rs`) folds each range through `ConstEnv` over the file's and
+  the body's const items and runs R3 with the answers; a range a dependency set names that `ConstEnv`
+  cannot fold is refused (`UNFOLDED_BOUNDARY_RANGE_MESSAGE`) — over-refusal where `ConstEnv` is
+  narrower than rustc, as R5 and R11.
+
+ui/fail `constant_empty_for_boundary`, ui/pass `constant_nonempty_for_boundary_ok`. **Corpus:** 7 such
+ranges in 4 modules (`uart/rx.rs::rx`, `uart/system.rs::uart_tx`, `uart_rx`,
+`fixtures/uart_rx_dut.rs::uart_rx_dut` — `0..CLKS_PER_BIT` and kin), each depending on its ranges being
+non-empty, 7 one-range sets, 0 of more than one; all four still compile (the assertions hold) and
+transpile.
+
+**Found — `II.3 found runtime-empty-boundary` (new OPEN line).** I.8.4(b) puts a ticking `for` over a
+range empty only at **run time** under case (a) — the enclosing path must reach a tick — but R3 counts
+it as a boundary. Probe `runtime_empty_for_boundary` (`for _ in 0..cnt { …; tick }` the module loop's
+only boundary, `cnt` read in the loop): the macro admits it (trybuild pass), the transpiler refuses it
+with the flattener's message ("could not be flattened into an FSM …") — REFUSED-one. Making such a
+range an exit in `may_exit_without_tick` was measured and **reverted**: corpus 0 (the shared-rule audit
+flagged only the 4 UART modules, whose ranges are the constant ones above), but it moved
+`ui/fail/nested_runtime_empty_for` (a run-time `for` ending a bounded outer `for`) from
+`check_counted_for_nesting`'s message to R3's, whose "livelock in simulation" is wrong for a bounded
+outer loop — the message split is a decision for the change that lands it. Also found, recorded: a
+body-local `const` used in a ticking `for`'s bound is refused by the transpiler's flattener (baseline
+too, measured), so the ui/pass twin uses file consts.
+
+### V.4 `II.3 found const-call` — CLOSED; the body-expression case found
+
+**Evaluators (B2: one grammar, two evaluators — both widened, no ASYMMETRIC rows).** The task offered
+pinned `ASYMMETRIC` rows instead; widening the interpreter was chosen because a swept fixture's
+reference leg needs the interpreter to evaluate the same initializers, and because B2's "one grammar"
+is the point of G-J. `ConstEnv` gains: integer types (`IntTy`) for consts, statics, associated consts,
+tuple-struct const fields and `const fn` parameters / annotated locals; the inherent `const` integer
+methods (`wrapping_add/sub/mul/neg/shl/shr`, `saturating_add/sub`, `pow`, `count_ones/zeros`,
+`leading/trailing_zeros`, `is_power_of_two`, `next_power_of_two`, `abs`) at the receiver's type, read
+off the expression (no inference from context: `3.wrapping_add(1)` is `None`); tuple structs
+(`W(a, b).1`, `const K: W = W(..)` as `K.0`, `K.1`); immutable `static`s (`static mut` refused). The
+interpreter (`copper-ref`) gains immutable statics, tuple-struct constructors and fields, and the
+methods it lacked. **Checked against rustc:** a 21-item file compiled by rustc 1.92, its values printed
+and recorded in `tests/const_evaluators_agree.rs::the_widened_constant_grammar_agrees_with_rustc`; both
+evaluators give each value. **Found while measuring:** `min`/`max` are `Ord`'s, not `const fn`s — rustc
+refuses `CC_SUM.min(CC_WRAP)` in a `const` (E0658, found when the first fixture failed to compile);
+both evaluators had admitted them, both leave them outside now, and the test pins that. One
+miscalculation of mine in a unit test (expected `250u16 << 9 = 0xFE00`; it is `0xF400`) was caught by
+the test.
+
+**Front-end half.** `parser.rs::capture_file_scope` passes immutable statics and tuple structs to
+`ConstEnv`; the R11 call half admits a tuple-struct constructor (rustc's E0015 note: "constant
+functions, tuple structs and tuple variants"). That alone took the `static` to the SV (`g = 8'd33`).
+**The register fold.** A register started from `K.wrapping_add(1)` or `W(7).0` was refused inside
+`chir_lower.rs::fold_const_init` ("is method call / field access, which is not a constant") — a
+lowering file outside this batch. Asked the coordinator; approved on the condition of one arm and
+nothing else in the file. **The change in `chir_lower.rs`, exactly:** 8 added lines (1430–1437 on the
+code commit), one `match` arm of `fold_const_init`, `e @ (ExprType::MethodCall(_) | ExprType::Field(_))`,
+placed before the final `other =>` arm, calling `crate::const_fold::method_or_field` with the module's
+`CONST_ENV` and `fold_const_init` itself for the sub-expressions; no other line of the file changed.
+The helper is a new file, `copper-codegen/src/const_fold.rs`: the receiver's type from the FIR (a typed
+const / static / tuple-struct field, a literal suffix, a cast), else the register's width, unsigned (as
+rustc infers it from the annotation); `consts::int_method` for the value; a field read as `K.i` or the
+constructor's argument. **Measured:** the probes fold to rustc's values (`cc_method` `8'd0`, `cc_tuple`
+`8'd7`, `cc_static` `8'd9`); `ui/pass/register_init_const_calls_ok` compiles and
+`register_init_parity.rs::the_transpiler_folds_const_calls_rustc_admits` finds `via_method = 8'd1`,
+`via_ctor = 8'd7`, `via_field = 8'd5`, `via_static = 8'd33`; the swept fixture
+`tests/fixtures/const_call_dut.rs` (`cc_static_init`, `cc_call_init`: `m = 8'd1`, `t = 8'd9`,
+`f = 8'd30`) passes its differential and reference-leg cases.
+
+**Found — `II.3 found const-call-body` (new OPEN line).** The same constants named in a **body**
+expression or a tick-free `for` bound (`for _ in 0..CC_WRAP`, `f.wrapping_add(CC_SUM)`) are emitted as
+a file `localparam` from their Rust text and refused ("`const CC_WRAP` has an initializer the
+transpiler cannot express in SystemVerilog (`CC_BASE . wrapping_add (10)`)"); the macro admits them.
+Corpus 0. Owner copper-codegen (`file_consts`, `emit.rs` — the `localparam`'s value through
+`ConstEnv`); not touched here.
+
+**G-J (measured):** baseline `e4a9aae` — 128 files, const items 67 compared / 16 outside both, 269
+stated registers + 42 vs `ConstEnv`, 0 asymmetric, 0 DISAGREE. After — 130 files, **72 compared / 22
+outside both**, 274 + 46, **0 asymmetric, 0 DISAGREE**. The +5 outside both are the harnesses'
+`static TMP_NONCE: AtomicUsize` items, now listed by both (neither folds an `AtomicUsize::new`, as
+rustc does not in a const), and `CC_PAIR` (a struct-valued const; its fields are compared through
+`CC_SUM`).
+
+### V.5 I.13.4(d) — pinned; the line stays OPEN for its memory half
+
+ui/fail `structural_unconnected_port` (`hold(clk, n.1)` for a three-port `hold`): rustc
+`error[E0061]: this function takes 3 arguments but 2 arguments were supplied`, the transpiler
+"structural instantiation of `hold` passes 2 args but the module has 3 ports". Listed in
+`front_end_parity_ui.rs`'s `RUSTC_JUDGED` and both messages pinned by
+`an_unconnected_child_port_is_refused_by_both`. The line's other half — one owner per memory port,
+which needs the port set in the parameter type — is I.10.5's (the memory batch).
+
+### V.6 I.12.4(e) — CLOSED
+
+`tests/fixtures/sync_bits_dut.rs::sync_bits_2ff`: `sync_2ff`'s body over `Bits<4>`, `SyncSrc` →
+`SyncDst`, swept (4 input bits: four 200-cycle seeds plus a sequence from every initial vector), each
+bit driven independently by the random stimulus. A fixture, not an anchor; no reference written.
+
+### V.7 Ledger, parity audit, counts
+
+`front_end_parity.rs` gains `the_2026_11_08_rules_refuse_their_witnesses_and_admit_their_twins` (the
+three rules) and `constant_range_boundaries_in_the_corpus` (the V.3 measurement, printed). Ledger
+(G-K, `tests/conformance_ledger.rs`): **before** 187 lines — 166 CLOSED, 21 OPEN; **after** 189 lines —
+171 CLOSED, 18 OPEN (closed: I.8.4, I.12.4, II.1.2 R16, `II.3 found body-wire`, `II.3 found
+const-call`; opened: `II.3 found runtime-empty-boundary`, `II.3 found const-call-body`; narrowed to its
+memory half: I.13.4). Not edited: the II.1.3 line's list of macro-admits/transpiler-refuses shapes
+still names body-wire and const-call (closed here) and not the two found here — the coordinator's
+edit, as are II.3.3's dated rows.
