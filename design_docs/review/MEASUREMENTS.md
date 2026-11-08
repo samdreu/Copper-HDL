@@ -3617,3 +3617,132 @@ method (the parser now takes lowercase identifiers only); `async fn det_010_awai
 lfsr (` (a space before the parenthesis) unmatched by the `fn` finder; and `checked_sub`'s line named
 no fixture that mentions it — a `checked_sub` witness was added to
 `front_end_parity.rs::the_step_8_data_rules_refuse_their_witnesses_and_admit_their_twins`.
+
+### R.5 The bare regression — measured
+
+**Bare `tools/regression.sh` on `dca622d` (the code commit; laptop): REGRESSION OK (485 s).** 1419
+passed, 0 failed, 16 ignored, 155 test binaries (G-C: 128 test files — +1, `conformance_ledger.rs`);
+examples **32/32**; G-D **213** differential cases (3 ignored-with-reason, unchanged); **G-F 213**
+(`run=213 clocked=161 memory=18 combinational=52 skipped=0`, design leg ran); **G-G differential
+1622 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**; **G-G reference 1634 PASS / 0
+DISAGREE**; pinned disagreements 0; **G-I** 162 clocked related, 0 uncovered; **G-J** 0 DISAGREE; G-E 5
+anchored; **G-K** `181 lines — 160 CLOSED, 21 OPEN; 167 required by the SPEC; fixtures: 5 coreui, 3
+example, 11 gone, 134 sweep, 102 test, 81 ui; 147 run checks`, 144 swept/test fixtures `ok` in the
+run, the 3 example fixtures PASS. **Predicted vs measured:** every guard count equal to §Q.3's, as
+predicted; tests +2 (1417 → 1419) and binaries +1, as predicted. Not run remotely (nothing pushed).
+
+After the run, docs only: the `II.3 found preload-ok` line (§N.5 item 2, re-measured: the module's
+first refusal is "match-as-expression without a wildcard/default arm"), the counts of III.3.6, the
+II.3.3 pointer note, this section, CLAUDE.md. `cargo test --test conformance_ledger` re-run on the
+final SPEC: PASS, **182 lines — 160 CLOSED, 22 OPEN**.
+
+**The ledger against the prediction.** Predicted ~175 lines / ~150 CLOSED / ~25 OPEN; measured 182 /
+160 / 22. Every predicted OPEN line is OPEN except two: **I.10.2** (its one open item, the stale
+inference comment, was a comment and was corrected this step) and **II.2.2** (its `infer_registers`
+row was stale wording, annotated this step). Not predicted: **I.13.4** (the "every child port
+connected" row has no fixture), **II.3 found u8-const** and **comb-double-write** (predicted inside
+I.11.2 and §N.5, but each is also its own found line), **II.3 found preload-ok**. By part: Part I 82
+lines / 12 OPEN; II.1–II.2 31 / 2; II.3 60 / 8; retired 9 / 0.
+
+### R.6 Stopped — decisions the spec does not settle (each line OPEN with owner "decision")
+
+**(1) I.13.5 — refusing instantiation in a behavioural body (I.13.7 (3)).**
+*Question:* by what test does each front-end refuse a child instantiated inside a `sequential`,
+`synchronizer` or `combinational` body, given that the macro sees one `ItemFn` and cannot tell a
+`#[hardware]` callee from a plain helper `fn` of the same shape?
+*Docs say:* I.13.5 (D-18 A2): instantiation and nets are structural-only (S0), `lower_hardware_call`,
+the `submodules` fields, `spawn_child` and `spawn_child!` deleted, `module_composition_hybrid.rs`
+rewritten, a ui case from probe `b2`. D-18 (iv) measured `b2` (a child taking a parent `Out` in a
+`sequential` body) **admitted by the macro, the child dropped and never run, and admitted by the
+transpiler**, which instantiates it — a sim ≠ SV shape (corpus 0).
+*Code does (924793e):* `spawn_child` (`copper-sim/src/executor.rs:508`), `spawn_child!`
+(`copper-sim/src/lib.rs:69-75`), `lower_hardware_call` (`chir_lower.rs:5850`, from `:4189`) stand;
+neither front-end refuses; `tests/module_composition_hybrid.rs` spawns children by hand (a testbench
+form, not a body). §P.4: a syntactic "port passed as a call argument" refusal would hit **22** corpus
+modules (`&clk` to `Memory::new` / `from_fn`, and to `preloaded(&clk)` in `tests/mem_latency_probe.rs`).
+*Options:* **(a)** rustc decides, as for a structural body: the macro makes a `#[hardware]` fn's
+return type `#[must_use]`-denied outside `copper_sim::__instance` (or returns a type with no use but
+`__instance`), so `child(a, b);` in a body is a compile error in the macro; the transpiler refuses
+any call it resolves to a `#[hardware]` fn (its registry) with the same message; `lower_hardware_call`
+and the `submodules` fields deleted. Cost: one macro change, the hybrid test rewritten; no corpus
+module. **(b)** a syntactic rule in both front-ends: a call whose argument is a port parameter
+(`In`/`Out`/`RegOut`) — not a `Clock` — is refused; `&clk` to `Memory::new`/helpers stays admitted
+(exempted by name: the clock is threaded, not wired). Cost: misses a child taking only a clock and
+plain values; over-refuses a helper `fn` taking a port (R19 already refuses an `In` passed on, so
+only `Out`/`RegOut` are new). **(c)** record it as a second named parity exception beside R6 (the
+transpiler refuses via its registry, the macro cannot see) and delete `lower_hardware_call` so the
+transpiler refuses instead of instantiating. Cost: II.1.3 gains a second exception; `b2` stays a
+sim-only shape whose child silently never runs.
+*Recommendation:* **(a)** — it reuses step 10's `__instance` mechanism, makes the refusal exact (it
+is about the callee, not the argument types), and closes the never-running child; (c) leaves a silent
+non-execution in the simulator.
+
+**(2) A `continue` of a tick-bearing counted `for` (I.8.5, I.2.4; II.3 found continue-for).**
+*Question:* realize it, or refuse it in both front-ends as a dated II.3 limitation?
+*Docs say:* I.8.3 / I.8.5 (D-10 A2-i): a `continue` is a zero-time return to the loop's test, which
+for a counted `for` runs `c += 1` then the test with the next `c` — IN. II.1.3: any shape one
+front-end admits and the other refuses is a break (R6 the only exception).
+*Code does:* the macro admits (rustc runs it); the transpiler refuses ("unsupported construct: a
+`continue` inside a tick-bearing counted `for`", `control_extract.rs` ~`:1990`); measured by probe
+2026-11-07 (§R.3); corpus 0; no ui case, so `front_end_parity_ui.rs` cannot see it.
+*Options:* **(a)** realize: lower the `continue` as the desugaring's increment-then-test, the entry
+copy that row (a) already uses for a nested `loop` (§J.4); fixture = the probe, swept. Cost: a
+control_extract change, predicted no corpus change. **(b)** refuse in both with one message (a
+shared `front_end` rule and a ui/fail case), a dated REFUSED-both II.3 row with fix direction (a).
+Cost: a meaning D-10 gives is refused until (a) lands. **(c)** leave it (a known break). Cost: II.1.3
+false.
+*Recommendation:* **(b) now, (a) as its dated fix** — the same order as §J.15's row-2 residue: parity
+first (one message, cheap, exact), the lowering when someone needs the shape.
+
+**(3) `v == Logic::X` (I.14.3; §M.9 4(a)).**
+*Question:* is comparing a value against the X literal with the derived `==` a value of the kernel, or
+the "is this X?" question `is_valid()` asks — OUTSIDE (I.14.3(d))?
+*Docs say:* I.14.2: X is a per-bit value; `==` on `Logic` is Rust's derived structural equality (X
+equals X), while `eq_logic` is IEEE `==` (X-propagating, §M.1). I.14.3(d): `is_valid()` is OUTSIDE —
+a 2-state realization cannot answer it. III.2.2: an X is outside every SV pair.
+*Code does:* the macro admits (`#[derive(PartialEq)]`); the transpiler refuses (no lowering of an X
+literal operand to `==`); corpus 0.
+*Options:* **(a)** OUTSIDE: `check_outside_methods` also refuses `==`/`!=` with an X-literal operand,
+one message citing I.14.3(d) — the `is_valid` class. Cost: none in the corpus. **(b)** a value: lower
+`v == Logic::X` to constant false in the SV (2-state: no bit is X) — sim ≡ SV only where the
+simulator holds no X, i.e. the shape leaves the relation exactly when it means something. **(c)**
+leave the break.
+*Recommendation:* **(a)** — it is `is_valid()` spelled with an operator, and (b) emits a text that is
+right only when the comparison is pointless.
+
+**Not a decision of this step (recorded):** D-21's H2 prototype branch `claude/phase-c-consts-h2`
+(tip `5d9153d`) is unmerged; the user decided H1, which is in `paper` (ui `held_preloop_read`, R11's
+line CLOSED) — whether to delete the branch is the user's. §N.5's follow-ups are ledger lines: item 1
+`II.3 found u8-const`, item 4 `II.3 found const-call` (both OPEN, owner the transpiler, no decision
+needed); item 3 (the interpreter's `Self { .. }` gap) is pinned by G-J's `ASYMMETRIC` rows and moves
+no line (REF_SKIP is empty); item 2 (`ui/pass/register_init_constants_ok` does not transpile) is
+`II.3 found preload-ok`.
+
+### R.7 For the coordinator — SPEC items (normative text read stale, not edited here)
+
+The four inventory passes found stale "today / owed to Phase C" sentences throughout Part I that no
+step wrote back (their measurements are in §E–§Q). Edited in this step, as the brief listed: I.10.1(c)
+(the write step's order, §O.7 item 1), I.10.7 (a dated note: done / open / moved), I.13.7 (a dated
+note), III.2.8 (a dated note: no live instance of any pattern), II.1.2 R8, R9, R21 (Parity cells
+annotated) and a note above the table with today's locations of R1–R4 and R11, II.2.2's
+`infer_registers` row, R20's three messages (`In<T, D>`, `Out<T, D>`, `RegOut<T, D>`: **2** `.stderr`
+files carry them, not 13 as §Q.4 said — the other R20 cases' first lines are other R20 messages), and
+`LEVELIZED_SCHEDULING_SCOPE.md`'s reversal note (I.13.7 (8)). **Not edited** (each is a "Today …"
+paragraph contradicted by a later step; none changes a meaning, and every one is now a CLOSED ledger
+line that names the fixture): I.0.2 (L80, the any-domain first settle), I.0.4 (L100-104), I.0.5(c),
+I.0.7 and I.0.8 (the barrier, the injection, the propositions), I.1.4 and I.1.6, I.2.4's table cells
+(`/`, statement macros, `break` forms, the nested `continue`, the array write, the `Bits` methods, the
+unit domain, the empty `for`), I.2.6, I.2.8, I.3.8, I.4.7, I.4.8, I.6.5, I.6.9 (`trailing_reg_outs`,
+`bsg_*` "plain `Out`"), I.7.2(h), I.7.3, I.7.5, I.7.6, I.8.2–I.8.5, I.9.2–I.9.4, I.10.3, I.11.3
+("Today both admit it"), I.11.4, I.11.6's map, I.12.2, I.12.3, I.12.5, I.12.6's map (and the per-domain
+`TICK_RESOLVING` thread-local, `copper-core/src/types.rs:982-1000`, which I.12.6 (1) says is deleted —
+a code item recorded here, not a ledger line: no clause's meaning depends on it), I.13.4(b)–(d)'s table,
+I.14.1(b), I.14.2(e)/(h), I.14.3(b)/(d), I.14.5(b)–(d), I.14.6(c), I.14.7's (1), (3)–(10) not marked
+done, I.14.8, II.1.1 ("none names its clause"), II.1.5 (R21, the hex parser), III.1's P6 row, and
+III.2.1–III.2.7's "Today" sentences (obs_0, X, the truncated verdict, the two pins, the design leg —
+all landed, §E, §O, §P.6). Also: the H2 branch is unmerged and decided against (§R.6, last paragraph).
+
+### R.8 Commit subjects that misname the step
+
+`1ebf010`, `5b22062`, `924793e` (D-22's work, §Q) say "Phase C step 11"; that work is step 10b. This
+section is step 11.

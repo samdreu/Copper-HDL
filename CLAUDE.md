@@ -30,7 +30,7 @@ It lives in `tools/` **because it must be in version control**: `.gitignore` exc
 and lost on a fresh clone. If a local `run-copper` skill wrapper exists, it should be
 nothing more than an `exec` of this script — `tools/regression.sh` is the driver.
 
-It also enforces nine wiring guards, because "the check silently didn't run" has
+It also enforces ten wiring guards, because "the check silently didn't run" has
 been a recurring bug class here: **G-A** every `examples/**.rs` is registered as a
 `[[example]]`, **G-B** every registered example actually ran, **G-C** every
 `tests/*.rs` (root and per-crate) produced a test binary that ran, **G-D** the
@@ -58,7 +58,13 @@ relate needs an `UNCOVERED` row with a reason; there are none
 `copper_analysis::consts` evaluated every corpus const item, pre-loop initializer (also against the
 transpiler's stated power-on value), counted-`for` bound and index both ways with 0 DISAGREE, a
 one-evaluator-only expression a pinned `ASYMMETRIC` row; its line reaches the driver through
-`COPPER_CONST_EVAL_REPORT`. Since 2026-11-06 observation 0
+`COPPER_CONST_EVAL_REPORT`, and **G-K** the conformance ledger (`tests/conformance_ledger.rs`, SPEC
+§III.3, Phase C step 11) ran and passed: every numbered clause of SPEC Parts I–II, every II.1.2 and
+II.2.1 rule, every II.3.3 row (per method for (e)) and every retired rule 7–15 has exactly one
+line, CLOSED with fixture tokens that resolve or OPEN with an owner; its `REQUIRE` lines reach the
+driver through `COPPER_LEDGER_REPORT` and each CLOSED fixture must show `ok` in the same run (a swept
+module's `_differential` and `_reference_leg`, a test inside its own binary's section, an example's
+PASS). **A new clause, rule or II.3 row needs its ledger line in the same change.** Since 2026-11-06 observation 0
 (after the first settle, before edge 1) is compared on all three legs. **OUTSIDE**: a
 simulator X at an observation compared against the 2-state SV takes that sequence's
 SV pair out of the relation from there — reported, never compared as 1 (the old

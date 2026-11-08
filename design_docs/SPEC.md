@@ -3552,6 +3552,10 @@ unless the row says otherwise.
 | (f6) | a `tick` before the module loop, linear route (R21) | none — OUTSIDE (I.2.2: `s_pre` is tick-free; I.9.3) | 2026-11-05 | `chir_lower.rs:1958-1972` (the pre-loop tick is dropped: the SV is `always_ff q <= a + 1` with no state); measured divergent at `obs_1` only (the simulator's first resumption ends at the pre-loop tick with no write; the SV's head runs from edge 1), agreeing from `obs_2` | the R21 refusal in both front-ends (II.1.2, Phase C); the row closes when it lands and is not a limitation — it is recorded so the shape is not silently wrong until then | ADMITTED-AND-DIVERGENT until R21 lands |
 | (g) | a hex literal in a `from_lit` turbofish (`Bits::from_lit::<0xFF>()`) | I.14's constant (I.8.7; D-19: I.14.4 — any base and underscores; closed by the shared evaluator) | 2026-11-05 | `chir_lower.rs:3812` region (the constant parser reads decimal only) | parse hex const generics (II.1.3's parity list) | REFUSED-one (the transpiler; the macro admits) |
 
+(Phase C step 11, 2026-11-07: the Status column above is each row as recorded on its date; every
+row but (e)'s `saturating_*` residue is **closed**, with its fixture, in III.3.4's ledger, and the
+rows Phase C found that this table does not carry are III.3.4's `II.3 found …` lines.)
+
 Cross-references, not rows: `/` is R15, refused in both front-ends by D-12 (II.1.2), its
 meaning I.14's (D-19: I.14.3(b) — given; R15 becomes a II.3 row); a nested `continue` appears in II.1.3's parity list and is row (a). **Not
 rows:** the two nested-loop fold defects of I.7.5 — the local assigned before a ticking
@@ -4156,6 +4160,7 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | II.3 found const-call | a constant the transpiler's fold is narrower than rustc on (2026-11-07, §N.5 item 4): a `const` method call (`K.wrapping_add(1)`), a tuple-struct constructor, a `static` read | `test:copper-codegen/tests/register_init_parity.rs::the_transpiler_refuses_every_initializer_rustc_refuses` | G-C | OPEN | copper-analysis (`ConstEnv`): REFUSED-one, corpus 0 — rustc admits each in `const { }`, the transpiler refuses with a lowering error (never a dropped value); fix: widen the fold, II.2.2's R11 row |
 | II.3 found u8-const | a `u8` file const in a body expression (2026-11-07, §N.5 item 1) | `sweep:tests/fixtures/const_init_dut.rs::init_file_const` | G-D/F/G | OPEN | copper-codegen: emitted as a 32-bit `localparam int`, which Verilator `-Wall` refuses (WIDTHEXPAND) — REFUSED-by-the-toolchain, admitted by both front-ends; the fixture names the working spelling; fix: a sized `localparam` |
 | II.3 found comb-double-write | a combinational port written twice at the top level (2026-11-05, I.11.2(c), D-14; re-measured 2026-11-07) | `sweep:tests/fixtures/comb_default_override_dut.rs::cdo_default_then_override` | G-D/F/G | OPEN | copper-codegen: two `assign`s, Verilator MULTIDRIVEN; the fixture names the `if`-guarded override that is routed; fix: the §10.12 routing into `always_comb` for any port written more than once |
+| II.3 found preload-ok | `ui/pass/register_init_constants_ok`, admitted by the macro, refused by the transpiler (2026-11-07, §N.5 item 2; re-measured 2026-11-07): a `match` as an expression with no wildcard arm, and element writes on a `[Logic; 4]` register refused as a latch (row (c)'s packed-vector note) | `test:copper-codegen/tests/front_end_parity_ui.rs::the_transpiler_admits_every_shape_the_macro_admits` | G-C, PA | OPEN | copper-codegen: REFUSED-one, the one named lowering-limit row of `front_end_parity_ui.rs`; fix: lower an exhaustive `match` expression, and an element write on a vector of one-bit elements |
 | II.3 found nested-runtime-empty | a run-time-bounded counted `for` ending an enclosing tick-bearing `for` (2026-11-07, §J.15) | `ui:fail/nested_runtime_empty_for`, `test:copper-codegen/tests/unsupported_constructs.rs::a_runtime_empty_counted_for_ending_an_enclosing_for_has_its_own_diagnostic` | PA, G-C | CLOSED | REFUSED-both, a dated limitation (fix direction: unroll the enclosing loop's zero-time iterations) — closed as a refusal |
 | II.3 found usize-width | `x.as_usize()` arithmetic at the receiver's width (2026-11-06, §J.10 item 8) | `sweep:tests/fixtures/data_i14_dut.rs::usize_width`, `sweep:tests/fixtures/data_i14_dut.rs::usize_annot` | G-D/F/G | CLOSED | step 8 (§M.3): `usize` 64 bits |
 
@@ -4175,7 +4180,16 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | retired 15 | `out_first_driven_late` | `gone:out_first_driven_late`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; I.11's class vacuous (D-14) |
 
 **III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §R
-(2026-11-07): COUNTS_PLACEHOLDER
+(2026-11-07, on `dca622d`, REGRESSION OK, 485 s; the `preload-ok` line added after it, docs only,
+re-checked by the ledger test): **182 lines — 160 CLOSED, 22 OPEN**; 167 required by the SPEC (91
+numbered clauses, 22 II.1.2 rules, 4 II.2.1 rules, 11 II.3.3 rows, 28 row-(e) methods, 9 retired
+rules) and 15 beyond it (the 7 methods row (e) owes, 8 II.3 rows found in Phase C). By part: Part I
+82 lines, 70 CLOSED, 12 OPEN; II.1–II.2 31 lines, 29 CLOSED, 2 OPEN (R16, II.1.3); II.3 60 lines, 52
+CLOSED, 8 OPEN (`saturating_add`, `saturating_sub`, and six found rows); the 9 retired rules CLOSED.
+Fixture tokens on CLOSED lines: 134 `sweep`, 102 `test`, 81 `ui`, 5 `coreui`, 3 `example`, 11 `gone`;
+G-K's run check found all 144 swept/test fixtures `ok` and the 3 examples PASS. Of the 22 OPEN
+lines, 3 wait on a decision (I.13.5, I.8.5 with II.3 found continue-for, I.14.3; §R.6) and the rest
+name the component that owes them; none is a divergence the sweep reaches (G-G 0 DISAGREE).
 
 **III.3.7 Implementation map.** `tests/conformance_ledger.rs` (the parser, the completeness and
 token checks, `COPPER_LEDGER_REPORT`); `tools/regression.sh` G-K (the `REQUIRE` lines against the
