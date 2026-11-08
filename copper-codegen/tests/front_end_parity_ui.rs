@@ -63,13 +63,18 @@ const PASS_NOT_TRANSPILED: &[(&str, &str)] = &[(
      constants); the transpilable twin is register_init_rust_constants_ok.rs (MEASUREMENTS §N)",
 )];
 
-/// SPEC II.1.3's one named exception (R6, D-22): a ui/pass case the macro admits and
-/// the transpiler refuses, with R6's message. The macro cannot see a helper's body;
-/// the transpiler inlines it. Exactly one row, required to fail with exactly that
-/// message — a second macro-admits/transpiler-refuses shape is a parity break, not
-/// another exception.
-const NAMED_PARITY_EXCEPTION: (&str, &str) =
-    ("recursive_helper_r6.rs", copper_analysis::front_end::RECURSIVE_HELPER_MESSAGE);
+/// SPEC II.1.3's two named exceptions: ui/pass cases the macro admits and the
+/// transpiler refuses, each with its message. R6 (D-22): the macro cannot see a
+/// helper's body; the transpiler inlines it. The let-bound instance (D-24 (1)): a
+/// `let` binding is a use, so the denied `#[must_use]` of D-23 (1) does not fire, and
+/// the macro cannot tell the callee is a module; the transpiler's registry can (and the
+/// simulator's drop guard refuses it at run time). Exactly these rows, each required
+/// to fail with exactly its message — a third macro-admits/transpiler-refuses shape is
+/// a parity break, not another exception.
+const NAMED_PARITY_EXCEPTIONS: &[(&str, &str)] = &[
+    ("recursive_helper_r6.rs", copper_analysis::front_end::RECURSIVE_HELPER_MESSAGE),
+    ("let_instance_d24.rs", copper_analysis::front_end::BEHAVIOURAL_INSTANCE_MESSAGE),
+];
 
 /// ui/fail cases whose transpiler message is not the macro's, with the reason.
 /// rustc, not the macro, refuses these — E0015 for a non-`const` callee inside the
@@ -137,15 +142,18 @@ fn the_transpiler_refuses_every_shape_the_macro_refuses_with_the_same_message() 
 fn the_transpiler_admits_every_shape_the_macro_admits() {
     let pass = cases("pass");
     assert!(pass.len() >= 8, "expected the ui/pass battery, found {}", pass.len());
+    for (n, _) in NAMED_PARITY_EXCEPTIONS {
+        assert!(pass.iter().any(|p| p.file_name().unwrap() == *n), "named exception row {n} missing from ui/pass");
+    }
     let mut refused = Vec::new();
     for p in &pass {
         let name = p.file_name().unwrap().to_string_lossy().to_string();
         let r = transpile(p);
-        if name == NAMED_PARITY_EXCEPTION.0 {
+        if let Some((_, msg)) = NAMED_PARITY_EXCEPTIONS.iter().find(|(n, _)| *n == name) {
             match r {
-                Err(e) if e.contains(NAMED_PARITY_EXCEPTION.1) => {}
-                Err(e) => refused.push(format!("{name}: refused, but not with R6's message: {e}")),
-                Ok(_) => refused.push(format!("{name}: transpiles — R6's exception no longer holds")),
+                Err(e) if e.contains(msg) => {}
+                Err(e) => refused.push(format!("{name}: refused, but not with its named exception's message: {e}")),
+                Ok(_) => refused.push(format!("{name}: transpiles — its named exception no longer holds")),
             }
             continue;
         }

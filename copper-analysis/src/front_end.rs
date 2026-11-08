@@ -90,13 +90,13 @@ pub(crate) fn outer_type_name(ty: &Type) -> Option<String> {
 // ── Clock domains (I.12.4) ──────────────────────────────────────────────────
 
 
-/// SPEC II.1 R6 (S3, I.2.5(c)), D-22: recursion through a helper `fn`. The one named
+/// SPEC II.1 R6 (S3, I.2.5(c)), D-22: recursion through a helper `fn`. The first named
 /// exception to II.1.3's "compiles iff it transpiles": the macro holds only the
 /// module's `ItemFn` (I.2.1), never the helper's body, so it cannot see the cycle,
 /// and rustc admits a non-`async` recursion; the transpiler, which inlines every
 /// helper (I.2.4), refuses it there — so no wrong text is ever emitted, and a
 /// terminating recursion simulates as Rust runs it. Pinned, so it cannot widen, by
-/// `copper-analysis/tests/front_end_parity.rs::the_one_named_parity_exception_is_r6`
+/// `copper-analysis/tests/front_end_parity.rs::the_named_parity_exceptions_are_r6_and_the_let_instance`
 /// and `copper-codegen/tests/front_end_parity_ui.rs` (`recursive_helper_r6.rs`).
 pub const RECURSIVE_HELPER_MESSAGE: &str = "a helper `fn` that calls itself (directly or through \
     another helper) has no finite unrolling to inline: refused by the transpiler, which inlines \

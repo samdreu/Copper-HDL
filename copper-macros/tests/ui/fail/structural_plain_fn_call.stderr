@@ -12,5 +12,5 @@ error[E0308]: mismatched types
 note: function defined here
   --> $WORKSPACE/copper-sim/src/executor.rs
    |
-   | pub fn __instance<F>(_module: HardwareModule<F>) {}
+   | pub fn __instance<F>(mut module: HardwareModule<F>) {
    |        ^^^^^^^^^^

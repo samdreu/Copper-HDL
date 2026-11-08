@@ -15,7 +15,7 @@ pub use testing::{HardwareTest, TestResult, make_cycle};
 pub mod executor;
 
 pub use executor::{
-    __instance, HardwareExecutor, HardwareModule, PollOrder, SchedulerMode,
+    __instance, HardwareExecutor, HardwareModule, PollOrder, SchedulerMode, UNSTARTED_MODULE_MESSAGE,
 };
 
 /// A future that suspends for exactly one delta cycle, then resumes.

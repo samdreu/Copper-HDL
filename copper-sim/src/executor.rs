@@ -46,8 +46,20 @@ const MAX_DELTA_CYCLES: usize = 1000;
 /// // error[E0308]: expected `HardwareModule<_>`, found future
 /// exec.spawn_wired(m(Clock::new(), o), vec![], vec![]);
 /// ```
+///
+/// **A module value must be started** (SPEC I.13.5, II.1.3, D-24): it is consumed
+/// by a testbench spawn ([`HardwareExecutor::spawn_wired`],
+/// [`HardwareExecutor::spawn_untracked`]) or by [`__instance`] (a structural
+/// body's instantiation). Dropped unconsumed, it panics with
+/// [`UNSTARTED_MODULE_MESSAGE`] — the run-time half of II.1.3's second named
+/// exception: `let _ = child(..)` / `let m = child(..)` in a behavioural body
+/// compiles (a `let` is a use, so the generated fn's denied `#[must_use]` does not
+/// fire) and the child would otherwise never run. Not while another panic unwinds
+/// (a panic in a drop during unwinding aborts the process).
 pub struct HardwareModule<F> {
-    future: F,
+    /// `Some` until the module is consumed (`into_future`, [`__instance`]); a drop
+    /// that still finds it `Some` is the unstarted module of the drop guard.
+    future: Option<F>,
     /// The clock domain whose edges resume this module's coroutine (SPEC §I.12.1):
     /// `Some` for a `sequential`/`synchronizer` module (the `D` of its one
     /// `Clock<D>`), `None` for a combinational module (it has no clock; it is part
@@ -65,7 +77,7 @@ impl<F> HardwareModule<F> {
     /// `#[hardware]`-generated code; not meant to be used by hand.
     #[doc(hidden)]
     pub fn __new(future: F) -> Self {
-        HardwareModule { future, domain: None, name: "" }
+        HardwareModule { future: Some(future), domain: None, name: "" }
     }
 
     /// Construct a clocked module from its future, tagged with the domain of its
@@ -73,7 +85,7 @@ impl<F> HardwareModule<F> {
     /// `#[hardware(synchronizer)]` emit.
     #[doc(hidden)]
     pub fn __new_in_domain<D: ClockDomain>(future: F) -> Self {
-        HardwareModule { future, domain: Some(TypeId::of::<D>()), name: "" }
+        HardwareModule { future: Some(future), domain: Some(TypeId::of::<D>()), name: "" }
     }
 
     /// Name the module (the `#[hardware]` fn's identifier). **Macro-internal.**
@@ -89,8 +101,25 @@ impl<F> HardwareModule<F> {
     }
 
     /// Unwrap the future (crate-internal, for the executor to poll).
-    pub(crate) fn into_future(self) -> F {
-        self.future
+    pub(crate) fn into_future(mut self) -> F {
+        self.future.take().expect("a HardwareModule is consumed once")
+    }
+}
+
+/// The drop guard's message (SPEC I.13.5, II.1.3's second named exception, D-24).
+pub const UNSTARTED_MODULE_MESSAGE: &str = "a `#[hardware]` module was made and never started — \
+    SPEC I.13.5: a module value is consumed by a testbench spawn (`spawn_wired`, \
+    `spawn_untracked`) or instantiated in a `#[hardware(structural)]` body; a behavioural body \
+    contains no instantiation, and `let _ = child(..)` / `let m = child(..)` there drops the \
+    child unrun (II.1.3's second named exception, D-24). Write a structural parent that wires \
+    this child beside the module that needed it";
+
+impl<F> Drop for HardwareModule<F> {
+    fn drop(&mut self) {
+        if self.future.is_some() && !std::thread::panicking() {
+            let name = if self.name.is_empty() { "a hand-built module" } else { self.name };
+            panic!("{UNSTARTED_MODULE_MESSAGE} (module `{name}`)");
+        }
     }
 }
 
@@ -99,7 +128,11 @@ impl<F> HardwareModule<F> {
 /// — which names no module — is a type error at the call (I.13.4(d), Phase C
 /// step 10). **Macro-internal.**
 #[doc(hidden)]
-pub fn __instance<F>(_module: HardwareModule<F>) {}
+pub fn __instance<F>(mut module: HardwareModule<F>) {
+    // Consumed: the structural parent is transpile-only (never spawned), and its
+    // instantiation is the child's start in the denoted design (SPEC I.13.4).
+    module.future = None;
+}
 
 /// The `HardwareExecutor` manages the execution of hardware modules defined as async tasks. 
 /// It tracks the current cycle and the spawned tasks. 

@@ -4,7 +4,9 @@
 //! - [`check_outside_methods`] — `checked_*` (an `Option`, I.14.3(c)) and
 //!   `is_valid()` (a question about the simulator's third value, which no 2-state
 //!   realization holds, I.14.3(d)) are OUTSIDE (D-19; I.14.7 (7)); so is `==`/`!=`
-//!   with an X-literal operand, the same question spelled with an operator (D-23 (3)).
+//!   with an X-literal operand, the same question spelled with an operator (D-23 (3)),
+//!   and a `Logic::X` pattern (or one naming a body `const` whose value is X), the
+//!   same question spelled as a pattern (D-24 (2)).
 //! - [`check_memory_port_index`] — a memory port index `k ≥ R` (`≥ W`) is a shape
 //!   rule decided at the instance (D-19 6b-A, I.14.6(c); I.14.7 (9)).
 
@@ -22,6 +24,12 @@ pub const X_COMPARISON_MESSAGE: &str = "a comparison with the X literal (`Logic:
     asks whether a value holds the simulator's third value X, which no 2-state realization holds: \
     it is `is_valid()` spelled with an operator, and OUTSIDE (SPEC I.14.3(d), D-19, D-23)";
 
+/// The message for a pattern that matches the X literal (I.14.3(d)–(e), D-24 (2)).
+pub const X_PATTERN_MESSAGE: &str = "a pattern matching the X literal (`Logic::X`, or a `const` \
+    whose value is X) asks whether a value holds the simulator's third value X, which no 2-state \
+    realization holds: it is `is_valid()` spelled as a pattern, and OUTSIDE (SPEC I.14.3(d), D-19, \
+    D-24). A `Logic` scrutinee holding X matches `_` only";
+
 /// The message for `is_valid()` (I.14.3(d)).
 pub const IS_VALID_MESSAGE: &str = "`is_valid()` asks whether a value holds the simulator's \
     third value X, which no 2-state realization holds: it is OUTSIDE (SPEC I.14.3(d), D-19)";
@@ -38,11 +46,15 @@ const CHECKED: &[&str] = &[
     "checked_pow",
 ];
 
-/// Refuse the OUTSIDE methods of I.14.3: `checked_*` and `is_valid()`, and `==`/`!=`
-/// with an X-literal operand (D-23 (3)), in every module mode. One function for the macro and `transpile_target`.
+/// Refuse the OUTSIDE methods of I.14.3: `checked_*` and `is_valid()`, `==`/`!=`
+/// with an X-literal operand (D-23 (3)), and a pattern matching the X literal — a
+/// `Logic::X` pattern anywhere in a pattern (`match`, `if let`, `let`, `matches!`),
+/// or an identifier pattern naming a body `const` whose initializer is an X literal
+/// (D-24 (2)) — in every module mode. One function for the macro and `transpile_target`.
 pub fn check_outside_methods(f: &ItemFn) -> Result<(), syn::Error> {
     struct V {
         err: Option<syn::Error>,
+        x_consts: std::collections::BTreeSet<String>,
     }
     impl<'ast> Visit<'ast> for V {
         fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
@@ -65,10 +77,58 @@ pub fn check_outside_methods(f: &ItemFn) -> Result<(), syn::Error> {
             }
             syn::visit::visit_expr_binary(self, b);
         }
+        fn visit_pat(&mut self, p: &'ast syn::Pat) {
+            if self.err.is_none() {
+                let hit = match p {
+                    syn::Pat::Path(pp) => path_is_logic_x(&pp.path),
+                    syn::Pat::Ident(pi) if pi.subpat.is_none() => self.x_consts.contains(&pi.ident.to_string()),
+                    _ => false,
+                };
+                if hit {
+                    self.err = Some(syn::Error::new(p.span(), X_PATTERN_MESSAGE));
+                }
+            }
+            syn::visit::visit_pat(self, p);
+        }
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            // `matches!(e, pat)` is admitted (DESUGARED, I.2.4): its pattern is a pattern.
+            if m.path.segments.last().is_some_and(|s| s.ident == "matches") {
+                use syn::parse::Parser;
+                let parse = |input: syn::parse::ParseStream| -> syn::Result<(Expr, syn::Pat)> {
+                    let e: Expr = input.parse()?;
+                    input.parse::<syn::Token![,]>()?;
+                    Ok((e, syn::Pat::parse_multi_with_leading_vert(input)?))
+                };
+                if let Ok((e, pat)) = parse.parse2(m.tokens.clone()) {
+                    self.visit_expr(&e);
+                    self.visit_pat(&pat);
+                }
+            }
+            syn::visit::visit_macro(self, m);
+        }
     }
-    let mut v = V { err: None };
+    // A `const` item of the body whose initializer is an X literal: a pattern naming
+    // it is the X pattern (D-24 (2)). A file-level `const` is not in the `ItemFn`
+    // either front-end's rule holds (MEASUREMENTS §T).
+    struct Consts(std::collections::BTreeSet<String>);
+    impl<'ast> Visit<'ast> for Consts {
+        fn visit_item_const(&mut self, c: &'ast syn::ItemConst) {
+            if is_x_literal(&c.expr) {
+                self.0.insert(c.ident.to_string());
+            }
+        }
+    }
+    let mut consts = Consts(Default::default());
+    consts.visit_block(&f.block);
+    let mut v = V { err: None, x_consts: consts.0 };
     v.visit_block(&f.block);
     v.err.map_or(Ok(()), Err)
+}
+
+/// `Logic::X` as a path (`Logic::X`, `copper_core::Logic::X`).
+fn path_is_logic_x(p: &syn::Path) -> bool {
+    let segs: Vec<String> = p.segments.iter().map(|s| s.ident.to_string()).collect();
+    segs.len() >= 2 && segs[segs.len() - 1] == "X" && segs[segs.len() - 2] == "Logic"
 }
 
 /// `Logic::X`, `Bits::x()` or `Bits::<N>::x()` (through parentheses and `&`): the
@@ -78,10 +138,7 @@ fn is_x_literal(e: &Expr) -> bool {
         Expr::Paren(p) => is_x_literal(&p.expr),
         Expr::Group(g) => is_x_literal(&g.expr),
         Expr::Reference(r) => is_x_literal(&r.expr),
-        Expr::Path(p) => {
-            let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
-            segs.len() >= 2 && segs[segs.len() - 1] == "X" && segs[segs.len() - 2] == "Logic"
-        }
+        Expr::Path(p) => path_is_logic_x(&p.path),
         Expr::Call(c) if c.args.is_empty() => match &*c.func {
             Expr::Path(p) => {
                 let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();

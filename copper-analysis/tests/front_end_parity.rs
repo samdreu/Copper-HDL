@@ -243,6 +243,10 @@ fn the_step_8_data_rules_refuse_their_witnesses_and_admit_their_twins() {
         ("is_valid", "async fn m(clk: Clock<C>, a: In<Bits<8>, C>, q: RegOut<Logic, C>) { loop { q.write(if a.read().is_valid() { Logic::One } else { Logic::Zero }); clk.tick().await; } }"),
         ("read_port index", "async fn m(clk: Clock<C>, q: RegOut<Bits<8>, C>) { let mem = Memory::<Bits<8>, 1, 1, C, 1, 1>::new(clk.clone(), 4); loop { mem.read_port::<1>().read(0); q.write(mem.read_port::<0>().data()); clk.tick().await; } }"),
         ("write_port index", "async fn m(clk: Clock<C>, mem: Memory<Bits<8>, 2, 1, C, 1, 1>) { loop { mem.write_port::<1>().write(0, Bits::zero()); clk.tick().await; } }"),
+        ("== X", "fn m(a: In<Logic, C>, q: Out<Logic, C>) { q.write(if a.read() == Logic::X { Logic::One } else { Logic::Zero }); }"),
+        ("X pattern", "fn m(a: In<Logic, C>, q: Out<Logic, C>) { q.write(match a.read() { Logic::X => Logic::One, _ => Logic::Zero }); }"),
+        ("X const pattern", "fn m(a: In<Logic, C>, q: Out<Logic, C>) { const U: Logic = Logic::X; q.write(match a.read() { U => Logic::One, _ => Logic::Zero }); }"),
+        ("X in matches!", "fn m(a: In<Logic, C>, q: Out<Logic, C>) { q.write(if matches!(a.read(), Logic::X | Logic::Zero) { Logic::One } else { Logic::Zero }); }"),
     ];
     for (what, src) in refused {
         let f = parse(src);
@@ -253,6 +257,9 @@ fn the_step_8_data_rules_refuse_their_witnesses_and_admit_their_twins() {
         "async fn m(clk: Clock<C>, a: In<u8, C>, q: RegOut<u8, C>) { loop { q.write(a.read().saturating_add(1)); clk.tick().await; } }",
         "async fn m(clk: Clock<C>, q: RegOut<Bits<8>, C>) { let mem = Memory::<Bits<8>, 2, 1, C, 1, 1>::new(clk.clone(), 4); loop { mem.read_port::<1>().read(0); q.write(mem.read_port::<0>().data()); clk.tick().await; } }",
         "async fn m<const K: usize>(clk: Clock<C>, mem: Memory<Bits<8>, K, 1, C, 1, 1>) { loop { mem.read_port::<3>().read(0); clk.tick().await; } }",
+        "fn m(a: In<Logic, C>, q: Out<Logic, C>) { q.write(match a.read() { Logic::One => Logic::Zero, _ => Logic::One }); }",
+        "fn m(a: In<Logic, C>, q: Out<Logic, C>) { const U: Logic = Logic::One; q.write(match a.read() { U => Logic::Zero, u => u }); }",
+        "fn m(a: In<Logic, C>, q: Out<Logic, C>) { q.write(a.read().eq_logic(Logic::X)); }",
     ];
     for src in admitted {
         let f = parse(src);
@@ -474,16 +481,74 @@ fn modules_reaching_a_recursive_helper(items: &[Item]) -> Vec<String> {
         .collect()
 }
 
-/// SPEC II.1.3's one named exception (R6, D-22; MEASUREMENTS §Q): recursion through a
-/// helper `fn` compiles — the macro holds the module's `ItemFn` only, never a helper's
-/// body (I.2.1), and rustc admits a non-`async` recursion — and the transpiler refuses
-/// it when it inlines (`RECURSIVE_HELPER_MESSAGE`). Neither front-end can widen it
-/// unseen, because this audit can see what the macro cannot: it reads each file's
-/// helper call graph, and the only `#[hardware]` module of the tree that reaches a
-/// recursive helper is the exception's witness. Any other is a module that simulates
-/// and does not transpile — a parity break to fix, not a second exception.
+/// The behavioural `#[hardware]` fns of `items` whose body binds a call of a
+/// `#[hardware]` fn of the same file in a `let` (`let _ = child(..)`, `let m =
+/// child(..)`): II.1.3's second named exception (D-24 (1)). The file's `#[hardware]`
+/// names (any depth, a test's fn-body modules too) stand for the transpiler's registry
+/// (`check_no_behavioural_instance`).
+fn modules_binding_a_hardware_call(items: &[Item]) -> Vec<String> {
+    use syn::visit::Visit;
+    struct All(Vec<ItemFn>);
+    impl<'ast> Visit<'ast> for All {
+        fn visit_item_fn(&mut self, f: &'ast ItemFn) {
+            if hardware_attr(f).is_some() {
+                self.0.push(f.clone());
+            }
+            syn::visit::visit_item_fn(self, f);
+        }
+    }
+    let mut all = All(Vec::new());
+    for i in items {
+        all.visit_item(i);
+    }
+    let hardware = all.0;
+    let names: BTreeSet<String> = hardware.iter().map(|f| f.sig.ident.to_string()).collect();
+    struct Lets<'a>(&'a BTreeSet<String>, bool);
+    impl<'ast> Visit<'ast> for Lets<'_> {
+        fn visit_local(&mut self, l: &'ast syn::Local) {
+            if let Some(init) = &l.init {
+                if let syn::Expr::Call(c) = &*init.expr {
+                    if let syn::Expr::Path(p) = &*c.func {
+                        if p.path.segments.last().is_some_and(|s| self.0.contains(&s.ident.to_string())) {
+                            self.1 = true;
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_local(self, l);
+        }
+        fn visit_item(&mut self, _: &'ast Item) {}
+    }
+    hardware
+        .iter()
+        .filter(|f| hardware_attr(f).is_some_and(|(mode, _)| mode != "structural"))
+        .filter(|f| {
+            let mut v = Lets(&names, false);
+            v.visit_block(&f.block);
+            v.1
+        })
+        .map(|f| f.sig.ident.to_string())
+        .collect()
+}
+
+/// SPEC II.1.3's two named exceptions, each found by a scan that sees what the macro
+/// cannot, and each required to have exactly its witnesses, so neither can widen unseen.
+///
+/// **R6** (D-22; MEASUREMENTS §Q): recursion through a helper `fn` compiles — the macro
+/// holds the module's `ItemFn` only, never a helper's body (I.2.1), and rustc admits a
+/// non-`async` recursion — and the transpiler refuses it when it inlines
+/// (`RECURSIVE_HELPER_MESSAGE`). The scan reads each file's helper call graph.
+///
+/// **The let-bound instance** (D-24 (1); MEASUREMENTS §T): `let _ = child(..)` / `let m
+/// = child(..)` in a behavioural body compiles — a binding is a use, so the denied
+/// `#[must_use]` of D-23 (1) does not fire — and the transpiler refuses it with I.13.5's
+/// message; the simulator's drop guard panics when the child is dropped unstarted. The
+/// scan reads each behavioural body's `let`s against the file's `#[hardware]` names.
+///
+/// Any other module either scan finds simulates (or panics) and does not transpile — a
+/// parity break to fix, not a third exception.
 #[test]
-fn the_one_named_parity_exception_is_r6() {
+fn the_named_parity_exceptions_are_r6_and_the_let_instance() {
     let root = repo_root();
     let mut files = Vec::new();
     for dir in ["examples", "src", "tests"] {
@@ -491,6 +556,7 @@ fn the_one_named_parity_exception_is_r6() {
     }
     files.sort();
     let mut found = BTreeSet::new();
+    let mut bound = BTreeSet::new();
     for path in &files {
         let Ok(src) = fs::read_to_string(path) else { continue };
         let Ok(file) = syn::parse_file(&src) else { continue };
@@ -498,9 +564,25 @@ fn the_one_named_parity_exception_is_r6() {
         for m in modules_reaching_a_recursive_helper(&file.items) {
             found.insert(format!("{rel}::{m}"));
         }
+        for m in modules_binding_a_hardware_call(&file.items) {
+            bound.insert(format!("{rel}::{m}"));
+        }
     }
     let expected: BTreeSet<String> = ["tests/recursive_helper_r6.rs::parity8".to_string()].into();
-    assert_eq!(found, expected, "R6 is the one named exception, and its witness the one module");
+    assert_eq!(found, expected, "R6's witness is the one module reaching a recursive helper");
+    let expected: BTreeSet<String> = [
+        "tests/let_instance_d24.rs::parent_named".to_string(),
+        "tests/let_instance_d24.rs::parent_wildcard".to_string(),
+    ]
+    .into();
+    assert_eq!(bound, expected, "the let-instance witnesses are the only behavioural bodies binding a module call");
+    let ui = fs::read_to_string(root.join("copper-macros/tests/ui/pass/let_instance_d24.rs")).unwrap();
+    assert_eq!(modules_binding_a_hardware_call(&syn::parse_file(&ui).unwrap().items), vec!["parent"]);
+    let lp = |src: &str| modules_binding_a_hardware_call(&syn::parse_file(src).unwrap().items);
+    let c = "#[hardware(sequential)] async fn c(clk: Clock<A>) { loop { clk.tick().await; } }";
+    assert_eq!(lp(&format!("{c} #[hardware(sequential)] async fn p(clk: Clock<A>) {{ let m = c(clk.clone()); loop {{ clk.tick().await; }} }}")), vec!["p"]);
+    assert!(lp(&format!("fn h(x: u8) -> u8 {{ x }} {c} #[hardware(sequential)] async fn p(clk: Clock<A>) {{ let m = h(1); loop {{ clk.tick().await; }} }}")).is_empty());
+    assert!(lp(&format!("{c} #[hardware(structural)] fn p(clk: Clock<A>) {{ c(clk.clone()); }}")).is_empty());
 
     // The scan sees the ui row too, and a direct, a mutual and an absent recursion.
     let ui = fs::read_to_string(root.join("copper-macros/tests/ui/pass/recursive_helper_r6.rs")).unwrap();

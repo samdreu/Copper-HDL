@@ -1155,3 +1155,42 @@ fn m(a: In<Logic, C>, q: Out<Logic, C>) {
     let err = transpile(cmp).expect_err("a comparison with X is refused");
     assert!(err.contains(copper_analysis::X_COMPARISON_MESSAGE), "{err}");
 }
+
+/// A pattern matching the X literal is the `is_valid` question spelled as a pattern
+/// (SPEC I.14.3(d)–(e), D-24 (2), Phase C step 11c): OUTSIDE, refused in both
+/// front-ends by `check_outside_methods` with one message, in every pattern position
+/// — a `match` arm, an or-pattern, `if let`, a tuple sub-pattern, `matches!` — and as
+/// an identifier pattern naming a body `const` whose value is X. Until then the macro
+/// admitted it and the transpiler refused it ("unsupported pattern"). The twin, a
+/// `Logic::One` arm, transpiles.
+#[test]
+fn a_pattern_matching_the_x_literal_is_refused_with_the_shared_message() {
+    let comb = |body: &str, ins: &str| {
+        format!("#[hardware(combinational)]\nfn m({ins} q: Out<Logic, C>) {{ {body} }}\n")
+    };
+    let a = "a: In<Logic, C>,";
+    let ab = "a: In<Logic, C>, b: In<Logic, C>,";
+    for (what, body, ins) in [
+        ("arm", "q.write(match a.read() { Logic::X => Logic::One, _ => Logic::Zero });", a),
+        ("or-pattern", "q.write(match a.read() { Logic::X | Logic::One => Logic::One, _ => Logic::Zero });", a),
+        ("tuple", "q.write(match (a.read(), b.read()) { (Logic::X, _) => Logic::One, _ => Logic::Zero });", ab),
+        ("matches!", "q.write(if matches!(a.read(), Logic::X) { Logic::One } else { Logic::Zero });", a),
+        ("body const", "const U: Logic = Logic::X; q.write(match a.read() { U => Logic::One, _ => Logic::Zero });", a),
+    ] {
+        let err = transpile(&comb(body, ins)).expect_err(what);
+        assert!(err.contains(copper_analysis::X_PATTERN_MESSAGE), "{what}: {err}");
+    }
+    let iflet = r#"
+#[hardware(sequential)]
+async fn m(clk: Clock<C>, a: In<Logic, C>, q: RegOut<Logic, C>) {
+    loop {
+        let v = a.read();
+        if let Logic::X = v { q.write(Logic::One); }
+        clk.tick().await;
+    }
+}
+"#;
+    let err = transpile(iflet).expect_err("if let");
+    assert!(err.contains(copper_analysis::X_PATTERN_MESSAGE), "if let: {err}");
+    transpile(&comb("q.write(match a.read() { Logic::One => Logic::Zero, _ => Logic::One });", a)).expect("the twin transpiles");
+}

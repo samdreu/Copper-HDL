@@ -1,4 +1,4 @@
-//! SPEC II.1 R6 — recursion through a helper `fn` — the one named exception to
+//! SPEC II.1 R6 — recursion through a helper `fn` — the first named exception to
 //! II.1.3's "a module compiles under `#[hardware]` iff it transpiles" (D-22, Phase C
 //! step 11; MEASUREMENTS §Q).
 //!
@@ -9,7 +9,7 @@
 //! not a divergence: a terminating recursion simulates as Rust runs it, which this
 //! test checks over the whole input space against `u8::count_ones`.
 //!
-//! `copper-analysis/tests/front_end_parity.rs::the_one_named_parity_exception_is_r6`
+//! `copper-analysis/tests/front_end_parity.rs::the_named_parity_exceptions_are_r6_and_the_let_instance`
 //! scans the tree's helper call graph and requires this file to hold the only
 //! `#[hardware]` module that reaches a recursive helper, so the exception cannot
 //! widen silently; `copper-macros/tests/ui/pass/recursive_helper_r6.rs` is its ui row.
