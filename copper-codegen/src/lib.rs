@@ -446,6 +446,8 @@ fn checked_fir_for_target(
     // `chir_lower::lower_register_init` folds the rest; what it cannot fold is an
     // error there, never a dropped value.
     copper_analysis::check_register_initializers(target).map_err(|e| e.to_string())?;
+    // D-21 §N.4 H1 (prototype): the macro's rule, same function, same message.
+    copper_analysis::check_held_preloop_values(target).map_err(|e| e.to_string())?;
     {
         let env = copper_analysis::consts::ConstEnv::from_items(
             prepared.file_scope.const_source.iter().map(String::as_str),
