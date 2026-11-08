@@ -1,4 +1,4 @@
-error: Unsupported #[hardware(...)] flag `allow_pretick_alignment`; the attribute takes a mode only — `allow_pretick_alignment` was retired with the pre-tick alignment rules by D-8 (SPEC II.3.2): a clocked module has no plain `Out`, so there is nothing to opt out of
+error: Unsupported #[hardware(...)] flag `allow_pretick_alignment`; the attribute takes a mode only (SPEC II.1 S0, R9) — `allow_pretick_alignment` was retired with the pre-tick alignment rules by D-8 (SPEC II.3.2): a clocked module has no plain `Out`, so there is nothing to opt out of
   --> tests/ui/fail/retired_pretick_opt_out.rs:11:1
    |
 11 | #[hardware(sequential, allow_pretick_alignment)]

@@ -1,0 +1,19 @@
+error: a second `Clock` parameter on a clocked module: a `sequential` or `synchronizer` module is resumed by the edges of exactly one clock, and a `tick` on a second clock would be a second resumption protocol the coroutine does not have (SPEC II.1 S0/S2, R10; I.2.2, I.12.5). Write the design as a `#[hardware(structural)]` parent that gives each single-clock child its own clock, with a `#[hardware(synchronizer)]` child at every crossing.
+  --> tests/ui/fail/two_clocks_sequential.rs:14:27
+   |
+14 | async fn m(clk: Clock<A>, clk2: Clock<B>, q: RegOut<Logic, A>) {
+   |                           ^^^^^^^^^^^^^^
+
+warning: unused imports: `Bits`, `Clock`, and `Logic`
+ --> tests/ui/fail/two_clocks_sequential.rs:1:19
+  |
+1 | use copper_core::{Bits, Clock, ClockDomain, Logic};
+  |                   ^^^^  ^^^^^               ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/two_clocks_sequential.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^

@@ -320,3 +320,95 @@ fn no_corpus_module_holds_a_preloop_read() {
     println!("held pre-loop values: {} modules scanned, {} flagged", looked, held.len());
     assert!(held.is_empty(), "{held:#?}");
 }
+
+/// SPEC II.1.3 / P10 (Phase C step 10, MEASUREMENTS §P): the audit's blind spots
+/// closed in the corpus direction. Every `#[hardware]` fn of the tree, in every
+/// mode, passes the shared syntactic rules both front-ends now run first
+/// (`check_front_end_rules`: the header R20 with R9's flag and R10, R17, I.14.3's
+/// OUTSIDE methods, the memory port index, D3, R16, R18, R7, R12, R13/R14, R5, the
+/// CDC port rule, R19), R2/R3 (`check_reachability`) on a clocked body and D2
+/// (`check_definite_assignment`) on a combinational one. The corpus compiles
+/// through the macro, so a failure here is a rule that regressed into a false
+/// positive, or a module the macro somehow admitted around it. The
+/// transpiler-admits direction is `copper-codegen/tests/front_end_parity_ui.rs`.
+#[test]
+fn every_corpus_module_passes_every_shared_rule_in_its_mode() {
+    let mods = every_hardware_fn_including_fn_bodies();
+    assert!(mods.len() >= 250, "expected every #[hardware] fn, saw {}", mods.len());
+    let mut failing = BTreeSet::new();
+    let mut by_mode = std::collections::BTreeMap::<String, usize>::new();
+    for (name, f) in &mods {
+        let mode = match copper_analysis::hardware_mode(f) {
+            Some(Ok(m)) => m,
+            Some(Err(e)) => {
+                failing.insert(format!("{name} — attribute: {e}"));
+                continue;
+            }
+            None => unreachable!("all_hardware_fns returns attributed fns"),
+        };
+        *by_mode.entry(format!("{mode:?}")).or_default() += 1;
+        if let Err(e) = copper_analysis::check_front_end_rules(f, mode) {
+            failing.insert(format!("{name} — {e}"));
+        }
+        if mode.is_sequential_like() {
+            if let Err(e) = copper_analysis::check_reachability(f) {
+                failing.insert(format!("{name} — R2/R3: {e}"));
+            }
+        }
+        if let Err(e) = copper_analysis::check_definite_assignment(f) {
+            failing.insert(format!("{name} — D2: {e}"));
+        }
+    }
+    println!("shared-rule audit: {} fns by mode {by_mode:?}", mods.len());
+    assert!(failing.is_empty(), "{failing:#?}");
+}
+
+/// [`all_hardware_fns`] plus the `#[hardware]` fns declared inside a fn body (a
+/// test that defines its module inline): the macro compiles those too.
+fn every_hardware_fn_including_fn_bodies() -> Vec<(String, ItemFn)> {
+    fn walk(items: &[Item], out: &mut Vec<ItemFn>) {
+        for item in items {
+            match item {
+                Item::Fn(f) => {
+                    if hardware_attr(f).is_some() {
+                        out.push(f.clone());
+                    }
+                    let inner: Vec<Item> = f
+                        .block
+                        .stmts
+                        .iter()
+                        .filter_map(|s| match s {
+                            syn::Stmt::Item(i) => Some(i.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    walk(&inner, out);
+                }
+                Item::Mod(m) => {
+                    if let Some((_, items)) = &m.content {
+                        walk(items, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let root = repo_root();
+    let mut files = Vec::new();
+    for dir in ["examples", "src", "tests"] {
+        rs_files(&root.join(dir), &mut files);
+    }
+    files.sort();
+    let mut out = Vec::new();
+    for path in &files {
+        let Ok(src) = fs::read_to_string(path) else { continue };
+        let Ok(file) = syn::parse_file(&src) else { continue };
+        let mut fns = Vec::new();
+        walk(&file.items, &mut fns);
+        let rel = path.strip_prefix(&root).unwrap_or(path).display().to_string();
+        for f in fns {
+            out.push((format!("{rel}::{}", f.sig.ident), f));
+        }
+    }
+    out
+}

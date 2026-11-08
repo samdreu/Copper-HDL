@@ -1,4 +1,4 @@
-error: a hardware module may not create a clock — clocks are provided as parameters. A fabricated clock is never driven, so the module would hang. To clock a submodule, pass a clone of a clock parameter (`clk.clone()`).
+error: a hardware module may not create a clock — clocks are provided as parameters. A fabricated clock is never driven, so the module would hang. To clock a submodule, pass a clone of a clock parameter (`clk.clone()`) (SPEC II.1 S2, R17; I.2.5(b)).
   --> tests/ui/fail/clock_construction.rs:13:23
    |
 13 |     let _fabricated = Clock::<MainClk>::new();

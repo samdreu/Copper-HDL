@@ -410,17 +410,20 @@ fn checked_fir_for_target(
     target: &syn::ItemFn,
     prepared: &PreparedSource,
 ) -> Result<copper_core::FrontendModuleIR, String> {
+    // SPEC II.1.3 (P10, Phase C step 10): the macro's syntactic rules — the header
+    // (R20, R9's flag, R10), R17, I.14.3's OUTSIDE methods, the memory port index,
+    // D3, R16, R18, R7, R12, R13/R14, the CDC port rule, R19 — one function, one
+    // message each, run first by both front-ends in the same order.
+    if let Some(mode) = copper_analysis::hardware_mode(target) {
+        let mode = mode.map_err(|e| e.to_string())?;
+        copper_analysis::check_front_end_rules(target, mode).map_err(|e| e.to_string())?;
+    }
     // c2 (item 2): the transpiler enforces the SAME reachability well-formedness
     // the sim macro does, from the SAME shared analysis on the SAME `&syn::ItemFn`
     // — a tickless loop path is rejected here too (one authoritative check, both
     // front-ends). In practice a module reaching the transpiler already compiled
     // through the macro's check; this keeps the standalone CLI honest.
     copper_analysis::check_reachability(target).map_err(|e| e.to_string())?;
-    // SPEC I.14.3 (c), (d), I.14.6(c) (Phase C step 8): the macro's rules, same
-    // functions, same messages — `checked_*` / `is_valid()` OUTSIDE, a memory port
-    // index below the port count.
-    copper_analysis::check_outside_methods(target).map_err(|e| e.to_string())?;
-    copper_analysis::check_memory_port_index(target).map_err(|e| e.to_string())?;
     // Front-end parity (2026-10-23): the two shape rules the macro now enforces
     // too, from the shared crate, AFTER reachability so a module that never ticks
     // at all gets the reachability message (the better of the two) rather than a
@@ -454,6 +457,30 @@ fn checked_fir_for_target(
         );
         copper_analysis::check_register_initializer_calls_in(target, &|p| env.is_const_fn(p))
             .map_err(|e| e.to_string())?;
+        // R5, the transpiler's half (the macro has rustc judge each bound in a
+        // `const { }` block): a tick-free `for` bound that names no const generic
+        // must fold through the same evaluator, or it is not a constant the
+        // transpiler can unroll — refused with R5's message, never emitted as a
+        // run-time `for` limit.
+        let generics: std::collections::HashSet<String> = target
+            .sig
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Const(c) => Some(c.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        for b in copper_analysis::front_end::tick_free_for_bounds(target) {
+            let text = quote::ToTokens::to_token_stream(b).to_string();
+            let names_generic = text
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|w| generics.contains(w));
+            if !names_generic && env.eval_expr(b, &Default::default()).is_none() {
+                return Err(copper_analysis::front_end::RUNTIME_FOR_BOUND_MESSAGE.to_string());
+            }
+        }
     }
     // SPEC II.1 R8 (D-8, Phase C step 3, 2026-11-06): a clocked module has no
     // plain `Out` — the macro's rule, same function, same message. The pre-tick

@@ -33,6 +33,8 @@ use syn::ItemFn;
 mod cfg;
 pub mod consts;
 mod data;
+pub mod front_end;
+pub use front_end::{check_front_end_rules, hardware_mode, parse_hardware_args, HardwareMode};
 pub use data::{
     check_memory_port_index, check_outside_methods, memory_port_index_message, CHECKED_METHOD_MESSAGE,
     IS_VALID_MESSAGE,
@@ -40,7 +42,7 @@ pub use data::{
 mod init;
 mod shape;
 
-pub use cfg::{Cfg, DerivationFacts, EdgeKind, PhaseFacts};
+pub use cfg::{stmt_contains_tick, Cfg, DerivationFacts, EdgeKind, PhaseFacts};
 pub use init::{
     call_path_text, check_held_preloop_values, check_register_initializer_calls, held_preloop_message,
     held_preloop_values,

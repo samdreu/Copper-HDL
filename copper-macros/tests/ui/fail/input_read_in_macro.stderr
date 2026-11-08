@@ -1,0 +1,19 @@
+error: `println!` in a hardware module body is outside the kernel's grammar: an expression is pure, over the operators of I.14, and an input is read only as `let t = x.read()` (SPEC II.1 S0, R13/R14; I.2.3). A macro's tokens are not an expression of the kernel. A compile-time check belongs in `const { … }`; a run-time one is an output port.
+  --> tests/ui/fail/input_read_in_macro.rs:13:9
+   |
+13 |         println!("{:?}", a.read());
+   |         ^^^^^^^
+
+warning: unused imports: `Bits`, `Clock`, and `Logic`
+ --> tests/ui/fail/input_read_in_macro.rs:1:19
+  |
+1 | use copper_core::{Bits, Clock, ClockDomain, Logic};
+  |                   ^^^^  ^^^^^               ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/input_read_in_macro.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^

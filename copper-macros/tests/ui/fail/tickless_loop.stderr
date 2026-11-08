@@ -1,4 +1,4 @@
-error: #[hardware(sequential)] body must contain `clk.tick().await`
+error: #[hardware(sequential)] body must contain `clk.tick().await` (SPEC II.1 S0, R20; I.2.2)
   --> tests/ui/fail/tickless_loop.rs:12:18
    |
 12 | async fn spinner(clk: Clock<MainClk>, out: RegOut<Bits<8>, MainClk>) {

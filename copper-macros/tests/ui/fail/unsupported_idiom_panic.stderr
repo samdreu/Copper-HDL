@@ -1,4 +1,4 @@
-error: `panic!` is not synthesizable in a hardware module — an unreachable/error condition must be an explicit output signal (e.g. an `illegal: Logic` port), not a panic.
+error: `panic!` is not synthesizable in a hardware module — an unreachable/error condition must be an explicit output signal (e.g. an `illegal: Logic` port), not a panic (SPEC II.2 D3; I.2.5(a)).
   --> tests/ui/fail/unsupported_idiom_panic.rs:11:9
    |
 11 |         panic!("cannot happen");

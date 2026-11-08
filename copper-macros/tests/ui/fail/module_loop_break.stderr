@@ -1,0 +1,19 @@
+error: this `break` leaves the module's own `loop`, which ends the coroutine — a hardware module runs forever (SPEC II.1 S4, R7; I.8.1). A `break` may leave only a nested loop; to stop doing something, hold a state register and test it.
+  --> tests/ui/fail/module_loop_break.rs:17:13
+   |
+17 |             break;
+   |             ^^^^^
+
+warning: unused imports: `Bits`, `Clock`, and `Logic`
+ --> tests/ui/fail/module_loop_break.rs:1:19
+  |
+1 | use copper_core::{Bits, Clock, ClockDomain, Logic};
+  |                   ^^^^  ^^^^^               ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/module_loop_break.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^

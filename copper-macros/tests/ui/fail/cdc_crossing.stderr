@@ -1,4 +1,4 @@
-error: clock-domain crossing: input `d` is in domain `Fast`, but this module is clocked on `Slow`. A regular module may not cross clock domains — bring the signal across with a synchronizer (`copper::sync_2ff`, or your own `#[hardware(synchronizer)]` module), then use its output in this domain.
+error: clock-domain crossing: input `d` is in domain `Fast`, but this module is clocked on `Slow`. A regular module may not cross clock domains — bring the signal across with a synchronizer (`copper::sync_2ff`, or your own `#[hardware(synchronizer)]` module), then use its output in this domain (SPEC I.12.4(a); II.1 S0).
   --> tests/ui/fail/cdc_crossing.rs:14:36
    |
 14 | async fn crosser(clk: Clock<Slow>, d: In<Logic, Fast>, q: RegOut<Logic, Slow>) {

@@ -1,4 +1,4 @@
-error: #[hardware(sequential)] body must have exactly one top-level `loop { … }` — a hardware module is a single state machine. Merge the loops, or split this into separate modules.
+error: #[hardware(sequential)] body must have exactly one top-level `loop { … }` — a hardware module is a single state machine. Merge the loops, or split this into separate modules (SPEC II.1 S0, R20; I.2.2).
   --> tests/ui/fail/multiple_top_level_loops.rs:17:5
    |
 17 |     loop {

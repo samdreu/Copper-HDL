@@ -1,4 +1,4 @@
-error: `d` shadows the hardware port parameter of the same name; the `let` binding hides the port for the rest of the body (reads and writes hit the local, not the wire). Rename the local.
+error: `d` shadows the hardware port parameter of the same name; the `let` binding hides the port for the rest of the body (reads and writes hit the local, not the wire). Rename the local (SPEC II.1 S0, R18; I.2.3's name classes).
   --> tests/ui/fail/param_shadowing.rs:14:13
    |
 14 |         let d: Bits<8> = Bits::zero();

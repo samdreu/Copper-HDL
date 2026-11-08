@@ -1,0 +1,19 @@
+error: this bound of a tick-free `for` is not a constant: a `for` with no `clk.tick().await` in its body runs inside one cycle, so it is unrolled, and its bound must be a Rust constant — a literal, a `const`, a const generic (SPEC II.1 S3, R5; I.2.5(c), I.8.5, I.14.4). Loop to a constant bound and test the run-time limit inside, or put a tick in the body to make the loop a state machine.
+  --> tests/ui/fail/runtime_for_bound.rs:16:22
+   |
+16 |         for _i in 0..k {
+   |                      ^
+
+warning: unused imports: `Bits` and `Clock`
+ --> tests/ui/fail/runtime_for_bound.rs:1:19
+  |
+1 | use copper_core::{Bits, Clock, ClockDomain};
+  |                   ^^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/runtime_for_bound.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^

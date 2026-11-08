@@ -1,4 +1,4 @@
-error: clock-domain crossing: memory `rom` is in domain `OtherClk`, but this module is clocked on `MainClk`. A memory is clocked on its own domain and cannot be synchronized across one — give this module a `Clock<OtherClk>` and receive the memory there, or hand it a memory in `MainClk`.
+error: clock-domain crossing: memory `rom` is in domain `OtherClk`, but this module is clocked on `MainClk`. A memory is clocked on its own domain and cannot be synchronized across one — give this module a `Clock<OtherClk>` and receive the memory there, or hand it a memory in `MainClk` (SPEC I.12.4(b), I.10.5).
   --> tests/ui/fail/cdc_memory_parameter.rs:16:5
    |
 16 |     rom: Memory<Bits<16>, 1, 0, OtherClk, 1, 1>,

@@ -1,4 +1,4 @@
-error: this `In<T, D>` parameter is used in a way #[hardware(sequential)] can't verify is protected against stale/premature reads — only `<param>.read()`, called directly on the parameter with no intervening `.clone()`, reassignment, or indirection, is supported. Read it directly at each place it's needed instead.
+error: this `In<T, D>` parameter is used other than as the receiver of `.read()`: the one read form is `let t = x.read()`, called on the parameter itself — a `.clone()`, a rebinding or a helper taking the port is no read of the kernel (SPEC II.1 S0, R19; I.2.3). Read it directly at each place it is needed.
   --> tests/ui/fail/sequential_unprotectable_read.rs:17:22
    |
 17 |         let input2 = input.clone();

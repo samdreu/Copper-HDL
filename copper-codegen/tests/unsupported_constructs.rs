@@ -185,9 +185,10 @@ async fn m(clk: Clock<MainClk>, step: In<Bits<8>, MainClk>, o: RegOut<Bits<8>, M
 fn a_loop_whose_only_boundary_can_exit_before_ticking_is_rejected() {
     let src = r#"
 #[hardware(sequential)]
-async fn m(clk: Clock<MainClk>, a: In<Logic, MainClk>, b: In<Logic, MainClk>) {
+async fn m(clk: Clock<MainClk>, a: In<Logic, MainClk>, b: In<Logic, MainClk>, o: RegOut<Logic, MainClk>) {
     loop {
         loop {
+            o.write(a.read());
             if a.read() == Logic::One { break; }
             loop {
                 if b.read() == Logic::One { break; }
@@ -282,8 +283,10 @@ async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<8>, Main
         "reproduced a *different* error than the untick'd nested loop: {err}"
     );
 
-    // Same shape, but the module never ticks at all: the reachability guarantee
-    // owns this one, and its message is the better of the two.
+    // Same shape, but the module never ticks at all: the header rule R20's tick
+    // clause owns this one in both front-ends since Phase C step 10 (SPEC II.1.3:
+    // the shared rules run first, in the macro's order), and its message names
+    // the missing tick, the better of the two.
     let no_tick = r#"
 #[hardware(sequential)]
 async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<8>, MainClk>) {
@@ -296,8 +299,8 @@ async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<8>, Main
 "#;
     let err = transpile(no_tick).expect_err("a loop with no tick must be rejected");
     assert!(
-        err.contains("must reach `clk.tick().await`"),
-        "the reachability guarantee should own the no-tick case: {err}"
+        err.contains("body must contain `clk.tick().await`"),
+        "the header's tick clause should own the no-tick case: {err}"
     );
 }
 

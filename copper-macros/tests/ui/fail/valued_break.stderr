@@ -1,0 +1,19 @@
+error: a `break` with a value is outside the kernel's grammar: `break` and `continue` are unlabelled and act on the innermost loop, and a `break` carries no value (SPEC II.1 S0, R12; I.2.3, I.8.3). Leave an outer loop through a state register the inner one sets, and carry a value out in a local assigned before the `break`.
+  --> tests/ui/fail/valued_break.rs:16:17
+   |
+16 |                 break t;
+   |                 ^^^^^
+
+warning: unused imports: `Bits`, `Clock`, and `Logic`
+ --> tests/ui/fail/valued_break.rs:1:19
+  |
+1 | use copper_core::{Bits, Clock, ClockDomain, Logic};
+  |                   ^^^^  ^^^^^               ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/valued_break.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^

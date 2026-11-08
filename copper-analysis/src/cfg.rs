@@ -2253,7 +2253,7 @@ pub(crate) fn tick_clock(expr: &Expr) -> Option<String> {
 /// Does this statement issue a `<clock>.tick().await` at any depth? Shares
 /// [`first_tick_clock`]'s walk so the two cannot disagree about where a tick can
 /// live — a drift that has caused real bugs in the transpiler's own gate.
-pub(crate) fn stmt_contains_tick(s: &syn::Stmt) -> bool {
+pub fn stmt_contains_tick(s: &syn::Stmt) -> bool {
     struct FindTick(bool);
     impl<'ast> Visit<'ast> for FindTick {
         fn visit_expr(&mut self, e: &'ast Expr) {

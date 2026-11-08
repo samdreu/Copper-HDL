@@ -1,4 +1,4 @@
-error: #[hardware(sequential)] can only be applied to async functions
+error: #[hardware(sequential)] can only be applied to async functions (SPEC II.1 S0, R20; I.2.2)
   --> tests/ui/fail/function_typed_no_return_type.rs:10:1
    |
 10 | fn counter(clk: Clock<MainClk>, input: In<u8>, out: Out<u8>) {
