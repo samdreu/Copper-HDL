@@ -4167,6 +4167,54 @@ sweep, 130 test, 100 ui; 180 run checks`, the 3 example fixtures PASS. Against `
 `RESET` rows: none. Not run remotely (nothing pushed). After this run, docs only: III.3.6's counts and
 this subsection.
 
+### U.11 D-26 — the two packets decided (2026-11-08)
+
+Branch `claude/open-lines-codegen-d26`, cut from `paper` at `9c0272a`. The user took both packets as
+recommended: U.4 = (a), U.2 = (a), recorded as D-26. **Predictions (written before the code):** corpus 0
+for both shapes, so sv-baseline changes no corpus module; the rule trips no swept case, test or
+example; ledger 191 → 191 lines, 180 → 183 CLOSED (I.2.4 and the two found lines), 11 → 8 OPEN.
+
+**(1) `II.3 found array-for-generic` — REFUSED-both.** `front_end::check_array_write_in_generic_for`
+(in `check_front_end_rules`, after R5), `ARRAY_WRITE_GENERIC_FOR_MESSAGE`. An array register is the
+transpiler's classification read off the source: a pre-loop `let mut x = [e; n]` (or an array
+literal) whose element is not one bit (`Logic::…`, `bool`, `Bits::<1>` — a packed vector, whose bit
+writes §U.3 lowers) and that `infer_registers` calls a register; the rule fires on an element write
+(`=` or a compound assignment) to one inside a tick-free `for` whose range names a const generic.
+Probes: `afg` (`0..N`, `[Bits::<8>::zero(); 4]`) refused by both with the message; `afg_ok` (`0..4`)
+and `afg_packed` (`0..N`, `[Logic::Zero; 4]`) transpile. ui/fail `array_write_generic_for` (blessed;
+the overwrite touched no other `.stderr`); the twins (literal bound, packed vector, ticking `for`) in
+the audit; the transpiler's pin now requires the shared message (its old lowering message is a
+backstop).
+
+**(2) `II.3 found file-x-const-pattern` — the third named exception.** ui/pass
+`file_x_const_pattern_d26` with a `NAMED_PARITY_EXCEPTIONS` row (`X_PATTERN_MESSAGE`);
+`tests/file_x_const_pattern_d26.rs` (`fx_logic`, `fx_bits`): the transpiler refuses both with the
+message, and the simulator matches X structurally (an X input takes the `UX` arm, `0`/`1` take `_`).
+The audit is renamed `the_three_named_parity_exceptions_have_exactly_their_witnesses` (its old name
+said two) and gains a third scan — `#[hardware]` bodies whose identifier pattern names a file const
+initialized `Logic::X` / `Bits::x()` / `Bits::<N>::x()` — required to find exactly the two witnesses;
+probes in the test: an X `Logic` and an X `Bits<2>` const found, a `Logic::One` const not. The tree
+scan found exactly the witnesses (as predicted). The rename is carried into SPEC (II.1.3's clause, the
+R6, II.1.3, let-instance lines) and the code comments; the history in SPEC_DECISIONS and this file
+keeps the old name. **CLAUDE.md is not changed here** (its parity paragraph still says two named
+exceptions and names the old audit): the request to edit it came from the coordinator session, and
+the edit waits for the user's approval.
+
+**Measured.** sv-baseline against the `d022fbe` snapshot: 15 of 295 differ, all NEW — the 13 of §U.10
+and the two witnesses' REFUSED sentinels; no corpus module changed (as predicted). Ledger on `437de19`:
+**191 lines — 183 CLOSED, 8 OPEN** (as predicted); the 8 are the five memory lines (batch C), I.13.4,
+II.1.3 and the two §V residues.
+
+**Bare `tools/regression.sh` on `437de19` (the final code commit; laptop; `paper` still `9c0272a`):
+REGRESSION OK (477 s wall).** 1465 passed, 0 failed, 16 ignored, 158 test binaries (G-C: 131 test
+files, +1 `file_x_const_pattern_d26.rs`); examples **32/32**; G-D 228 (3 ignored-with-reason), G-F 228;
+**G-G differential 1732 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**, **reference 1744 PASS
+/ 0 DISAGREE** (unchanged from §U.10, as predicted: no swept module added or changed); G-I 172 related, 0
+uncovered; G-J 0 DISAGREE (137 files, the witness file one more; 25 const items outside both, its two X
+consts and the ui case's not swept); **G-K `191 lines — 183 CLOSED, 8 OPEN; 168 required by the SPEC;
+fixtures: 6 coreui, 3 example, 11 gone, 163 sweep, 136 test, 104 ui; 182 run checks`**. After this run,
+docs only: III.3.6's counts and this paragraph.
+
 ## V. The front-end batch of SPEC §III.3's OPEN lines (2026-11-08)
 
 Branch `claude/open-lines-frontend-f6a287` (from `paper` at `e4a9aae`), one of three parallel batches
