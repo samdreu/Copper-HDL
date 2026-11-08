@@ -4274,19 +4274,21 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | retired 14 | `multi_phase_out_write` | `gone:multi_phase_out_write`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8 |
 | retired 15 | `out_first_driven_late` | `gone:out_first_driven_late`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; I.11's class vacuous (D-14) |
 
-**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §V.8
-(2026-11-08, on `c518b77`, the front-end batch of the OPEN lines, REGRESSION OK): **189 lines — 171
-CLOSED, 18 OPEN**; 168 required by the SPEC (91 numbered clauses, 22 II.1.2 rules, 4 II.2.1 rules, 12
-II.3.3 rows, 28 row-(e) methods, 9 retired rules) and 21 beyond it (the 7 methods row (e) owes, 14 II.3
-rows found in Phase C and after). By part: Part I 82 lines, 75 CLOSED, 7 OPEN; II.1–II.2 31 lines, 30
-CLOSED, 1 OPEN (II.1.3); II.3 67 lines, 57 CLOSED, 10 OPEN (`saturating_add`, `saturating_sub`, and eight
-found rows); the 9 retired rules CLOSED. Fixture tokens on CLOSED lines: 141 `sweep`, 123 `test`, 100
-`ui`, 6 `coreui`, 3 `example`, 11 `gone`; G-K's run check found all 162 run checks satisfied and the 3
-examples PASS. No OPEN line waits on a decision; each names the component that owes it; none is a
-divergence the sweep reaches (G-G 0 DISAGREE). (Step 11c's counts, on `7589204`: 187 lines — 166
-CLOSED, 21 OPEN; the front-end batch closed I.8.4, I.12.4, II.1.2 R16, `II.3 found body-wire` and
-`II.3 found const-call`, and opened `II.3 found runtime-empty-boundary` and `II.3 found
-const-call-body`, §V.)
+**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §U.10
+(2026-11-08, on `f29fe46`, the codegen batch of the OPEN lines rebased onto the front-end batch,
+REGRESSION OK): **191 lines — 180 CLOSED, 11 OPEN**; 168 required by the SPEC (91 numbered clauses, 22
+II.1.2 rules, 4 II.2.1 rules, 12 II.3.3 rows, 28 row-(e) methods, 9 retired rules) and 23 beyond it (the
+7 methods row (e) owes, 16 II.3 rows found in Phase C and after). By part: Part I 82 lines, 76 CLOSED, 6
+OPEN; II.1–II.2 31 lines, 30 CLOSED, 1 OPEN (II.1.3); II.3 69 lines, 65 CLOSED, 4 OPEN (four found rows:
+const-call-body, runtime-empty-boundary, array-for-generic, file-x-const-pattern); the 9 retired rules
+CLOSED. Fixture tokens on CLOSED lines: 160 `sweep`, 130 `test`, 100 `ui`, 6 `coreui`, 3 `example`, 11
+`gone`; G-K's run check found all 180 run checks satisfied and the 3 examples PASS. Two OPEN lines wait
+on a decision (array-for-generic, file-x-const-pattern — the packets of §U.2 and §U.4); every other
+names the component that owes it; none is a divergence the sweep reaches (G-G 0 DISAGREE). (The
+front-end batch's counts, on `c518b77`: 189 lines — 171 CLOSED, 18 OPEN, §V.8; the codegen batch closed
+I.11.2, `saturating_add`, `saturating_sub` and six found rows — array-for, u8-const, comb-double-write,
+preload-ok, tickfree-continue, const-pattern — and opened `II.3 found array-for-generic` and
+`II.3 found file-x-const-pattern`, §U.)
 
 **III.3.7 Implementation map.** `tests/conformance_ledger.rs` (the parser, the completeness and
 token checks, `COPPER_LEDGER_REPORT`); `tools/regression.sh` G-K (the `REQUIRE` lines against the

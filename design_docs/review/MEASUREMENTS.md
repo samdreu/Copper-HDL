@@ -3990,7 +3990,7 @@ Session open-lines-codegen, branch `claude/open-lines-codegen-2c913f` (cut from 
 nothing pushed). One of three parallel batches over III.3's 21 OPEN lines (§V is another session's).
 Instrument for every prediction: `sv-baseline` (`copper-codegen/src/bin/sv-baseline.rs`), snapshot of
 the untouched tree at `e4a9aae`, **277 modules**. Probes in the session scratchpad, not in the tree.
-Code commits `09eec30`, `5f56131`, `ccd1f63`… (see `git log`), ledger `7dc5c89`.
+Commits (after the rebase of U.10): code `41931a5`, `f913713`, `244d49e`, `357c6f8`, `ecc26cf`, `4d69982`; ledger `83848cd`; docs after.
 
 **Every change: predicted no corpus module's SV changes; measured — none did.** The final
 `sv-baseline diff`: 13 of 290 modules differ, all 13 NEW (the fixture modules below and the
@@ -4118,14 +4118,14 @@ limit are follow-ups (copper-ref, copper-sim), not fixed here.
 
 Predicted 187 → 189 lines (two residue lines opened), 166 → 175 CLOSED (tickfree-continue,
 const-pattern, preload-ok, array-for, comb-double-write, I.11.2, u8-const, `saturating_add`,
-`saturating_sub`), 21 → 14 OPEN. Measured by `conformance_ledger.rs` on `7dc5c89`: **189 lines — 175
+`saturating_sub`), 21 → 14 OPEN. Measured by `conformance_ledger.rs` on `7dc5c89` (before the rebase): **189 lines — 175
 CLOSED, 14 OPEN; fixtures 5 coreui, 3 example, 11 gone, 156 sweep, 123 test, 89 ui; 174 run checks.**
 I.2.4 stays OPEN, narrowed to array-for-generic; II.1.3 stays OPEN with four residues (const-call,
 body-wire, array-for-generic, file-x-const-pattern).
 
 ### U.9 What the first bare regression found — G-J
 
-**Bare `tools/regression.sh` on `7dc5c89`: REGRESSION FAIL** at `cargo test --workspace`
+**Bare `tools/regression.sh` on `7dc5c89` (before the rebase): REGRESSION FAIL** at `cargo test --workspace`
 (`const_evaluators_agree.rs`, 1190 s wall). Not predicted. Two items, both in the test, neither a
 semantic disagreement: (i) **1 DISAGREE** — `packed_bit_write_dut.rs::pb_shift_and_phase`'s
 `let bits = [Logic::Zero; 4]`: the transpiler states 0 (the packed vector), the interpreter has an
@@ -4137,6 +4137,35 @@ the transpiler, one more). (ii) **5 unpinned asymmetries**, the const-pattern fi
 only the interpreter evaluates them. They are the corpus's first non-integer consts, and they are
 pinned as `ASYMMETRIC` with that reason (the transpiler folds a pattern const with `fold_const_init`,
 and the sweep checks that against rustc). Commit `Open lines (codegen): G-J reads a packed-vector …`.
+
+### U.10 The rebase and the bare regression
+
+**Rebase.** `paper` moved to `d022fbe` (the front-end batch, §V) during this work; the branch was
+rebased onto it. The code commits applied without conflict (B's only `chir_lower.rs` hunk, the
+`fold_const_init` arm, is apart from this batch's). Conflicts were in SPEC §III.3's found rows (both
+batches' rows kept: B's `const-call` CLOSED and `const-call-body`, `runtime-empty-boundary` OPEN beside
+this batch's), II.1.3's list (rewritten to the four residues after both batches), this file's tail
+(§U placed before §V) and CLAUDE.md's parity paragraph. **Re-measured on the rebased tree:**
+sv-baseline against a fresh snapshot of `d022fbe` (280 modules): 13 of 293 differ, all NEW (this
+batch's fixture modules and the `tests/ref_probes` module) — no corpus module changed, B's
+`const_call_dut` modules included. G-J's five `ASYMMETRIC` rows are still required after B widened
+both evaluators (the test fails on a stale row): `ConstEnv` is still integer-valued for `Logic`/`Bits`.
+Ledger predicted from `d022fbe`'s 189 / 171 / 18 as 191 / 180 / 11; measured as predicted.
+
+**Bare `tools/regression.sh` on `f29fe46` (the rebased tip; the last code commit is `4d69982`, the one
+after it docs; laptop): REGRESSION OK (427 s wall).** 1463 passed, 0 failed, 16 ignored, 157 test
+binaries (G-C: 130 test files); examples **32/32**; G-D **228** differential cases (3
+ignored-with-reason); **G-F 228** (3 skipped with a reason); **G-G differential 1732 PASS / 12 OUTSIDE /
+0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**; **G-G reference 1744 PASS / 0 DISAGREE**; **G-I** 172 clocked
+related (43 extracted, 18 linear, 111 single-tick), 0 uncovered; **G-J** 73 const items compared / 22
+outside both, 278 + 47 initializers, 5 asymmetric (pinned), **0 DISAGREE**; G-E 5 anchored; **G-K**
+`191 lines — 180 CLOSED, 11 OPEN; 168 required by the SPEC; fixtures: 6 coreui, 3 example, 11 gone, 160
+sweep, 130 test, 100 ui; 180 run checks`, the 3 example fixtures PASS. Against `c518b77`'s run (§V.8):
++12 swept modules (G-D 216 → 228: `tfc` ×2, `cp` ×2, `pb` ×2, `afw` ×2, `cdo_double_write*` ×2,
+`init_file_const_in_body`, `sat_signed`), G-G +78 PASS on each comparison, +1 test file
+(`saturating_u128_equivalence.rs`); the 12 OUTSIDE unchanged. New `SKIP` / `REF_SKIP` / `PARAMS` /
+`RESET` rows: none. Not run remotely (nothing pushed). After this run, docs only: III.3.6's counts and
+this subsection.
 
 ## V. The front-end batch of SPEC §III.3's OPEN lines (2026-11-08)
 
