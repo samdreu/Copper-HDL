@@ -53,8 +53,33 @@ pub fn candidates(fir: &FrontendModuleIR) -> Vec<ModuleLocalParam> {
 
     ordered
         .into_iter()
-        .map(|(c, sv)| ModuleLocalParam { name: c.name.clone(), value_expr: sv })
+        .map(|(c, sv)| match narrow_int_width(&c.ty.ty_text) {
+            // A `u8`/`u16`/`i8`/`i16` const is its own width (line `II.3 found u8-const`,
+            // MEASUREMENTS §U.6): a 32-bit `localparam int` in an 8-bit expression is a
+            // Verilator `-Wall` WIDTHEXPAND/WIDTHTRUNC error. The initializer is size-cast, so
+            // an expression over other consts (`CI_START / 30`) does not trip WIDTHTRUNC.
+            Some((w, signed)) => ModuleLocalParam {
+                name: c.name.clone(),
+                value_expr: format!("{w}'({sv})"),
+                sv_type: format!("logic {}[{}:0]", if signed { "signed " } else { "" }, w - 1),
+            },
+            None => ModuleLocalParam { name: c.name.clone(), value_expr: sv, sv_type: "int".to_string() },
+        })
         .collect()
+}
+
+/// The width and signedness of a file const narrower than 32 bits (`u8`, `u16`, `i8`, `i16`),
+/// which emits as a sized `localparam`; `None` for every other type (a 32-bit-or-wider integer
+/// stays a `localparam int`, as it always has).
+pub fn narrow_int_width(ty_text: &str) -> Option<(usize, bool)> {
+    let t: String = ty_text.chars().filter(|c| !c.is_whitespace()).collect();
+    match t.as_str() {
+        "u8" => Some((8, false)),
+        "u16" => Some((16, false)),
+        "i8" => Some((8, true)),
+        "i16" => Some((16, true)),
+        _ => None,
+    }
 }
 
 /// Why a referenced name that *is* a file-scope const did not become a

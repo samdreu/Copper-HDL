@@ -146,8 +146,9 @@ impl Emitter<'_> {
             i += 1;
             let comma = if i == total { "" } else { "," };
             self.out.push_str(&format!(
-                "{}localparam int {} = {}{}\n",
+                "{}localparam {} {} = {}{}\n",
                 self.indent(1),
+                lp.sv_type,
                 lp.name,
                 lp.value_expr,
                 comma

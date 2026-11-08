@@ -52,6 +52,8 @@ pub struct VLIRWidthCheck {
 pub struct VLIRLocalParam {
     pub name: String,
     pub value_expr: String,
+    /// The SystemVerilog type (`int`, or a sized `logic` vector; see `ModuleLocalParam`).
+    pub sv_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

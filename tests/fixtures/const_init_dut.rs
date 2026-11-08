@@ -56,9 +56,28 @@ async fn init_file_const(
         p.write(Bits::from_u8(c));
         clk.tick().await;
         n = n ^ a.read();
-        // `c.wrapping_add(CI_STEP)` would lint-fail: a `u8` file const in a body
-        // expression emits as a 32-bit `localparam int` (§N, a recorded follow-up).
+        // Until 2026-11-08 `c.wrapping_add(CI_STEP)` lint-failed: a `u8` file const in a
+        // body expression emitted as a 32-bit `localparam int` (§N.5 item 1); it is a
+        // sized `localparam` since §U.6 — `init_file_const_in_body` below.
         c = c.wrapping_add(1);
+    }
+}
+
+/// `u8` file consts in body expressions (line `II.3 found u8-const`, MEASUREMENTS §U.6): each
+/// emits as a sized `localparam logic [7:0]`, so `c + CI_STEP` is an 8-bit add.
+#[hardware(sequential)]
+async fn init_file_const_in_body(
+    clk: Clock<MainClk>,
+    a: In<Bits<8>, MainClk>,
+    o: RegOut<Bits<8>, MainClk>,
+    p: RegOut<Bits<8>, MainClk>,
+) {
+    let mut c: u8 = CI_STEP;
+    loop {
+        p.write(Bits::from_u8(c));
+        o.write(a.read() ^ Bits::from_u8(CI_START));
+        clk.tick().await;
+        c = c.wrapping_add(CI_STEP);
     }
 }
 

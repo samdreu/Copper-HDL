@@ -163,6 +163,7 @@ pub fn lower_to_vlir(shir: &SHIRModule) -> LowerResult<VLIRModule> {
         .map(|lp| copper_core::vlir::VLIRLocalParam {
             name: lp.name.clone(),
             value_expr: lp.value_expr.clone(),
+            sv_type: lp.sv_type.clone(),
         })
         .collect();
 

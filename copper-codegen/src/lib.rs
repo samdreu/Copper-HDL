@@ -2,6 +2,7 @@ mod parser;
 pub mod file_consts;
 pub mod chir_lower;
 pub mod control_extract;
+pub mod for_continue;
 pub mod shir_lower;
 pub mod vlir_lower;
 pub mod emit;
@@ -81,6 +82,9 @@ pub fn lower_fir_to_chir(
     // the pipeline below already lowers correctly. No-op for linear modules.
     let source = fir;
     let mut fir = fir.clone();
+    // A `continue` of a tick-free `for` → the rest of the iteration under the negated
+    // condition (SPEC I.2.4, MEASUREMENTS §U.1), before any pass looks at a loop body.
+    for_continue::eliminate_tickfree_continue(&mut fir);
     // `while <cond> { … tick; }` is sugar for the repeating wait extraction
     // already handles; rewrite it before the gate looks at the body.
     control_extract::desugar_tick_waits(&mut fir);

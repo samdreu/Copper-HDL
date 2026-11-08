@@ -615,7 +615,7 @@ fn parse_expr_stmt(expr: &Expr, has_semi: bool, hardware_fns: &std::collections:
     })
 }
 
-fn parse_expr_type(expr: &Expr, hardware_fns: &std::collections::HashSet<String>) -> ExprType {
+pub(crate) fn parse_expr_type(expr: &Expr, hardware_fns: &std::collections::HashSet<String>) -> ExprType {
     match expr {
         Expr::Array(e) => ExprType::Array(ExprArray {
             elements: e.elems.iter().map(|e| parse_expr_type(e, hardware_fns)).collect(),

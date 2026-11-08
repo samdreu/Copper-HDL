@@ -35,6 +35,10 @@ pub struct CHIRModule {
 pub struct ModuleLocalParam {
     pub name: String,
     pub value_expr: String,
+    /// The SystemVerilog type: `int` for a const of 32 bits or more (as before), a sized
+    /// `logic [W-1:0]` (`signed` for `i8`/`i16`) for a `u8`/`u16`/`i8`/`i16` const, whose
+    /// `value_expr` is then a size cast (MEASUREMENTS §U.6).
+    pub sv_type: String,
 }
 
 /// A module-level parameter, e.g. `parameter N = 8`. `default` is the concrete

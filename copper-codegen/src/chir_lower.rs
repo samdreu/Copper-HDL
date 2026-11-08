@@ -1732,6 +1732,12 @@ fn lower_comb_body(
     let has_return = fir.signature.return_ty.is_some();
     let mut ctx = LowerCtx::new(hardware_fns, registry);
     ctx.params = param_names(fir);
+    (ctx.pattern_consts, ctx.file_consts) = pattern_const_items(fir, &ctx.params);
+    ctx.narrow_consts = fir
+        .file_consts
+        .iter()
+        .filter_map(|c| crate::file_consts::narrow_int_width(&c.ty.ty_text).map(|(w, _)| (c.name.clone(), w)))
+        .collect();
     ctx.output_ports = fir.signature.params.iter()
         .filter_map(|p| {
             let compact = compact_type(&p.ty.ty_text);
@@ -2156,6 +2162,12 @@ fn lower_seq_body(
 
     let mut ctx = LowerCtx::new(hardware_fns, registry);
     ctx.params = param_names(fir);
+    (ctx.pattern_consts, ctx.file_consts) = pattern_const_items(fir, &ctx.params);
+    ctx.narrow_consts = fir
+        .file_consts
+        .iter()
+        .filter_map(|c| crate::file_consts::narrow_int_width(&c.ty.ty_text).map(|(w, _)| (c.name.clone(), w)))
+        .collect();
     ctx.clock_name = clock.clone();
     ctx.output_ports = fir.signature.params.iter()
         .filter_map(|p| {
@@ -2731,6 +2743,14 @@ pub(crate) struct LowerCtx<'a> {
     /// rather than left at the 64-bit default (`ELS_P == 64'd1` is a Verilator
     /// WIDTHEXPAND error under `-Wall`).
     params: std::collections::HashSet<String>,
+    /// The consts a pattern may name that are not `params` (not a `localparam`): a
+    /// non-integer file const and every body `const`, body first (it shadows). A pattern
+    /// naming one is lowered by its folded value (`pattern_const`, MEASUREMENTS §U.2).
+    pattern_consts: Vec<copper_core::frontend_ir::ItemConst>,
+    /// The file's consts, which a pattern const's value may name.
+    file_consts: Vec<copper_core::frontend_ir::ItemConst>,
+    /// File consts emitted as a sized `localparam` (`u8`/`u16`/`i8`/`i16`): name → width.
+    narrow_consts: std::collections::HashMap<String, usize>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -2757,6 +2777,9 @@ impl<'a> LowerCtx<'a> {
             write_inferred: SymbolTable::new(),
             memories: std::collections::HashMap::new(),
             params: std::collections::HashSet::new(),
+            pattern_consts: Vec::new(),
+            file_consts: Vec::new(),
+            narrow_consts: std::collections::HashMap::new(),
         }
     }
 }
@@ -3972,6 +3995,24 @@ fn lower_expr_stmt(
         // Only meaningful inside a nested loop, which is rejected above — so
         // reaching here means one escaped its loop, and dropping it silently
         // would change the design's control flow.
+        // A `continue` of a tick-free `for` that `for_continue` left in place: labelled, inside
+        // a `let` initializer or an expression, or followed by statements naming a binding
+        // made in its branch (MEASUREMENTS §U.1).
+        ExprType::Continue(_) if ctx.comb_for_depth > 0 => {
+            return Err(CHIRLowerError::UnsupportedConstruct {
+                description: "this `continue` of a tick-free `for` is not lowered: it is \
+                              labelled, sits inside an expression or a `let`, or the statements \
+                              after it name a binding made in its branch"
+                    .to_string(),
+                span,
+                suggested_rewrite: Some(
+                    "write it unlabelled as a statement of the `for`'s body (or of an `if`/`match`/block \
+                     in it), and rename a branch's binding the rest of the iteration also names"
+                        .to_string(),
+                ),
+            });
+        }
+
         ExprType::Break(_) | ExprType::Continue(_) => {
             return Err(CHIRLowerError::UnsupportedConstruct {
                 description: format!(
@@ -4439,26 +4480,25 @@ enum PatElem {
 fn parse_pattern_elems(
     text: &str,
     span: SourceSpan,
-    enums: &EnumRegistry,
-    params: &std::collections::HashSet<String>,
+    ctx: &LowerCtx,
 ) -> Result<Vec<PatElem>, CHIRLowerError> {
     let s = text.trim();
     if s.starts_with('(') && s.ends_with(')') {
         let inner = &s[1..s.len() - 1];
         return split_top_level_commas(inner)
             .iter()
-            .map(|p| parse_pattern_elem(p.trim(), span, enums, params))
+            .map(|p| parse_pattern_elem(p.trim(), span, ctx))
             .collect();
     }
-    Ok(vec![parse_pattern_elem(s, span, enums, params)?])
+    Ok(vec![parse_pattern_elem(s, span, ctx)?])
 }
 
 fn parse_pattern_elem(
     s: &str,
     span: SourceSpan,
-    enums: &EnumRegistry,
-    params: &std::collections::HashSet<String>,
+    ctx: &LowerCtx,
 ) -> Result<PatElem, CHIRLowerError> {
+    let (enums, params) = (&ctx.enums, &ctx.params);
     if s == "_" {
         return Ok(PatElem::Wildcard);
     }
@@ -4469,6 +4509,11 @@ fn parse_pattern_elem(
         // not a variant.
         CHIRPattern::EnumVariant { name, inner: None } if params.contains(&name) => {
             return Ok(PatElem::Const(name));
+        }
+        // A const that is not a `localparam` (a non-integer file const, a body const):
+        // its folded value (MEASUREMENTS §U.2).
+        CHIRPattern::EnumVariant { name, inner: None } if pattern_const(&name, span, ctx)?.is_some() => {
+            return Ok(PatElem::Lit(pattern_const(&name, span, ctx)?.expect("checked")));
         }
         CHIRPattern::EnumVariant { name, .. } => {
             // A bare variant name (no enum prefix): resolve it if exactly one
@@ -4539,7 +4584,7 @@ fn match_expr_is_case_compatible(
             return Ok(false);
         }
         for alt in split_top_level_pipes(&arm.pattern_text) {
-            let elems = parse_pattern_elems(&alt, m.span, &ctx.enums, &ctx.params)?;
+            let elems = parse_pattern_elems(&alt, m.span, ctx)?;
             let all_lit = elems
                 .iter()
                 .all(|e| matches!(e, PatElem::Lit(_) | PatElem::Const(_)));
@@ -4575,7 +4620,7 @@ fn lower_match_as_chain(
         let mut has_binder = false;
 
         for alt in &alts {
-            let elems = parse_pattern_elems(alt, span, &ctx.enums, &ctx.params)?;
+            let elems = parse_pattern_elems(alt, span, ctx)?;
             // A lone `_` matches the whole scrutinee regardless of its arity
             // (`match (a, b) { _ => .. }`), so it is unconditional. Only when the
             // pattern is a tuple must its arity match the scrutinee's.
@@ -5113,8 +5158,13 @@ fn width_of_chir_expr(e: &CHIRExpr, ctx: &LowerCtx) -> Option<usize> {
             .symbols
             .get(name)
             .and_then(width_of_type_concrete)
-            // Not a signal: a `parameter int` / `localparam int` is 32 bits.
-            .or_else(|| ctx.params.contains(name).then_some(32)),
+            // Not a signal: a `parameter int` / `localparam int` is 32 bits; a `u8`/`u16`
+            // file const is a sized `localparam` of its own width (MEASUREMENTS §U.6).
+            .or_else(|| {
+                ctx.params
+                    .contains(name)
+                    .then(|| ctx.narrow_consts.get(name).copied().unwrap_or(32))
+            }),
         CHIRExpr::Lit(l) => width_of_type_concrete(&l.ty),
         CHIRExpr::XLit { width } => match width {
             Some(Width::Concrete(w)) => Some(*w),
@@ -5868,16 +5918,19 @@ fn size_patterns_to_scrutinee(
     span: SourceSpan,
     ctx: &LowerCtx,
 ) -> Result<Vec<CHIRPattern>, CHIRLowerError> {
-    let _ = span;
     let patterns: Vec<CHIRPattern> = patterns
         .into_iter()
         .map(|p| match p {
             CHIRPattern::EnumVariant { name, inner: None } if ctx.params.contains(&name) => {
-                CHIRPattern::Const { name }
+                Ok(CHIRPattern::Const { name })
             }
-            other => other,
+            CHIRPattern::EnumVariant { name, inner: None } => match pattern_const(&name, span, ctx)? {
+                Some(lit) => Ok(CHIRPattern::Lit(lit)),
+                None => Ok(CHIRPattern::EnumVariant { name, inner: None }),
+            },
+            other => Ok(other),
         })
-        .collect();
+        .collect::<Result<_, CHIRLowerError>>()?;
     let Some(w) = width_of_chir_expr(scrutinee, ctx) else { return Ok(patterns) };
     Ok(patterns
         .into_iter()
@@ -5896,6 +5949,90 @@ fn size_patterns_to_scrutinee(
             other => other,
         })
         .collect())
+}
+
+/// The consts a pattern may name that are not `localparam`s, and the file's consts: every
+/// body `const` (any depth; first, since one shadows a file const of its name) and every file
+/// const outside `params` (a non-integer one — `Logic`, `Bits<N>`, `bool`).
+fn pattern_const_items(
+    fir: &FrontendModuleIR,
+    params: &std::collections::HashSet<String>,
+) -> (Vec<copper_core::frontend_ir::ItemConst>, Vec<copper_core::frontend_ir::ItemConst>) {
+    fn walk(stmts: &[RawStmt], out: &mut Vec<copper_core::frontend_ir::ItemConst>) {
+        for s in stmts {
+            match &s.kind {
+                RawStmtKind::Item(copper_core::frontend_ir::ItemStmt::Const(c)) => out.push(c.clone()),
+                RawStmtKind::Expr(es) => walk_expr(&es.expr, out),
+                RawStmtKind::Local(l) => {
+                    if let Some(i) = &l.init {
+                        walk_expr(i, out);
+                    }
+                }
+                RawStmtKind::Item(_) => {}
+            }
+        }
+    }
+    fn walk_expr(e: &ExprType, out: &mut Vec<copper_core::frontend_ir::ItemConst>) {
+        match e {
+            ExprType::Loop(l) => walk(&l.body, out),
+            ExprType::While(w) => walk(&w.body, out),
+            ExprType::ForLoop(f) => walk(&f.body, out),
+            ExprType::Block(b) => walk(&b.stmts, out),
+            ExprType::If(f) => {
+                walk(&f.then_block, out);
+                if let Some(eb) = f.else_branch.as_deref() {
+                    walk_expr(eb, out);
+                }
+            }
+            ExprType::Match(m) => m.arms.iter().for_each(|a| walk_expr(&a.body, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(&fir.raw_statements, &mut out);
+    out.extend(fir.file_consts.iter().filter(|c| !params.contains(&c.name)).cloned());
+    (out, fir.file_consts.clone())
+}
+
+/// A pattern naming a `const` that is not a `localparam` (line `II.3 found const-pattern`,
+/// MEASUREMENTS §U.2): the const's value, folded as a register initializer is
+/// (`fold_const_init`), at the width of its declared type. `None` when `name` is no such const
+/// (an enum variant, resolved elsewhere). A const whose value is X is OUTSIDE with D-24's
+/// message (`X_PATTERN_MESSAGE`, SPEC I.14.3(d)) — the shared rule sees a body `const`'s X
+/// literal syntactically; a file const's value is outside the `ItemFn`, so the transpiler
+/// refuses it here, once it has the value.
+fn pattern_const(name: &str, span: SourceSpan, ctx: &LowerCtx) -> Result<Option<CHIRLit>, CHIRLowerError> {
+    let Some(c) = ctx.pattern_consts.iter().find(|c| c.name == name) else {
+        return Ok(None);
+    };
+    let refuse = |why: String| CHIRLowerError::UnsupportedConstruct {
+        description: format!("the pattern `{name}` names `const {name}`, whose value {why}"),
+        span,
+        suggested_rewrite: None,
+    };
+    let ty = resolve_type(&c.ty.ty_text, c.span)?;
+    let width = width_of_type_concrete(&ty);
+    let expr = syn::parse_str::<syn::Expr>(&c.value_text)
+        .map_err(|e| refuse(format!("does not parse ({e})")))?;
+    let expr = crate::parser::parse_expr_type(&expr, &std::collections::HashSet::new());
+    match fold_const_init(&expr, width, &ctx.enums, &ctx.file_consts) {
+        Ok(RegisterInit::Value(v)) => {
+            let ty = match ty {
+                CHIRType::Bool => CHIRType::Bool,
+                _ => match width {
+                    Some(w) => CHIRType::UInt { width: Width::Concrete(w) },
+                    None => return Err(refuse("has a type whose width the transpiler cannot see".to_string())),
+                },
+            };
+            Ok(Some(CHIRLit { ty, value: v }))
+        }
+        Ok(RegisterInit::Undefined) => Err(CHIRLowerError::UnsupportedConstruct {
+            description: copper_analysis::X_PATTERN_MESSAGE.to_string(),
+            span,
+            suggested_rewrite: None,
+        }),
+        Err(why) => Err(refuse(why)),
+    }
 }
 
 /// Parse a `pattern_text` string into a single `CHIRPattern`.

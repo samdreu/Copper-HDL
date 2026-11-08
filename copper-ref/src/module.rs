@@ -253,7 +253,7 @@ impl Module {
             // I.2.7, I.11.1: the tick-free fragment — no tick, `loop`, `while`,
             // `break`, `continue`, memory.
             let mut scan = Scan { prog: &prog, pre_loop: false, in_preload: 0, err: None };
-            let mut frag = CombFragment { err: None };
+            let mut frag = CombFragment { err: None, for_depth: 0 };
             for s in &item.block.stmts {
                 scan.visit_stmt(s);
                 frag.visit_stmt(s);
@@ -911,17 +911,28 @@ impl<'ast, 'p> Visit<'ast> for WritesPort<'p> {
 }
 
 /// The tick-free fragment of I.2.7 a `combinational` body is: no `loop`, `while`,
-/// `break` or `continue` (a counted `for` is admitted — it is unrolled, I.2.4).
+/// `break` or `continue` (a counted `for` is admitted — it is unrolled, I.2.4 — and so is an
+/// unlabelled `continue` of it: the unrolled iteration's rest is skipped, Rust's meaning,
+/// line `II.3 found tickfree-continue`, MEASUREMENTS §U.1).
 struct CombFragment {
     err: Option<RefError>,
+    for_depth: usize,
 }
 
 impl<'ast> Visit<'ast> for CombFragment {
     fn visit_expr(&mut self, e: &'ast Expr) {
+        if let Expr::ForLoop(f) = e {
+            self.visit_expr(&f.expr);
+            self.for_depth += 1;
+            self.visit_block(&f.body);
+            self.for_depth -= 1;
+            return;
+        }
         let bad = match e {
             Expr::Loop(_) => Some("`loop`"),
             Expr::While(_) => Some("`while`"),
             Expr::Break(_) => Some("`break`"),
+            Expr::Continue(c) if c.label.is_none() && self.for_depth > 0 => None,
             Expr::Continue(_) => Some("`continue`"),
             _ => None,
         };

@@ -1194,3 +1194,73 @@ async fn m(clk: Clock<C>, a: In<Logic, C>, q: RegOut<Logic, C>) {
     assert!(err.contains(copper_analysis::X_PATTERN_MESSAGE), "if let: {err}");
     transpile(&comb("q.write(match a.read() { Logic::One => Logic::Zero, _ => Logic::One });", a)).expect("the twin transpiles");
 }
+
+/// SPEC I.2.4, line `II.3 found tickfree-continue` (MEASUREMENTS §U.1, 2026-11-08): a `continue`
+/// of a tick-free `for` is lowered by placing the rest of the iteration under the negated
+/// condition (`copper_codegen::for_continue`; swept by `tests/fixtures/tickfree_continue_dut.rs`).
+/// The rewrite copies the rest of the iteration into each branch, so it declines when that rest
+/// names a binding made inside the branch (the copy would capture it); the transpiler then
+/// refuses with a message about the `for`, not the module loop (the message before §U.1).
+#[test]
+fn a_tickfree_for_continue_whose_rest_names_a_branch_binding_is_refused_with_its_own_message() {
+    let lowered = r#"
+#[hardware(combinational)]
+fn tfc_ok<D: ClockDomain>(a: In<Bits<4>, D>, o: Out<Bits<4>, D>) {
+    let av = a.read();
+    let mut acc: Bits<4> = Bits::zero();
+    for i in 0..4 {
+        if av[i] == Logic::One { continue; }
+        acc = acc + Bits::from_lit::<1>();
+    }
+    o.write(acc);
+}
+"#;
+    let shadowed = r#"
+#[hardware(combinational)]
+fn tfc_shadow<D: ClockDomain>(a: In<Bits<4>, D>, o: Out<Bits<4>, D>) {
+    let av = a.read();
+    let t: Bits<4> = Bits::from_lit::<1>();
+    let mut acc: Bits<4> = Bits::zero();
+    for i in 0..4 {
+        if av[i] == Logic::One {
+            let t: Bits<4> = Bits::from_lit::<2>();
+            acc = acc ^ t;
+            if acc[0] == Logic::One { continue; }
+        }
+        acc = acc + t;
+    }
+    o.write(acc);
+}
+"#;
+    let sv = transpile(lowered).expect("a tick-free `for`'s `continue` lowers");
+    assert!(!sv.contains("continue"), "no `continue` reaches the SV:\n{sv}");
+    let err = transpile(shadowed).expect_err("the shadowing rest is not rewritten");
+    assert!(err.contains("this `continue` of a tick-free `for` is not lowered"), "a different error: {err}");
+}
+
+/// Line `II.3 found const-pattern` (MEASUREMENTS §T.3, §U.2, 2026-11-08): a pattern naming a
+/// non-integer `const` is lowered by the const's value (swept by
+/// `tests/fixtures/const_pattern_dut.rs`). A FILE const whose value is X is OUTSIDE (D-24,
+/// SPEC I.14.3(d)): the shared rule sees only the `ItemFn` (a body `const`'s X literal), so the
+/// transpiler refuses the file spelling here, with the same `X_PATTERN_MESSAGE`, once it folds
+/// the value. Before §U.2 it refused all four spellings with "tuple-pattern match lowering is not
+/// yet implemented (M2)", X or not.
+#[test]
+fn a_pattern_naming_a_file_const_whose_value_is_x_is_refused_as_outside() {
+    for (name, decl, ty) in [
+        ("UX", "const UX: Logic = Logic::X;", "Logic"),
+        ("UB", "const UB: Bits<2> = Bits::x();", "Bits<2>"),
+    ] {
+        let src = format!(
+            r#"
+{decl}
+#[hardware(combinational)]
+fn xp<D: ClockDomain>(a: In<{ty}, D>, o: Out<Bits<2>, D>) {{
+    match a.read() {{ {name} => o.write(Bits::from_lit::<1>()), _ => o.write(Bits::zero()) }}
+}}
+"#
+        );
+        let err = transpile(&src).expect_err("an X-valued const pattern is OUTSIDE");
+        assert!(err.contains(copper_analysis::X_PATTERN_MESSAGE), "{name}: a different error: {err}");
+    }
+}
