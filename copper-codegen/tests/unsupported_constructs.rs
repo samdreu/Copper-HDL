@@ -506,24 +506,51 @@ fn preload_reading_a_signal_is_rejected() {
     );
 }
 
-/// Two accesses to one port in a single cycle. The simulator silently keeps the
-/// last one (it overwrites pipeline stage 0); one physical address bus cannot.
-///
-/// "In a single cycle" is a per-PATH question, not a count of sites: accesses on
-/// mutually exclusive branches are a multiplexer and are accepted (anchored by
-/// `tests/extracted_memory_equivalence.rs::exclusive_arm_writes_…`). The extra
-/// write below is unconditional, so whichever cycle runs the guarded one runs it too.
+/// Two stagings of one port in one resumption DO transpile, the last winning (SPEC
+/// I.10.1(b); rule 6 (b) retired by D-16 B, removed by D-25 — until then this exact
+/// shape was refused as "accessed 2 times in one cycle"). The emitted `always_comb`
+/// assigns the write nets twice and the later blocking assignment is what the port
+/// sees — the simulator's overwrite of pipeline stage 0. The three-leg check is the
+/// sweep fixture `tests/fixtures/memory_staging_dut.rs::stage_twice_write`.
 #[test]
-fn two_accesses_to_one_memory_port_are_rejected() {
+fn two_stagings_of_one_memory_port_lower_last_wins() {
     let src = mem_dut(
         MEM_DECL,
         &format!("{MEM_BODY}\n        mem.write_port::<0>().write(0, d.read());"),
     );
-    let err = transpile(&src).expect_err("a port driven twice in one cycle must be rejected");
-    assert!(
-        err.contains("accessed 2 times in one cycle"),
-        "reproduced a *different* error than the double-drive rule: {err}"
-    );
+    let sv = transpile(&src).expect("a port staged twice in one resumption transpiles (I.10.1(b))");
+    let first = sv.find("mem_wr0_addr = 8'(a)").expect("the guarded staging's address");
+    let last = sv.rfind("mem_wr0_addr = 8'(64'd0)").expect("the unconditional staging's address");
+    assert!(first < last, "the later staging must be the later assignment:\n{sv}");
+}
+
+/// A received memory may leave its latencies at the type's defaults (SPEC I.10.5,
+/// D-25 (5)): `Memory<T, R, W, D>` lowers exactly as `Memory<T, R, W, D, 1, 1>` — the
+/// same text, byte for byte. Before D-25 the transpiler refused the short spelling
+/// ("must spell all six generics") while the macro admitted it (`review/MEASUREMENTS.md`
+/// §W.1 #13); the parity case is `ui:pass/memory_parameter_default_latencies`.
+#[test]
+fn a_received_memory_with_default_latencies_lowers_as_latency_one() {
+    let child = |ty: &str| {
+        format!(
+            r#"
+#[hardware(sequential)]
+async fn m(clk: Clock<MainClk>, mem: {ty}, a: In<Bits<4>, MainClk>, d: In<Bits<8>, MainClk>, q: RegOut<Bits<8>, MainClk>) {{
+    loop {{
+        mem.write_port::<0>().write(a.read().as_usize(), d.read());
+        mem.read_port::<0>().read(a.read().as_usize());
+        clk.tick().await;
+        if mem.read_port::<0>().is_ready() {{ q.write(mem.read_port::<0>().data()); }}
+    }}
+}}
+"#
+        )
+    };
+    let short = transpile(&child("Memory<Bits<8>, 1, 1, MainClk>")).expect("the defaulted spelling transpiles");
+    let read_only = transpile(&child("Memory<Bits<8>, 1, 1, MainClk, 1>")).expect("a defaulted WRITE_LAT transpiles");
+    let full = transpile(&child("Memory<Bits<8>, 1, 1, MainClk, 1, 1>")).expect("the full spelling transpiles");
+    assert_eq!(short, full);
+    assert_eq!(read_only, full);
 }
 
 /// Multi-phase memory DOES transpile: the address buses are phase-gated and the
@@ -674,9 +701,10 @@ async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<16>, Mai
     );
 }
 
-/// Same, for the one-bus rule.
+/// Same, in a module that needs control extraction: the double staging transpiles
+/// there too (D-25; refused before as "accessed 2 times in one cycle").
 #[test]
-fn two_accesses_in_one_cycle_of_an_extracted_module_are_still_rejected() {
+fn two_stagings_in_one_resumption_of_an_extracted_module_transpile() {
     let src = r#"
 #[hardware(sequential)]
 async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<16>, MainClk>) {
@@ -690,11 +718,7 @@ async fn m(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<16>, Mai
     }
 }
 "#;
-    let err = transpile(src).expect_err("one address bus, two drivers in a cycle");
-    assert!(
-        err.contains("accessed 2 times in one cycle"),
-        "reproduced a *different* error than the double-drive rule: {err}"
-    );
+    transpile(src).expect("two stagings of one port in one resumption transpile (I.10.1(b))");
 }
 
 // ── Counted repetition (`TODO` cause M) ───────────────────────────────────────

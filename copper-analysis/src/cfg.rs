@@ -249,6 +249,10 @@ pub struct Cfg {
     /// 0-iteration exit never false-rejects the outer loop); its own body's
     /// tickless-cycle well-formedness is enforced here instead.
     nested_ticking_loops: Vec<Cfg>,
+    /// The (memory, read port) pairs staged by the statements before the top-level loop
+    /// (`s_pre`, SPEC I.2.3) — rule 6 (c)'s existence test counts them (I.10.4). Empty for
+    /// a nested loop's sub-CFG and a combinational body.
+    pre_staged: BTreeSet<(String, String)>,
     /// The register set, computed once. The backward-liveness fixed point behind
     /// [`Cfg::registers`] is the expensive part of every analysis on this graph
     /// (≈375 ms on the transpilable CPU, measured 2026-09-03 against 0.8 ms to
@@ -302,6 +306,7 @@ impl Cfg {
             inputs: in_param_names(f),
             exit: None,
             nested_ticking_loops: b.nested,
+            pre_staged: pre_loop_read_stagings(f),
             registers_cache: std::cell::OnceCell::new(),
             reg_nodes: rb.nodes,
         })
@@ -334,6 +339,7 @@ impl Cfg {
             inputs: in_param_names(f),
             exit: Some(exit),
             nested_ticking_loops: b.nested,
+            pre_staged: BTreeSet::new(),
             registers_cache: std::cell::OnceCell::new(),
             reg_nodes: Vec::new(),
         }
@@ -444,16 +450,18 @@ impl Cfg {
     /// still visible.
     ///
     /// Copper's memory model is that `read`/`write` *stage* a bus during a cycle and
-    /// `data`/`is_ready` *observe* what the following clock edge produced. Three
-    /// things follow, and each guards a place where the emitted array would silently
-    /// disagree with the simulator:
+    /// `data`/`is_ready` *observe* what the following clock edge produced (SPEC
+    /// I.10.1). Two rules follow — rule 6's clauses (c) and (d), SPEC I.10.4:
     ///
-    /// * **One access per bus per cycle.** A physical port has one address bus. The
-    ///   simulator silently keeps the last write of a cycle; hardware cannot.
-    /// * **A result is observed after the edge that produces it** — never in the same
-    ///   cycle as the staging that feeds it, which would read it a cycle early.
-    /// * **A result has a staging somewhere.** Observing a port nothing ever stages
-    ///   reads a port that never becomes ready.
+    /// * **(d) A result is observed after the edge that produces it** — never in the
+    ///   same cycle as every staging that feeds it (one spelling, II.2).
+    /// * **(c) A result has a staging somewhere** — in the loop or in `s_pre`, the
+    ///   statements before it (the first resumption's, I.9.3). Observing a port nothing
+    ///   ever stages reads a port that never becomes ready.
+    ///
+    /// Several stagings of one port in one resumption are **admitted**: the last wins
+    /// (I.10.1(b); D-16 B retired clauses (a) and (b), removed by D-25). The emitted
+    /// `always_comb`'s later blocking assignment to the port's nets is the same mux.
     ///
     /// # Why this is not in codegen
     ///
@@ -497,74 +505,6 @@ impl Cfg {
     /// *ordering* rules apply. The enclosing CFG sees every access (the folded node
     /// carries the whole body) and answers the existence question for both.
     fn check_memory_staging_inner(&self, require_staging: bool) -> Result<(), (Span, String)> {
-        // A tick-free nested loop is unrolled, so an access inside it becomes N
-        // accesses on one bus in one cycle. Refused rather than counted as one.
-        for node in &self.nodes {
-            if node.folded && !node.is_tick && !node.mem.is_empty() {
-                let a = &node.mem[0];
-                return Err((
-                    node.span,
-                    format!(
-                        "memory `{}` is accessed inside a nested loop with no \
-                         `clk.tick().await`; that loop is unrolled, so every iteration's \
-                         access lands in the same cycle on one address bus",
-                        a.mem
-                    ),
-                ));
-            }
-        }
-
-        // One access per bus per cycle. Two accesses conflict iff one can reach the
-        // other WITHOUT crossing a clock edge — not merely iff they share a phase.
-        // The distinction is the whole difference between a bus conflict and a
-        // multiplexer: `rv32i_cpu`'s seven regfile writebacks sit in exclusive
-        // `match` arms, no path joins any two of them, and each drives the bus in
-        // its own state — which is exactly what the emitted `always_comb` does.
-        // Counting them instead reported a design error where there is a mux.
-        //
-        // A folded tick-bearing loop contributes at most ONE site per bus: its
-        // interior may legitimately access the bus once per iteration (separate
-        // cycles), and its own sub-CFG is where that is checked. It does still
-        // contribute, because its first iteration runs in the cycle that reaches it.
-        let mut sites: Vec<(usize, (String, bool, String), Span)> = Vec::new();
-        for (i, node) in self.nodes.iter().enumerate() {
-            let mut here: BTreeSet<(String, bool, String)> = BTreeSet::new();
-            for a in &node.mem {
-                let Some(is_read) = a.kind.bus() else { continue };
-                let key = (a.mem.clone(), is_read, a.port.clone());
-                if node.folded && !here.insert(key.clone()) {
-                    continue;
-                }
-                sites.push((i, key, node.span));
-            }
-        }
-        for (p, (i, key, span)) in sites.iter().enumerate() {
-            let conflicting: Vec<&(usize, (String, bool, String), Span)> = sites
-                .iter()
-                .enumerate()
-                .filter(|(q, (j, k, _))| {
-                    *q != p
-                        && k == key
-                        && (self.tick_free_reaches(*i, *j) || self.tick_free_reaches(*j, *i))
-                })
-                .map(|(_, s)| s)
-                .collect();
-            if conflicting.is_empty() {
-                continue;
-            }
-            let (mem, is_read, port) = key;
-            let n = conflicting.len() + 1;
-            return Err((
-                *span,
-                format!(
-                    "memory `{mem}` {} port {port} is accessed {n} times in one cycle; a \
-                     physical port has a single address bus. Merge the accesses into one, \
-                     selecting the address and data with a conditional",
-                    if *is_read { "read" } else { "write" }
-                ),
-            ));
-        }
-
         // Where each read port is staged, so an observation can ask whether any
         // staging is separated from it by a clock edge. Positions come from THIS
         // graph; existence (below) looks through the folds as well, since a staging
@@ -577,7 +517,11 @@ impl Cfg {
                 }
             }
         }
-        let anywhere = self.staged_ports();
+        // (c) counts the pre-loop stagings too (SPEC I.10.4 (c), D-16, D-25): a port staged
+        // only in `s_pre` is delivered at edge 1 and observable once. (d) does not order
+        // against them (D-25 (4)): they are no node of this graph.
+        let mut anywhere = self.staged_ports();
+        anywhere.extend(self.pre_staged.iter().cloned());
 
         for (i, node) in self.nodes.iter().enumerate() {
             for a in &node.mem {
@@ -1366,6 +1310,7 @@ impl Builder {
             inputs: self.inputs.clone(),
             exit: None,
             nested_ticking_loops: b.nested,
+            pre_staged: BTreeSet::new(),
             // Not consulted on a sub-CFG (the multi-phase rule runs on the top level).
             registers_cache: std::cell::OnceCell::new(),
             reg_nodes: Vec::new(),
@@ -2109,6 +2054,33 @@ pub fn is_constant_expr(e: &Expr) -> bool {
 }
 
 /// The statement list and span of the module's top-level `loop { … }`, if any.
+/// The read ports staged by the statements before the top-level loop (`s_pre`).
+fn pre_loop_read_stagings(f: &ItemFn) -> BTreeSet<(String, String)> {
+    struct V<'a> {
+        mems: &'a BTreeSet<String>,
+        out: BTreeSet<(String, String)>,
+    }
+    impl<'ast> Visit<'ast> for V<'_> {
+        fn visit_expr(&mut self, e: &'ast Expr) {
+            for a in mem_accesses(e, self.mems) {
+                if a.kind == MemAccessKind::StageRead {
+                    self.out.insert((a.mem, a.port));
+                }
+            }
+            // `mem_accesses` already walked the whole expression.
+        }
+    }
+    let mems = memory_locals(f);
+    let mut v = V { mems: &mems, out: BTreeSet::new() };
+    for st in &f.block.stmts {
+        if matches!(st, Stmt::Expr(Expr::Loop(_), _)) {
+            break;
+        }
+        v.visit_stmt(st);
+    }
+    v.out
+}
+
 fn top_level_loop(f: &ItemFn) -> Option<(Vec<Stmt>, Span)> {
     f.block.stmts.iter().find_map(|s| match s {
         Stmt::Expr(Expr::Loop(l), _) => Some((l.body.stmts.clone(), l.span())),
@@ -3516,11 +3488,13 @@ mod tests {
         assert!(err.contains("nothing stages a `read()`"), "{err}");
     }
 
-    /// Two stagings of one bus that a single cycle really does reach — one after
-    /// the other, no edge between them. There is one address bus, so the design
-    /// has to say which address; the simulator would silently keep the last.
+    /// Two stagings of one port that one resumption runs — one after the other, no
+    /// edge between them — are **admitted** and the last wins (SPEC I.10.1(b); D-16 B
+    /// retired rule 6 (b), D-25 removed it). Before D-25 this exact shape was refused
+    /// as "accessed 2 times in one cycle"; the sweep fixtures `stage_twice_read`/`stage_twice_write`/`stage_dominated`
+    /// (`tests/fixtures/memory_staging_dut.rs`) show the three legs agree on it.
     #[test]
-    fn two_stagings_of_one_bus_in_one_cycle_are_rejected() {
+    fn two_stagings_of_one_port_in_one_resumption_are_admitted() {
         let src = r#"
             #[hardware(sequential)]
             async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: RegOut<Bits<16>, C>) {
@@ -3533,8 +3507,51 @@ mod tests {
                 }
             }
         "#;
-        let err = mem_check(src).expect_err("one address bus, two drivers in a cycle");
-        assert!(err.contains("accessed 2 times in one cycle"), "{err}");
+        assert_eq!(mem_check(src), Ok(()));
+    }
+
+    /// A memory access inside a tick-free counted `for` is **admitted** (rule 6 (a)
+    /// retired, D-16 B / D-25): the loop is unrolled and its stagings are several
+    /// stagings of one resumption, the last winning.
+    #[test]
+    fn an_access_in_a_tick_free_for_is_admitted() {
+        let src = r#"
+            #[hardware(sequential)]
+            async fn m(clk: Clock<C>, a: In<Bits<8>, C>, o: RegOut<Bits<16>, C>) {
+                let rom = Memory::<Bits<16>, 1, 0, C, 1, 1>::new(clk.clone(), 256);
+                loop {
+                    for i in 0..2 {
+                        rom.read_port::<0>().read(a.read().as_usize() + i);
+                    }
+                    clk.tick().await;
+                    o.write(rom.read_port::<0>().data());
+                }
+            }
+        "#;
+        assert_eq!(mem_check(src), Ok(()));
+    }
+
+    /// Rule 6 (c) counts the stagings of `s_pre` (SPEC I.10.4 (c), D-16, D-25): a port
+    /// staged only before the loop is observable once, in the resumption ending at
+    /// edge 2 (I.9.3). Both observe positions are admitted — after the loop's tick and
+    /// at the head before it, since (d) does not order against a pre-loop staging
+    /// (D-25 (4)).
+    #[test]
+    fn a_port_staged_only_before_the_loop_is_staged() {
+        for body in [
+            "clk.tick().await; if rom.read_port::<0>().is_ready() { o.write(rom.read_port::<0>().data()); }",
+            "if rom.read_port::<0>().is_ready() { o.write(rom.read_port::<0>().data()); } clk.tick().await;",
+        ] {
+            let src = format!(
+                "#[hardware(sequential)]
+                async fn m(clk: Clock<C>, o: RegOut<Bits<16>, C>) {{
+                    let rom = Memory::<Bits<16>, 1, 0, C, 1, 1>::new(clk.clone(), 256);
+                    rom.read_port::<0>().read(5);
+                    loop {{ {body} }}
+                }}"
+            );
+            assert_eq!(mem_check(&src), Ok(()), "{body}");
+        }
     }
 
     /// Stagings on **exclusive** branches are a multiplexer, not a conflict: no
@@ -3571,8 +3588,9 @@ mod tests {
     /// moment `#[hardware]` began accepting a `Memory<…>` parameter, a module that
     /// received one would not have been diagnosed as safe — it would have stopped
     /// being examined, and every rule below would have gone quiet on it. The
-    /// violation here is the same one `two_stagings_of_one_bus_in_one_cycle_are_rejected`
-    /// uses, so a regression shows up as this test passing where that one fails.
+    /// violation here is (d)'s — an observe in the resumption that stages it — so a
+    /// regression shows up as this test failing where a declared memory's twin passes.
+    /// (Until D-25 it used the double staging, which rule 6 (b) refused and no longer does.)
     #[test]
     fn a_received_memory_is_checked_like_a_declared_one() {
         let src = r#"
@@ -3580,14 +3598,13 @@ mod tests {
             async fn m(clk: Clock<C>, mem: Memory<Bits<16>, 1, 0, C, 1, 1>, a: In<Bits<8>, C>, o: RegOut<Bits<16>, C>) {
                 loop {
                     mem.read_port::<0>().read(a.read().as_usize());
-                    mem.read_port::<0>().read(0);
-                    clk.tick().await;
                     o.write(mem.read_port::<0>().data());
+                    clk.tick().await;
                 }
             }
         "#;
-        let err = mem_check(src).expect_err("one address bus, two drivers in a cycle");
-        assert!(err.contains("accessed 2 times in one cycle"), "{err}");
+        let err = mem_check(src).expect_err("an observe before the tick that delivers it");
+        assert!(err.contains("is read before the `clk.tick().await` that produces it"), "{err}");
     }
 
     /// The well-formed half of the same shape: receiving a memory is not itself a

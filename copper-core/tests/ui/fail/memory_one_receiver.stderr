@@ -1,0 +1,16 @@
+error[E0382]: use of moved value: `m`
+  --> tests/ui/fail/memory_one_receiver.rs:18:21
+   |
+15 |     let m = Memory::<Bits<8>, 1, 1, Main, 1, 1>::new(clk.clone(), 16);
+   |         - move occurs because `m` has type `Memory<Bits<8>, 1, 1, Main>`, which does not implement the `Copy` trait
+16 |     receiver_a(clk.clone(), m);
+   |                             - value moved here
+17 |     // E0382: use of moved value `m` — a memory has one receiver, by move semantics
+18 |     receiver_b(clk, m);
+   |                     ^ value used here after move
+   |
+note: consider changing this parameter type in function `receiver_a` to borrow instead if owning the value isn't necessary
+  --> tests/ui/fail/memory_one_receiver.rs:10:36
+   |
+10 | fn receiver_a(_c: Clock<Main>, _m: Memory<Bits<8>, 1, 1, Main, 1, 1>) {}
+   |    ---------- in this function     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this parameter takes ownership of the value

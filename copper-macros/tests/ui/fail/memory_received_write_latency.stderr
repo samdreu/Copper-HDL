@@ -1,0 +1,19 @@
+error: received `Memory` parameter `m` has WRITE_LAT = 2; the bus ABI supports WRITE_LAT = 1 only — declare the memory inside the module, or use WRITE_LAT = 1 (SPEC I.10.5; II.3.3 row (i), REFUSED-both)
+  --> tests/ui/fail/memory_received_write_latency.rs:11:43
+   |
+11 | async fn recv_wl2(clk: Clock<MainClk>, m: Memory<Bits<8>, 1, 1, MainClk, 1, 2>, a: In<Bits<4>, MainClk>, d: In<Bits<8>, MainClk>, q:...
+   |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Bits`, `Clock`, and `Memory`
+ --> tests/ui/fail/memory_received_write_latency.rs:3:19
+  |
+3 | use copper_core::{Bits, Clock, ClockDomain, Memory};
+  |                   ^^^^  ^^^^^               ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In`, `Out`, and `RegOut`
+ --> tests/ui/fail/memory_received_write_latency.rs:4:25
+  |
+4 | use copper_core::port::{In, Out, RegOut};
+  |                         ^^  ^^^  ^^^^^^

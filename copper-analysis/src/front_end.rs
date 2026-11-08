@@ -1727,6 +1727,7 @@ pub const RETIRED_NET_MESSAGE: &str = "`wire`/`registered_wire` in a `#[hardware
 /// mode-specific rules each front-end runs after this, from the same functions.
 pub fn check_front_end_rules(f: &ItemFn, mode: HardwareMode) -> Result<(), Error> {
     check_header(f, mode)?;
+    crate::memory_rules::check_memory_shapes(f, mode)?;
     check_port_domains(f)?;
     check_one_clock(f, mode)?;
     check_no_clock_construction(f)?;

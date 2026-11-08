@@ -1577,11 +1577,13 @@ fn received_memory_decls(fir: &FrontendModuleIR) -> Result<Vec<CHIRMemoryDecl>, 
             continue;
         };
         let parts = split_top_level_commas(args);
-        if parts.len() != 6 {
+        // READ_LAT and WRITE_LAT may be left at the type's defaults, 1 and 1 (SPEC I.10.5,
+        // D-25 (5)) — as `parse_memory_decl` already reads a declaration's turbofish.
+        if !(4..=6).contains(&parts.len()) {
             return Err(CHIRLowerError::UnsupportedConstruct {
                 description: format!(
-                    "`Memory` parameter `{}` must spell all six generics \
-                     (Memory<T, R, W, Domain, READ_LAT, WRITE_LAT>)",
+                    "`Memory` parameter `{}` must spell Memory<T, R, W, Domain> with optional \
+                     READ_LAT and WRITE_LAT",
                     param.name
                 ),
                 span: param.span,
@@ -1600,7 +1602,10 @@ fn received_memory_decls(fir: &FrontendModuleIR) -> Result<Vec<CHIRMemoryDecl>, 
                 suggested_rewrite: None,
             })
         };
-        let write_lat = int(5)?;
+        let lat = |i: usize| -> Result<usize, CHIRLowerError> {
+            if i < parts.len() { int(i) } else { Ok(1) }
+        };
+        let write_lat = lat(5)?;
         if write_lat != 1 {
             // The bus carries the freshly-staged write nets; at WRITE_LAT > 1
             // the value that commits is a child-side pipeline register instead,
@@ -1626,7 +1631,7 @@ fn received_memory_decls(fir: &FrontendModuleIR) -> Result<Vec<CHIRMemoryDecl>, 
             depth: 0,
             read_ports: int(1)?,
             write_ports: int(2)?,
-            read_lat: int(4)?,
+            read_lat: lat(4)?,
             write_lat,
             init: None,
             received: true,

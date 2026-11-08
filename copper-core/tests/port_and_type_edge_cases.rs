@@ -172,3 +172,21 @@ fn reductions_on_known_vectors() {
     assert_eq!(mixed.or_reduce(), Logic::One);
     assert_eq!(mixed.xor_reduce(), Logic::One); // odd parity
 }
+
+// ── Memory latency (SPEC I.10.1(a), D-25 (3)) ────────────────────────────────
+
+/// `READ_LAT = 0` is OUTSIDE: the simulator's type refuses it where the instance is
+/// built, with the front-ends' message — before D-25 it built, and panicked on an
+/// index out of bounds at the first edge (`review/MEASUREMENTS.md` §W.1 #1).
+#[test]
+#[should_panic(expected = "READ_LAT = 0, WRITE_LAT = 1; both must be at least 1")]
+fn a_zero_read_latency_memory_is_refused_at_construction() {
+    let _ = copper_core::Memory::<u8, 1, 0, TestDom, 0, 1>::new(copper_core::Clock::<TestDom>::new(), 4);
+}
+
+/// `WRITE_LAT = 0` likewise (before D-25: an index panic at the first `write`, §W.1 #2).
+#[test]
+#[should_panic(expected = "READ_LAT = 1, WRITE_LAT = 0; both must be at least 1")]
+fn a_zero_write_latency_memory_is_refused_at_construction() {
+    let _ = copper_core::Memory::<u8, 1, 1, TestDom, 1, 0>::from_fn(copper_core::Clock::<TestDom>::new(), 4, |_| 0);
+}

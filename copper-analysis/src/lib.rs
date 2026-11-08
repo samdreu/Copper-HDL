@@ -40,6 +40,7 @@ pub use data::{
     IS_VALID_MESSAGE, X_COMPARISON_MESSAGE, X_PATTERN_MESSAGE,
 };
 mod init;
+pub mod memory_rules;
 mod shape;
 
 pub use cfg::{
@@ -205,11 +206,13 @@ pub fn check_reachability(f: &ItemFn) -> Result<(), syn::Error> {
 }
 
 
-/// Enforce the **memory-port staging rules** — one access per bus per cycle, a read
-/// result observed only after the clock edge that produces it, and never observed on
-/// a port nothing stages. Rejected with a spanned [`syn::Error`].
+/// Enforce the **memory-port staging rules** (rule 6, SPEC I.10.4) — a read result
+/// observed only after the clock edge that produces it (d), and never observed on a port
+/// nothing stages, in the loop or before it (c). Several stagings of one port in one
+/// resumption are admitted, the last winning (I.10.1(b); clauses (a) and (b) retired by
+/// D-16 B, removed by D-25). Rejected with a spanned [`syn::Error`].
 ///
-/// Lives here, on the source, because all three are questions about clock **edges**,
+/// Lives here, on the source, because both are questions about clock **edges**,
 /// and the transpiler's own copy asked them of the loop's tick-delimited *segments*
 /// — which `control_extract` legitimately erases by rewriting a branch- or
 /// loop-nested tick into a single-tick `match pc` FSM. That made every memory design

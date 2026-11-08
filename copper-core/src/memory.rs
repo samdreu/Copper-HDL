@@ -9,12 +9,6 @@ pub enum WriteMode {
     WriteFirst,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadMode {
-    Sync,
-    Async,
-}
-
 /// Multi-port synchronous memory with configurable read and write latency.
 ///
 /// - `R` = read port count, `W` = write port count
@@ -35,7 +29,6 @@ pub struct Memory<
 > {
     shared: Arc<MemoryShared<T, R, W, READ_LAT, WRITE_LAT>>,
     _clock: Clock<D>,
-    read_mode: ReadMode,
 }
 
 struct MemoryInner<T, const R: usize, const W: usize, const READ_LAT: usize, const WRITE_LAT: usize>
@@ -159,6 +152,14 @@ fn advance_read_pipelines<
     }
 }
 
+/// The message for a memory whose `READ_LAT` or `WRITE_LAT` is 0 (SPEC I.10.1(a)).
+pub fn latency_message(read_lat: usize, write_lat: usize) -> String {
+    format!(
+        "a `Memory` has READ_LAT = {read_lat}, WRITE_LAT = {write_lat}; both must be at least 1 — \
+         a synchronous port cannot answer in zero cycles (SPEC I.10.1(a): L = 0 is OUTSIDE)"
+    )
+}
+
 // ── Port handles ──────────────────────────────────────────────────────────────
 
 pub struct ReadPort<
@@ -211,10 +212,6 @@ impl<T, const R: usize, const W: usize, D: ClockDomain, const READ_LAT: usize, c
             WriteMode::ReadFirst
         }
     }
-
-    pub fn read_mode(&self) -> ReadMode {
-        self.read_mode
-    }
 }
 
 impl<
@@ -251,6 +248,16 @@ impl<
     }
 
     fn from_data(clock: Clock<D>, data: Vec<T>) -> Self {
+        // SPEC I.10.1(a) (D-16 2A, D-25 (3)): a synchronous port answers in at least one
+        // cycle; `L = 0` is OUTSIDE. Checked here, where every constructor builds the
+        // instance, so a testbench's memory is refused at construction rather than by an
+        // index panic at its first edge. A module's literal 0 is refused earlier, by both
+        // front-ends (`copper_analysis::memory_rules`).
+        assert!(
+            READ_LAT >= 1 && WRITE_LAT >= 1,
+            "{}",
+            latency_message(READ_LAT, WRITE_LAT)
+        );
         let shared = Arc::new(MemoryShared {
             inner: Mutex::new(MemoryInner {
                 data,
@@ -265,7 +272,6 @@ impl<
         Self {
             shared,
             _clock: clock,
-            read_mode: ReadMode::Sync,
         }
     }
 }
@@ -603,6 +609,18 @@ mod tests {
         mem.read_port::<0>().read(3);
         clk.advance();
         assert_eq!(mem.read_port::<0>().data(), 9u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "READ_LAT = 0, WRITE_LAT = 1; both must be at least 1")]
+    fn zero_read_latency_is_refused_at_construction() {
+        let _ = Memory::<u8, 1, 0, TestClk, 0, 1>::new(clk(), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "READ_LAT = 1, WRITE_LAT = 0; both must be at least 1")]
+    fn zero_write_latency_is_refused_at_construction() {
+        let _ = Memory::<u8, 1, 1, TestClk, 1, 0>::from_contents(clk(), vec![0; 4]);
     }
 
     #[test]

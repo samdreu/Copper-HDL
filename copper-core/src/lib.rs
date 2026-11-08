@@ -26,5 +26,5 @@ pub use frontend_ir::{
     SourceSpan,
 };
 pub use types::{Bits, Clock, ClockDomain, HasUnknown, Logic};
-pub use memory::{Memory, ReadMode, WriteMode};
+pub use memory::{Memory, WriteMode};
 pub use port::{WireId, WireKind};

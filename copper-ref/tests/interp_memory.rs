@@ -207,3 +207,24 @@ async fn par(clk: Clock<C>, m: Memory<Bits<8>, 1, 0, C, 1, 1>, q: RegOut<Bits<8>
     let e = Module::new(&format!("{PRELUDE}{param}"), "par", &[]).unwrap_err();
     assert!(matches!(e, RefError::Deferred(ref s) if s.contains("I.10.5")), "{e}");
 }
+
+/// I.10.6 (D-16 A8, D-25): a `combinational` module receives no `Memory` — the
+/// interpreter refuses the header as the two front-ends do (`ui:fail/memory_combinational_*`).
+/// Both shapes: an observe and a staging.
+#[test]
+fn a_memory_on_a_combinational_module_is_refused() {
+    for (name, src) in [
+        ("c_obs", "
+#[hardware(combinational)]
+fn c_obs(m: Memory<Bits<8>, 1, 0, C, 1, 1>, o: Out<Bits<8>, C>) { o.write(m.read_port::<0>().data()); }"),
+        ("c_stage", "
+#[hardware(combinational)]
+fn c_stage(x: In<Bits<4>, C>, m: Memory<Bits<8>, 1, 0, C, 1, 1>, o: Out<Bits<4>, C>) {
+    m.read_port::<0>().read(x.read().as_usize());
+    o.write(x.read());
+}"),
+    ] {
+        let e = Module::new(&format!("{PRELUDE}{src}"), name, &[]).unwrap_err();
+        assert!(matches!(e, RefError::Unsupported(ref s) if s.contains("I.10.6")), "{name}: {e}");
+    }
+}

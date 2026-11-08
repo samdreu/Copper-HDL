@@ -1,0 +1,19 @@
+error: a `combinational` module cannot receive a `Memory`: an evaluation has no resumption to stage in, and a port nothing stages is never ready. Stage the read in a `sequential` module and write `data()` to a `RegOut` that the combinational module reads (SPEC I.10.6: OUTSIDE; I.2.2)
+  --> tests/ui/fail/memory_combinational_observe.rs:11:13
+   |
+11 | fn c_obs(m: Memory<Bits<8>, 1, 0, MainClk, 1, 1>, o: Out<Bits<8>, MainClk>) {
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Bits`, `Clock`, and `Memory`
+ --> tests/ui/fail/memory_combinational_observe.rs:3:19
+  |
+3 | use copper_core::{Bits, Clock, ClockDomain, Memory};
+  |                   ^^^^  ^^^^^               ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In`, `Out`, and `RegOut`
+ --> tests/ui/fail/memory_combinational_observe.rs:4:25
+  |
+4 | use copper_core::port::{In, Out, RegOut};
+  |                         ^^  ^^^  ^^^^^^

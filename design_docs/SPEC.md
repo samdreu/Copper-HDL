@@ -1607,9 +1607,11 @@ READ_LAT, WRITE_LAT>`: `T` a type of I.14 (D-19: I.14.1), `R` read ports and `W`
 `D` the domain of the clock it is given (I.10.5), `READ_LAT = L ≥ 1` and `WRITE_LAT = M ≥ 1`
 — **decided (D-16 2A):** kept as parameters of the instance, one pipeline clause for every
 `L`, `M`; `L = 0` is OUTSIDE (a combinational read is Chisel's `readLatency = 0` [chisel §4.3]
-and no form of this document: the transpiler refuses it, `zero_latency_memory_is_rejected`,
-the simulator's type does not check it — a parity item of II.1.3); `ReadMode::Async` is
-retired (no setter, no meaning, 0 uses; `ReadMode` goes in Phase C). Its state: an array `A`
+and no form of this document: both front-ends refuse a literal 0 in either latency position with
+one message (`copper_analysis::memory_rules`, D-25 (3); `ui:fail/memory_zero_latency`,
+`memory_zero_latency_parameter` — the second a transpiler crash before D-25), and the simulator's type
+asserts it where every constructor builds the instance (`Memory::from_data`, the same message);
+`ReadMode::Async` is retired (no setter, no meaning, 0 uses) and `ReadMode` is deleted (D-25). Its state: an array `A`
 of `depth` words (the depth a run-time argument of the constructor; its address width → I.14; D-19: I.14.6(a) — ⌈log₂ depth⌉ bits)
 and, per read port `k`, a delivery pipeline `P_k` of `L` stages each holding a word or
 nothing; per write port `j`, a write pipeline `Q_j` of `M` stages each holding `(a, e)` or
@@ -1631,7 +1633,9 @@ earlier staging is not a dead effect but a value a later staging replaces before
 as I.6.2 reads the second `RegOut` write and I.11.2(b) the second write of a wire; the
 simulator's `pending_read_addr[k]` and `write_pipeline[j][0]` are overwritten by the later
 call (`memory.rs:290-298`, `:353-361`) and the emitted text's later blocking assignment to
-the port's address net in one `always_comb` is the same mux. An out-of-range `⟦a⟧` is a
+the port's address net in one `always_comb` is the same mux. Both front-ends admit it since D-25
+(rule 6 (a) and (b) removed, I.10.4); `tests/fixtures/memory_staging_dut.rs` sweeps the read, write,
+dominated and unrolled-`for` spellings on three legs. An out-of-range `⟦a⟧` is a
 run-time failure (→ I.14; D-19: I.14.6(b) — OUTSIDE, decided): the simulator panics at the call (`memory.rs:116-138`), the emitted
 address net truncates (cause Q's cast, `vlir_lower.rs:782-830`) — outside the agreement
 relation, as every run-time failure is.
@@ -1748,10 +1752,10 @@ each sorted here by I.0.6's principles with its direction in II.2.2's format.
 
 | clause | predicate | principle | direction, witness | verdict (D-16) |
 |---|---|---|---|---|
-| (a) | a memory access inside a tick-free nested loop (a folded node with no tick) | (b)'s case after `D`'s unrolling of the constant-bound `for` (I.2.4) | **over**: `for i in 0..1 { m.read(i) }` and a loop touching two distinct ports once each are refused | **retired** with (b), Phase C |
-| (b) | two stagings of one (memory, port) that reach each other tick-free (through the loop head) | the overridden staging is an effect no observation shows — the dominated-write question D-12 D4 and D-14 A1 answered for the `RegOut` and the wire: a lint, not a refusal; the hardware realizes last-wins for free | exact on its predicate; `p_b`, `p_dom` (II.2.4's dominated staging), `two_stagings_of_one_bus_in_one_cycle_are_rejected` | **retired (D-16 B)**: the last staging wins (I.10.1(b)); the conditional and the sequence are two spellings of one meaning, both realized; corpus cost 0 |
-| (c) | an observe of a port staged nowhere in the module loop (top level only; off inside a nested loop's sub-CFG) | **design** (II.2): an observation no effect feeds — valid constantly false, `data()` a run-time failure on every execution (I.10.1(d)) | **over** by one blind spot: a port staged only in `s_pre` (`p_pre_only`: refused by both, though I.9.3 gives it a meaning — valid once, in the resumption ending at edge 2); the CFG is built over the loop (`cfg.rs:287-290`); `p_c`, `an_unstaged_port_is_rejected` | **kept**, design; Phase C counts `s_pre`'s stagings |
-| (d) | an observe that every staging of its port reaches tick-free | **design, one spelling** (II.2): the observe stands after the tick that delivers it; the rotation `observe; stage; tick` (`p_guarded`, admitted by both) is the same coroutine and is the spelling — D1's kind (I.8.2(b)); the refused text is the one a Verilog reader misreads as a combinational read | exact on its predicate (a mixed shape — one staging across a tick, one before the observe — is admitted and reads the delivered word, I.10.1(d)); `p_d`, `a_same_cycle_observation_is_rejected_even_when_extracted` | **kept (D-16 A)** |
+| (a) | a memory access inside a tick-free nested loop (a folded node with no tick) | (b)'s case after `D`'s unrolling of the constant-bound `for` (I.2.4) | **over**: `for i in 0..1 { m.read(i) }` and a loop touching two distinct ports once each are refused | **retired** with (b); removed by D-25 (`stage_unrolled_for`, `stage_for_once`, `stage_for_two_ports` swept) |
+| (b) | two stagings of one (memory, port) that reach each other tick-free (through the loop head) | the overridden staging is an effect no observation shows — the dominated-write question D-12 D4 and D-14 A1 answered for the `RegOut` and the wire: a lint, not a refusal; the hardware realizes last-wins for free | exact on its predicate; `p_b`, `p_dom` (II.2.4's dominated staging), `two_stagings_of_one_bus_in_one_cycle_are_rejected` | **retired (D-16 B)**: the last staging wins (I.10.1(b)); the conditional and the sequence are two spellings of one meaning, both realized; corpus cost 0; removed by D-25 (`stage_twice_read`, `stage_twice_write`, `stage_dominated` swept) |
+| (c) | an observe of a port staged nowhere in the module loop (top level only; off inside a nested loop's sub-CFG) | **design** (II.2): an observation no effect feeds — valid constantly false, `data()` a run-time failure on every execution (I.10.1(d)) | **over** by one blind spot: a port staged only in `s_pre` (`p_pre_only`: refused by both, though I.9.3 gives it a meaning — valid once, in the resumption ending at edge 2); the CFG is built over the loop (`cfg.rs:287-290`); `p_c`, `an_unstaged_port_is_rejected` | **kept**, design; counts `s_pre`'s stagings since D-25 (`stage_preloop_only` swept) |
+| (d) | an observe that every staging of its port reaches tick-free | **design, one spelling** (II.2): the observe stands after the tick that delivers it; the rotation `observe; stage; tick` (`p_guarded`, admitted by both) is the same coroutine and is the spelling — D1's kind (I.8.2(b)); the refused text is the one a Verilog reader misreads as a combinational read | exact on its predicate (a mixed shape — one staging across a tick, one before the observe — is admitted and reads the delivered word, I.10.1(d)); `p_d`, `a_same_cycle_observation_is_rejected_even_when_extracted` | **kept (D-16 A)**; a staging of `s_pre` is no site it orders against (D-25 (4): `stage_preloop_head`, observe at the head, admitted and swept) |
 
 Every clause ranges over the module loop's CFG: a nested tick-bearing loop contributes the
 accesses before its first tick to the node that reaches it (`entry_cycle_mem`, `cfg.rs:2352`;
@@ -1779,7 +1783,18 @@ OUTSIDE: it has no meaning, because the simulator's result would depend on the p
 which I.0 forbids (the object is shared by `Arc` with no port ownership, `memory.rs:263`). It
 is a structural shape rule that I.13 states and enforces (D-18: I.13.4(d) — one owner per memory port, refused by both front-ends on the probe; the port set and mode owed to Phase C) — the port set a module uses, and
 the mode of I.10.2, carried in the parameter type (a Round 3 form); nothing enforces it today,
-and no corpus module shares a memory (the pipelined CPU's owner is its testbench). **The bus
+and no corpus module shares a memory (the pipelined CPU's owner is its testbench). **Realized
+(D-25 (1), 2026-11-08): one receiver per memory** — the partition in its trivial case. `Memory` is
+not `Clone` and nothing yields a second handle, so rustc's move refuses a memory handed to two
+modules (`coreui:fail/memory_one_receiver`, E0382), and a `structural` module receives none (both
+front-ends, `ui:fail/memory_structural_parameter`), so no module of the language splits one; the port
+set needs no type, the bus carrying the ports the receiver uses. **The mode is the owner's (D-25
+(2))**: the receiving module's emitted text has no mode (no forwarding net; `received_memory_decls`
+never consults one), and on each leg the owner states it — the simulator's owner object, the SV's
+owner array; a harness agrees with itself when its two owners are one mode (the CPU lane builds both
+WriteFirst). The parameter type does not carry the mode, and that is no limit of the lowering (II.3.3
+row (j)). A `Memory` parameter may leave `READ_LAT` and `WRITE_LAT` at the type's defaults, 1 and 1
+(D-25 (5); `ui:pass/memory_parameter_default_latencies`, lowered byte-identically). **The bus
 ABI** — per used port `m_rd<i>_addr` (out) and `m_rd<i>_data` (in), `m_wr<j>_en`,
 `m_wr<j>_addr`, `m_wr<j>_data` (out); `M_ADDR_W` a module parameter defaulting to 1; no read
 enable; the delivery pipeline child-side; the array, its preload, the continuous read and the
@@ -1789,9 +1804,10 @@ of its fork (ports, not a hierarchy edge); `chir_lower::received_memory_decls`
 (`chir_lower.rs:1448-1510`), `vlir_lower::lower_mem_decls`, `mem_write_commits`,
 `lower_to_vlir`, `mem_net_defaults`; verified by `tests/received_memory_abi.rs` and the CPU
 lane. Nothing above changes if I.13 realizes the edge another way (D-18: I.13.6 — recorded as a dated realization). Its two limits are dated
-rows of II.3 (→ II.3.7): `WRITE_LAT ≠ 1` on a received memory is refused by the transpiler
-only (`chir_lower.rs:1489`; the macro admits it — REFUSED-one; fix: expose the committing
-stage on the bus), and the mode is absent from the type (a WriteFirst child under a ReadFirst
+rows of II.3 (→ II.3.7; written as II.3.3 rows (i) and (j) by D-25): `WRITE_LAT ≠ 1` on a received
+memory is refused by the transpiler only (`chir_lower.rs:1489`; the macro admits it — REFUSED-one;
+fix: expose the committing stage on the bus; REFUSED-both since D-25, `ui:fail/memory_received_write_latency`),
+and the mode is absent from the type (a WriteFirst child under a ReadFirst
 owner is two memories; the type owes the mode, I.13; D-18: I.13.7 (6)). The sweep skips **1** module for a
 `Memory` parameter (`rv32i_cpu_pipelined`; `build.rs:693-699`): the harness would have to
 invent the depth and the contents, both design decisions; it is anchored outside the sweep by
@@ -1819,7 +1835,10 @@ the macro — no header rule, and the combinational arm runs no memory rule — 
 the transpiler by accident of its registries ("method `data` is not supported in hardware
 expressions"; "one-argument `.read()` on something that is not a memory read port") — a parity
 break of II.1.3; Phase C gives both front-ends the header rule with one message and a ui/fail
-case. Prior work: Chisel's `readLatency = 0` `Mem` is the combinational read Copper does not
+case. **Done (D-25):** `copper_analysis::memory_rules::check_memory_shapes`, called from
+`front_end::check_front_end_rules`, refuses a `Memory` parameter on a `combinational` module in both
+front-ends with one message (`ui:fail/memory_combinational_observe`, `memory_combinational_stage`);
+`copper-ref` refuses the header too (`interp_memory.rs::a_memory_on_a_combinational_module_is_refused`). Prior work: Chisel's `readLatency = 0` `Mem` is the combinational read Copper does not
 have [chisel §4.3]; Spade's `read_memory` is an entity, not a function [spade §III-C]; the
 rest — not covered.
 
@@ -1881,7 +1900,11 @@ times in one cycle" arm) and (c) does not count `s_pre`'s stagings; (3) no I.10.
 either front-end; (4) `ReadMode` is still a field (`memory.rs:13`, `:38`, `:215`) and the
 simulator's type checks no `L ≥ 1`; (5) the inference comment at `memory.rs:323-325` stands;
 (6) no memory pre-loop-staging fixture (the entry itself landed, §J.1); (7) `WRITE_LAT ≠ 1` on a
-received memory refused by the transpiler only. Moved since the snapshot: `check_memory_staging`
+received memory refused by the transpiler only. (D-25, 2026-11-08: **(2), (3), (4), (6) and (7) are
+done** — (a) and (b) deleted from `check_memory_staging` with their four pins rewritten, (c) counting
+`s_pre` (`Cfg::pre_staged`); the header rule; `ReadMode` deleted and the latencies asserted at
+construction; `stage_preloop_only` / `stage_preloop_head` swept; `WRITE_LAT ≠ 1` refused by the
+shared rule — `review/MEASUREMENTS.md` §W.5. (5) was done at step 11, I.10.2's line.) Moved since the snapshot: `check_memory_staging`
 `cfg.rs:491-650`, `mem_accesses` :1644, `memory_locals` :1721; the macro's call
 `copper-macros/src/lib.rs:295`, the parameter allowlist and the CDC arm now
 `copper-analysis/src/front_end.rs` (`check_cdc` :188); `parse_memory_decl` `chir_lower.rs:6640`,
@@ -2607,7 +2630,7 @@ on a probe (D-18 (iii); M = macro, T = transpiler):
 | same payload and domain on both ends; a crossing only into a `synchronizer` (I.12.4(a), (d)) | S0 | refuses (E0308, `s5`; D-17 (v)) | refuses (call-site check, `:2286-2310`) | — |
 | the port kind on both ends (a `RegOut` port to a `registered_wire` net) | S0 (I.13.4(c)) | refuses (E0308, `s6a`) | **admits** (`s6a`: no port-kind check) | T (vacuous once `net::<T, D>()` lands) |
 | at least one `Clock` parameter, every clock threaded | S0 (I.2.2 for the mode) | refuses (`lib.rs:1496-1503`, `s8`, `s8b`) | **admits** (`s8b`) | T |
-| one owner per memory port (I.10.5): a `Memory` parameter reaches one child | S0 (D-16 A7) | refuses (E0382, `Memory` is not `Clone`, `s7`) | refuses (a `Memory` parameter is no signal of the lowering, `s7`) — the received-memory bus is the ABI of a child, not of a parent (I.13.6) | the port set and mode in the parameter type (I.10.8) |
+| one owner per memory port (I.10.5): a `Memory` parameter reaches one child | S0 (D-16 A7) | refuses (E0382, `Memory` is not `Clone`, `s7`) | refuses (a `Memory` parameter is no signal of the lowering, `s7`) — the received-memory bus is the ABI of a child, not of a parent (I.13.6) | the port set and mode in the parameter type (I.10.8). **D-25 (1):** a `structural` module receives no `Memory` (I.10.5, I.2.2) — both refuse the parameter with one message (`ui:fail/memory_structural_parameter`; before, the macro admitted one child, MEASUREMENTS §W.1 #15); one receiver per memory is rustc's move (`coreui:fail/memory_one_receiver`); no type carries the port set or the mode (the mode is the owner's, I.10.5) |
 | an instantiation names a `#[hardware]` module (no plain `fn` call) | S0 | admits (`s12`: a plain fn call compiles) | refuses ("call is not a `#[hardware]` submodule", `:2170-2175`) | M |
 | no instance of the parent's own name (recursion) | S0 (I.2.5(c): finite) | admits (`s13`: the dropped future is no recursion to rustc) | admits (`s13`: a self-instantiating module, Verilator UNSUPPORTED) | both |
 
@@ -2618,7 +2641,10 @@ this clause. (e) **Domains and memories.** A structural parent receives several 
 each child in the domain of the clock it passes; every crossing inside it is a `synchronizer`
 child (I.12.4(d), enforced at the call site in the transpiler and by E0308 in rustc); a `Memory`
 parameter of the parent is owned by the one child it reaches, and the port set and mode a child
-uses are owed to the parameter type (I.10.5, I.10.8 — Phase C, with the kind-agnostic net). The
+uses are owed to the parameter type (I.10.5, I.10.8 — Phase C, with the kind-agnostic net). (D-25,
+2026-11-08, corrects this: a `structural` module receives **no** `Memory` — a memory is a parameter of
+a `sequential` or `synchronizer` module only and has one receiver, I.10.5 and I.2.2 — so no parent
+holds one to hand on; the port set needs no type and the mode is the owner's, I.10.5.) The
 dual-clock memory — one port per domain — is a synchronizer-kind primitive with no form, carried
 (I.13.8). Prior work: CλaSH, Chisel, Spade, PyMTL3, Filament and Arch each have an instantiation
 form and a connection form (I.13.1); none gives the hierarchy a meaning other than the flattened
@@ -2774,7 +2800,9 @@ settle resumes none; `PreEdgeBarrier` gone, §F–§G). (8)'s `LEVELIZED_SCHEDUL
 `front_end::check_header` (:688). **(3) is open** — `spawn_child` (`executor.rs:508`), `spawn_child!`
 (`copper-sim/src/lib.rs:69-75`) and `lower_hardware_call` (`chir_lower.rs:5850`) stand, neither
 front-end refuses a `#[hardware]` call in a behavioural body, and `tests/module_composition_hybrid.rs`
-still spawns children; its III.3 line is OPEN with a decision packet (§R). (6) is open (I.10.5's line).
+still spawns children; its III.3 line is OPEN with a decision packet (§R). (6) is open (I.10.5's line). (D-25, 2026-11-08: **(6) is discharged** by
+narrowing, not by a type — no structural module receives a memory, one receiver per memory is
+rustc's move, and the mode is the owner's; I.10.5.)
 (D-23, 2026-11-08: **(3) is discharged** in Phase C step 11b — option (a) of §R.6 (1), I.13.5's note:
 the refusal is rustc's in the macro and the registry's in the transpiler, one message; the deleted
 forms are listed there. The bound-instance and body-wire residues are III.3.4 lines.)
@@ -2793,7 +2821,8 @@ forms are listed there. The bound-instance and body-wire residues are III.3.4 li
 - An **independent reference for a hierarchical design** beyond the 2:1 CDC anchor — a
   single-domain parent of a `RegOut` core and a `combinational` reader, and a two-domain parent
   under a second interleaving → III.2 (D-20: III.2.11 item 8) (the user writes references).
-- The received memory's port set and mode in the parameter type (I.10.8) → Phase C (I.13.7 (6)).
+- The received memory's port set and mode in the parameter type (I.10.8) → Phase C (I.13.7 (6)). (D-25:
+  closed — not carried; I.10.5.)
 - X propagation through the settle — a function evaluated over an X input, a `RegOut` holding
   `Bits::x()` read by a function, X on a net → I.14. (D-19: I.14.2(g) — closed.)
 - `poll_tasks` outside a tick and a mid-cycle drive (I.1.5, I.1.6) → III.2 (preconditions; D-20: III.2.3).
@@ -3637,6 +3666,8 @@ unless the row says otherwise.
 | (f6) | a `tick` before the module loop, linear route (R21) | none — OUTSIDE (I.2.2: `s_pre` is tick-free; I.9.3) | 2026-11-05 | `chir_lower.rs:1958-1972` (the pre-loop tick is dropped: the SV is `always_ff q <= a + 1` with no state); measured divergent at `obs_1` only (the simulator's first resumption ends at the pre-loop tick with no write; the SV's head runs from edge 1), agreeing from `obs_2` | the R21 refusal in both front-ends (II.1.2, Phase C); the row closes when it lands and is not a limitation — it is recorded so the shape is not silently wrong until then | ADMITTED-AND-DIVERGENT until R21 lands |
 | (g) | a hex literal in a `from_lit` turbofish (`Bits::from_lit::<0xFF>()`) | I.14's constant (I.8.7; D-19: I.14.4 — any base and underscores; closed by the shared evaluator) | 2026-11-05 | `chir_lower.rs:3812` region (the constant parser reads decimal only) | parse hex const generics (II.1.3's parity list) | REFUSED-one (the transpiler; the macro admits) |
 | (h) | a `continue` that targets a tick-bearing `for` (`for i in 0..n { if c { tick; continue; } …; tick }`) | I.8.5 (D-10 A2-i): the next iteration — `c = c + 1`, then the test with the next `c` | 2026-11-08 (D-23 (2); measured REFUSED-one 2026-11-06/07, §J.10 item 4, §R.3) | `control_extract.rs` `unflattenable_in_stmts`' `ForLoop` arm (the desugar declines the `for`: its hoisted tick would no longer stand for the last iteration's), now a backstop | lower the `continue` as the desugaring's increment-then-test — the entry copy row (a) uses for a nested `loop` (§J.4); the probe of §R.3 as the swept fixture | REFUSED-both (`front_end::check_ticking_for_continue`, one message; `ui/fail/ticking_for_continue`); corpus 0 |
+| (i) | a received `Memory` parameter with `WRITE_LAT ≠ 1` | I.10.1(b)–(c): a write pipeline of `M` stages, committing at edge N+M (a declared memory at any `M` agrees, `ram_r2w2`) | 2026-08-27 (`RECEIVED_MEMORY_ABI.md` §3; D-16 obligation (7); written 2026-11-08, D-25) | `chir_lower.rs` `received_memory_decls` (the bus carries the freshly staged write nets; at `M > 1` the committing value is a child-side stage register) | expose the committing stage on the bus | REFUSED-one until D-25 (the macro admitted it, MEASUREMENTS §W.1 #12); **REFUSED-both** since, one message (`copper_analysis::memory_rules`) |
+| (j) | a received memory's read-during-write mode absent from the parameter type | I.10.2: the mode is the instance's; for a received memory, the owner's | 2026-08-27 (D-16 obligation (7), I.13.7 (6); written 2026-11-08, D-25) | `chir_lower.rs` `received_memory_decls` (`write_mode` fixed at ReadFirst and never consulted: the child's text has no forwarding net, MEASUREMENTS §W.1 #17) | none — D-25 (2): not a limit of the lowering; the owner states the mode on each leg, and a harness's two owners are one mode | NOT A LIMIT (the child's emitted text is mode-free; the CPU lane's two owners are WriteFirst) |
 
 (Phase C step 11, 2026-11-07: the Status column above is each row as recorded on its date; every
 row but (e)'s `saturating_*` residue is **closed**, with its fixture, in III.3.4's ledger, and the
@@ -3721,7 +3752,7 @@ fixes of II.1.3 (R6's macro side, R19's transpiler side, R21 in both).
 - I.10: rule 6 (`check_memory_staging`) with its principle and the dominated staging
   (II.2.4); rule 7 retired here, re-derivable there only if a memory reaches a
   `combinational` module. (D-16: done — I.10.4, I.10.6; two rows for the received memory
-  owed to II.3.3, D-16 obligations.)
+  owed to II.3.3, D-16 obligations. D-25: written, rows (i) and (j).)
 - I.11: D2 (II.2.4); nothing of this section. (D-14: I.11.3 done; I.11.2(c) owes this section one
   row — a combinational port written twice at the top level, emitted as two `assign`s and refused by
   Verilator as MULTIDRIVEN, admitted by both front-ends, fix: the §10.12 routing for any port written
@@ -4120,12 +4151,12 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | I.9.3 | pre-loop statements that are not a `let` | `test:tests/reference_leg_measurements.rs::preloop_statement_agrees_on_both_routes`, `ui:fail/preloop_tick`, `test:copper-codegen/tests/unsupported_constructs.rs::a_tick_before_the_module_loop_is_refused_by_r21_on_both_routes` | G-C, PA | CLOSED | (f2), (f3), (f6), R21 (§J.1, §J.12) |
 | I.9.4 | observation 0 | `sweep:tests/fixtures/preloop_entry_dut.rs::preloop_probe`, `test:tests/reference_leg_measurements.rs::preloop_statement_agrees_on_both_routes` | G-D/F/G, G-C | CLOSED | §E.1 |
 | I.9.5 | state the module did not declare | `sweep:tests/fixtures/shift_register_dut.rs::shift_register`, `sweep:tests/fixtures/counted_delay_dut.rs::counted_delay` | G-D/F/G | CLOSED | `RESET` rows with sentences (III.2.10) |
-| I.10.1 | the memory as a variable of H(M) | `sweep:tests/fixtures/pipelined_ram_dut.rs::ram_r2w2`, `test:copper-ref/tests/interp_memory.rs::write_latency_two_commits_at_edge_n_plus_m`, `test:copper-ref/tests/interp_memory.rs::unready_data_is_a_runtime_failure` | G-D/F/G, G-C | OPEN | Phase C follow-up (simulator, front-ends): (a) `ReadMode` not deleted and `L ≥ 1` not checked by the simulator's type (`memory.rs:13`, `:215`); (b) last-staging-wins is realized by the interpreter only — both front-ends still refuse a second staging (rule 6 (a)/(b), I.10.4's line). (c)'s wording corrected this step; (d) agrees on 18 memory modules (§O.1) |
+| I.10.1 | the memory as a variable of H(M) | `sweep:tests/fixtures/pipelined_ram_dut.rs::ram_r2w2`, `test:copper-ref/tests/interp_memory.rs::write_latency_two_commits_at_edge_n_plus_m`, `test:copper-ref/tests/interp_memory.rs::unready_data_is_a_runtime_failure`, `sweep:tests/fixtures/memory_staging_dut.rs::stage_twice_read`, `sweep:tests/fixtures/memory_staging_dut.rs::stage_twice_write`, `test:copper-core/tests/port_and_type_edge_cases.rs::a_zero_read_latency_memory_is_refused_at_construction`, `ui:fail/memory_zero_latency` | G-D/F/G, G-C, PA | CLOSED | D-25 (§W.5): (a) `ReadMode` deleted, the latencies asserted at construction and a literal 0 refused by both front-ends, one message; (b) last-staging-wins admitted by both front-ends and swept on three legs. (c)'s wording corrected at step 11; (d) agrees on the memory modules (§O.1) |
 | I.10.2 | read-during-write | `test:tests/write_first_memory_equivalence.rs::read_first_and_write_first_actually_differ`, `sweep:tests/fixtures/write_first_ram_dut.rs::ram_write_first`, `sweep:tests/fixtures/pipelined_ram_dut.rs::ram_r1w2_wf` | G-C, G-D/F/G | CLOSED | the mode the author's; the stale inference comment (`memory.rs:323`) corrected this step |
 | I.10.3 | initial contents and the first resumption | `test:tests/preloaded_memory_equivalence.rs::from_fn_preload_sim_matches_transpiled_verilog`, `sweep:tests/fixtures/preloaded_rom_dut.rs::rom_from_contents`, `sweep:examples/cpu/rv32i_cpu_transpilable.rs::rv32i_cpu_transpilable` | G-C, G-D/F/G | CLOSED | the entry (§J.1); probes (iv) as fixtures are I.10.7 (6), not this clause's meaning |
-| I.10.4 | the memory rules and their principles | `test:copper-codegen/tests/unsupported_constructs.rs::memory_read_result_before_the_tick_is_rejected` | G-C | OPEN | Phase C follow-up (copper-analysis): D-16 retired rule 6's clauses (a) and (b), but `check_memory_staging` still refuses two stagings of one port in a cycle (`cfg.rs:491`, pins `two_accesses_*`), and (c) does not count `s_pre`'s stagings (I.10.7 (2)) |
-| I.10.5 | a received memory, sharing and the bus | `ui:pass/memory_parameter_ok`, `ui:fail/cdc_memory_parameter`, `test:tests/received_memory_abi.rs::received_memory_bus_matches_the_owned_memory_semantics` | PA, G-C | OPEN | Phase C follow-up (types, front-ends): the port set and mode are not in the parameter type and one owner per port is not enforced ("nothing enforces it today"); `WRITE_LAT ≠ 1` refused by the transpiler only (I.10.7 (7), I.13.7 (6)) |
-| I.10.6 | memory and the combinational module | `test:copper-ref/tests/interp_memory.rs::memory_binding_outside_s_pre_and_memory_parameter_are_refused` | G-C | OPEN | Phase C follow-up (front-ends): the header rule refusing a `Memory` in a `combinational` module is in neither front-end and has no ui case (I.10.7 (3)); corpus 0 |
+| I.10.4 | the memory rules and their principles | `test:copper-codegen/tests/unsupported_constructs.rs::memory_read_result_before_the_tick_is_rejected`, `sweep:tests/fixtures/memory_staging_dut.rs::stage_unrolled_for`, `sweep:tests/fixtures/memory_staging_dut.rs::stage_for_two_ports`, `sweep:tests/fixtures/memory_staging_dut.rs::stage_dominated`, `sweep:tests/fixtures/memory_staging_dut.rs::stage_preloop_only`, `sweep:tests/fixtures/memory_staging_dut.rs::stage_preloop_head`, `test:copper-codegen/tests/unsupported_constructs.rs::two_stagings_of_one_memory_port_lower_last_wins` | G-C, G-D/F/G | CLOSED | D-25 (§W.5): (a) and (b) deleted from `check_memory_staging`, their four pins rewritten; (c) counts `s_pre`'s stagings; (d) kept, ordering against no pre-loop staging (D-25 (4)); corpus 0 |
+| I.10.5 | a received memory, sharing and the bus | `ui:pass/memory_parameter_ok`, `ui:fail/cdc_memory_parameter`, `test:tests/received_memory_abi.rs::received_memory_bus_matches_the_owned_memory_semantics`, `coreui:fail/memory_one_receiver`, `ui:fail/memory_structural_parameter`, `ui:fail/memory_received_write_latency`, `ui:pass/memory_parameter_default_latencies`, `test:copper-codegen/tests/unsupported_constructs.rs::a_received_memory_with_default_latencies_lowers_as_latency_one` | PA, G-C | CLOSED | D-25 (1), (2), (5) (§W.5): one receiver per memory (rustc's move; no `structural` receiver, both front-ends); the mode the owner's, not in the type (II.3.3 (j)); `WRITE_LAT ≠ 1` REFUSED-both (II.3.3 (i)); the defaulted latencies admitted by both |
+| I.10.6 | memory and the combinational module | `ui:fail/memory_combinational_observe`, `ui:fail/memory_combinational_stage`, `test:copper-ref/tests/interp_memory.rs::a_memory_on_a_combinational_module_is_refused` | PA, G-C | CLOSED | D-25 (§W.5): the header rule in both front-ends, one message (`copper_analysis::memory_rules`), and the interpreter's refusal pinned; corpus 0. The fixture until D-25 (`memory_binding_outside_s_pre_and_memory_parameter_are_refused`) tested I.10.1(a) and I.10.5, not this clause |
 | I.11.1 | the combinational module as a function | `sweep:examples/basejump/bsg_mux_one_hot.rs::bsg_mux_one_hot`, `test:copper-ref/tests/interp_comb.rs::no_local_survives_an_evaluation`, `example:bsg_mux_one_hot` | G-D/F/G, G-C, G-B | CLOSED | 52 combinational modules on three legs (§O.2); anchored (BaseJump) |
 | I.11.2 | the wire rules | `sweep:tests/fixtures/comb_default_override_dut.rs::cdo_override_then_default`, `test:copper-ref/tests/interp_comb.rs::last_write_wins_and_the_dead_write_is_admitted`, `sweep:tests/fixtures/comb_default_override_dut.rs::cdo_double_write`, `sweep:tests/fixtures/comb_default_override_dut.rs::cdo_double_write_mixed` | G-D/F/G, G-C | CLOSED | (c) a port written twice at the top level is routed into `always_comb` since 2026-11-08 (§U.5; until then two `assign`s, Verilator MULTIDRIVEN), line II.3 found comb-double-write |
 | I.11.3 | definite assignment | `ui:fail/combinational_never_written`, `ui:fail/combinational_latch`, `test:copper-codegen/tests/comb_definite_assignment_parity.rs::both_front_ends_admit_and_refuse_the_same_rows` | PA, G-C | CLOSED | the never-written port in both (§P.5) |
@@ -4139,7 +4170,7 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | I.13.1 | a design as coroutines over wires | `coreui:fail/out_is_not_clone`, `coreui:fail/regout_is_not_clone`, `test:copper-core/tests/port_and_type_edge_cases.rs::cloned_inputs_observe_the_same_wire` | G-C | CLOSED | — |
 | I.13.2 | the settle | `test:tests/levelized_differential.rs::diff_comb_chain`, `test:tests/poll_order_fuzz.rs::combinational_chain_is_poll_order_independent`, `test:copper-ref/tests/interp_design.rs::one_settle_evaluates_in_topological_order` | G-C | CLOSED | (b)'s order realized since steps 2–3 |
 | I.13.3 | the evaluation count and the dirty flag | `test:tests/golden_traces.rs::counter_trace_is_frozen`, `test:copper-core/tests/port_and_type_edge_cases.rs::dirty_flag_tracks_changing_writes` | G-C | CLOSED | — |
-| I.13.4 | the structural module | `test:tests/two_domain_hierarchy_cdc.rs::independent_reference_matches_sim_under_verilator`, `test:tests/two_domain_hierarchy_cdc.rs::reference_interpreter_design_matches_sim`, `ui:fail/structural_two_drivers`, `ui:fail/structural_undriven_net`, `ui:fail/structural_self_instance`, `ui:fail/structural_unconnected_port`, `test:copper-codegen/tests/front_end_parity_ui.rs::an_unconnected_child_port_is_refused_by_both` | G-C, G-F, PA | OPEN | Phase C follow-up (memory): (d)'s/(e)'s one owner per memory needs the port set in the parameter type (I.10.5's line). (d)'s "every child port connected" row is pinned since 2026-11-08 (§V.5): rustc's E0061 and the transpiler's port count, each message pinned. The rest of (a)–(d) closed (§P.4); the 2:1 design anchored |
+| I.13.4 | the structural module | `test:tests/two_domain_hierarchy_cdc.rs::independent_reference_matches_sim_under_verilator`, `test:tests/two_domain_hierarchy_cdc.rs::reference_interpreter_design_matches_sim`, `ui:fail/structural_two_drivers`, `ui:fail/structural_undriven_net`, `ui:fail/structural_self_instance`, `ui:fail/structural_unconnected_port`, `test:copper-codegen/tests/front_end_parity_ui.rs::an_unconnected_child_port_is_refused_by_both`, `ui:fail/memory_structural_parameter`, `coreui:fail/memory_one_receiver` | G-C, G-F, PA | CLOSED | (d)/(e)'s one owner per memory closed by D-25 (1) (§W.5): a `structural` module receives no `Memory` (both front-ends, one message) and one receiver per memory is rustc's move; no type carries the port set. (d)'s "every child port connected" row is pinned since 2026-11-08 (§V.5): rustc's E0061 and the transpiler's port count, each message pinned. The rest of (a)–(d) closed (§P.4); the 2:1 design anchored |
 | I.13.5 | hierarchy inside a behavioural module | `ui:fail/behavioural_instantiation`, `test:tests/module_composition_hybrid.rs::sequential_modules_compose_in_a_testbench`, `test:copper-codegen/tests/front_end_parity_ui.rs::the_transpiler_refuses_every_shape_the_macro_refuses_with_the_same_message` | PA, G-C | CLOSED | D-23 (1), step 11b (§S): rustc refuses `child(a, b);` (the denied `#[must_use]`, the note I.13.5's message), the transpiler refuses from its registry with the same message; `lower_hardware_call`, the behavioural `submodules` fields, `spawn_child`, `spawn_child!` deleted; corpus 0, SV byte-identical. The bound-instance and body-wire residues are lines II.3 found let-instance (CLOSED, D-24 (1): the second named exception, with the simulator's drop guard, `test:tests/let_instance_d24.rs`) and body-wire |
 | I.13.6 | the emitted hierarchy and its ABIs | `test:copper-codegen/tests/structural_hierarchy.rs::hierarchy_co_emits_children_deepest_first`, `test:tests/received_memory_abi.rs::received_memory_bus_matches_the_owned_memory_semantics`, `example:two_domain_hierarchy` | G-C, G-B | CLOSED | — |
 | I.14.1 | the type set | `sweep:tests/fixtures/signedness_dut.rs::signed_lt_via_cast`, `test:copper-ref/tests/interp_data.rs::int_wrapping_on_u8_ports`, `sweep:tests/fixtures/data_i14_dut.rs::usize_width` | G-D/F/G, G-C | CLOSED | `usize` 64 bits (§M.3); `Bits<N>`'s N bound is R16's line |
@@ -4243,6 +4274,8 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | II.3.3 (e) all_ones | `all_ones` (owed by the row) | `sweep:tests/fixtures/data_i14_dut.rs::k_ones_nowidth`, `sweep:tests/fixtures/data_i14_dut.rs::k_ones_width`, `sweep:tests/fixtures/data_i14_dut.rs::k_ones_init` | G-D/F/G | CLOSED | every spelling (§M.9 item 2) |
 | II.3 found array-for | an element write to an array register inside a combinational `for` (2026-11-06, §J.10 item 6 (i)) | `sweep:tests/fixtures/array_for_write_dut.rs::afw_accumulate`, `sweep:tests/fixtures/array_for_write_dut.rs::afw_shift_cond`, `test:copper-codegen/tests/unsupported_constructs.rs::an_array_register_element_write_inside_a_combinational_for_is_unrolled_unless_the_bound_is_generic` | G-D/F/G, G-C | CLOSED | 2026-11-08 (§U.4): a `for` whose bounds fold to constants is unrolled (I.2.4), each iteration's write its own write port — row (c)'s form; corpus SV byte-identical. A const-generic bound is line II.3 found array-for-generic |
 | II.3.3 (h) | a `continue` of a tick-bearing `for` (found 2026-11-06, §J.10 item 4; a row since D-23, 2026-11-08) | `ui:fail/ticking_for_continue`, `test:copper-codegen/tests/unsupported_constructs.rs::a_continue_of_a_tick_bearing_for_is_refused_with_the_shared_message` | PA, G-C | CLOSED | REFUSED-both, a dated limitation (D-23 (2), step 11b, §S): one message (`front_end::check_ticking_for_continue`); fix direction the lowering (increment, then test); corpus 0 |
+| II.3.3 (i) | a received memory with `WRITE_LAT ≠ 1` (2026-08-27; written D-25) | `ui:fail/memory_received_write_latency` | PA | CLOSED | REFUSED-both since D-25, one message (`copper_analysis::memory_rules`); a dated limitation, fix direction: expose the committing stage on the bus |
+| II.3.3 (j) | a received memory's mode absent from the type (2026-08-27; written D-25) | `test:tests/rv32i_pipelined_verilator.rs::pipelined_cpu_matches_its_verilated_self_on_all_programs`, `test:tests/received_memory_abi.rs::received_memory_bus_matches_the_owned_memory_semantics` | G-C | CLOSED | NOT A LIMIT (D-25 (2), §W.1 #17): the receiving module's text is mode-free; the owner states the mode on each leg, and the CPU lane's two owners are WriteFirst |
 | II.3 found const-call | a constant the transpiler's fold is narrower than rustc on (2026-11-07, §N.5 item 4): a `const` method call (`K.wrapping_add(1)`), a tuple-struct constructor, a `static` read | `test:copper-codegen/tests/register_init_parity.rs::the_transpiler_refuses_every_initializer_rustc_refuses`, `test:copper-codegen/tests/register_init_parity.rs::the_transpiler_folds_const_calls_rustc_admits`, `ui:pass/register_init_const_calls_ok`, `sweep:tests/fixtures/const_call_dut.rs::cc_call_init`, `sweep:tests/fixtures/const_call_dut.rs::cc_static_init`, `test:tests/const_evaluators_agree.rs::the_widened_constant_grammar_agrees_with_rustc` | G-C, PA, G-D/F/G | CLOSED | since 2026-11-08 (§V.4): both evaluators fold all three (`ConstEnv` and the interpreter's, each pinned to rustc's values; `min`/`max` outside, as in rustc; G-J 0 DISAGREE), the R11 call half admits a tuple-struct constructor, and the register fold delegates a method call and a tuple field to `ConstEnv` (`copper-codegen/src/const_fold.rs`, one arm of `fold_const_init`). The same constants named in a body expression or a `for` bound are their own line, `II.3 found const-call-body` |
 | II.3 found const-call-body | a `const` item whose value is a method call or a tuple-struct field (`const W: u8 = B.wrapping_add(10);`) named in a body expression or a tick-free `for` bound (2026-11-08, §V.4) | — (probes `cc_bounds` and the first `cc_call_init` of §V.4, scratchpad) | G-C | OPEN | copper-codegen: REFUSED-one, corpus 0 — the macro admits (rustc), the transpiler emits a file const as a `localparam` from its Rust text and refuses ("has an initializer the transpiler cannot express in SystemVerilog"), never wrong text; fix: state the `localparam`'s value through `ConstEnv` (`file_consts`, `emit.rs`) |
 | II.3 found u8-const | a `u8` file const in a body expression (2026-11-07, §N.5 item 1) | `sweep:tests/fixtures/const_init_dut.rs::init_file_const_in_body`, `sweep:tests/fixtures/const_pattern_dut.rs::cp_statement` | G-D/F/G | CLOSED | 2026-11-08 (§U.6): a `u8`/`u16`/`i8`/`i16` file const emits as `localparam logic [W-1:0] K = W'(e)` (`signed` for `i8`/`i16`); a 32-bit-or-wider one stays `localparam int`; corpus SV byte-identical |

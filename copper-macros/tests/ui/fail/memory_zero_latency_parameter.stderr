@@ -1,0 +1,19 @@
+error: a `Memory` has READ_LAT = 0, WRITE_LAT = 1; both must be at least 1 — a synchronous port cannot answer in zero cycles (SPEC I.10.1(a): L = 0 is OUTSIDE)
+  --> tests/ui/fail/memory_zero_latency_parameter.rs:11:42
+   |
+11 | async fn recv_l0(clk: Clock<MainClk>, m: Memory<Bits<8>, 1, 1, MainClk, 0, 1>, a: In<Bits<4>, MainClk>, d: In<Bits<8>, MainClk>, q: ...
+   |                                          ^^^^^^
+
+warning: unused imports: `Bits`, `Clock`, and `Memory`
+ --> tests/ui/fail/memory_zero_latency_parameter.rs:3:19
+  |
+3 | use copper_core::{Bits, Clock, ClockDomain, Memory};
+  |                   ^^^^  ^^^^^               ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In`, `Out`, and `RegOut`
+ --> tests/ui/fail/memory_zero_latency_parameter.rs:4:25
+  |
+4 | use copper_core::port::{In, Out, RegOut};
+  |                         ^^  ^^^  ^^^^^^
