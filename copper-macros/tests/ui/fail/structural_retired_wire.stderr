@@ -1,0 +1,19 @@
+error: `wire`/`registered_wire` in a `#[hardware(structural)]` body: a net carries no value of its own and its kind follows its driver, so the structural spelling is `let n = net::<T, D>()` with no initial value (SPEC I.13.4(c), D-18 A3). `wire` and `registered_wire` stay the testbench's spellings for hand wiring.
+  --> tests/ui/fail/structural_retired_wire.rs:27:13
+   |
+27 |     let n = wire::<Logic, A>(Logic::Zero);
+   |             ^^^^
+
+warning: unused import: `net`
+ --> tests/ui/fail/structural_retired_wire.rs:2:25
+  |
+2 | use copper_core::port::{net, In, Out, RegOut};
+  |                         ^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `copper_core::port::wire`
+  --> tests/ui/fail/structural_retired_wire.rs:23:5
+   |
+23 | use copper_core::port::wire;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^

@@ -134,6 +134,34 @@ fn const_wrap_for_bounds(f: &mut ItemFn) {
     W.visit_block_mut(&mut f.block);
 }
 
+/// The structural arm's two rewrites (see the arm).
+fn structural_rewrite(f: &mut ItemFn) {
+    use syn::spanned::Spanned;
+    for st in f.block.stmts.iter_mut() {
+        match st {
+            syn::Stmt::Local(l) => {
+                if let Some(init) = &mut l.init {
+                    if let syn::Expr::Call(call) = &mut *init.expr {
+                        if let syn::Expr::Path(p) = &mut *call.func {
+                            if let Some(seg) = p.path.segments.last_mut() {
+                                if let syn::PathArguments::AngleBracketed(ab) = &mut seg.arguments {
+                                    ab.args.push(syn::parse_quote!(_));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Stmt::Expr(e @ syn::Expr::Call(_), Some(_)) => {
+                let call = e.clone();
+                let span = call.span();
+                *e = syn::parse_quote_spanned!(span=> ::copper_sim::__instance(#call));
+            }
+            _ => {}
+        }
+    }
+}
+
 fn wrap_in_module(f: &mut ItemFn) {
     let body = f.block.clone();
     // A clocked module (one `Clock<D>` parameter: `sequential`, `synchronizer`) is
@@ -310,17 +338,20 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             quote! { #f }.into()
         }
         HardwareMode::Structural => {
-            // Pure-hierarchy parent (item 4). Transpile-only for now: the parent
-            // instantiates clocked children and has no loop/tick/registers of its
-            // own, so there is nothing to rewrite for the sim. It is NOT wrapped as
-            // a `HardwareModule` — a structural parent is not spawned (its children
-            // are hand-wired in the testbench); the transpiler reads the parent
-            // from source and lowers it via `#[hardware(structural)]`. The CDC
-            // discipline at its instantiation call sites is enforced there (the
-            // transpiler is text-based and re-derives it), and for compiled code
-            // the phantom domain types already reject a mismatched wire. Emit the
-            // function unchanged so it compiles alongside its children.
-            let f = input_fn;
+            // A structural module names a design (SPEC I.13.4(a), D-18 A1): it is
+            // not a coroutine and is never spawned — the simulator hand-wires the
+            // same instances in a testbench, the transpiler emits the hierarchy. It
+            // is NOT wrapped as a `HardwareModule`; it is emitted so it compiles
+            // alongside its children, which makes rustc check the wiring (port
+            // count E0061, domains E0308, one driver E0382).
+            // Phase C step 10 (SPEC I.13.4(b)–(d), D-18): the shape rules ran in
+            // `check_front_end_rules`. Two rewrites let rustc judge the rest: each
+            // `net::<T, D>()` gets the `_` for its driver kind (inferred from the
+            // child port its driver end reaches, so an `Out` and a `RegOut` net are
+            // one spelling), and each instantiation is passed to
+            // `copper_sim::__instance`, so a call of a plain `fn` is a type error.
+            let mut f = input_fn;
+            structural_rewrite(&mut f);
             quote! { #f }.into()
         }
     }

@@ -1,0 +1,13 @@
+error: `top` instantiates itself: a structural module names a finite design, and an instance of the module inside its own body has no finite flattening (SPEC I.13.4(d); II.1 S0; I.2.5(c)).
+  --> tests/ui/fail/structural_self_instance.rs:29:5
+   |
+29 |     top(clk, m.0);
+   |     ^^^
+
+warning: unused import: `net`
+ --> tests/ui/fail/structural_self_instance.rs:2:25
+  |
+2 | use copper_core::port::{net, In, Out, RegOut};
+  |                         ^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

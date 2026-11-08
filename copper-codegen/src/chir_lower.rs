@@ -2338,7 +2338,7 @@ fn lower_seq_body(
 /// submodule instances wired together by internal nets. No registers, no loop.
 ///
 /// Two body forms are recognised, in source order:
-///   * `let <net> = wire::<T, D>(<init>);` — declares an internal net wiring
+///   * `let <net> = net::<T, D>();` — declares an internal net wiring
 ///     children together; its width comes from `T`. Use sites reference the
 ///     driver as `<net>.0` and the observer as `<net>.1`; both resolve to the
 ///     one SV net named `<net>`.
@@ -2370,7 +2370,7 @@ fn lower_structural_body(
                     return Err(CHIRLowerError::UnsupportedConstruct {
                         description: "structural module: `let` without initializer".to_string(),
                         span: local.span,
-                        suggested_rewrite: Some("declare internal nets with `let n = wire::<T, D>(init);`".to_string()),
+                        suggested_rewrite: Some("declare internal nets with `let n = net::<T, D>();`".to_string()),
                     });
                 };
                 let (ty, domain) = parse_wire_net(init, local.span)?;
@@ -2488,32 +2488,26 @@ fn refuse_structural_comb_cycle(
 }
 
 /// Parse the data type `T` and clock domain `D` of an internal net declared by
-/// `wire::<T, D>(init)`. `D` is `None` only when the turbofish omits it.
+/// `net::<T, D>()` (SPEC I.13.4(c), D-18 A3; Phase C step 10). The shared shape rule
+/// (`copper_analysis::front_end::check_structural_body`) has already refused every
+/// other spelling — the retired `wire`/`registered_wire` with their `init` among
+/// them — so the substring match this replaced (which admitted `registered_wire`
+/// by the accident of containing `wire::<`, D-18 (iii) `s6b`) is gone.
 fn parse_wire_net(init: &ExprType, span: SourceSpan) -> Result<(CHIRType, Option<String>), CHIRLowerError> {
-    let ExprType::Call(call) = init else {
-        return Err(CHIRLowerError::UnsupportedConstruct {
-            description: "structural net must be initialized with `wire::<T, D>(init)`".to_string(),
-            span,
-            suggested_rewrite: None,
-        });
+    let not_a_net = || CHIRLowerError::UnsupportedConstruct {
+        description: "structural net must be declared `let n = net::<T, D>();` (SPEC I.13.4(c))".to_string(),
+        span,
+        suggested_rewrite: None,
     };
-    let ExprType::Path(p) = call.func.as_ref() else {
-        return Err(CHIRLowerError::UnsupportedConstruct {
-            description: "structural net initializer must be a `wire::<T, D>(..)` call".to_string(),
-            span,
-            suggested_rewrite: None,
-        });
-    };
-    // path_text is like `wire :: < Logic , ClkFast >` (possibly module-qualified).
+    let ExprType::Call(call) = init else { return Err(not_a_net()) };
+    let ExprType::Path(p) = call.func.as_ref() else { return Err(not_a_net()) };
+    // path_text is like `net :: < Logic , ClkFast >` (possibly module-qualified).
     let text: String = p.path_text.chars().filter(|c| !c.is_whitespace()).collect();
-    if !text.contains("wire::<") {
-        return Err(CHIRLowerError::UnsupportedConstruct {
-            description: "structural net must be declared with an explicit `wire::<T, D>(init)` type".to_string(),
-            span,
-            suggested_rewrite: Some("annotate the net type: `let n = wire::<Bits<8>, D>(init);`".to_string()),
-        });
+    let Some(at) = text.find("net::<") else { return Err(not_a_net()) };
+    if !call.args.is_empty() || (at > 0 && !text[..at].ends_with("::")) {
+        return Err(not_a_net());
     }
-    let after = &text[text.find("wire::<").unwrap() + "wire::<".len()..];
+    let after = &text[at + "net::<".len()..];
     let inner = after.strip_suffix('>').unwrap_or(after);
     // `T, D` split at the top level.
     let parts = split_top_level_commas(inner);

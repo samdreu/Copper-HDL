@@ -94,6 +94,13 @@ impl<F> HardwareModule<F> {
     }
 }
 
+/// An instantiation in a `#[hardware(structural)]` body (SPEC I.13.4(b)): the
+/// macro wraps each `child(args)` statement in this, so a call of a plain `fn`
+/// — which names no module — is a type error at the call (I.13.4(d), Phase C
+/// step 10). **Macro-internal.**
+#[doc(hidden)]
+pub fn __instance<F>(_module: HardwareModule<F>) {}
+
 /// The `HardwareExecutor` manages the execution of hardware modules defined as async tasks. 
 /// It tracks the current cycle, the modules in the system, and allows for spawning new tasks and child modules. 
 /// It provides a `tick_clock` method to advance the simulation by one clock cycle, 

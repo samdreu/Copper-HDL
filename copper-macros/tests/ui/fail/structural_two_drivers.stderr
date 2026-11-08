@@ -1,0 +1,13 @@
+error: net `n` has 2 drivers: its driver end `n.0` is passed to 2 instances, and a wire has one driver (SPEC I.13.1, II.1 S5 R22; I.13.4(d)).
+  --> tests/ui/fail/structural_two_drivers.rs:25:5
+   |
+25 |     let n = net::<Logic, A>();
+   |     ^^^
+
+warning: unused import: `net`
+ --> tests/ui/fail/structural_two_drivers.rs:2:25
+  |
+2 | use copper_core::port::{net, In, Out, RegOut};
+  |                         ^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

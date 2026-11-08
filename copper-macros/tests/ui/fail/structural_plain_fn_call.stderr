@@ -1,0 +1,16 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail/structural_plain_fn_call.rs:29:5
+   |
+29 |     helper();
+   |     ------^^
+   |     |
+   |     expected `HardwareModule<_>`, found `()`
+   |     arguments to this function are incorrect
+   |
+   = note: expected struct `HardwareModule<_>`
+           found unit type `()`
+note: function defined here
+  --> $WORKSPACE/copper-sim/src/executor.rs
+   |
+   | pub fn __instance<F>(_module: HardwareModule<F>) {}
+   |        ^^^^^^^^^^

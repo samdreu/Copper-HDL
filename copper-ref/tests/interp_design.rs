@@ -34,7 +34,7 @@ fn ready(full: In<Logic, C>, drain: In<Logic, C>, r: Out<Logic, C>) {
 }
 #[hardware(structural)]
 async fn top(clk: Clock<C>, x: In<Logic, C>, drain: In<Logic, C>, rdy: Out<Logic, C>) {
-    let full = registered_wire::<Logic, C>(&clk, Logic::Zero);
+    let full = net::<Logic, C>();
     core(clk, x, full.0);
     ready(full.1, drain, rdy);
 }";
@@ -71,8 +71,8 @@ fn inv(a: In<Logic, C>, o: Out<Logic, C>) { o.write(!a.read()); }
 fn buf(a: In<Logic, C>, o: Out<Logic, C>) { o.write(a.read()); }
 #[hardware(structural)]
 async fn chain(clk: Clock<C>, x: In<Logic, C>, y: Out<Logic, C>) {
-    let n1 = wire::<Logic, C>(Logic::Zero);
-    let n2 = wire::<Logic, C>(Logic::Zero);
+    let n1 = net::<Logic, C>();
+    let n2 = net::<Logic, C>();
     buf(n2.1, y);
     inv(n1.1, n2.0);
     inv(x, n1.0);
@@ -93,8 +93,8 @@ fn a_combinational_cycle_is_refused() {
 fn inv(a: In<Logic, C>, o: Out<Logic, C>) { o.write(!a.read()); }
 #[hardware(structural)]
 async fn ring(clk: Clock<C>, x: In<Logic, C>, y: Out<Logic, C>) {
-    let n1 = wire::<Logic, C>(Logic::Zero);
-    let n2 = wire::<Logic, C>(Logic::Zero);
+    let n1 = net::<Logic, C>();
+    let n2 = net::<Logic, C>();
     inv(n1.1, n2.0);
     inv(n2.1, n1.0);
     inv(x, y);
@@ -121,7 +121,7 @@ async fn two(clk: Clock<C>, x: In<Logic, C>, y: Out<Logic, C>) {
 fn buf(a: In<Logic, C>, o: Out<Logic, C>) { o.write(a.read()); }
 #[hardware(structural)]
 async fn und(clk: Clock<C>, x: In<Logic, C>, y: Out<Logic, C>) {
-    let n = wire::<Logic, C>(Logic::Zero);
+    let n = net::<Logic, C>();
     buf(n.1, y);
 }";
     let e = Design::new(&format!("{PRELUDE}{undriven}"), "und").err().expect("refused");

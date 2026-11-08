@@ -32,9 +32,26 @@ fn cases(sub: &str) -> Vec<PathBuf> {
     v
 }
 
+/// Transpile every `#[hardware]` fn of the case: `Ok` iff all of them transpile,
+/// else the errors (a case refused by the macro is refused at one of its modules).
 fn transpile(path: &Path) -> Result<String, String> {
     let src = std::fs::read_to_string(path).unwrap();
-    copper_codegen::transpile_source(&src, None, &copper_codegen::EmitConfig::default())
+    let file = syn::parse_file(&src).unwrap();
+    let names: Vec<String> = file
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            syn::Item::Fn(f) if copper_codegen::is_hardware_fn(f) => Some(f.sig.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut errs = Vec::new();
+    for n in &names {
+        if let Err(e) = copper_codegen::transpile_source(&src, Some(n), &copper_codegen::EmitConfig::default()) {
+            errs.push(e);
+        }
+    }
+    if errs.is_empty() { Ok(format!("{} modules", names.len())) } else { Err(errs.join("\n")) }
 }
 
 /// ui/pass cases the transpiler refuses, each with its reviewed reason. A case
@@ -47,9 +64,16 @@ const PASS_NOT_TRANSPILED: &[(&str, &str)] = &[(
 )];
 
 /// ui/fail cases whose transpiler message is not the macro's, with the reason.
-/// rustc, not the macro, refuses these (E0015 for a non-`const` callee inside the
-/// macro's `const { }` wrap), so there is no macro message to equal.
-const RUSTC_JUDGED: &[&str] = &["register_init_non_const_ctor.rs", "register_init_not_constant.rs"];
+/// rustc, not the macro, refuses these — E0015 for a non-`const` callee inside the
+/// macro's `const { }` wrap (R11), E0308 for a plain `fn` called where the macro
+/// wraps an instantiation in `copper_sim::__instance` (I.13.4(d)) — so there is no
+/// macro message to equal; the transpiler refuses from its own knowledge (the
+/// fold, the registry).
+const RUSTC_JUDGED: &[&str] = &[
+    "register_init_non_const_ctor.rs",
+    "register_init_not_constant.rs",
+    "structural_plain_fn_call.rs",
+];
 
 #[test]
 fn the_transpiler_refuses_every_shape_the_macro_refuses_with_the_same_message() {

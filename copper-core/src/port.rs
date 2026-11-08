@@ -234,6 +234,42 @@ pub fn registered_wire<T: Clone + PartialEq + Send + Sync + 'static, D: ClockDom
     (out, input)
 }
 
+/// The driver end of a structural net: a `RegOut` or a plain `Out` (SPEC I.13.4(c),
+/// D-18 A3). Sealed: the two port kinds are the only drivers a net has, and which
+/// one a net carries is fixed by the child port it is passed to.
+pub trait NetDriver<T, D: ClockDomain>: net_sealed::Sealed {}
+
+mod net_sealed {
+    pub trait Sealed {}
+}
+
+impl<T, D: ClockDomain> net_sealed::Sealed for Out<T, D> {}
+impl<T, D: ClockDomain> NetDriver<T, D> for Out<T, D> {}
+impl<T, D: ClockDomain> net_sealed::Sealed for RegOut<T, D> {}
+impl<T, D: ClockDomain> NetDriver<T, D> for RegOut<T, D> {}
+
+/// A **net** of a `#[hardware(structural)]` body: `let n = net::<T, D>();`, its
+/// driver end `n.0` passed to the one child port that drives it and its reader
+/// end `n.1` to every port that reads it (SPEC I.13.4(b)–(c), D-18 A3; Phase C step
+/// 10). A net **carries no value of its own** — its value is its driver's: a
+/// `RegOut` child's committed value (`init(q)` before the first edge), a
+/// combinational child's evaluation — so it takes no initial value, and one
+/// spelling serves both driver kinds: the kind `W` is inferred from the child port
+/// `n.0` reaches. The `#[hardware(structural)]` macro writes the `_` for `W`, so
+/// the source spelling is `net::<T, D>()`.
+///
+/// A structural body is never executed: it names a design, and the design runs
+/// either hand-wired in the simulator (`wire` / `registered_wire` in a testbench)
+/// or as the hierarchy the transpiler emits (I.13.4(a)). Calling this at run time
+/// is therefore a misuse, and it panics saying so.
+pub fn net<T, D: ClockDomain, W: NetDriver<T, D>>() -> (W, In<T, D>) {
+    panic!(
+        "`net::<T, D>()` names a wire of a `#[hardware(structural)]` design and has no run-time \
+         value: a structural body is not executed (SPEC I.13.4(a)). Hand-wire the design in the \
+         testbench with `wire`/`registered_wire`, or transpile it with `--hierarchy`."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

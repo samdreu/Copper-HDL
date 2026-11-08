@@ -9,7 +9,7 @@ use copper_codegen::{transpile_source, transpile_source_hierarchy, EmitConfig};
 
 const DUAL_CLOCK_SRC: &str = r#"
 use copper_core::{Bits, Clock, ClockDomain, Logic};
-use copper_core::port::{registered_wire, wire, In, Out, RegOut};
+use copper_core::port::{net, In, Out, RegOut};
 use copper_macros::hardware;
 
 struct ClkFast;
@@ -57,8 +57,8 @@ async fn two_domain_top(
     count_out: RegOut<Bits<8>, ClkFast>,
     flag_sync_out: Out<Logic, ClkSlow>,
 ) {
-    let flag = registered_wire::<Logic, ClkFast>(&wr_clk, Logic::Zero);
-    let synced = registered_wire::<Logic, ClkSlow>(&rd_clk, Logic::Zero);
+    let flag = net::<Logic, ClkFast>();
+    let synced = net::<Logic, ClkSlow>();
     fast_counter(wr_clk, count_out, flag.0);
     sync_2ff(rd_clk, flag.1, synced.0);
     slow_consumer(synced.1, flag_sync_out);
@@ -120,7 +120,7 @@ fn hierarchy_co_emits_children_deepest_first() {
 /// consumer, skipping the synchronizer — an unsynchronized clock-domain crossing.
 const UNSYNCED_CROSSING_SRC: &str = r#"
 use copper_core::{Bits, Clock, ClockDomain, Logic};
-use copper_core::port::{registered_wire, wire, In, Out, RegOut};
+use copper_core::port::{net, In, Out, RegOut};
 use copper_macros::hardware;
 
 struct ClkFast;
@@ -151,11 +151,10 @@ fn slow_consumer(flag_in: In<Logic, ClkSlow>, out: Out<Logic, ClkSlow>) {
 #[hardware(structural)]
 async fn bad_top(
     wr_clk: Clock<ClkFast>,
-    rd_clk: Clock<ClkSlow>,
     count_out: RegOut<Bits<8>, ClkFast>,
     out: Out<Logic, ClkSlow>,
 ) {
-    let flag = registered_wire::<Logic, ClkFast>(&wr_clk, Logic::Zero);
+    let flag = net::<Logic, ClkFast>();
     fast_counter(wr_clk, count_out, flag.0);
     slow_consumer(flag.1, out);
 }
@@ -193,7 +192,7 @@ fn leaf_module_hierarchy_equals_single() {
 /// refuses the same cycle at spawn, the interpreter's design leg when it builds it.)
 const COMB_CYCLE_SRC: &str = r#"
 use copper_core::{Clock, ClockDomain, Logic};
-use copper_core::port::{wire, In, Out, RegOut};
+use copper_core::port::{net, In, Out, RegOut};
 use copper_macros::hardware;
 
 struct C;
@@ -219,25 +218,25 @@ async fn hold(clk: Clock<C>, d: In<Logic, C>, q: RegOut<Logic, C>) {
 }
 
 #[hardware(structural)]
-async fn ring(clk: Clock<C>, o: Out<Logic, C>) {
-    let x = wire::<Logic, C>(Logic::Zero);
-    let y = wire::<Logic, C>(Logic::Zero);
+async fn ring(clk: Clock<C>, o: RegOut<Logic, C>) {
+    let x = net::<Logic, C>();
+    let y = net::<Logic, C>();
     inv(x.1, y.0);
     pass(y.1, x.0);
-    pass(y.1, o);
+    hold(clk, y.1, o);
 }
 
 #[hardware(structural)]
-async fn chain(clk: Clock<C>, a: In<Logic, C>, o: Out<Logic, C>) {
-    let x = wire::<Logic, C>(Logic::Zero);
+async fn chain(clk: Clock<C>, a: In<Logic, C>, o: RegOut<Logic, C>) {
+    let x = net::<Logic, C>();
     inv(a, x.0);
-    pass(x.1, o);
+    hold(clk, x.1, o);
 }
 
 #[hardware(structural)]
 async fn broken_by_a_register(clk: Clock<C>, o: Out<Logic, C>) {
-    let x = registered_wire::<Logic, C>(&clk, Logic::Zero);
-    let y = wire::<Logic, C>(Logic::Zero);
+    let x = net::<Logic, C>();
+    let y = net::<Logic, C>();
     inv(x.1, y.0);
     hold(clk, y.1, x.0);
     pass(y.1, o);
@@ -252,7 +251,6 @@ fn combinational_cycle_through_a_structural_parent_is_refused() {
     assert!(err.contains("`inv_0`") && err.contains("`pass_0`"), "the refusal names the instances: {err}");
     // A chain is no cycle, and a sequential child's RegOut breaks one.
     transpile_source(COMB_CYCLE_SRC, Some("chain"), &EmitConfig::default()).expect("a chain is acyclic");
-    let src = COMB_CYCLE_SRC.replace("use copper_core::port::{wire,", "use copper_core::port::{registered_wire, wire,");
-    transpile_source(&src, Some("broken_by_a_register"), &EmitConfig::default())
+    transpile_source(COMB_CYCLE_SRC, Some("broken_by_a_register"), &EmitConfig::default())
         .expect("a RegOut between the two breaks the cycle");
 }

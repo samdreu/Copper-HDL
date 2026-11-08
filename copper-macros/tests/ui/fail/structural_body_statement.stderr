@@ -1,0 +1,13 @@
+error: a `let` that is not a net in a `#[hardware(structural)]` body: the body of a structural module is a wiring language — net declarations `let n = net::<T, D>()` and instantiations `child(arg, …)`, each argument a parent port, a net end `n.0`/`n.1` or a clock (`clk.clone()`), and nothing else (SPEC I.13.4(b), (d); II.1 S0). Logic belongs in a child module.
+  --> tests/ui/fail/structural_body_statement.rs:26:13
+   |
+26 |     let x = Logic::One;
+   |             ^^^^^
+
+warning: unused import: `net`
+ --> tests/ui/fail/structural_body_statement.rs:2:25
+  |
+2 | use copper_core::port::{net, In, Out, RegOut};
+  |                         ^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

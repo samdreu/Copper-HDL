@@ -1364,6 +1364,193 @@ pub fn two_flop_message(port: &str, how: &str) -> String {
     )
 }
 
+
+// ── I.13.4: the structural module's shape (S0 rows of II.1.1) ────────────────
+
+/// A net declaration `let n = net::<T, D>();` → `(n, T, D)` as token text, or the
+/// reason the statement is not one.
+fn structural_net(l: &syn::Local) -> Result<(String, String, String), Error> {
+    use syn::spanned::Spanned;
+    let name = match &l.pat {
+        Pat::Ident(pi) => pi.ident.to_string(),
+        other => return Err(Error::new(other.span(), structural_body_message("a `let` that binds a pattern"))),
+    };
+    let Some(init) = &l.init else {
+        return Err(Error::new(l.span(), structural_body_message("a `let` with no initializer")));
+    };
+    let syn::Expr::Call(call) = &*init.expr else {
+        return Err(Error::new(init.expr.span(), structural_body_message("a `let` that is not a net")));
+    };
+    let syn::Expr::Path(p) = &*call.func else {
+        return Err(Error::new(call.span(), structural_body_message("a `let` that is not a net")));
+    };
+    let last = p.path.segments.last().unwrap();
+    let callee = last.ident.to_string();
+    if callee == "wire" || callee == "registered_wire" {
+        return Err(Error::new(call.span(), RETIRED_NET_MESSAGE));
+    }
+    let args: Vec<String> = match &last.arguments {
+        syn::PathArguments::AngleBracketed(ab) => ab
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(syn::__private::ToTokens::to_token_stream(t).to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if callee != "net" || args.len() != 2 || !call.args.is_empty() {
+        return Err(Error::new(call.span(), structural_body_message("a `let` that is not `net::<T, D>()`")));
+    }
+    Ok((name, args[0].clone(), args[1].clone()))
+}
+
+/// SPEC I.13.4(b), (d) (D-18 A1, A3; S0 rows of II.1.1, both front-ends): the body
+/// of a `structural` module is a wiring language — in source order, net
+/// declarations `let n = net::<T, D>()` and instantiations `child(arg, …)`, each
+/// argument a parent port, a net's driver end `n.0` or reader end `n.1`, or a clock
+/// — `.clone()`d where a clock, a parent `In` or a reader end reaches several
+/// children (the reader clone is this rule's reading of I.13.4(b)'s "any readers",
+/// MEASUREMENTS §P) — and nothing else. Also: no
+/// instance of the module itself (I.2.5(c): the design is finite); every net driven
+/// by exactly one instance (I.13.1; a second driver is R22's); every `Clock`
+/// parameter threaded to a child (I.13.4(a): the clocks are what it passes on).
+/// That a callee is a `#[hardware]` module is the type system's in the macro (each
+/// instantiation is wrapped in `copper_sim::__instance`) and the registry's in the
+/// transpiler; the port kind on both ends is the type of `net`'s driver end.
+pub fn check_structural_body(f: &ItemFn) -> Result<(), Error> {
+    use syn::spanned::Spanned;
+    let own = f.sig.ident.to_string();
+    let params: HashSet<String> = param_idents(&f.sig);
+    let clocks: Vec<String> = f
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|a| match a {
+            FnArg::Typed(pt) if outer_type_name(&pt.ty).as_deref() == Some("Clock") => param_ident(a),
+            _ => None,
+        })
+        .collect();
+    let mut nets: Vec<(String, proc_macro2::Span)> = Vec::new();
+    let mut drives: std::collections::HashMap<String, usize> = Default::default();
+    let mut threaded: HashSet<String> = HashSet::new();
+    for st in &f.block.stmts {
+        match st {
+            syn::Stmt::Local(l) => {
+                let (name, _, _) = structural_net(l)?;
+                nets.push((name, l.span()));
+            }
+            syn::Stmt::Expr(syn::Expr::Call(call), Some(_)) => {
+                let callee = match &*call.func {
+                    syn::Expr::Path(p) if p.qself.is_none() => {
+                        p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()
+                    }
+                    other => {
+                        return Err(Error::new(other.span(), structural_body_message("a call whose callee is not a module name")))
+                    }
+                };
+                if callee == own {
+                    return Err(Error::new(call.span(), format!(
+                        "`{own}` instantiates itself: a structural module names a finite design, and an \
+                         instance of the module inside its own body has no finite flattening (SPEC \
+                         I.13.4(d); II.1 S0; I.2.5(c))."
+                    )));
+                }
+                for a in &call.args {
+                    match a {
+                        syn::Expr::Path(p) if p.path.get_ident().is_some_and(|i| params.contains(&i.to_string())) => {
+                            let n = p.path.get_ident().unwrap().to_string();
+                            if clocks.contains(&n) {
+                                threaded.insert(n);
+                            }
+                        }
+                        syn::Expr::Field(fe)
+                            if matches!(&fe.member, syn::Member::Unnamed(i) if i.index <= 1)
+                                && matches!(&*fe.base, syn::Expr::Path(p)
+                                    if p.path.get_ident().is_some_and(|i| nets.iter().any(|(n, _)| i == n))) =>
+                        {
+                            let syn::Expr::Path(p) = &*fe.base else { unreachable!() };
+                            if matches!(&fe.member, syn::Member::Unnamed(i) if i.index == 0) {
+                                *drives.entry(p.path.get_ident().unwrap().to_string()).or_default() += 1;
+                            }
+                        }
+                        // A clock or a reader reaching several children is cloned: a
+                        // clock parameter, a parent `In`, a net's reader end `n.1`.
+                        syn::Expr::MethodCall(mc)
+                            if mc.method == "clone"
+                                && mc.args.is_empty()
+                                && match &*mc.receiver {
+                                    syn::Expr::Path(p) => p.path.get_ident().is_some_and(|i| params.contains(&i.to_string())),
+                                    syn::Expr::Field(fe) => {
+                                        matches!(&fe.member, syn::Member::Unnamed(i) if i.index == 1)
+                                            && matches!(&*fe.base, syn::Expr::Path(p)
+                                                if p.path.get_ident().is_some_and(|i| nets.iter().any(|(n, _)| i == n)))
+                                    }
+                                    _ => false,
+                                } =>
+                        {
+                            if let syn::Expr::Path(p) = &*mc.receiver {
+                                let n = p.path.get_ident().unwrap().to_string();
+                                if clocks.contains(&n) {
+                                    threaded.insert(n);
+                                }
+                            }
+                        }
+                        other => {
+                            return Err(Error::new(other.span(), structural_body_message(
+                                "an argument that is not a parent port, a net end `n.0`/`n.1` or a cloned clock",
+                            )))
+                        }
+                    }
+                }
+            }
+            other => return Err(Error::new(other.span(), structural_body_message("a statement that is neither"))),
+        }
+    }
+    for (n, span) in &nets {
+        match drives.get(n).copied().unwrap_or(0) {
+            1 => {}
+            0 => {
+                return Err(Error::new(*span, format!(
+                    "net `{n}` is never driven: no instance receives its driver end `{n}.0`, so the wire has \
+                     no value (SPEC I.13.1: every wire has exactly one driver; I.13.4(d)). Pass `{n}.0` to the \
+                     child port that drives it, or delete the net."
+                )))
+            }
+            k => {
+                return Err(Error::new(*span, format!(
+                    "net `{n}` has {k} drivers: its driver end `{n}.0` is passed to {k} instances, and a wire \
+                     has one driver (SPEC I.13.1, II.1 S5 R22; I.13.4(d))."
+                )))
+            }
+        }
+    }
+    if let Some(c) = clocks.iter().find(|c| !threaded.contains(*c)) {
+        return Err(Error::new_spanned(&f.sig, format!(
+            "clock `{c}` is not passed to any child: a structural module's clocks are the clocks it \
+             threads to its children, each child on its own (SPEC I.13.4(a), (d); II.1 S0)."
+        )));
+    }
+    Ok(())
+}
+
+/// The body-form rule's one message.
+pub fn structural_body_message(what: &str) -> String {
+    format!(
+        "{what} in a `#[hardware(structural)]` body: the body of a structural module is a wiring \
+         language — net declarations `let n = net::<T, D>()` and instantiations `child(arg, …)`, each \
+         argument a parent port, a net end `n.0`/`n.1` or a clock (`clk.clone()`), and nothing else \
+         (SPEC I.13.4(b), (d); II.1 S0). Logic belongs in a child module."
+    )
+}
+
+/// The retired net spellings' one message.
+pub const RETIRED_NET_MESSAGE: &str = "`wire`/`registered_wire` in a `#[hardware(structural)]` body: \
+    a net carries no value of its own and its kind follows its driver, so the structural spelling is \
+    `let n = net::<T, D>()` with no initial value (SPEC I.13.4(c), D-18 A3). `wire` and \
+    `registered_wire` stay the testbench's spellings for hand wiring.";
+
 /// The syntactic front-end rules of II.1 and II.2, in the one order both
 /// front-ends run them (II.1.3): the header first (R20, R9, R10), then the body
 /// rules. The CFG rules (R2/R3 reachability, R11, the memory rules) and the
@@ -1378,7 +1565,7 @@ pub fn check_front_end_rules(f: &ItemFn, mode: HardwareMode) -> Result<(), Error
     crate::check_admissible(f)?;
     check_no_param_shadowing(f)?;
     if mode == HardwareMode::Structural {
-        return Ok(());
+        return check_structural_body(f);
     }
     check_module_loop_exit(f)?;
     check_break_forms(f)?;

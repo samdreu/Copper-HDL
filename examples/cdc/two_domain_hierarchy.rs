@@ -21,7 +21,7 @@
 // of "a well-formed multi-clock design behaves correctly under any relative tick
 // rate, provided every crossing goes through a synchronizer."
 
-use copper_core::port::{registered_wire, wire, In, Out, RegOut};
+use copper_core::port::{net, registered_wire, wire, In, Out, RegOut};
 use copper_core::{Bits, Clock, ClockDomain, Logic};
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
@@ -102,8 +102,10 @@ async fn two_domain_top(
     count_out: RegOut<Bits<8>, ClkFast>,
     flag_sync_out: Out<Logic, ClkSlow>,
 ) {
-    let flag = registered_wire::<Logic, ClkFast>(&wr_clk, Logic::Zero);
-    let synced = registered_wire::<Logic, ClkSlow>(&rd_clk, Logic::Zero);
+    // Nets (SPEC I.13.4(c), D-18 A3): a net carries no value of its own — its
+    // driver's — and its kind follows the child port its driver end reaches.
+    let flag = net::<Logic, ClkFast>();
+    let synced = net::<Logic, ClkSlow>();
     fast_counter(wr_clk, count_out, flag.0);
     flag_sync(rd_clk, flag.1, synced.0);
     slow_consumer(synced.1, flag_sync_out);
