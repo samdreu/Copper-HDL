@@ -240,7 +240,6 @@ pub fn lower_to_vlir(shir: &SHIRModule) -> LowerResult<VLIRModule> {
 // ── Combinational body ──────────────────────────────────────────────────────
 
 fn lower_comb(c: &SHIRCombBody, leg: &Legalizer) -> LowerResult<VLIRCombBody> {
-    let submodules = c.submodules.iter().map(|s| lower_submodule(s, leg, &MemBinding::new())).collect::<LowerResult<_>>()?;
     // A combinational module has no clock, so it has no registered outputs. A port
     // written unconditionally AND inside an `if`/`match`/`for` (a default, then an
     // override — or the reverse) keeps its unconditional write in `always_comb`, in
@@ -253,14 +252,14 @@ fn lower_comb(c: &SHIRCombBody, leg: &Legalizer) -> LowerResult<VLIRCombBody> {
     // A combinational module has no registers, so nothing is exempt.
     hoist_branch_local_defaults(&mut comb_stmts, &HashSet::new());
     check_no_latches(&comb_stmts)?;
-    Ok(VLIRCombBody { submodules, comb_stmts, output_assigns })
+    Ok(VLIRCombBody { comb_stmts, output_assigns })
 }
 
 // ── Structural body ─────────────────────────────────────────────────────────
 
 fn lower_structural(st: &SHIRStructuralBody, leg: &Legalizer) -> LowerResult<VLIRStructuralBody> {
     let nets = st.nets.iter().map(|(n, ty)| (leg.get(n), width_of(ty))).collect();
-    let submodules = st.submodules.iter().map(|s| lower_submodule(s, leg, &MemBinding::new())).collect::<LowerResult<_>>()?;
+    let submodules = st.submodules.iter().map(|s| lower_submodule(s, leg)).collect::<LowerResult<_>>()?;
     Ok(VLIRStructuralBody { nets, submodules })
 }
 
@@ -291,8 +290,6 @@ fn lower_seq(
             }),
         })
         .collect();
-
-    let submodules = s.submodules.iter().map(|m| lower_submodule(m, leg, &MemBinding::new())).collect::<LowerResult<_>>()?;
 
     // Width of the phase register (for phase guards / PhaseEq literals).
     let phase_r_width = s
@@ -471,7 +468,6 @@ fn lower_seq(
         clock: clock.clone(),
         reg_decls,
         memories,
-        submodules,
         comb_phases,
         always_ff,
         port_inits,
@@ -794,26 +790,14 @@ fn clone_comb_stmt(s: &VLIRStmt) -> VLIRStmt {
 
 // ── Submodule ───────────────────────────────────────────────────────────────
 
-fn lower_submodule(
-    m: &SHIRSubmoduleInst,
-    leg: &Legalizer,
-    mb: &MemBinding,
-) -> LowerResult<VLIRSubmoduleInst> {
+fn lower_submodule(m: &SHIRSubmoduleInst, leg: &Legalizer) -> LowerResult<VLIRSubmoduleInst> {
     Ok(VLIRSubmoduleInst {
         inst_name: leg.get(&m.inst_name),
         module_name: leg.get(&m.module_name),
-        inputs: m
-            .inputs
-            .iter()
-            .map(|(port, e)| Ok((leg.get(port), lower_expr(e, leg, mb)?)))
-            .collect::<LowerResult<_>>()?,
-        output_wire: leg.get(&m.output_wire),
-        output_width: width_of(&m.output_ty),
         // Legalize both sides: child port names and the parent-side signal/net
         // names must match the identifiers emitted elsewhere in the module.
         clocks: m.clocks.iter().map(|(p, s)| (leg.get(p), leg.get(s))).collect(),
         port_nets: m.port_nets.iter().map(|(p, n)| (leg.get(p), leg.get(n))).collect(),
-        output_port: m.output_port.as_ref().map(|p| leg.get(p)),
     })
 }
 
@@ -2651,22 +2635,12 @@ pub fn legalized_port_name(name: &str) -> String {
 fn collect_and_legalize_body_names(body: &SHIRBody, leg: &mut Legalizer) {
     match body {
         SHIRBody::Combinational(c) => {
-            for s in &c.submodules {
-                leg.legalize(&s.inst_name);
-                leg.legalize(&s.module_name);
-                leg.legalize(&s.output_wire);
-            }
             collect_stmt_names(&c.stmts, leg);
         }
         SHIRBody::Sequential(s) => {
             leg.legalize(&s.clock);
             for r in &s.registers {
                 leg.legalize(&r.name);
-            }
-            for m in &s.submodules {
-                leg.legalize(&m.inst_name);
-                leg.legalize(&m.module_name);
-                leg.legalize(&m.output_wire);
             }
             // The memory array and every net its ports could drive, reserved up
             // front so a user signal cannot collide with a synthesized name.
@@ -3670,11 +3644,6 @@ fn narrow_sole_resize_wires(m: &mut VLIRModule) {
                 }
             }
             None => {}
-        }
-    }
-    for sub in &seq.submodules {
-        for (_, e) in &sub.inputs {
-            scan_expr(e, &mut uses);
         }
     }
 

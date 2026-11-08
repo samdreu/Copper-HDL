@@ -1990,9 +1990,11 @@ fn unflattenable_in_expr(e: &ExprType, in_loop: bool) -> Option<Unflattenable> {
         // A `continue` of a tick-bearing counted `for` is the next ITERATION —
         // increment, test — and skips the iteration's tick, so the desugared loop's
         // hoisted tick would no longer stand for the last iteration's. The desugar
-        // declines such a `for`.
+        // declines such a `for`. Defence in depth since Phase C step 11b (D-23 (2)):
+        // `front_end::check_ticking_for_continue` refuses it first in both front-ends
+        // with this message (SPEC II.3.3 (h)); the fix direction is the lowering.
         ExprType::ForLoop(f) if stmts_contain_tick(&f.body) && stmts_continue_enclosing_loop(&f.body) => named(
-            "a `continue` inside a tick-bearing counted `for`",
+            copper_analysis::front_end::TICKING_FOR_CONTINUE_MESSAGE,
             f.span,
             "restructure the body so the path falls through to the iteration's tick, e.g. \
              `if ok { <work> }` rather than `if !ok { continue; } <work>`",

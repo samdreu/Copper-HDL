@@ -110,7 +110,6 @@ pub struct VLIRStructuralBody {
 
 #[derive(Debug)]
 pub struct VLIRCombBody {
-    pub submodules: Vec<VLIRSubmoduleInst>,
     /// `always_comb` block contents, in order.
     pub comb_stmts: Vec<VLIRStmt>,
     /// `assign out = <expr>;` — one per output port.
@@ -125,7 +124,6 @@ pub struct VLIRSeqBody {
     pub reg_decls: Vec<VLIRRegDecl>,
     /// Memory arrays declared by this module, with their read-port output nets.
     pub memories: Vec<VLIRMemDecl>,
-    pub submodules: Vec<VLIRSubmoduleInst>,
     /// One `always_comb` block per phase (the phase's wires and memory nets; its
     /// port drives are in `always_ff`). Single-phase modules have exactly one,
     /// with `phase_guard: None`.
@@ -215,15 +213,10 @@ pub struct VLIRMemReadNet {
 pub struct VLIRSubmoduleInst {
     pub inst_name: String,
     pub module_name: String,
-    pub inputs: Vec<(String, VLIRExpr)>,
-    pub output_wire: String,
-    pub output_width: Width,
     /// `(child_clock_port, parent_clock_signal)` — emit wires `.clk(sig)`.
     pub clocks: Vec<(String, String)>,
     /// `(child_port, net_name)` — direct net connections (structural form).
     pub port_nets: Vec<(String, String)>,
-    /// Child output port name for the single-output expression form.
-    pub output_port: Option<String>,
 }
 
 #[derive(Debug)]

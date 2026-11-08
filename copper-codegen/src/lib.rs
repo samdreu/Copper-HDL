@@ -318,7 +318,7 @@ impl PreparedSource {
     }
 
     /// The `#[hardware]` submodules `name` directly instantiates, read off its
-    /// lowered CHIR (the authoritative submodule set for every body kind).
+    /// lowered CHIR. Only a structural body instantiates (SPEC I.13.5, D-23).
     fn direct_deps(&self, name: &str) -> Vec<String> {
         use copper_core::chir::CHIRBody;
         let Some(fir) = self.registry.get(name) else { return Vec::new() };
@@ -326,8 +326,7 @@ impl PreparedSource {
             return Vec::new();
         };
         let subs = match &chir.body {
-            CHIRBody::Combinational(b) => &b.submodules,
-            CHIRBody::Sequential(b) => &b.submodules,
+            CHIRBody::Combinational(_) | CHIRBody::Sequential(_) => return Vec::new(),
             CHIRBody::Structural(b) => &b.submodules,
         };
         let mut names: Vec<String> = subs.iter().map(|s| s.module_name.clone()).collect();
@@ -494,6 +493,18 @@ fn checked_fir_for_target(
     // the lowered body's tick-delimited segments, which made an ordinary memory
     // design fail the moment anything else in the module needed extraction.
     copper_analysis::check_memory_staging(target).map_err(|e| e.to_string())?;
+    // SPEC I.13.5 (D-18 A2, D-23 (1), Phase C step 11b): a behavioural body
+    // instantiates nothing. The macro has rustc refuse `child(a, b);` (the generated
+    // fn's denied `#[must_use]`, whose reason is this message); the transpiler
+    // refuses every call its registry resolves to a `#[hardware]` fn. Late, as the
+    // macro's refusal is rustc's, after every macro rule. (`lower_hardware_call`, the
+    // legacy expression form that instantiated such a call, is deleted.)
+    if !matches!(copper_analysis::hardware_mode(target), Some(Ok(copper_analysis::HardwareMode::Structural))) {
+        copper_analysis::front_end::check_no_behavioural_instance(target, &|n| {
+            prepared.registry.contains_key(n) || prepared.hardware_fns.contains(n)
+        })
+        .map_err(|e| e.to_string())?;
+    }
     // (`memory_result_drives_plain_out`, rule 7, was checked here: retired as
     // vacuous under D-8 — SPEC II.3.2.)
 

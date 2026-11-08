@@ -1,0 +1,17 @@
+error: unused return value of `child` that must be used
+  --> tests/ui/fail/behavioural_instantiation.rs:24:5
+   |
+24 |     child(clk.clone(), o);
+   |     ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: a `#[hardware]` module is instantiated only in a `#[hardware(structural)]` body: a sequential, synchronizer or combinational body contains no instantiation (SPEC I.13.5, D-18 A2, D-23). Write a structural parent that wires this child beside the module that needed it
+note: the lint level is defined here
+  --> tests/ui/fail/behavioural_instantiation.rs:22:1
+   |
+22 | #[hardware(sequential)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `hardware` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: use `let _ = ...` to ignore the resulting value
+   |
+24 |     let _ = child(clk.clone(), o);
+   |     +++++++

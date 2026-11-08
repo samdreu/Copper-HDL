@@ -3,7 +3,8 @@
 //!
 //! - [`check_outside_methods`] — `checked_*` (an `Option`, I.14.3(c)) and
 //!   `is_valid()` (a question about the simulator's third value, which no 2-state
-//!   realization holds, I.14.3(d)) are OUTSIDE (D-19; I.14.7 (7)).
+//!   realization holds, I.14.3(d)) are OUTSIDE (D-19; I.14.7 (7)); so is `==`/`!=`
+//!   with an X-literal operand, the same question spelled with an operator (D-23 (3)).
 //! - [`check_memory_port_index`] — a memory port index `k ≥ R` (`≥ W`) is a shape
 //!   rule decided at the instance (D-19 6b-A, I.14.6(c); I.14.7 (9)).
 
@@ -15,6 +16,11 @@ use syn::{Expr, ItemFn};
 pub const CHECKED_METHOD_MESSAGE: &str = "`checked_*` arithmetic returns an `Option`, which \
     is not a hardware value: it is OUTSIDE (SPEC I.14.3(c), D-19). Use `wrapping_*` (modular) \
     or `saturating_*` (clamped), or test the operands before the operation";
+
+/// The message for `==`/`!=` with an X literal operand (I.14.3(d), D-23 (3)).
+pub const X_COMPARISON_MESSAGE: &str = "a comparison with the X literal (`Logic::X`, `Bits::x()`) \
+    asks whether a value holds the simulator's third value X, which no 2-state realization holds: \
+    it is `is_valid()` spelled with an operator, and OUTSIDE (SPEC I.14.3(d), D-19, D-23)";
 
 /// The message for `is_valid()` (I.14.3(d)).
 pub const IS_VALID_MESSAGE: &str = "`is_valid()` asks whether a value holds the simulator's \
@@ -32,8 +38,8 @@ const CHECKED: &[&str] = &[
     "checked_pow",
 ];
 
-/// Refuse the OUTSIDE methods of I.14.3: `checked_*` and `is_valid()`, in every
-/// module mode. One function for the macro and `transpile_target`.
+/// Refuse the OUTSIDE methods of I.14.3: `checked_*` and `is_valid()`, and `==`/`!=`
+/// with an X-literal operand (D-23 (3)), in every module mode. One function for the macro and `transpile_target`.
 pub fn check_outside_methods(f: &ItemFn) -> Result<(), syn::Error> {
     struct V {
         err: Option<syn::Error>,
@@ -50,10 +56,41 @@ pub fn check_outside_methods(f: &ItemFn) -> Result<(), syn::Error> {
             }
             syn::visit::visit_expr_method_call(self, mc);
         }
+        fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
+            if self.err.is_none() && matches!(b.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
+                let x = if is_x_literal(&b.right) { Some(&b.right) } else if is_x_literal(&b.left) { Some(&b.left) } else { None };
+                if let Some(x) = x {
+                    self.err = Some(syn::Error::new(x.span(), X_COMPARISON_MESSAGE));
+                }
+            }
+            syn::visit::visit_expr_binary(self, b);
+        }
     }
     let mut v = V { err: None };
     v.visit_block(&f.block);
     v.err.map_or(Ok(()), Err)
+}
+
+/// `Logic::X`, `Bits::x()` or `Bits::<N>::x()` (through parentheses and `&`): the
+/// X literal of I.14.4.
+fn is_x_literal(e: &Expr) -> bool {
+    match e {
+        Expr::Paren(p) => is_x_literal(&p.expr),
+        Expr::Group(g) => is_x_literal(&g.expr),
+        Expr::Reference(r) => is_x_literal(&r.expr),
+        Expr::Path(p) => {
+            let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            segs.len() >= 2 && segs[segs.len() - 1] == "X" && segs[segs.len() - 2] == "Logic"
+        }
+        Expr::Call(c) if c.args.is_empty() => match &*c.func {
+            Expr::Path(p) => {
+                let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                segs.len() >= 2 && segs[segs.len() - 1] == "x" && segs[segs.len() - 2] == "Bits"
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// The message for a memory port index out of range (I.14.6(c)).

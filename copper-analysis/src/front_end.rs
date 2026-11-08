@@ -968,6 +968,96 @@ pub fn check_break_forms(f: &ItemFn) -> Result<(), Error> {
     }
 }
 
+/// The message for a `continue` of a tick-bearing `for` (II.3 found continue-for, D-23 (2)).
+pub const TICKING_FOR_CONTINUE_MESSAGE: &str = "a `continue` of a `for` whose body holds a \
+    `clk.tick().await` is not realized yet: it means the next iteration — increment, then test \
+    (SPEC I.8.5, D-10 A2-i) — but the transpiler's counted-`for` lowering has no state for it, so \
+    both front-ends refuse it (a dated lowering limitation, SPEC II.3.3 \"continue-for\", D-23). \
+    Restructure the body so the path falls through to the iteration's tick, e.g. \
+    `if ok { <work> }` rather than `if !ok { continue; } <work>`";
+
+/// SPEC II.3.3 row "continue-for" (D-23 (2), Phase C step 11b): a `continue` that
+/// targets a `for` whose body holds a tick is REFUSED in both front-ends with one
+/// message until the lowering of I.8.5 (increment, then test) lands. A `continue`
+/// inside a loop nested in the `for` targets that loop, not the `for`, and is not
+/// this rule's; a tick-free `for` is unrolled and admits `continue` as before.
+pub fn check_ticking_for_continue(f: &ItemFn) -> Result<(), Error> {
+    /// The first unlabelled `continue` that targets the loop whose body is walked:
+    /// nested loops, closures and items are not entered.
+    struct C(Option<proc_macro2::Span>);
+    impl<'ast> Visit<'ast> for C {
+        fn visit_expr_continue(&mut self, n: &'ast syn::ExprContinue) {
+            if self.0.is_none() && n.label.is_none() {
+                self.0 = Some(syn::spanned::Spanned::span(n));
+            }
+        }
+        fn visit_expr_loop(&mut self, _: &'ast syn::ExprLoop) {}
+        fn visit_expr_while(&mut self, _: &'ast syn::ExprWhile) {}
+        fn visit_expr_for_loop(&mut self, _: &'ast syn::ExprForLoop) {}
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    struct V(Option<proc_macro2::Span>);
+    impl<'ast> Visit<'ast> for V {
+        fn visit_expr_for_loop(&mut self, fl: &'ast syn::ExprForLoop) {
+            if self.0.is_none() && fl.body.stmts.iter().any(crate::cfg::stmt_contains_tick) {
+                let mut c = C(None);
+                c.visit_block(&fl.body);
+                self.0 = c.0;
+            }
+            syn::visit::visit_expr_for_loop(self, fl);
+        }
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let mut v = V(None);
+    v.visit_block(&f.block);
+    match v.0 {
+        Some(span) => Err(Error::new(span, TICKING_FOR_CONTINUE_MESSAGE)),
+        None => Ok(()),
+    }
+}
+
+/// The message for a call of a `#[hardware]` fn in a behavioural body (SPEC I.13.5,
+/// D-23 (1)). The macro puts it on every generated behavioural fn as its
+/// `#[must_use]` reason and denies `unused_must_use` in the body, so rustc prints it
+/// as the note of the refusal; the transpiler refuses with it from its registry.
+pub const BEHAVIOURAL_INSTANCE_MESSAGE: &str = "a `#[hardware]` module is instantiated only in a \
+    `#[hardware(structural)]` body: a sequential, synchronizer or combinational body contains no \
+    instantiation (SPEC I.13.5, D-18 A2, D-23). Write a structural parent that wires this child \
+    beside the module that needed it";
+
+/// SPEC I.13.5 (D-18 A2, D-23 (1)), the transpiler's half: a call in a
+/// non-structural body whose callee resolves (`is_hardware`, the transpiler's
+/// registry) to a `#[hardware]` fn is refused. The macro cannot tell such a callee
+/// from a helper `fn` of the same shape; rustc does, through the generated fn's
+/// denied `#[must_use]`.
+pub fn check_no_behavioural_instance(f: &ItemFn, is_hardware: &dyn Fn(&str) -> bool) -> Result<(), Error> {
+    struct V<'a> {
+        is_hw: &'a dyn Fn(&str) -> bool,
+        found: Option<proc_macro2::Span>,
+    }
+    impl<'ast> Visit<'ast> for V<'_> {
+        fn visit_expr_call(&mut self, n: &'ast syn::ExprCall) {
+            if self.found.is_none() {
+                if let syn::Expr::Path(p) = &*n.func {
+                    if p.path.segments.last().is_some_and(|s| (self.is_hw)(&s.ident.to_string())) {
+                        self.found = Some(syn::spanned::Spanned::span(n));
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, n);
+        }
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let mut v = V { is_hw: is_hardware, found: None };
+    v.visit_block(&f.block);
+    match v.found {
+        Some(span) => Err(Error::new(span, BEHAVIOURAL_INSTANCE_MESSAGE)),
+        None => Ok(()),
+    }
+}
+
 /// R12's one message.
 pub fn break_form_message(what: &str) -> String {
     format!(
@@ -1612,6 +1702,7 @@ pub fn check_front_end_rules(f: &ItemFn, mode: HardwareMode) -> Result<(), Error
     }
     check_module_loop_exit(f)?;
     check_break_forms(f)?;
+    check_ticking_for_continue(f)?;
     check_tick_free_for_bounds(f)?;
     check_no_body_macros(f)?;
     match mode {

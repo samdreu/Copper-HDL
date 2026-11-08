@@ -1,0 +1,19 @@
+error: a comparison with the X literal (`Logic::X`, `Bits::x()`) asks whether a value holds the simulator's third value X, which no 2-state realization holds: it is `is_valid()` spelled with an operator, and OUTSIDE (SPEC I.14.3(d), D-19, D-23)
+  --> tests/ui/fail/outside_x_comparison.rs:14:28
+   |
+14 |     q.write(if a.read() == Logic::X { Logic::One } else { Logic::Zero });
+   |                            ^^^^^
+
+warning: unused import: `Logic`
+ --> tests/ui/fail/outside_x_comparison.rs:1:32
+  |
+1 | use copper_core::{ClockDomain, Logic};
+  |                                ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `Out`
+ --> tests/ui/fail/outside_x_comparison.rs:2:25
+  |
+2 | use copper_core::port::{In, Out};
+  |                         ^^  ^^^

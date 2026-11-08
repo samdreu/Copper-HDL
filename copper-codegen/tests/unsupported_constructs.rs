@@ -972,6 +972,49 @@ fn a_runtime_empty_counted_for_ending_an_enclosing_for_has_its_own_diagnostic() 
     transpile(&constant).expect("a constant inner bound is statically non-empty and transpiles");
 }
 
+/// SPEC II.3.3 (h) (D-23 (2), Phase C step 11b): a `continue` of a tick-bearing `for`
+/// means increment-then-test (I.8.5), which the counted-`for` lowering does not
+/// realize. Until 2026-11-08 the transpiler refused it alone (MEASUREMENTS §R.3);
+/// `copper_analysis::front_end::check_ticking_for_continue` now refuses it in both
+/// front-ends with one message (the macro's witness is
+/// `copper-macros/tests/ui/fail/ticking_for_continue.rs`). A `continue` of a loop
+/// NESTED in the `for` targets that loop (row (a), realized) and stays admitted.
+#[test]
+fn a_continue_of_a_tick_bearing_for_is_refused_with_the_shared_message() {
+    let src = r#"
+#[hardware(sequential)]
+async fn cf(clk: Clock<MainClk>, a: In<Logic, MainClk>, o: RegOut<Logic, MainClk>) {
+    loop {
+        for _i in 0..4 {
+            if a.read() == Logic::One { clk.tick().await; continue; }
+            o.write(Logic::Zero);
+            clk.tick().await;
+        }
+    }
+}
+"#;
+    let err = transpile(src).expect_err("NOW SUPPORTED: a `continue` of a tick-bearing `for` transpiles — sweep it");
+    assert!(err.contains(copper_analysis::front_end::TICKING_FOR_CONTINUE_MESSAGE), "not the shared message: {err}");
+    let nested = r#"
+#[hardware(sequential)]
+async fn cfn(clk: Clock<MainClk>, a: In<Logic, MainClk>, o: RegOut<Logic, MainClk>) {
+    loop {
+        for _i in 0..4 {
+            loop {
+                let v = a.read();
+                if v == Logic::Zero { break; }
+                if v == Logic::One { clk.tick().await; continue; }
+                clk.tick().await;
+            }
+            o.write(Logic::Zero);
+            clk.tick().await;
+        }
+    }
+}
+"#;
+    transpile(nested).expect("a `continue` of a loop nested in the `for` is the nested loop's, and admitted");
+}
+
 /// An element write to an array register inside a combinational `for`: one write site
 /// run once per iteration, all in one cycle. Measured 2026-11-06 (Phase C step 5,
 /// MEASUREMENTS §J.6) admitted and divergent — the site's one write port had its nets
@@ -1087,7 +1130,8 @@ async fn m(clk: Clock<C>, a: In<Bits<2>, C>, q: RegOut<Bits<8>, C>) {
 
 /// `Bits::x()` / `Logic::X` as a VALUE emit the type's X literal (I.14.7 (6), D-19's
 /// `xw_port`); a comparison with one asks whether a value is X — the `is_valid`
-/// class — and stays refused (transpiler only; recorded as REFUSED-one, §M).
+/// class — and is OUTSIDE, refused in both front-ends with one message since Phase C
+/// step 11b (D-23 (3); until then the transpiler only, REFUSED-one, §M).
 #[test]
 fn the_x_literal_is_emitted_as_a_value_and_refused_in_a_comparison() {
     let src = r#"
@@ -1109,5 +1153,5 @@ fn m(a: In<Logic, C>, q: Out<Logic, C>) {
 }
 "#;
     let err = transpile(cmp).expect_err("a comparison with X is refused");
-    assert!(err.contains("asks whether a value is X"), "{err}");
+    assert!(err.contains(copper_analysis::X_COMPARISON_MESSAGE), "{err}");
 }

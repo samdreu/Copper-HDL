@@ -1,12 +1,18 @@
 //! Module-composition tests: combinational logic as plain functions, sequential
-//! modules spawned as a tracked hierarchy (`spawn_child` / `module_info`) and as
-//! peers (`spawn_untracked`). Uses the current `In<T,D>` / `Out<T,D>` wire port
-//! model.
+//! modules composed by a testbench (`spawn_wired`, the hand wiring of a design,
+//! SPEC I.13.3) and spawned as peers (`spawn_untracked`). Uses the current
+//! `In<T,D>` / `RegOut<T,D>` wire port model.
+//!
+//! Until Phase C step 11b the pipeline was spawned with `spawn_child!`, which also
+//! recorded a parent/child `ModuleInfo` for a parent that was never a module. A
+//! hierarchy is a structural module (SPEC I.13.5, D-18 A2, D-23), so `spawn_child`,
+//! `spawn_child!` and `module_info` were deleted; the children are wired here as a
+//! testbench wires any design, which stays legal.
 
-use copper_core::port::{wire, In, Out, RegOut, registered_wire};
+use copper_core::port::{wire, In, RegOut, registered_wire};
 use copper_core::{Clock, ClockDomain};
 use copper_macros::hardware;
-use copper_sim::{spawn_child, HardwareExecutor};
+use copper_sim::HardwareExecutor;
 
 struct MainClk;
 impl ClockDomain for MainClk {}
@@ -70,7 +76,7 @@ fn combinational_modules_are_plain_functions() {
 }
 
 #[test]
-fn sequential_modules_spawn_with_spawn_child() {
+fn sequential_modules_compose_in_a_testbench() {
     let mut clk = Clock::<MainClk>::new();
     let mut exec = HardwareExecutor::new();
 
@@ -80,21 +86,11 @@ fn sequential_modules_spawn_with_spawn_child() {
     let (out_drv, out_obs) = registered_wire::<u8, MainClk>(&clk, 0);
 
     let s1_reads = vec![in_port.wire_id()];
-    spawn_child!(
-        exec,
-        "pipeline",
-        "stage_add_one",
-        stage_add_one(clk.clone(), in_port, mid_out),
-        s1_reads
-    );
+    let s1_dirties = vec![mid_out.dirty_handle()];
+    exec.spawn_wired(stage_add_one(clk.clone(), in_port, mid_out), s1_dirties, s1_reads);
     let s2_reads = vec![mid_in.wire_id()];
-    spawn_child!(
-        exec,
-        "pipeline",
-        "stage_double",
-        stage_double(clk.clone(), mid_in, out_drv),
-        s2_reads
-    );
+    let s2_dirties = vec![out_drv.dirty_handle()];
+    exec.spawn_wired(stage_double(clk.clone(), mid_in, out_drv), s2_dirties, s2_reads);
 
     // Two-stage registered pipeline: affine_mix has a TWO-FLOP latency — the
     // input driven before edge k is sampled at k's pre-edge, commits through
@@ -111,21 +107,6 @@ fn sequential_modules_spawn_with_spawn_child() {
         let observed = out_obs.read();
         assert_eq!(observed, *expected, "cycle {}", clk.cycle());
     }
-
-    let pipeline = exec.module_info("pipeline").expect("pipeline metadata missing");
-    assert_eq!(pipeline.children.len(), 2);
-    assert!(pipeline.children.contains(&"stage_add_one".to_string()));
-    assert!(pipeline.children.contains(&"stage_double".to_string()));
-
-    let stage1 = exec
-        .module_info("stage_add_one")
-        .expect("stage_add_one metadata missing");
-    assert_eq!(stage1.parent.as_deref(), Some("pipeline"));
-
-    let stage2 = exec
-        .module_info("stage_double")
-        .expect("stage_double metadata missing");
-    assert_eq!(stage2.parent.as_deref(), Some("pipeline"));
 }
 
 #[test]

@@ -15,7 +15,7 @@ pub use testing::{HardwareTest, TestResult, make_cycle};
 pub mod executor;
 
 pub use executor::{
-    __instance, HardwareExecutor, HardwareModule, ModuleInfo, PollOrder, SchedulerMode,
+    __instance, HardwareExecutor, HardwareModule, PollOrder, SchedulerMode,
 };
 
 /// A future that suspends for exactly one delta cycle, then resumes.
@@ -59,19 +59,6 @@ pub fn delta_yield() -> DeltaYield {
 // deleted with the two-job executor (Phase C step 3, D-8): under one resumption
 // per tick every read sees `x_{N+1}` with no barrier.
 
-/// A helper macro to spawn a child module's future and track the parent-child
-/// relationship in the executor.
-///
-/// The trailing `reads` argument is the child's input wire-ids (`vec![
-/// port.wire_id(), .. ]`), recorded for the item-6 dependency graph. Phase 1
-/// records only — it has no effect on the current scheduler.
-#[macro_export]
-macro_rules! spawn_child {
-    ($exec:expr, $parent:expr, $module_future:expr, $reads:expr) => {{
-        $exec.spawn_child(stringify!($module_future), $parent, $module_future, $reads)
-    }};
-    ($exec:expr, $parent:expr, $child_name:expr, $module_future:expr, $reads:expr) => {{
-        $exec.spawn_child($child_name, $parent, $module_future, $reads)
-    }};
-}
+// The `spawn_child!` macro (a spawn recording a parent/child relationship) was
+// deleted in Phase C step 11b with `HardwareExecutor::spawn_child` (SPEC I.13.5, D-23).
 

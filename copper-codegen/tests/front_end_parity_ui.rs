@@ -83,6 +83,14 @@ const RUSTC_JUDGED: &[&str] = &[
     "structural_plain_fn_call.rs",
 ];
 
+/// ui/fail cases rustc refuses through a lint the macro denies, with the macro's text
+/// as the lint's reason: rustc's first line is the lint's own ("unused return value of
+/// `child` that must be used"), and the message is the `= note:` line. SPEC I.13.5
+/// (D-23 (1)): the generated fn's `#[must_use]` reason, `unused_must_use` denied in
+/// every behavioural body. The transpiler's message must equal the note.
+const LINT_JUDGED: &[(&str, &str)] =
+    &[("behavioural_instantiation.rs", copper_analysis::front_end::BEHAVIOURAL_INSTANCE_MESSAGE)];
+
 #[test]
 fn the_transpiler_refuses_every_shape_the_macro_refuses_with_the_same_message() {
     let fail = cases("fail");
@@ -99,6 +107,16 @@ fn the_transpiler_refuses_every_shape_the_macro_refuses_with_the_same_message() 
             Err(e) => e,
         };
         if RUSTC_JUDGED.contains(&name.as_str()) {
+            continue;
+        }
+        if let Some((_, msg)) = LINT_JUDGED.iter().find(|(n, _)| *n == name) {
+            let stderr = std::fs::read_to_string(p.with_extension("stderr")).unwrap();
+            if !stderr.contains(&format!("= note: {msg}")) {
+                other_message.push(format!("{name}: the .stderr does not carry the note `{msg}`"));
+            }
+            if !err.contains(msg) {
+                other_message.push(format!("{name}:\n    note:       {msg}\n    transpiler: {err}"));
+            }
             continue;
         }
         let stderr = std::fs::read_to_string(p.with_extension("stderr")).unwrap();

@@ -165,7 +165,6 @@ pub struct CHIRStructuralBody {
 /// in source order.
 #[derive(Debug, Clone)]
 pub struct CHIRCombBody {
-    pub submodules: Vec<CHIRSubmoduleInst>,
     pub stmts: Vec<CHIRStmt>,
 }
 
@@ -178,8 +177,6 @@ pub struct CHIRSeqBody {
     pub registers: Vec<CHIRRegDecl>,
     /// `Memory<..>` instances declared before the loop.
     pub memories: Vec<CHIRMemoryDecl>,
-    /// `#[hardware]` submodule instantiations used in this module.
-    pub submodules: Vec<CHIRSubmoduleInst>,
     /// The infinite loop body containing one or more AwaitTick boundaries.
     pub loop_body: Vec<CHIRStmt>,
     /// The loop body's segment 0 reads [`STARTED_REG`] to run the pre-loop
@@ -275,24 +272,15 @@ pub enum CHIRMemInit {
 pub struct CHIRSubmoduleInst {
     pub inst_name: String,
     pub module_name: String,
-    pub inputs: Vec<(String, CHIRExpr)>,
-    pub output_wire: String,
-    pub output_ty: CHIRType,
-    /// Clock port connections: `(child_clock_port_name, parent_clock_signal)`.
-    /// Empty for a submodule used as a combinational expression inside a normal
-    /// module (the legacy expression model). A structurally-instantiated clocked
-    /// child carries its clock port(s) here so emit can wire `.clk(parent_clk)`.
+    /// Clock port connections: `(child_clock_port_name, parent_clock_signal)`, so
+    /// emit can wire `.clk(parent_clk)`.
     pub clocks: Vec<(String, String)>,
-    /// Port connections whose value is an internal net / parent port name rather
-    /// than a lowered expression — `(child_port_name, net_name)`. Used by the
-    /// structural (statement/port) instantiation form for both extra outputs and
-    /// net-valued inputs. The legacy expression form leaves this empty and uses
-    /// `inputs` + `output_wire`.
+    /// Every other port connection: `(child_port_name, net_name)`, the net an
+    /// internal net or a parent port. (The legacy expression form's `inputs`,
+    /// `output_wire`, `output_ty` and `output_port` were deleted with
+    /// `lower_hardware_call`: an instance is a structural body's only, SPEC I.13.5,
+    /// D-23.)
     pub port_nets: Vec<(String, String)>,
-    /// The child's *output* port name for the single-output expression form
-    /// (emit wires `.<output_port>(output_wire)`). `None` when the child's
-    /// outputs are all carried in `port_nets` (structural form).
-    pub output_port: Option<String>,
     pub span: SourceSpan,
 }
 

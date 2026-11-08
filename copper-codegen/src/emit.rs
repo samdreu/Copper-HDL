@@ -197,7 +197,6 @@ impl Emitter<'_> {
     // ── Combinational body ──────────────────────────────────────────────────
 
     fn comb_body(&mut self, c: &VLIRCombBody) {
-        self.submodules(&c.submodules);
         self.emit_wire_decls(&c.comb_stmts);
         if !c.comb_stmts.is_empty() {
             self.out.push_str(&format!("{}always_comb begin\n", self.indent(1)));
@@ -225,8 +224,6 @@ impl Emitter<'_> {
         self.reg_inits(&s.reg_decls, &s.port_inits);
 
         self.mem_decls(&s.memories);
-
-        self.submodules(&s.submodules);
 
         // Declare intermediate combinational wires used in the pre-edge phases.
         let phase_stmts: Vec<&VLIRStmt> =
@@ -442,41 +439,22 @@ impl Emitter<'_> {
     // ── Submodules ──────────────────────────────────────────────────────────
 
     fn submodules(&mut self, subs: &[VLIRSubmoduleInst]) {
+        // The one instantiation form (a structural body's, SPEC I.13.5): every
+        // connection is a named port wired to an existing net/port — clocks first,
+        // then data ports. The nets are declared by the parent's `structural_body`.
+        // (The legacy expression form, an instance-local output wire, was deleted
+        // with `lower_hardware_call`, D-23.)
         for s in subs {
-            // Structural (statement/port) form: every connection is a named port
-            // wired to an existing net/port — clocks first, then data ports. No
-            // instance-local output wire to declare (the nets are declared by the
-            // parent's `structural_body`).
-            if !s.clocks.is_empty() || !s.port_nets.is_empty() {
-                self.out.push_str(&format!("{}{} {} (\n", self.indent(1), s.module_name, s.inst_name));
-                let conns: Vec<(String, String)> = s.clocks.iter()
-                    .chain(s.port_nets.iter())
-                    .map(|(p, n)| (p.clone(), n.clone()))
-                    .collect();
-                let last = conns.len().saturating_sub(1);
-                for (i, (port, net)) in conns.iter().enumerate() {
-                    let comma = if i == last { "" } else { "," };
-                    self.out.push_str(&format!("{}.{} ({}){}\n", self.indent(2), port, net, comma));
-                }
-                self.out.push_str(&format!("{});\n\n", self.indent(1)));
-                continue;
-            }
-
-            // Legacy expression form: a single combinational output wire the
-            // caller reads. Declare the instance's output wire immediately before
-            // the instance, then wire inputs + the output port.
-            self.out.push_str(&format!(
-                "{}logic {}{};\n",
-                self.indent(1),
-                range_str(&s.output_width),
-                s.output_wire
-            ));
             self.out.push_str(&format!("{}{} {} (\n", self.indent(1), s.module_name, s.inst_name));
-            for (port, val) in &s.inputs {
-                self.out.push_str(&format!("{}.{} ({}),\n", self.indent(2), port, expr_str(val)));
+            let conns: Vec<(String, String)> = s.clocks.iter()
+                .chain(s.port_nets.iter())
+                .map(|(p, n)| (p.clone(), n.clone()))
+                .collect();
+            let last = conns.len().saturating_sub(1);
+            for (i, (port, net)) in conns.iter().enumerate() {
+                let comma = if i == last { "" } else { "," };
+                self.out.push_str(&format!("{}.{} ({}){}\n", self.indent(2), port, net, comma));
             }
-            let out_port = s.output_port.as_deref().unwrap_or("out");
-            self.out.push_str(&format!("{}.{} ({})\n", self.indent(2), out_port, s.output_wire));
             self.out.push_str(&format!("{});\n\n", self.indent(1)));
         }
     }
@@ -942,7 +920,6 @@ mod tests {
                 registered: false,
             }],
             body: VLIRBody::Combinational(VLIRCombBody {
-                submodules: vec![],
                 comb_stmts: vec![VLIRStmt::ForLoop {
                     var: "i".to_string(),
                     start: VLIRExpr::Lit { width: Width::Concrete(32), value: 0 },

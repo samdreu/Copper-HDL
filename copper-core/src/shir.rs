@@ -63,7 +63,6 @@ pub struct SHIRStructuralBody {
 /// preserving their source order and conditional structure.
 #[derive(Debug)]
 pub struct SHIRCombBody {
-    pub submodules: Vec<SHIRSubmoduleInst>,
     pub stmts: Vec<SHIRStmt>,
 }
 
@@ -75,7 +74,6 @@ pub struct SHIRSeqBody {
     pub registers: Vec<SHIRReg>,
     /// `Memory<..>` instances — 1:1 with `CHIRSeqBody::memories`.
     pub memories: Vec<SHIRMemory>,
-    pub submodules: Vec<SHIRSubmoduleInst>,
     /// One entry per phase (tick boundary).
     /// Single-tick modules have exactly one phase (phase_idx = 0).
     pub phases: Vec<SHIRPhase>,
@@ -125,15 +123,10 @@ pub enum SHIRMemInit {
 pub struct SHIRSubmoduleInst {
     pub inst_name: String,
     pub module_name: String,
-    pub inputs: Vec<(String, SHIRExpr)>,
-    pub output_wire: String,
-    pub output_ty: CHIRType,
     /// `(child_clock_port, parent_clock_signal)` — see `CHIRSubmoduleInst::clocks`.
     pub clocks: Vec<(String, String)>,
     /// `(child_port, net_name)` — see `CHIRSubmoduleInst::port_nets`.
     pub port_nets: Vec<(String, String)>,
-    /// Child output port name for the expression form — see `CHIRSubmoduleInst::output_port`.
-    pub output_port: Option<String>,
 }
 
 // ── Phase ─────────────────────────────────────────────────────────────────────

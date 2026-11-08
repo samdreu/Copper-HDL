@@ -64,10 +64,6 @@ fn lower_ports(ports: &[CHIRPort]) -> Vec<SHIRPort> {
 fn lower_comb_body(
     comb: &copper_core::chir::CHIRCombBody,
 ) -> Result<SHIRCombBody, SHIRLowerError> {
-    let submodules = comb.submodules.iter()
-        .map(lower_submodule)
-        .collect::<Result<_, _>>()?;
-
     // A combinational local may be *reassigned* (`acc = acc + 1`, incl. inside a
     // loop). Such an Assign becomes another blocking assign to the same signal;
     // its declared type comes from the original `let` wire, collected here.
@@ -82,7 +78,7 @@ fn lower_comb_body(
         &mut Forwarding::disabled(),
     )?;
 
-    Ok(SHIRCombBody { submodules, stmts })
+    Ok(SHIRCombBody { stmts })
 }
 
 /// Collect every combinational wire's declared type (`let` bindings), recursing
@@ -402,18 +398,11 @@ fn lower_stmt_list(
 }
 
 fn lower_submodule(sub: &CHIRSubmoduleInst) -> Result<SHIRSubmoduleInst, SHIRLowerError> {
-    let inputs = sub.inputs.iter()
-        .map(|(name, expr)| Ok((name.clone(), lower_expr(expr)?)))
-        .collect::<Result<Vec<_>, SHIRLowerError>>()?;
     Ok(SHIRSubmoduleInst {
         inst_name: sub.inst_name.clone(),
         module_name: sub.module_name.clone(),
-        inputs,
-        output_wire: sub.output_wire.clone(),
-        output_ty: sub.output_ty.clone(),
         clocks: sub.clocks.clone(),
         port_nets: sub.port_nets.clone(),
-        output_port: sub.output_port.clone(),
     })
 }
 
@@ -494,10 +483,8 @@ fn lower_seq_body(
         .map(|(name, _, _)| name.clone())
         .collect();
 
-    // Step 9: Lower submodules
-    let submodules = seq.submodules.iter()
-        .map(lower_submodule)
-        .collect::<Result<_, _>>()?;
+    // (Step 9, the submodules, is gone: a sequential body instantiates nothing,
+    // SPEC I.13.5, D-23.)
 
     // Step 10: Build phases.
     //
@@ -668,7 +655,6 @@ fn lower_seq_body(
             init: m.init.as_ref().map(lower_mem_init).transpose()?,
             write_mode: m.write_mode,
         })).collect::<Result<Vec<_>, SHIRLowerError>>()?,
-        submodules,
         phases,
     })
 }

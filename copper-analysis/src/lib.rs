@@ -37,7 +37,7 @@ pub mod front_end;
 pub use front_end::{check_front_end_rules, hardware_mode, parse_hardware_args, HardwareMode};
 pub use data::{
     check_memory_port_index, check_outside_methods, memory_port_index_message, CHECKED_METHOD_MESSAGE,
-    IS_VALID_MESSAGE,
+    IS_VALID_MESSAGE, X_COMPARISON_MESSAGE,
 };
 mod init;
 mod shape;

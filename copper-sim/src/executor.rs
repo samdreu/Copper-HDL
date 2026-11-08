@@ -102,14 +102,12 @@ impl<F> HardwareModule<F> {
 pub fn __instance<F>(_module: HardwareModule<F>) {}
 
 /// The `HardwareExecutor` manages the execution of hardware modules defined as async tasks. 
-/// It tracks the current cycle, the modules in the system, and allows for spawning new tasks and child modules. 
+/// It tracks the current cycle and the spawned tasks. 
 /// It provides a `tick_clock` method to advance the simulation by one clock cycle, 
 /// which includes pre-edge and post-edge settling phases to allow combinational and sequential logic to execute properly.
 pub struct HardwareExecutor {
     // tasks to be done
     tasks: Vec<TaskEntry>,
-    // modules included in the execution model
-    modules: HashMap<String, ModuleInfo>,
     // order in which poll_tasks visits tasks within each delta cycle
     poll_order: PollOrder,
     // which settling algorithm poll_tasks uses (item 6)
@@ -335,22 +333,11 @@ struct TaskEntry {
     domain: Option<TypeId>,
 }
 
-/// Modules in the execution, with parent-child relationships. This is used for tracking the hierarchy of modules in the system, which can be useful for debugging and visualization.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleInfo {
-    pub name: String,
-    // if there is a parent module, this is the name of the parent. None if top-level
-    pub parent: Option<String>,
-    // names of child modules
-    pub children: Vec<String>,
-}
-
 impl HardwareExecutor {
-    /// Create a new HardwareExecutor with no tasks, at cycle 0, and an empty module hierarchy.
+    /// Create a new HardwareExecutor with no tasks, at cycle 0.
     pub fn new() -> Self {
         Self {
             tasks: Vec::new(),
-            modules: HashMap::new(),
             poll_order: PollOrder::Insertion,
             scheduler: SchedulerMode::env_default(),
             levelized_plan: Vec::new(),
@@ -496,63 +483,11 @@ impl HardwareExecutor {
         self.refuse_comb_cycle();
     }
 
-    /// Spawn a child module's future and track the parent-child relationship for
-    /// [`Self::module_info`]. Untracked like [`Self::spawn_untracked`] (no
-    /// `DirtyHandle`s) — fine for a purely-registered hierarchy where nothing
-    /// needs iterative combinational re-settling across children within one
-    /// delta-cycle pass (see `module_composition_hybrid.rs`), not for a
-    /// hierarchy with combinational dependencies between children.
-    ///
-    /// `reads` is the child's input wire-ids (recorded for the item-6 dependency
-    /// graph; phase 1 records only, no scheduling effect).
-    pub fn spawn_child<F>(
-        &mut self,
-        child_name: &str,
-        parent_name: &str,
-        module: HardwareModule<F>,
-        reads: Vec<WireId>,
-    ) where
-        F: Future<Output = ()> + 'static,
-    {
-        // Ensure both parent and child modules are in the module info map
-        self.ensure_module(parent_name);
-        self.ensure_module(child_name);
-
-        {
-            // get parent module info (should exist)
-            let parent = self
-                .modules
-                .get_mut(parent_name)
-                .expect("parent module should exist");
-            // if child doesn't already exist in parent's children, add it
-            if !parent.children.iter().any(|child| child == child_name) {
-                parent.children.push(child_name.to_string());
-            }
-        }
-
-        {
-            // get child module info (should exist)
-            let child = self
-                .modules
-                .get_mut(child_name)
-                .expect("child module should exist");
-            // set child's parent to the given parent name
-            child.parent = Some(parent_name.to_string());
-        }
-
-        // spawn the child's module as a task in the executor
-        self.spawn_untracked(module, reads);
-    }
-
-    /// Get information about a module by name, if it exists. This can be used to inspect the module hierarchy and relationships.
-    pub fn module_info(&self, module_name: &str) -> Option<&ModuleInfo> {
-        self.modules.get(module_name)
-    }
-
-    /// Get a reference to the map of all module infos. This allows for iterating over all modules and their relationships.
-    pub fn module_infos(&self) -> &HashMap<String, ModuleInfo> {
-        &self.modules
-    }
+    // `spawn_child` (a spawn that recorded a parent/child `ModuleInfo`), its
+    // `spawn_child!` macro, `module_info` and `module_infos` were deleted in Phase C
+    // step 11b (SPEC I.13.5, D-18 A2, D-23): a hierarchy is a structural module, and
+    // a testbench wires its children with `spawn_wired`; nothing read the metadata
+    // but the one test that exercised it.
 
     /// SPEC I.11.4 (D-14 A4) and I.13.7 (4): two or more combinational modules
     /// whose reads reach each other with no `RegOut`, memory or synchronizer
@@ -921,16 +856,6 @@ impl HardwareExecutor {
         self.cycles.get(&TypeId::of::<Domain>()).copied().unwrap_or(0)
     }
 
-    /// Ensure a module exists in the module info map, creating it if necessary
-    fn ensure_module(&mut self, module_name: &str) {
-        self.modules
-            .entry(module_name.to_string())
-            .or_insert_with(|| ModuleInfo {
-                name: module_name.to_string(),
-                parent: None,
-                children: Vec::new(),
-            });
-    }
 }
 
 impl Default for HardwareExecutor {

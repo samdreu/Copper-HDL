@@ -1760,10 +1760,7 @@ fn lower_comb_body(
         }
     }
 
-    Ok(CHIRCombBody {
-        submodules: ctx.submodules,
-        stmts,
-    })
+    Ok(CHIRCombBody { stmts })
 }
 
 // ── Sequential body ───────────────────────────────────────────────────────────
@@ -2328,7 +2325,6 @@ fn lower_seq_body(
         clock,
         registers,
         memories,
-        submodules: ctx.submodules,
         loop_body,
         entry_guard,
         pre_loop_constants,
@@ -2640,12 +2636,8 @@ fn lower_structural_inst(
     Ok(CHIRSubmoduleInst {
         inst_name,
         module_name,
-        inputs: Vec::new(),
-        output_wire: String::new(),
-        output_ty: CHIRType::UInt { width: Width::Concrete(1) },
         clocks,
         port_nets,
-        output_port: None,
         span: call.span,
     })
 }
@@ -2671,14 +2663,14 @@ fn structural_signal_name(arg: &ExprType, span: SourceSpan) -> Result<String, CH
 // ── Lowering context ──────────────────────────────────────────────────────────
 
 pub(crate) struct LowerCtx<'a> {
-    // NOTE: threaded through the lowering pipeline but not yet consumed here —
-    // submodule detection goes through `registry` instead. Either unthread it or
-    // give it a real use; kept for now so the call sites stay stable.
+    // NOTE: threaded through the lowering pipeline but not consumed here; the
+    // registry's one reader in a behavioural body was `lower_hardware_call`, deleted
+    // with the legacy instantiation form (SPEC I.13.5, D-23). Kept so the call
+    // sites stay stable.
     #[allow(dead_code)]
     hardware_fns: &'a std::collections::HashSet<String>,
+    #[allow(dead_code)]
     registry: &'a ModuleRegistry,
-    submodules: Vec<CHIRSubmoduleInst>,
-    inst_counters: std::collections::HashMap<String, usize>,
     clock_name: String,
     /// Names of `Out<T,D>` ports — used to validate `.write()` targets.
     output_ports: std::collections::HashSet<String>,
@@ -2741,8 +2733,6 @@ impl<'a> LowerCtx<'a> {
         Self {
             hardware_fns,
             registry,
-            submodules: Vec::new(),
-            inst_counters: std::collections::HashMap::new(),
             clock_name: String::new(),
             output_ports: std::collections::HashSet::new(),
             symbols: SymbolTable::new(),
@@ -2760,14 +2750,6 @@ impl<'a> LowerCtx<'a> {
             memories: std::collections::HashMap::new(),
             params: std::collections::HashSet::new(),
         }
-    }
-
-    fn next_inst_name(&mut self, module_name: &str) -> (String, String) {
-        let count = self.inst_counters.entry(module_name.to_string()).or_insert(0);
-        let inst_name = format!("{}_{}", module_name, count);
-        let output_wire = format!("{}_out", inst_name);
-        *count += 1;
-        (inst_name, output_wire)
     }
 }
 
@@ -4062,16 +4044,16 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
             let op = lower_binop(&bin.op, bin.span)?;
             // A comparison with the X literal (`v == Logic::X`) asks whether a value
             // is the simulator's third value — a 2-state realization holds no X, so
-            // the question has no SV form (I.14.3(d)'s `is_valid` class). Kept refused
-            // (MEASUREMENTS §M); an X literal as a VALUE lowers (I.14.7 (6)).
+            // the question has no SV form: OUTSIDE (I.14.3(d), D-23 (3)), refused first
+            // in both front-ends by `check_outside_methods` with this message. Kept
+            // here as defence in depth; an X literal as a VALUE lowers (I.14.7 (6)).
+            // (`Bits` and `Logic` have no `PartialOrd`, so only `==`/`!=` reach here.)
             if matches!(op, CHIRBinOp::Eq | CHIRBinOp::Neq | CHIRBinOp::Lt | CHIRBinOp::Lte
                 | CHIRBinOp::Gt | CHIRBinOp::Gte)
                 && (matches!(left, CHIRExpr::XLit { .. }) || matches!(right, CHIRExpr::XLit { .. }))
             {
                 return Err(CHIRLowerError::UnsupportedConstruct {
-                    description: "a comparison with `Logic::X` / `Bits::x()` asks whether a value is X, \
-                        which a 2-state realization cannot answer (SPEC I.14.3(d), the `is_valid` class)"
-                        .to_string(),
+                    description: copper_analysis::X_COMPARISON_MESSAGE.to_string(),
                     span: bin.span,
                     suggested_rewrite: None,
                 });
@@ -4186,7 +4168,15 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
 
         ExprType::Call(call) => {
             if call.is_hardware_module {
-                lower_hardware_call(call, ctx)
+                // SPEC I.13.5 (D-23 (1)): `front_end::check_no_behavioural_instance`
+                // refuses this first; the legacy expression form that instantiated
+                // the call (`lower_hardware_call`) is deleted. Defence in depth for
+                // an entry point that skips the front-end rules.
+                Err(CHIRLowerError::UnsupportedConstruct {
+                    description: copper_analysis::front_end::BEHAVIOURAL_INSTANCE_MESSAGE.to_string(),
+                    span: call.span,
+                    suggested_rewrite: None,
+                })
             } else if call_path(call).as_deref().is_some_and(|n| ctx.fns.contains_key(n)) {
                 // Call to a file-scope free function (#7b): inline it.
                 lower_inlined_fn_call(call, ctx)
@@ -5847,74 +5837,6 @@ fn lower_method_call(
     }
 }
 
-fn lower_hardware_call(
-    call: &copper_core::frontend_ir::ExprCall,
-    ctx: &mut LowerCtx,
-) -> Result<CHIRExpr, CHIRLowerError> {
-    let module_name = match call.func.as_ref() {
-        ExprType::Lit(lit) => lit.text.trim().to_string(),
-        ExprType::Path(p) => p.path_text.trim().to_string(),
-        _ => return Err(CHIRLowerError::UnsupportedConstruct {
-            description: "hardware module call with non-identifier callee".to_string(),
-            span: call.span,
-            suggested_rewrite: None,
-        }),
-    };
-
-    let (inst_name, output_wire) = ctx.next_inst_name(&module_name);
-
-    let (inputs, output_ty) = if let Some(callee) = ctx.registry.get(&module_name) {
-        // Skip clock params when mapping positional args → port names
-        let data_params: Vec<_> = callee.signature.params.iter()
-            .filter(|p| {
-                let compact = compact_type(&p.ty.ty_text);
-                !compact.starts_with("Clock<")
-            })
-            .collect();
-
-        let mut inputs = Vec::new();
-        for (i, arg) in call.args.iter().enumerate() {
-            let port_name = data_params.get(i)
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| format!("arg{}", i));
-            let expr = lower_expr(arg, ctx)?;
-            inputs.push((port_name, expr));
-        }
-
-        let output_ty = callee.signature.return_ty.as_ref()
-            .map(|rt| resolve_type(&rt.ty_text, rt.span))
-            .transpose()?
-            .unwrap_or(CHIRType::UInt { width: Width::Concrete(1) });
-
-        (inputs, output_ty)
-    } else {
-        // Callee not in registry — use positional port names as fallback
-        let mut inputs = Vec::new();
-        for (i, arg) in call.args.iter().enumerate() {
-            let expr = lower_expr(arg, ctx)?;
-            inputs.push((format!("arg{}", i), expr));
-        }
-        (inputs, CHIRType::UInt { width: Width::Concrete(8) })
-    };
-
-    ctx.submodules.push(CHIRSubmoduleInst {
-        inst_name,
-        module_name,
-        inputs,
-        output_wire: output_wire.clone(),
-        output_ty,
-        // Legacy expression model: clock is filtered above, output uses the
-        // conventional `.out`, no direct net connections. The structural
-        // (statement/port) form populates these instead — see `lower_structural_body`.
-        clocks: Vec::new(),
-        port_nets: Vec::new(),
-        output_port: None,
-        span: call.span,
-    });
-
-    Ok(CHIRExpr::Var(output_wire))
-}
-
 // ── Pattern parsing ───────────────────────────────────────────────────────────
 
 /// Size suffix-less integer pattern literals to the scrutinee's width.
@@ -6112,13 +6034,6 @@ fn validate_module_scope(module: &CHIRModule) -> Result<(), CHIRLowerError> {
 
     match &module.body {
         CHIRBody::Combinational(body) => {
-            // Submodule output wires are available everywhere in a comb body
-            for sub in &body.submodules {
-                for (_, expr) in &sub.inputs {
-                    validate_expr(expr, &known, module.span)?;
-                }
-                known.insert(sub.output_wire.clone());
-            }
             validate_stmts(&body.stmts, &mut known, module.span)?;
         }
         CHIRBody::Sequential(body) => {
@@ -6133,12 +6048,6 @@ fn validate_module_scope(module: &CHIRModule) -> Result<(), CHIRLowerError> {
                         known.insert(format!("{}_wr{port}_{suffix}", mem.name));
                     }
                 }
-            }
-            for sub in &body.submodules {
-                for (_, expr) in &sub.inputs {
-                    validate_expr(expr, &known, module.span)?;
-                }
-                known.insert(sub.output_wire.clone());
             }
             // The entry guard's carrier, declared by `shir_lower` (SPEC I.9.2).
             if body.entry_guard {
@@ -8089,7 +7998,6 @@ mod tests {
             localparams: vec![],
             ports: vec![],
             body: CHIRBody::Combinational(CHIRCombBody {
-                submodules: vec![],
                 stmts: vec![CHIRStmt::PortWrite {
                     port_name: "out".to_string(),
                     value: CHIRExpr::Var("undefined_var".to_string()),
@@ -8128,7 +8036,6 @@ mod tests {
                 },
             ],
             body: CHIRBody::Combinational(CHIRCombBody {
-                submodules: vec![],
                 stmts: vec![CHIRStmt::PortWrite {
                     port_name: "out".to_string(),
                     value: CHIRExpr::Var("a".to_string()),
@@ -8164,7 +8071,6 @@ mod tests {
                 },
             ],
             body: CHIRBody::Combinational(CHIRCombBody {
-                submodules: vec![],
                 stmts: vec![
                     CHIRStmt::Wire {
                         name: "doubled".to_string(),
@@ -8191,64 +8097,27 @@ mod tests {
     // ── Module registry / hardware call ──────────────────────────────────────
 
     #[test]
-    fn test_hardware_call_uses_registry_port_names() {
-        // Define the callee FIR
+    fn test_hardware_call_in_a_behavioural_body_is_refused() {
+        // SPEC I.13.5 (D-23 (1)): the legacy expression form that instantiated a
+        // `#[hardware]` callee (`lower_hardware_call`) is deleted; the lowering
+        // refuses the call with I.13.5's message (the front-end rule
+        // `check_no_behavioural_instance` refuses it first on every entry point that
+        // runs the rules).
         let callee_fir = make_fir("fn full_adder(a: u8, b: u8) -> u8 { a }");
         let mut registry = ModuleRegistry::new();
         registry.insert("full_adder".to_string(), callee_fir);
-
-        // Caller that uses full_adder
         let caller_fir = make_fir_hw(
             "fn adder_top(x: u8, y: u8) -> u8 { full_adder(x, y) }",
             &hw(&["full_adder"]),
         );
-
-        let module = lower_to_chir(&caller_fir, &hw(&["full_adder"]), &registry).unwrap();
-        if let CHIRBody::Combinational(body) = &module.body {
-            assert_eq!(body.submodules.len(), 1);
-            let sub = &body.submodules[0];
-            assert_eq!(sub.module_name, "full_adder");
-            // Port names from registry (skip clock params — none here)
-            assert_eq!(sub.inputs[0].0, "a");
-            assert_eq!(sub.inputs[1].0, "b");
-            // Output type from callee return type (u8)
-            assert_eq!(sub.output_ty, CHIRType::UInt { width: Width::Concrete(8) });
-        } else {
-            panic!("expected combinational body");
-        }
-    }
-
-    #[test]
-    fn test_hardware_call_fallback_to_positional_when_not_in_registry() {
-        let caller_fir = make_fir_hw(
-            "fn top(x: u8) -> u8 { unknown_module(x) }",
-            &hw(&["unknown_module"]),
+        let err = lower_to_chir(&caller_fir, &hw(&["full_adder"]), &registry).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("is instantiated only in a `#[hardware(structural)]` body"),
+            "{err:?}"
         );
-        let module = lower_to_chir(&caller_fir, &hw(&["unknown_module"]), &empty_registry()).unwrap();
-        if let CHIRBody::Combinational(body) = &module.body {
-            assert_eq!(body.submodules[0].inputs[0].0, "arg0");
-        } else {
-            panic!("expected combinational body");
-        }
     }
 
-    #[test]
-    fn test_hardware_call_output_type_from_registry() {
-        let callee_fir = make_fir("fn adder(a: u16, b: u16) -> u16 { a }");
-        let mut registry = ModuleRegistry::new();
-        registry.insert("adder".to_string(), callee_fir);
 
-        let caller_fir = make_fir_hw(
-            "fn top(x: u16, y: u16) -> u16 { adder(x, y) }",
-            &hw(&["adder"]),
-        );
-        let module = lower_to_chir(&caller_fir, &hw(&["adder"]), &registry).unwrap();
-        if let CHIRBody::Combinational(body) = &module.body {
-            assert_eq!(body.submodules[0].output_ty, CHIRType::UInt { width: Width::Concrete(16) });
-        } else {
-            panic!("expected combinational body");
-        }
-    }
 
     // ── Integer / ident helpers ──────────────────────────────────────────────
 
@@ -8379,43 +8248,6 @@ mod tests {
         }
     }
 
-    /// Hardware call with full_adder submodule: checks submodule instantiation
-    /// and named port connections using the registry.
-    #[test]
-    fn test_e2e_hardware_call_with_registry() {
-        let adder_fir = make_fir("fn full_adder(a: u8, b: u8) -> u8 { a + b }");
-        let mut registry = ModuleRegistry::new();
-        registry.insert("full_adder".to_string(), adder_fir);
-
-        let top_fir = make_fir_hw(
-            "fn top(x: u8, y: u8) -> u8 { full_adder(x, y) }",
-            &hw(&["full_adder"]),
-        );
-        let module = lower_to_chir(&top_fir, &hw(&["full_adder"]), &registry).unwrap();
-
-        assert_eq!(module.name, "top");
-
-        if let CHIRBody::Combinational(body) = &module.body {
-            assert_eq!(body.submodules.len(), 1);
-            let sub = &body.submodules[0];
-            assert_eq!(sub.module_name, "full_adder");
-            assert_eq!(sub.inst_name, "full_adder_0");
-            assert_eq!(sub.inputs.len(), 2);
-            assert_eq!(sub.inputs[0].0, "a");
-            assert_eq!(sub.inputs[1].0, "b");
-            assert_eq!(sub.output_ty, CHIRType::UInt { width: Width::Concrete(8) });
-
-            // The PortWrite drives "out" with the submodule output wire
-            if let CHIRStmt::PortWrite { port_name, value, .. } = body.stmts.last().unwrap() {
-                assert_eq!(port_name, "out");
-                assert!(matches!(value, CHIRExpr::Var(name) if name == "full_adder_0_out"));
-            } else {
-                panic!("expected PortWrite");
-            }
-        } else {
-            panic!("expected combinational body");
-        }
-    }
 
     /// Sequential module with conditional: if/else on a register value.
     #[test]

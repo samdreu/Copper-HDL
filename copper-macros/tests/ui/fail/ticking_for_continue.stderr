@@ -1,0 +1,19 @@
+error: a `continue` of a `for` whose body holds a `clk.tick().await` is not realized yet: it means the next iteration — increment, then test (SPEC I.8.5, D-10 A2-i) — but the transpiler's counted-`for` lowering has no state for it, so both front-ends refuse it (a dated lowering limitation, SPEC II.3.3 "continue-for", D-23). Restructure the body so the path falls through to the iteration's tick, e.g. `if ok { <work> }` rather than `if !ok { continue; } <work>`
+  --> tests/ui/fail/ticking_for_continue.rs:19:17
+   |
+19 |                 continue;
+   |                 ^^^^^^^^
+
+warning: unused imports: `Clock` and `Logic`
+ --> tests/ui/fail/ticking_for_continue.rs:1:19
+  |
+1 | use copper_core::{Clock, ClockDomain, Logic};
+  |                   ^^^^^               ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/ticking_for_continue.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^

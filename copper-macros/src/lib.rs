@@ -180,6 +180,20 @@ fn wrap_in_module(f: &mut ItemFn) {
         })
         .collect();
     let name = f.sig.ident.to_string();
+    // SPEC I.13.5 (D-18 A2, D-23 (1), Phase C step 11b): instantiation is a form of
+    // the structural body only. The module's `HardwareModule` is consumed by a
+    // testbench spawn or by `copper_sim::__instance` (the structural wrapper); a
+    // call of it as a statement of a behavioural body would drop the child, which
+    // then never runs. rustc decides: the generated fn's return is `#[must_use]`
+    // with I.13.5's message, and every behavioural body denies `unused_must_use`,
+    // so `child(a, b);` in a body is a compile error naming the clause. (The
+    // transpiler refuses the same call from its registry with the same message.)
+    let must_use = syn::LitStr::new(
+        copper_analysis::front_end::BEHAVIOURAL_INSTANCE_MESSAGE,
+        proc_macro2::Span::call_site(),
+    );
+    f.attrs.push(syn::parse_quote!(#[must_use = #must_use]));
+    f.attrs.push(syn::parse_quote!(#[deny(unused_must_use)]));
     f.sig.asyncness = None;
     f.sig.output = syn::parse_quote! {
         -> ::copper_sim::HardwareModule<impl ::core::future::Future<Output = ()>>
