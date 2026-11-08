@@ -4153,3 +4153,18 @@ const-call`; opened: `II.3 found runtime-empty-boundary`, `II.3 found const-call
 memory half: I.13.4). Not edited: the II.1.3 line's list of macro-admits/transpiler-refuses shapes
 still names body-wire and const-call (closed here) and not the two found here — the coordinator's
 edit, as are II.3.3's dated rows.
+
+### V.8 The bare regression — measured
+
+**Bare `tools/regression.sh` on `c518b77` (the final code commit; laptop, `paper` still at `e4a9aae`):
+REGRESSION OK (4130 s wall — not a timing number).** 1436 passed, 0 failed, 16 ignored, 156 test
+binaries (G-C: 129 test files); examples **32/32**; G-D **216** differential cases (3
+ignored-with-reason); **G-F 216** (3 skipped with a reason); **G-G differential 1654 PASS / 12 OUTSIDE /
+0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**; **G-G reference 1666 PASS / 0 DISAGREE**; **G-I** 165 clocked
+related, 0 uncovered, 219/219 sweep modules examined; **G-J** 72 const items compared / 22 outside both,
+274 + 46 initializers, 0 asymmetric, **0 DISAGREE**; G-E 5 anchored; **G-K** `189 lines — 171 CLOSED, 18
+OPEN; 168 required by the SPEC; fixtures: 6 coreui, 3 example, 11 gone, 141 sweep, 123 test, 100 ui; 162
+run checks`, the 3 example fixtures PASS. An earlier run on `0bd4007` was stopped when the const-call
+arm was approved; it is not a result. Not run remotely (nothing pushed).
+
+After the run, docs only: III.3.6's counts, this section, CLAUDE.md.

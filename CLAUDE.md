@@ -38,7 +38,7 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (213 of 216 since Phase C step 10: 161
+`_reference_leg` cases as build.rs generated to run (216 of 219 since 2026-11-08, MEASUREMENTS §V; 213 of 216 at Phase C step 10: 161
 clocked, 18 of them binding a `Memory` (I.10), 52 combinational (I.11); `REF_SKIP` empty), each
 leg non-empty, and the design leg (I.13, `copper_ref::Design` on `two_domain_top` vs the hand-wired
 simulation, `tests/two_domain_hierarchy_cdc.rs`) — and
@@ -407,7 +407,8 @@ the emitted SV is the concrete module's, with no parameter for `D`.
 - **Both front-ends enforce the same rules (front-end parity, 2026-10-23; one list since Phase C
   step 10).** The syntactic rules — the header (R20, R9, R10), R17, D3, R16, R18, R7, R12, R13/R14,
   R5, the CDC rules (the port rule, the two-flop rule, the combinational one-domain rule), R19 and the
-  structural body rules, and (D-23) the `continue` of a tick-bearing `for` (a dated REFUSED-both
+  structural body rules, no net (`wire`/`registered_wire`/`net`) in a behavioural body (I.13.5,
+  `check_no_body_nets`, 2026-11-08), R16's `Bits<N>` width bound 1 ≤ N ≤ 128 (`check_admissible`), and (D-23) the `continue` of a tick-bearing `for` (a dated REFUSED-both
   II.3.3 row (h), fix direction the lowering) — are `copper_analysis::front_end::check_front_end_rules`, which both call
   first; `copper-codegen/tests/front_end_parity_ui.rs` transpiles every macro ui case and requires the
   macro's message. A combinational cycle is refused at spawn (`refuse_comb_cycle`) and over a
@@ -415,13 +416,19 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   macro's sequential arm and `transpile_target` run the same list from
   `copper-analysis`: the two source-shape rules (`check_nested_loop_shape` — a nested
   loop must end at a clock boundary; `check_awaits` — only `clk.tick().await` may be
-  awaited), reachability, the register power-on rule R11 (2026-10-29; D-21 A3,
+  awaited), reachability (a ticking `for` over a range empty only through a constant is no boundary — the
+  transpiler folds it through `ConstEnv`, the macro emits a `const _: () = assert!(..)` body item per
+  hypothesis R3 depends on, `cfg.rs::empty_range_dependencies`, since 2026-11-08), the register power-on rule R11 (2026-10-29; D-21 A3,
   2026-11-07 — a pre-loop register's initializer must be a Rust constant, which reaches the
   SV as its `initial` value, or `Bits::x()`; no opt-out). Since D-21 rustc judges it: the
   macro wraps every pre-loop register initializer in `const { … }` (every `Bits`/`Logic`
   constructor is a `const fn`, and a struct ctor like `bubble()` must be one too), so file
   consts, `T::K`, const generics and any `const fn` call are admitted and a non-`const`
-  callee is rustc's E0015. Both front-ends share the syntactic half
+  callee is rustc's E0015. `ConstEnv` and the interpreter also fold the inherent `const` integer
+  methods at their receiver's type, tuple-struct constructors and fields, and immutable `static`s
+  (not `min`/`max`, which rustc refuses in a constant), pinned to rustc by
+  `const_evaluators_agree.rs::the_widened_constant_grammar_agrees_with_rustc`; the register fold
+  delegates those to it (`copper-codegen/src/const_fold.rs`, 2026-11-08). Both front-ends share the syntactic half
   (`check_register_initializers`: an initializer reading a run-time value — a parameter, an
   earlier pre-loop binding — gets R11's message); the transpiler adds
   `check_register_initializer_calls_in` (every callee a `const fn`) before its fold, and
