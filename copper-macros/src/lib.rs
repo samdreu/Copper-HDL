@@ -151,6 +151,7 @@ fn wrap_in_module(f: &mut ItemFn) {
             _ => None,
         })
         .collect();
+    let name = f.sig.ident.to_string();
     f.sig.asyncness = None;
     f.sig.output = syn::parse_quote! {
         -> ::copper_sim::HardwareModule<impl ::core::future::Future<Output = ()>>
@@ -158,12 +159,12 @@ fn wrap_in_module(f: &mut ItemFn) {
     f.block = Box::new(match clock_domains.as_slice() {
         [d] => syn::parse_quote! {
             {
-                ::copper_sim::HardwareModule::__new_in_domain::<#d>(async move #body)
+                ::copper_sim::HardwareModule::__new_in_domain::<#d>(async move #body).__named(#name)
             }
         },
         _ => syn::parse_quote! {
             {
-                ::copper_sim::HardwareModule::__new(async move #body)
+                ::copper_sim::HardwareModule::__new(async move #body).__named(#name)
             }
         },
     });

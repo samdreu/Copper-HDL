@@ -185,3 +185,74 @@ fn leaf_module_hierarchy_equals_single() {
     let hier = transpile_source_hierarchy(DUAL_CLOCK_SRC, Some("slow_consumer"), &EmitConfig::default()).unwrap();
     assert_eq!(single, hier);
 }
+
+/// SPEC I.11.4 (D-14 A4), I.13.7 (4) — Phase C step 10: a combinational cycle
+/// through a structural parent's nets is refused over the design the hierarchy
+/// emits, naming the instances. (Before step 10 the transpiler emitted the
+/// `assign` network as written and Verilator refused it as UNOPTFLAT; the executor
+/// refuses the same cycle at spawn, the interpreter's design leg when it builds it.)
+const COMB_CYCLE_SRC: &str = r#"
+use copper_core::{Clock, ClockDomain, Logic};
+use copper_core::port::{wire, In, Out, RegOut};
+use copper_macros::hardware;
+
+struct C;
+impl ClockDomain for C {}
+
+#[hardware(combinational)]
+fn inv(a: In<Logic, C>, o: Out<Logic, C>) {
+    o.write(!a.read());
+}
+
+#[hardware(combinational)]
+fn pass(a: In<Logic, C>, o: Out<Logic, C>) {
+    o.write(a.read());
+}
+
+#[hardware(sequential)]
+async fn hold(clk: Clock<C>, d: In<Logic, C>, q: RegOut<Logic, C>) {
+    loop {
+        let t = d.read();
+        q.write(t);
+        clk.tick().await;
+    }
+}
+
+#[hardware(structural)]
+async fn ring(clk: Clock<C>, o: Out<Logic, C>) {
+    let x = wire::<Logic, C>(Logic::Zero);
+    let y = wire::<Logic, C>(Logic::Zero);
+    inv(x.1, y.0);
+    pass(y.1, x.0);
+    pass(y.1, o);
+}
+
+#[hardware(structural)]
+async fn chain(clk: Clock<C>, a: In<Logic, C>, o: Out<Logic, C>) {
+    let x = wire::<Logic, C>(Logic::Zero);
+    inv(a, x.0);
+    pass(x.1, o);
+}
+
+#[hardware(structural)]
+async fn broken_by_a_register(clk: Clock<C>, o: Out<Logic, C>) {
+    let x = registered_wire::<Logic, C>(&clk, Logic::Zero);
+    let y = wire::<Logic, C>(Logic::Zero);
+    inv(x.1, y.0);
+    hold(clk, y.1, x.0);
+    pass(y.1, o);
+}
+"#;
+
+#[test]
+fn combinational_cycle_through_a_structural_parent_is_refused() {
+    let err = transpile_source(COMB_CYCLE_SRC, Some("ring"), &EmitConfig::default())
+        .expect_err("a ring of combinational children is OUTSIDE");
+    assert!(err.contains("form a combinational cycle"), "{err}");
+    assert!(err.contains("`inv_0`") && err.contains("`pass_0`"), "the refusal names the instances: {err}");
+    // A chain is no cycle, and a sequential child's RegOut breaks one.
+    transpile_source(COMB_CYCLE_SRC, Some("chain"), &EmitConfig::default()).expect("a chain is acyclic");
+    let src = COMB_CYCLE_SRC.replace("use copper_core::port::{wire,", "use copper_core::port::{registered_wire, wire,");
+    transpile_source(&src, Some("broken_by_a_register"), &EmitConfig::default())
+        .expect("a RegOut between the two breaks the cycle");
+}

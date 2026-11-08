@@ -2400,7 +2400,91 @@ fn lower_structural_body(
         }
     }
 
+    refuse_structural_comb_cycle(&submodules, registry)?;
     Ok(CHIRStructuralBody { nets, submodules })
+}
+
+/// SPEC I.11.4 (D-14 A4), I.13.7 (4): combinational children of a structural
+/// parent whose reads reach each other through its nets, with no `RegOut`, memory
+/// or synchronizer between them, are a combinational cycle — OUTSIDE, refused
+/// over the design the hierarchy emits, as the executor refuses the same cycle
+/// at spawn (`HardwareExecutor::refuse_comb_cycle`) and the interpreter's design
+/// leg when it builds the design (`copper_ref::Design`). A sequential child's
+/// `RegOut` drive is a source of the settle, so it adds no edge.
+fn refuse_structural_comb_cycle(
+    submodules: &[CHIRSubmoduleInst],
+    registry: &ModuleRegistry,
+) -> Result<(), CHIRLowerError> {
+    use std::collections::{BTreeMap, BTreeSet};
+    // net → combinational children that drive / read it.
+    let mut drivers: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut readers: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, inst) in submodules.iter().enumerate() {
+        let Some(callee) = registry.get(&inst.module_name) else { continue };
+        if !matches!(callee.classification, FrontendClassification::CombinationalFn) {
+            continue;
+        }
+        for (port, net) in &inst.port_nets {
+            let Some(p) = callee.signature.params.iter().find(|p| &p.name == port) else { continue };
+            let ty = compact_type(&p.ty.ty_text);
+            if ty.starts_with("In<") {
+                readers.entry(net.as_str()).or_default().push(i);
+            } else if ty.starts_with("Out<") {
+                drivers.entry(net.as_str()).or_default().push(i);
+            }
+        }
+    }
+    let n = submodules.len();
+    let mut adj: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    for (net, ds) in &drivers {
+        for &d in ds {
+            for &r in readers.get(net).into_iter().flatten() {
+                adj[d].insert(r);
+            }
+        }
+    }
+    // DFS for a back edge; the stack from its target is the cycle.
+    fn dfs(u: usize, adj: &[BTreeSet<usize>], state: &mut [u8], stack: &mut Vec<usize>) -> Option<Vec<usize>> {
+        state[u] = 1;
+        stack.push(u);
+        for &v in &adj[u] {
+            if state[v] == 1 {
+                let at = stack.iter().position(|&x| x == v).unwrap();
+                return Some(stack[at..].to_vec());
+            }
+            if state[v] == 0 {
+                if let Some(c) = dfs(v, adj, state, stack) {
+                    return Some(c);
+                }
+            }
+        }
+        stack.pop();
+        state[u] = 2;
+        None
+    }
+    let mut state = vec![0u8; n];
+    for u in 0..n {
+        if state[u] == 0 {
+            if let Some(cycle) = dfs(u, &adj, &mut state, &mut Vec::new()) {
+                let names: Vec<String> =
+                    cycle.iter().map(|&i| format!("`{}`", submodules[i].inst_name)).collect();
+                return Err(CHIRLowerError::UnsupportedConstruct {
+                    description: format!(
+                        "combinational cycle: the instances {} form a combinational cycle through \
+                         this structural module's nets — each reads a plain `Out` another drives, with \
+                         no `RegOut`, memory or synchronizer between them, so the settle would be a \
+                         fixpoint problem rather than a function of the registers and the inputs \
+                         (SPEC I.11.4, D-14 A4; I.13.2(a), I.13.7 (4)). Break the cycle with a \
+                         registered output of a sequential child",
+                        names.join(", ")
+                    ),
+                    span: submodules[cycle[0]].span,
+                    suggested_rewrite: None,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse the data type `T` and clock domain `D` of an internal net declared by

@@ -54,6 +54,10 @@ pub struct HardwareModule<F> {
     /// of the network every settle evaluates) and for hand-built futures. Read only
     /// to decide which domain's ticks resume it.
     domain: Option<TypeId>,
+    /// The `#[hardware]` fn's name (the macro sets it; `""` for a hand-built
+    /// future), for the messages that name a module — the combinational-cycle
+    /// refusal at spawn (SPEC I.11.4, I.13.7 (4)).
+    name: &'static str,
 }
 
 impl<F> HardwareModule<F> {
@@ -61,7 +65,7 @@ impl<F> HardwareModule<F> {
     /// `#[hardware]`-generated code; not meant to be used by hand.
     #[doc(hidden)]
     pub fn __new(future: F) -> Self {
-        HardwareModule { future, domain: None }
+        HardwareModule { future, domain: None, name: "" }
     }
 
     /// Construct a clocked module from its future, tagged with the domain of its
@@ -69,7 +73,14 @@ impl<F> HardwareModule<F> {
     /// `#[hardware(synchronizer)]` emit.
     #[doc(hidden)]
     pub fn __new_in_domain<D: ClockDomain>(future: F) -> Self {
-        HardwareModule { future, domain: Some(TypeId::of::<D>()) }
+        HardwareModule { future, domain: Some(TypeId::of::<D>()), name: "" }
+    }
+
+    /// Name the module (the `#[hardware]` fn's identifier). **Macro-internal.**
+    #[doc(hidden)]
+    pub fn __named(mut self, name: &'static str) -> Self {
+        self.name = name;
+        self
     }
 
     /// The domain tag (see the field). Crate-internal.
@@ -156,10 +167,9 @@ impl PollSet {
 /// both modes.
 ///
 /// The fixpoint scheduler stays in the tree permanently as the differential oracle
-/// (like the [`PollOrder`] knob, whose fuzzer is pinned to it). A genuine
-/// combinational cycle becomes one multi-task strongly-connected component that is
-/// iterated to a fixpoint *within itself* while the acyclic remainder is still
-/// single-passed; a non-convergent one panics naming the whole SCC.
+/// (like the [`PollOrder`] knob, whose fuzzer is pinned to it). A combinational
+/// cycle is refused at spawn under either mode (SPEC I.11.4, D-14; Phase C step 10),
+/// so every component the levelized settle meets is a singleton.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SchedulerMode {
     /// Iterate-to-fixpoint delta-cycle loop — retained permanently as the
@@ -300,6 +310,8 @@ fn splitmix64(mut x: u64) -> u64 {
 
 struct TaskEntry {
     future: Pin<Box<dyn Future<Output = ()>>>,
+    /// The module's name (`HardwareModule::name`), for messages.
+    name: &'static str,
     /// Number of consecutive delta cycles in which this task's output changed.
     /// Reset to 0 whenever a pass produces no change for this task. Used to detect
     /// combinational loops (a task that never reaches a fixed point).
@@ -420,14 +432,16 @@ impl HardwareExecutor {
         F: Future<Output = ()> + 'static,
     {
         let domain = module.domain();
+        let name = module.name;
         self.tasks.push(TaskEntry {
             future: Box::pin(module.into_future()),
+            name,
             consecutive_dirty: 0,
             port_dirties: vec![],
             reads,
             domain,
         });
-        self.graph_dirty = true;
+        self.refuse_comb_cycle();
     }
 
     /// Spawn a module, registering its output [`DirtyHandle`]s so the executor
@@ -463,14 +477,16 @@ impl HardwareExecutor {
         F: Future<Output = ()> + 'static,
     {
         let domain = module.domain();
+        let name = module.name;
         self.tasks.push(TaskEntry {
             future: Box::pin(module.into_future()),
+            name,
             consecutive_dirty: 0,
             port_dirties: dirties,
             reads,
             domain,
         });
-        self.graph_dirty = true;
+        self.refuse_comb_cycle();
     }
 
     /// Spawn a child module's future and track the parent-child relationship for
@@ -531,6 +547,40 @@ impl HardwareExecutor {
         &self.modules
     }
 
+    /// SPEC I.11.4 (D-14 A4) and I.13.7 (4): two or more combinational modules
+    /// whose reads reach each other with no `RegOut`, memory or synchronizer
+    /// between them are **outside the language** — in a cycle the settle is a
+    /// fixpoint problem, not a function (I.13.2(a)). Refused here, statically, at
+    /// the spawn that closes the cycle, from the same SCC computation the levelized
+    /// settle plans with (Phase C step 10; until then the settle iterated a
+    /// convergent cycle and panicked on a non-convergent one at run time —
+    /// "detection is not rejection", item 6 phase 5, reversed by D-14). Under
+    /// both schedulers. The graph is the one the testbench declares (`reads`,
+    /// `dirties`): a cycle through undeclared reads is invisible here and is left to
+    /// the fixpoint oracle's oscillation guard.
+    fn refuse_comb_cycle(&mut self) {
+        let plan = self.compute_scc_plan();
+        if let Some(cycle) = plan.iter().find(|c| c.len() > 1) {
+            let names: Vec<String> = cycle
+                .iter()
+                .map(|&i| {
+                    let n = self.tasks[i].name;
+                    if n.is_empty() { format!("task {i}") } else { format!("`{n}` (task {i})") }
+                })
+                .collect();
+            panic!(
+                "combinational cycle refused at spawn: {} form a combinational cycle — each \
+                 reads a plain `Out` another drives, with no `RegOut`, memory or synchronizer \
+                 between them, so the settle would be a fixpoint problem rather than a function \
+                 of the registers and the inputs (SPEC I.11.4, D-14 A4; I.13.2(a)). Break the \
+                 cycle with a registered output (`RegOut`) of a sequential module.",
+                names.join(", ")
+            );
+        }
+        self.levelized_plan = plan;
+        self.graph_dirty = false;
+    }
+
     /// The **combinational loops** in the currently-spawned design: each inner vec
     /// is the set of task indices forming a strongly-connected component of size ≥ 2
     /// in the combinational dependency graph (item 6). Empty for a well-formed,
@@ -540,11 +590,10 @@ impl HardwareExecutor {
     /// the simulation. A multi-task component is a combinational cycle: mutual
     /// plain-`Out` feedback with no register (`RegOut`), memory, or synchronizer to
     /// break it (those commit at the clock edge and so induce no combinational
-    /// edge). **Detection is not rejection:** a *convergent* loop (e.g. a
-    /// set-dominant latch) is legal and simulated by iterating the component to a
-    /// fixpoint; only a *non-convergent* loop panics, and only when the settle
-    /// actually fails to converge (see [`Self::poll_tasks`]/`iterate_scc`). Use this
-    /// to surface a design's combinational loops for inspection or a lint.
+    /// edge). Since Phase C step 10 a spawn that closes such a cycle panics
+    /// (`refuse_comb_cycle`, SPEC I.11.4 — D-14 reversed item 6 phase 5's
+    /// "detection is not rejection"), so on an executor that spawned without
+    /// panicking this is empty; it stays as the inspection the refusal is built on.
     pub fn comb_cycles(&self) -> Vec<Vec<usize>> {
         self.compute_scc_plan()
             .into_iter()
@@ -599,13 +648,12 @@ impl HardwareExecutor {
     /// (every producer SCC precedes it in `plan`), so:
     /// - a **singleton** component (the overwhelmingly common case — well-formed
     ///   designs have acyclic combinational graphs) is settled in a **single poll**;
-    /// - a **multi-task** component is a genuine combinational cycle (mutual
-    ///   plain-`Out` feedback) and is iterated to a fixpoint *within itself*
-    ///   ([`Self::iterate_scc`]) — the acyclic remainder is unaffected.
+    /// - a **multi-task** component would be a combinational cycle, which is refused
+    ///   at spawn (SPEC I.11.4), so none reaches here.
     ///
-    /// This reaches the same global fixed point as [`Self::poll_tasks_fixpoint`]
-    /// (a topological sweep with per-SCC fixpoints equals the whole-graph fixpoint),
-    /// which the differential harness verifies corpus-wide.
+    /// On an acyclic network this computes the one fixpoint the oracle
+    /// ([`Self::poll_tasks_fixpoint`]) iterates to (I.13.2(a): a DAG has one, P5),
+    /// which the differential harness verifies.
     fn poll_tasks_levelized(&mut self, plan: &[Vec<usize>], set: PollSet) {
         let waker = noop_waker();
         let mut context = Context::from_waker(&waker);
@@ -615,12 +663,10 @@ impl HardwareExecutor {
                     self.poll_task_once(component[0], &mut context);
                 }
             } else {
-                let members: Vec<usize> = component
-                    .iter()
-                    .copied()
-                    .filter(|&i| set.admits(self.tasks[i].domain))
-                    .collect();
-                self.iterate_scc(&members, &mut context);
+                unreachable!(
+                    "a multi-task component is a combinational cycle, refused at spawn \
+                     (`refuse_comb_cycle`, SPEC I.11.4)"
+                );
             }
         }
     }
@@ -639,68 +685,6 @@ impl HardwareExecutor {
         );
         for h in &task.port_dirties {
             h.take();
-        }
-    }
-
-    /// Iterate a genuine combinational cycle (a multi-task SCC) to a fixpoint,
-    /// polling only the SCC's own tasks. Bounded and oscillation-checked, but scoped
-    /// to the cycle — a *convergent* combinational loop (e.g. a set-dominant latch)
-    /// settles here, reproducing the fixpoint scheduler; a *non-convergent* one
-    /// trips [`OSCILLATION_THRESHOLD`] and is reported as a combinational loop.
-    ///
-    /// **Item 6, phase 5 — static comb-loop detection.** A multi-task SCC is a
-    /// combinational cycle *identified structurally* (from the dependency graph),
-    /// so when the settle fails to converge the panic names the **whole cycle** and
-    /// what to do about it — replacing the old vague single-task oscillation panic.
-    /// Detection is not rejection: a convergent cycle is legal and simulated (per
-    /// the plan, an error is emitted *only* for a loop the model cannot resolve, so
-    /// we never reject a design the fixpoint oracle accepts).
-    fn iterate_scc(&mut self, scc: &[usize], context: &mut Context<'_>) {
-        for delta in 0..=MAX_DELTA_CYCLES {
-            assert!(
-                delta < MAX_DELTA_CYCLES,
-                "Delta-cycle limit ({MAX_DELTA_CYCLES}) exceeded — combinational loop among \
-                 tasks {scc:?} not resolved"
-            );
-
-            let mut any_dirty = false;
-            for &i in scc {
-                let task = &mut self.tasks[i];
-                assert!(
-                    task.future.as_mut().poll(context).is_pending(),
-                    "hardware module task {i} completed (its future returned Poll::Ready) — a \
-                     #[hardware] module's body is a `loop {{ .. }}` that never terminates; a \
-                     module future resolving indicates a malformed module (e.g. an early \
-                     `return` or a loop that broke), not legal hardware behavior."
-                );
-                let port_dirty = task.port_dirties.iter().any(|h| h.take());
-                if port_dirty {
-                    task.consecutive_dirty += 1;
-                    any_dirty = true;
-                } else {
-                    task.consecutive_dirty = 0;
-                }
-            }
-
-            if !any_dirty {
-                for &i in scc {
-                    self.tasks[i].consecutive_dirty = 0;
-                }
-                break;
-            }
-
-            // Still dirty after OSCILLATION_THRESHOLD passes → this SCC is a
-            // combinational loop with no fixed point. Report the whole cycle
-            // structurally (the statically-detected SCC), not just one task.
-            if scc.iter().any(|&i| self.tasks[i].consecutive_dirty >= OSCILLATION_THRESHOLD) {
-                panic!(
-                    "Combinational loop detected: tasks {scc:?} form a combinational cycle \
-                     (each drives a plain `Out` that the next reads, with no register \
-                     (`RegOut`), memory, or synchronizer to break it) and it does not settle \
-                     to a fixed point after {OSCILLATION_THRESHOLD} delta cycles. Break the \
-                     cycle with a registered output (`RegOut`) or a synchronizer."
-                );
-            }
         }
     }
 
@@ -1305,87 +1289,77 @@ mod tests {
         })
     }
 
+    /// SPEC I.11.4 (D-14 A4), Phase C step 10: a combinational cycle is refused at the
+    /// spawn that closes it — the oscillating pair `a = b + 1`, `b = a`, under the
+    /// levelized scheduler (it used to iterate the SCC and panic at run time).
     #[test]
-    #[should_panic(expected = "form a combinational cycle")]
-    fn levelized_oscillating_scc_trips_threshold() {
+    #[should_panic(expected = "combinational cycle refused at spawn")]
+    fn levelized_oscillating_pair_is_refused_at_spawn() {
         let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Levelized);
-
         let (a_out, a_in) = wire::<u8, TestClk>(0);
         let (b_out, b_in) = wire::<u8, TestClk>(0);
-
         let ad = a_out.dirty_handle();
         let a_reads = vec![b_in.wire_id()];
         exec.spawn_wired(inc_u8(b_in, a_out), vec![ad], a_reads);
-
         let bd = b_out.dirty_handle();
         let b_reads = vec![a_in.wire_id()];
-        exec.spawn_wired(buf_u8(a_in, b_out), vec![bd], b_reads);
-
-        // levelized: SCC {inc, buf} iterated → non-convergent → structural panic
-        // naming the whole cycle (item-6 phase 5).
-        exec.poll_tasks();
+        exec.spawn_wired(buf_u8(a_in, b_out), vec![bd], b_reads); // closes the cycle: panics here
+        unreachable!("the spawn above must refuse the cycle");
     }
 
-    /// A 3-module oscillating cycle (`a = c + 1`, `b = a`, `c = b`) — the structural
-    /// error must name the *whole* SCC, not just one task (item-6 phase 5).
+    /// A 3-module cycle (`a = c + 1`, `b = a`, `c = b`): refused at the third spawn,
+    /// and the message names every member (one SCC, three tasks).
     #[test]
-    #[should_panic(expected = "form a combinational cycle")]
-    fn levelized_three_module_cycle_reports_whole_scc() {
-        let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Levelized);
-
-        let (a_out, a_in) = wire::<u8, TestClk>(0);
-        let (b_out, b_in) = wire::<u8, TestClk>(0);
-        let (c_out, c_in) = wire::<u8, TestClk>(0);
-
-        let ad = a_out.dirty_handle();
-        let a_reads = vec![c_in.wire_id()];
-        exec.spawn_wired(inc_u8(c_in, a_out), vec![ad], a_reads); // a = c + 1
-
-        let bd = b_out.dirty_handle();
-        let b_reads = vec![a_in.wire_id()];
-        exec.spawn_wired(buf_u8(a_in, b_out), vec![bd], b_reads); // b = a
-
-        let cd = c_out.dirty_handle();
-        let c_reads = vec![b_in.wire_id()];
-        exec.spawn_wired(buf_u8(b_in, c_out), vec![cd], c_reads); // c = b  → closes the cycle
-
-        exec.poll_tasks();
+    fn three_module_cycle_is_refused_naming_the_whole_scc() {
+        let r = std::panic::catch_unwind(|| {
+            let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Levelized);
+            let (a_out, a_in) = wire::<u8, TestClk>(0);
+            let (b_out, b_in) = wire::<u8, TestClk>(0);
+            let (c_out, c_in) = wire::<u8, TestClk>(0);
+            let ad = a_out.dirty_handle();
+            exec.spawn_wired(inc_u8(c_in.clone(), a_out), vec![ad], vec![c_in.wire_id()]);
+            let bd = b_out.dirty_handle();
+            exec.spawn_wired(buf_u8(a_in.clone(), b_out), vec![bd], vec![a_in.wire_id()]);
+            let cd = c_out.dirty_handle();
+            exec.spawn_wired(buf_u8(b_in.clone(), c_out), vec![cd], vec![b_in.wire_id()]);
+        });
+        let msg = r.expect_err("the third spawn closes the cycle");
+        let msg = msg.downcast_ref::<String>().cloned().unwrap_or_default();
+        for t in ["task 0", "task 1", "task 2"] {
+            assert!(msg.contains(t), "the refusal names {t}: {msg}");
+        }
     }
 
-    /// Static detection: a convergent combinational loop (an OR set-latch) is
-    /// *reported* by `comb_cycles` yet remains **legal** — it simulates without a
-    /// panic (detection is not rejection; item-6 phase 5).
+    /// A **convergent** combinational loop (an OR set-latch) is refused too: D-14
+    /// makes every cycle OUTSIDE, whether or not an iteration would settle it (it
+    /// used to be detected by `comb_cycles`, simulated, and never rejected).
     #[test]
-    fn comb_cycles_reports_convergent_latch_without_rejecting_it() {
+    #[should_panic(expected = "combinational cycle refused at spawn")]
+    fn convergent_latch_is_refused_at_spawn() {
         let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Levelized);
-
-        let (ext_drv, ext_in) = wire::<u8, TestClk>(0);
+        let (_ext_drv, ext_in) = wire::<u8, TestClk>(0);
         let (a_out, a_in) = wire::<u8, TestClk>(0);
         let (b_out, b_in) = wire::<u8, TestClk>(0);
-
         let ad = a_out.dirty_handle();
         let or_reads = vec![ext_in.wire_id(), b_in.wire_id()];
         let b_feedback = b_in.clone();
         exec.spawn_wired(or_u8(ext_in, b_feedback, a_out), vec![ad], or_reads);
-
         let bd = b_out.dirty_handle();
-        let buf_reads = vec![a_in.wire_id()];
-        let a_probe = a_in.clone();
-        exec.spawn_wired(buf_u8(a_in, b_out), vec![bd], buf_reads);
+        exec.spawn_wired(buf_u8(a_in.clone(), b_out), vec![bd], vec![a_in.wire_id()]);
+    }
 
-        // Detected as exactly one combinational cycle of two modules.
-        let cycles = exec.comb_cycles();
-        assert_eq!(cycles.len(), 1, "the latch is one combinational cycle");
-        assert_eq!(cycles[0].len(), 2, "two modules form the cycle");
-
-        // …yet it is legal: the settle converges (monotone OR), no panic.
-        ext_drv.write(1);
-        exec.poll_tasks();
-        assert_eq!(a_probe.read(), 1, "set-latch latches the input high");
-        // Latches: even after ext clears, the bit is held via the feedback.
-        ext_drv.write(0);
-        exec.poll_tasks();
-        assert_eq!(a_probe.read(), 1, "latch holds after the set pulse clears");
+    /// The refusal does not depend on the scheduler: the fixpoint oracle refuses the
+    /// same declared cycle at the same spawn.
+    #[test]
+    #[should_panic(expected = "combinational cycle refused at spawn")]
+    fn fixpoint_oracle_refuses_the_declared_cycle_at_spawn() {
+        let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Fixpoint);
+        let (a_out, a_in) = wire::<u8, TestClk>(0);
+        let (b_out, b_in) = wire::<u8, TestClk>(0);
+        let ad = a_out.dirty_handle();
+        exec.spawn_wired(inc_u8(b_in.clone(), a_out), vec![ad], vec![b_in.wire_id()]);
+        let bd = b_out.dirty_handle();
+        exec.spawn_wired(buf_u8(a_in.clone(), b_out), vec![bd], vec![a_in.wire_id()]);
     }
 
     /// An acyclic design (counter → passthrough) has no combinational cycles.
@@ -1409,8 +1383,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "Combinational loop detected")]
     fn fixpoint_oscillating_loop_trips_threshold() {
-        // The same oscillator must be rejected identically under the fixpoint
-        // oracle — the levelized SCC guard reproduces the existing behavior.
+        // The cycle's reads are NOT declared (`vec![]`), so the spawn-time refusal
+        // (SPEC I.11.4) cannot see it; the fixpoint oracle's run-time oscillation
+        // guard is the defence that remains for a testbench that under-declares.
         // Pinned to Fixpoint (not the env-sensitive default) so it tests the
         // oracle regardless of `COPPER_SCHEDULER`.
         let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Fixpoint);

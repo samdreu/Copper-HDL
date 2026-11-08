@@ -83,7 +83,7 @@ async fn accum(clk: Clock<Dm>, a: In<Bits<8>, Dm>, out: RegOut<Bits<8>, Dm>) {
 /// Combinational OR gate: `out = ext | fb`. Wired with `fb` fed back from `out`
 /// (through `buf`) this forms a set-dominant latch — a *convergent* combinational
 /// loop (monotone: a set bit never clears), the case the per-SCC iteration exists
-/// for. Not caught by the oscillation threshold, so it stays a legal iterated SCC.
+/// for. Since Phase C step 10 the latch is refused at spawn (SPEC I.11.4).
 #[hardware(combinational)]
 fn or_gate(ext: In<Bits<8>, Dm>, fb: In<Bits<8>, Dm>, out: Out<Bits<8>, Dm>) {
     out.write(ext.read() | fb.read());
@@ -355,50 +355,33 @@ fn diff_regout_pipeline() {
 }
 
 /// A **convergent combinational cycle**: `or_gate(ext, b) → a`, `buf(a) → b`, with
-/// `b` fed back into `or_gate`. The two modules form one strongly-connected
-/// component in the comb graph, so the levelized scheduler must iterate them to a
-/// fixpoint *within the SCC* (`iterate_scc`) rather than single-pass them — and
-/// must reach the same set-latch state as the fixpoint scheduler every phase.
+/// `b` fed back into `or_gate` — a set-dominant latch. Until Phase C step 10 the
+/// levelized scheduler iterated the SCC to a fixpoint and this test checked it
+/// against the oracle. SPEC I.11.4 (D-14 A4) makes every combinational cycle
+/// OUTSIDE, convergent or not, and the executor now refuses it at the spawn that
+/// closes it under **both** schedulers (I.11.6's refusal pin; P5's open item).
 #[test]
-fn diff_convergent_comb_loop() {
-    fn build(mode: SchedulerMode) -> Instance {
-        let clk = Clock::<Dm>::new();
-        let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
-
-        let (ext_drv, ext_in) = wire::<Bits<8>, Dm>(Bits::zero());
-        let (a_out, a_in) = wire::<Bits<8>, Dm>(Bits::zero());
-        let (b_out, b_in) = wire::<Bits<8>, Dm>(Bits::zero());
-
-        // or_gate reads the external input and the feedback wire `b`, drives `a`.
-        let od = a_out.dirty_handle();
-        let or_reads = vec![ext_in.wire_id(), b_in.wire_id()];
-        let ext_probe = ext_in.clone();
-        let b_feedback = b_in.clone();
-        exec.spawn_wired(or_gate(ext_in, b_feedback, a_out), vec![od], or_reads);
-
-        // buf reads `a`, drives the feedback wire `b` — closing the cycle.
-        let bd = b_out.dirty_handle();
-        let buf_reads = vec![a_in.wire_id()];
-        let a_probe = a_in.clone();
-        exec.spawn_wired(buf(a_in, b_out), vec![bd], buf_reads);
-
-        Instance {
-            clk,
-            exec,
-            drive: Box::new(move |step| ext_drv.write(Bits::<8>::from_u8(step[0] as u8))),
-            snapshot: Box::new(move || {
-                vec![
-                    ext_probe.read().as_u128(),
-                    a_probe.read().as_u128(),
-                    b_in.read().as_u128(),
-                ]
-            }),
-        }
+fn convergent_comb_loop_is_refused_at_spawn_by_both_schedulers() {
+    for mode in [SchedulerMode::Levelized, SchedulerMode::Fixpoint] {
+        let r = std::panic::catch_unwind(move || {
+            let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
+            let (_ext_drv, ext_in) = wire::<Bits<8>, Dm>(Bits::zero());
+            let (a_out, a_in) = wire::<Bits<8>, Dm>(Bits::zero());
+            let (b_out, b_in) = wire::<Bits<8>, Dm>(Bits::zero());
+            let od = a_out.dirty_handle();
+            let or_reads = vec![ext_in.wire_id(), b_in.wire_id()];
+            exec.spawn_wired(or_gate(ext_in, b_in, a_out), vec![od], or_reads);
+            let bd = b_out.dirty_handle();
+            let buf_reads = vec![a_in.wire_id()];
+            exec.spawn_wired(buf(a_in, b_out), vec![bd], buf_reads);
+        });
+        let msg = r.expect_err("the second spawn closes the latch and must be refused");
+        let msg = msg.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(
+            msg.contains("`or_gate` (task 0), `buf` (task 1) form a combinational cycle"),
+            "{mode:?}: {msg}"
+        );
     }
-    // Pulses set bits that then latch (monotone) — values must evolve identically.
-    let stim: Vec<Vec<u128>> =
-        [1u128, 0, 2, 0, 0, 0x80, 0, 4].iter().map(|&v| vec![v]).collect();
-    assert_schedulers_agree("convergent_comb_loop", build, &stim);
 }
 
 // ── multi-domain scenario ─────────────────────────────────────────────────────

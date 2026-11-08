@@ -77,14 +77,14 @@ fn buffer_a(a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
     o.write(a.read());
 }
 
-/// A genuine combinational cycle with **no fixed point**: `y = !x` feeds a buffer
-/// `x = y`, so `x = !x`. This never settles; the executor must *detect* the cycle
-/// (statically-condensed SCC iterated to the oscillation threshold) and panic with
-/// a structural "combinational loop" report rather than hang or emit a garbage
-/// value. This is the guardrail for un-broken feedback (no `RegOut`/synchronizer).
+/// A combinational cycle with **no fixed point**: `y = !x` feeds a buffer `x = y`,
+/// so `x = !x`. SPEC I.11.4 (D-14 A4) makes every combinational cycle OUTSIDE, and
+/// since Phase C step 10 the executor refuses it statically at the spawn that
+/// closes it, naming both modules (it used to iterate the SCC to the oscillation
+/// threshold and panic at run time — I.11.6's refusal pin).
 #[test]
-#[should_panic(expected = "Combinational loop detected")]
-fn non_convergent_combinational_loop_is_detected() {
+#[should_panic(expected = "`invert_a` (task 0), `buffer_a` (task 1) form a combinational cycle")]
+fn non_convergent_combinational_loop_is_refused_at_spawn() {
     let mut exec = HardwareExecutor::new();
 
     // wire_x: driven by the buffer, read by the inverter.
@@ -101,5 +101,5 @@ fn non_convergent_combinational_loop_is_detected() {
     let buf_dh = x_out.dirty_handle();
     exec.spawn_wired(buffer_a(y_in, x_out), vec![buf_dh], vec![y_read_id]);
 
-    exec.poll_tasks(); // must panic: the SCC never converges
+    unreachable!("the second spawn closes the cycle and must panic");
 }
