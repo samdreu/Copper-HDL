@@ -1018,12 +1018,14 @@ async fn cfn(clk: Clock<MainClk>, a: In<Logic, MainClk>, o: RegOut<Logic, MainCl
 /// An element write to an array register inside a combinational `for`: one write site
 /// run once per iteration, all in one cycle. Measured 2026-11-06 (Phase C step 5,
 /// MEASUREMENTS §J.6) admitted and divergent — the site's one write port had its nets
-/// reassigned per iteration, so only the last iteration's write committed. Refused
-/// since, transpiler only (the macro admits: a REFUSED-one shape for the coordinator's
-/// II.3). Two writes as separate statements are supported (II.3 (c),
-/// `tests/fixtures/array_two_writes_dut.rs`).
+/// reassigned per iteration, so only the last iteration's write committed — then refused,
+/// transpiler only (line `II.3 found array-for`). Since 2026-11-08 (MEASUREMENTS §U.4) the
+/// `for` is unrolled when its bounds fold to constants, each iteration's write its own port
+/// (II.3 (c)'s form; swept by `tests/fixtures/array_for_write_dut.rs`). A bound the fold cannot
+/// see — a const generic, whose value is the instance's — keeps the refusal: the emitted SV is
+/// one parametric module, and an unrolling needs the trip count.
 #[test]
-fn an_array_register_element_write_inside_a_combinational_for_is_refused() {
+fn an_array_register_element_write_inside_a_combinational_for_is_unrolled_unless_the_bound_is_generic() {
     let src = r#"
 #[hardware(sequential)]
 async fn arr_for_writes(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, k: In<Bits<2>, MainClk>, q: RegOut<Bits<8>, MainClk>) {
@@ -1037,7 +1039,22 @@ async fn arr_for_writes(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, k: In<Bits
     }
 }
 "#;
-    let err = transpile(src).expect_err("NOW SUPPORTED: an element write in a comb `for` transpiles — sweep it");
+    let sv = transpile(src).expect("an element write in a constant-bound comb `for` unrolls");
+    assert!(sv.contains("arr_wr3_en"), "four write ports, one per iteration:\n{sv}");
+    let generic = r#"
+#[hardware(sequential)]
+async fn arr_for_generic<const N: usize>(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, q: RegOut<Bits<8>, MainClk>) {
+    let mut arr = [Bits::<8>::zero(); 4];
+    loop {
+        q.write(arr[0]);
+        for j in 0..N {
+            arr[j] = a.read() + arr[j];
+        }
+        clk.tick().await;
+    }
+}
+"#;
+    let err = transpile(generic).expect_err("a generic bound has no trip count to unroll");
     assert!(err.contains("inside a combinational `for`"), "a different error: {err}");
 }
 

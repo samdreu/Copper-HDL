@@ -3677,6 +3677,56 @@ fn lower_expr_stmt(
             };
             // The loop variable is an integer index, in scope for the body.
             ctx.symbols.insert(var.clone(), CHIRType::UInt { width: Width::Concrete(32) });
+            // An element write to an array register in the body: unroll the `for` (I.2.4 —
+            // a tick-free constant-bound `for` IS an unrolling), one copy of the body per
+            // iteration with the loop variable bound to its literal, so each iteration's
+            // write is its own statement and takes its own write port — row (c)'s form
+            // (line `II.3 found array-for`, MEASUREMENTS §U.4). A bound the transpiler cannot
+            // fold keeps the refusal below.
+            if stmts_write_array_reg(&f.body, ctx) {
+                let bound = |e: Option<&ExprType>| match e {
+                    None => Some(0usize),
+                    Some(e) => eval_const_usize(e),
+                };
+                let (lo, hi) = match &*f.iter {
+                    ExprType::Range(r) => (bound(r.start.as_deref()), r.end.as_deref().and_then(eval_const_usize)),
+                    _ => (None, None),
+                };
+                if let (Some(lo), Some(hi)) = (lo, hi) {
+                    if hi.saturating_sub(lo) > MAX_UNROLL {
+                        return Err(CHIRLowerError::UnsupportedConstruct {
+                            description: format!(
+                                "a combinational `for` that writes an array register is unrolled, \
+                                 and {} iterations is more than {MAX_UNROLL}",
+                                hi - lo
+                            ),
+                            span,
+                            suggested_rewrite: None,
+                        });
+                    }
+                    let saved = ctx.bindings.get(&var).cloned();
+                    for k in lo..hi {
+                        ctx.bindings.insert(
+                            var.clone(),
+                            CHIRExpr::Lit(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(32) }, value: k as u128 }),
+                        );
+                        let body = lower_stmts(&f.body, ctx);
+                        let body = match body {
+                            Ok(b) => b,
+                            Err(e) => {
+                                ctx.bindings.remove(&var);
+                                return Err(e);
+                            }
+                        };
+                        out.extend(body);
+                    }
+                    match saved {
+                        Some(b) => ctx.bindings.insert(var.clone(), b),
+                        None => ctx.bindings.remove(&var),
+                    };
+                    return Ok(());
+                }
+            }
             ctx.comb_for_depth += 1;
             let body = lower_stmts(&f.body, ctx);
             ctx.comb_for_depth -= 1;
@@ -6569,6 +6619,38 @@ fn is_tick_stmt(stmt: &RawStmt) -> bool {
 /// phase FSM extracts); a tick inside a `for`/`while`/`if`/`match` needs control
 /// extraction (counters / self-loop states), which is not yet built — so such a
 /// tick must be *rejected*, never silently dropped.
+/// The most iterations a combinational `for` writing an array register is unrolled to.
+const MAX_UNROLL: usize = 1024;
+
+/// Whether the statements write an element of an array register (`arr[i] = e`, at any depth,
+/// nested `for`s included).
+fn stmts_write_array_reg(stmts: &[RawStmt], ctx: &LowerCtx) -> bool {
+    fn expr(e: &ExprType, ctx: &LowerCtx) -> bool {
+        match e {
+            ExprType::Assign(a) => match a.left.as_ref() {
+                ExprType::Index(idx) => match idx.base.as_ref() {
+                    ExprType::Path(p) => ctx.array_regs.contains_key(p.path_text.trim()),
+                    ExprType::Lit(l) => ctx.array_regs.contains_key(l.text.trim()),
+                    _ => false,
+                },
+                _ => false,
+            },
+            ExprType::Block(b) => stmts_write_array_reg(&b.stmts, ctx),
+            ExprType::ForLoop(f) => stmts_write_array_reg(&f.body, ctx),
+            ExprType::If(f) => {
+                stmts_write_array_reg(&f.then_block, ctx)
+                    || f.else_branch.as_deref().is_some_and(|e| expr(e, ctx))
+            }
+            ExprType::Match(m) => m.arms.iter().any(|a| expr(&a.body, ctx)),
+            _ => false,
+        }
+    }
+    stmts.iter().any(|s| match &s.kind {
+        RawStmtKind::Expr(es) => expr(&es.expr, ctx),
+        _ => false,
+    })
+}
+
 fn stmts_contain_tick(stmts: &[RawStmt]) -> bool {
     stmts.iter().any(stmt_contains_tick)
 }
