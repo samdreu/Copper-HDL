@@ -3739,3 +3739,47 @@ coroutine that silently never runs. An X pattern asks the coroutine's third valu
 machine does not hold.
 Obligations: `II.3 found const-pattern` (the lowering; how a file-level X-valued `const` pattern is
 then refused is a decision for that change); III.3.6's counts.
+
+### D-25 — Memory: one receiver per memory, the mode the owner's, the latency and placement rules in both front-ends   (2026-11-08)
+Clause: SPEC I.10.1(a)–(b), I.10.4, I.10.5, I.10.6, I.10.7; I.13.4(d)–(e), I.13.7 (6), I.13.8; II.3.3 rows (i)
+and (j) (new); II.3.7's I.10 item; III.3's lines I.10.1, I.10.4, I.10.5, I.10.6, I.13.4, II.3.3 (i), II.3.3 (j).
+Question: the memory OPEN lines of III.3 (the open-lines memory batch): how D-16 A7's "ports partitioned
+among the receivers, the port set and mode eventually in the parameter type" is realized; whether the mode
+is owed to the type; how `L ≥ 1` is checked; whether rule 6 (d) orders against a pre-loop staging; and
+whether a `Memory` parameter may leave its latencies defaulted.
+Docs say: D-16 1A–8A and its Phase C obligations (I.10.7 (2)–(7)); I.10.5 and I.2.2 — a `Memory` is a
+parameter of a `sequential` or `synchronizer` module only; I.13.4(e) — a structural parent's memory "is
+owned by the one child it reaches" (the two disagree on the structural parent); `RECEIVED_MEMORY_ABI.md` §3.
+Code did (at `e4a9aae`): `ReadMode` a field, no latency check in the simulator (an index panic at the first
+edge, `memory.rs:156`/`:360`); rule 6 (a)/(b) refusing in both; (c) blind to `s_pre`; no I.10.6 header rule
+(the transpiler refused by a registry accident); `WRITE_LAT ≠ 1` and a latency 0 refused by the transpiler
+only, a received `READ_LAT = 0` a transpiler crash (`vlir_lower.rs:2092`); a defaulted `Memory` parameter
+admitted by the macro and refused by the transpiler; a structural memory parameter admitted by the macro
+for one child.
+Measured basis: `review/MEASUREMENTS.md` §W.1 (17 probes, every verdict predicted first; rule 6's retirement
+measured on three legs under a temporary patch: 16/16 cases, corpus 0, four pins).
+Options and recommendations: §W.3 (1)–(5).
+Decision: **(1) A, (2) M1, (3) a3, (4) (i), (5) (ii)** — the user, each as recommended (relayed by the
+coordinator, 2026-11-08), with the mechanical items of §W.2.
+(1) **One receiver per memory.** The partition of D-16 A7 is realized in its trivial case: `Memory` is not
+`Clone` and nothing yields a second handle, so rustc's move refuses a memory handed to two modules; a
+`structural` module receives no `Memory` (I.10.5, I.2.2 kept; I.13.4(e) corrected); the port set needs no
+type. (2) **The mode is the owner's**, stated by the owner on each leg; the receiving module's text is
+mode-free; not carried in the type, and not a limit (II.3.3 row (j)). (3) The simulator's type asserts
+`READ_LAT ≥ 1 ∧ WRITE_LAT ≥ 1` at construction, and both front-ends refuse a literal 0 in either latency
+position, one message. (4) Rule 6 (c) counts the stagings of `s_pre`; (d) does not order against them.
+(5) The transpiler reads a received memory's omitted latencies as the type's defaults, 1 and 1.
+Changes (branch `claude/open-lines-memory-71b72a`, §W.5): `copper-core` — `ReadMode` deleted,
+`latency_message`, the assert in `Memory::from_data`; `copper-analysis` — `check_memory_staging` without (a)
+and (b), `Cfg::pre_staged` for (c), and `memory_rules::check_memory_shapes` (placement, latency, received
+`WRITE_LAT`) called once from `front_end::check_front_end_rules`; `copper-codegen` — `received_memory_decls`
+admits four to six generics; fixtures `tests/fixtures/memory_staging_dut.rs` (eight swept modules), ui/fail
+`memory_combinational_observe`, `memory_combinational_stage`, `memory_structural_parameter`,
+`memory_zero_latency`, `memory_zero_latency_parameter`, `memory_received_write_latency`, ui/pass
+`memory_parameter_default_latencies`, coreui/fail `memory_one_receiver`, the construction asserts, the
+interpreter's I.10.6 refusal pinned; the four rule-6 pins rewritten as admitted shapes.
+Coroutine terms: a memory is a variable of H(M) that one coroutine stages and observes; its mode is a
+property of the instance its owner built, outside the receiving coroutine; a resumption's several stagings of
+one port are its effects in program order, the last consumed at the edge.
+Obligations: III.3.6's counts; the coordinator's notes in `RECEIVED_MEMORY_ABI.md` (done in this change:
+`WRITE_LAT` REFUSED-both, the defaulted spelling).

@@ -4568,3 +4568,56 @@ rows with their III.3 lines; I.10.1, I.10.4, I.10.5, I.10.6 closed in III.3 with
 III.3.6's counts; bare `tools/regression.sh` to REGRESSION OK. Ledger forecast if every recommendation
 is taken: the four lines CLOSED; plus one REFUSED-both II.3.3 row (`WRITE_LAT ≠ 1`) with its line, and
 the mode row not written (M1).
+
+### W.5 Phase 2 — the decisions implemented (D-25)
+
+The user took all five packets as recommended — (1) A, (2) M1, (3) a3, (4) (i), (5) (ii) — relayed by
+the coordinator, with the mechanical items of W.2; recorded as D-25. Rebased onto `paper` at `d022fbe`
+(the front-end batch) first; `paper` had not moved again when the regression ran. Code commit `8f21db8`;
+docs after.
+
+**What changed.** `copper-core`: `ReadMode` deleted; `Memory::from_data` asserts both latencies ≥ 1 with
+`latency_message`. `copper-analysis`: `check_memory_staging` without clauses (a) and (b); (c)'s existence
+test counts the pre-loop stagings (`Cfg::pre_staged`, `pre_loop_read_stagings`), (d) unchanged and so
+blind to them; the new `memory_rules.rs` (`check_memory_shapes`: a `Memory` parameter on a
+`combinational` or `structural` module, a literal latency 0 in a parameter type or a `Memory::<…>`
+turbofish, a received `WRITE_LAT ≠ 1`), called once from `check_front_end_rules` — the only line added to
+`front_end.rs`. `copper-codegen`: `received_memory_decls` reads four to six generics, the omitted latencies
+1. The received-`READ_LAT = 0` crash (W.1 #4) is pre-empted by the shared rule in both front-ends; the
+lowering itself still assumes `L ≥ 1`.
+
+**Pins rewritten (W.1 #9).** `two_stagings_of_one_bus_in_one_cycle_are_rejected` →
+`two_stagings_of_one_port_in_one_resumption_are_admitted`; `a_received_memory_is_checked_like_a_declared_one`
+now uses (d)'s violation; `two_accesses_to_one_memory_port_are_rejected` →
+`two_stagings_of_one_memory_port_lower_last_wins` (the later assignment is the later staging);
+`two_accesses_in_one_cycle_of_an_extracted_module_are_still_rejected` →
+`two_stagings_in_one_resumption_of_an_extracted_module_transpile`. New: `an_access_in_a_tick_free_for_is_admitted`,
+`a_port_staged_only_before_the_loop_is_staged`, five `memory_rules` unit tests,
+`a_received_memory_with_default_latencies_lowers_as_latency_one` (the short spelling's SV byte-identical to
+`(1, 1)`), two `copper-core` construction asserts, `copper-ref`'s
+`a_memory_on_a_combinational_module_is_refused`.
+
+**Fixtures.** `tests/fixtures/memory_staging_dut.rs` — W.1's eight probes renamed (`stage_unrolled_for`,
+`stage_for_once`, `stage_for_two_ports`, `stage_twice_read`, `stage_twice_write`, `stage_dominated`,
+`stage_preloop_only`, `stage_preloop_head`), swept on three legs; ui/fail `memory_combinational_observe`,
+`memory_combinational_stage`, `memory_structural_parameter`, `memory_zero_latency`,
+`memory_zero_latency_parameter`, `memory_received_write_latency`; ui/pass
+`memory_parameter_default_latencies`; coreui/fail `memory_one_receiver` (E0382). `front_end_parity_ui.rs`
+transpiles every new ui case and finds the macro's message.
+
+**SPEC.** I.10.1(a)–(b), the I.10.4 table, I.10.5 (one receiver; the mode the owner's; the defaults),
+I.10.6, I.10.7's open list, I.13.4's table row and (e), I.13.7 (6), I.13.8, II.3.7; II.3.3 rows (i)
+(REFUSED-both) and (j) (NOT A LIMIT); III.3 lines I.10.1, I.10.4, I.10.5, I.10.6, I.13.4 CLOSED, lines
+II.3.3 (i) and (j) added CLOSED; `RECEIVED_MEMORY_ABI.md` §3 notes.
+
+**The bare regression — measured.** Bare `tools/regression.sh` on `8f21db8` (the final code commit;
+laptop): **REGRESSION OK (1068 s wall — not a timing number).** 1465 passed, 0 failed, 16 ignored, 156 test
+binaries (G-C: 129 test files); examples **32/32**; G-D **224** differential cases (3 ignored-with-reason;
++8, the fixture file); **G-F 224**; **G-G differential 1782 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0
+DISAGREE**; **G-G reference 1794 PASS / 0 DISAGREE**; **G-I** 173 clocked related, 0 uncovered, 227/227
+sweep modules examined; **G-J** 0 asymmetric, 0 DISAGREE; G-E 5 anchored; **G-K** `191 lines — 178
+CLOSED, 13 OPEN; 170 required by the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 149 sweep, 136 test,
+114 ui; 181 run checks`, the 3 example fixtures PASS. Not run remotely (nothing pushed).
+
+After the run, docs only: D-25 (`SPEC_DECISIONS.md`), `RECEIVED_MEMORY_ABI.md`, III.3.6's counts, this
+section, CLAUDE.md.

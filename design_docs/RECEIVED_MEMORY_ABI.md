@@ -73,6 +73,14 @@ parameter named `m`:
   (`chir_lower::received_memory_decls` rejects `WRITE_LAT != 1` with a clean
   diagnostic). Any `READ_LAT ≥ 1` works (the capture chain is child-side and
   feeds off the data input).
+  (D-25, 2026-11-08: refused by **both** front-ends with one message —
+  `copper_analysis::memory_rules`, SPEC II.3.3 row (i).)
+* **The latencies may be defaulted** (D-25 (5)): `Memory<T, R, W, D>` is read as
+  `Memory<T, R, W, D, 1, 1>` and lowers byte-identically. A literal latency of 0 is
+  refused by both front-ends (SPEC I.10.1(a)).
+* **One receiver per memory, the mode the owner's** (D-25 (1), (2)): a `structural`
+  module receives no `Memory`; the child's bus carries no mode, and the owner — the
+  simulator's object and the hand-written SV — states it on each side.
 
 ## 4. Implementation notes
 

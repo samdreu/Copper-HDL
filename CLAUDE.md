@@ -38,7 +38,7 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (216 of 219 since 2026-11-08, MEASUREMENTS §V; 213 of 216 at Phase C step 10: 161
+`_reference_leg` cases as build.rs generated to run (224 of 227 since 2026-11-08, MEASUREMENTS §W — the memory batch's eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
 clocked, 18 of them binding a `Memory` (I.10), 52 combinational (I.11); `REF_SKIP` empty), each
 leg non-empty, and the design leg (I.13, `copper_ref::Design` on `two_domain_top` vs the hand-wired
 simulation, `tests/two_domain_hierarchy_cdc.rs`) — and
@@ -408,7 +408,8 @@ the emitted SV is the concrete module's, with no parameter for `D`.
 - **Both front-ends enforce the same rules (front-end parity, 2026-10-23; one list since Phase C
   step 10).** The syntactic rules — the header (R20, R9, R10), R17, D3, R16, R18, R7, R12, R13/R14,
   R5, the CDC rules (the port rule, the two-flop rule, the combinational one-domain rule), R19 and the
-  structural body rules, no net (`wire`/`registered_wire`/`net`) in a behavioural body (I.13.5,
+  structural body rules, the memory shape rules of D-25 (`memory_rules.rs`: no `Memory` parameter on a
+  `combinational` or `structural` module, no literal latency 0, a received `WRITE_LAT` of 1), no net (`wire`/`registered_wire`/`net`) in a behavioural body (I.13.5,
   `check_no_body_nets`, 2026-11-08), R16's `Bits<N>` width bound 1 ≤ N ≤ 128 (`check_admissible`), and (D-23) the `continue` of a tick-bearing `for` (a dated REFUSED-both
   II.3.3 row (h), fix direction the lowering) — are `copper_analysis::front_end::check_front_end_rules`, which both call
   first; `copper-codegen/tests/front_end_parity_ui.rs` transpiles every macro ui case and requires the
