@@ -249,9 +249,15 @@ fn pulse_held_across_an_edge_is_captured() {
     assert_eq!(high, 1 + LATENCY_DST_CYCLES, "trace = {observed:?}");
 }
 
-/// A **one**-flip-flop "synchronizer" — not a real CDC primitive, just the
-/// degenerate neighbour of `sync_2ff`. Its only job is to be the thing
-/// `synchronizer_behaves_as_two_flops_not_one` distinguishes the library from.
+/// A **one**-flip-flop "synchronizer" — the degenerate neighbour of `sync_2ff`
+/// (`q.write(d.read())`: `q <= d`, one flop sampling the foreign wire). Until Phase C
+/// step 10 it compiled and this test ran it, measuring that collapsing the two
+/// stages makes `q` assert one destination cycle earlier (2-FF one cycle later than
+/// 1-FF, measured). SPEC I.12.3's two-flop rule (D-17 A3) now refuses the shape in
+/// both front-ends, and the spec makes this the rule's refusal pin: the storage
+/// claim — two flops, not one — is the rule's (`copper_analysis::front_end::
+/// check_two_flop`; ui `copper-macros/tests/ui/fail/sync_one_flop.rs`).
+const SYNC_1FF: &str = r#"
 #[hardware(synchronizer)]
 async fn sync_1ff(clk: Clock<DstClk>, d: In<Logic, SrcClk>, q: RegOut<Logic, DstClk>) {
     loop {
@@ -259,47 +265,30 @@ async fn sync_1ff(clk: Clock<DstClk>, d: In<Logic, SrcClk>, q: RegOut<Logic, Dst
         clk.tick().await;
     }
 }
+"#;
 
 #[test]
-fn synchronizer_behaves_as_two_flops_not_one() {
-    // The observable latency is one destination cycle, but the *storage* is two
-    // flip-flops — that is the whole point of a 2-FF synchronizer (stage 1 absorbs
-    // metastability, stage 2 presents a settled value). Those are consistent: with
-    // two flops, `q` after edge n is `d` as it stood at edge n-1.
-    //
-    // Latency and storage are separate claims, so check the storage one by its
-    // observable consequence rather than by argument: collapse the two stages into
-    // one and the behaviour must change — a single flop asserts a full destination
-    // cycle earlier. This is the failure mode `src/sync.rs`'s own comment warns
-    // about (reversing the two assignments), and it is what would silently destroy
-    // the metastability guard.
-    let mut clk_src = Clock::<SrcClk>::new();
-    let mut clk_dst = Clock::<DstClk>::new();
-    let mut exec = HardwareExecutor::new();
-    let (d_drv, d_in) = wire::<Logic, SrcClk>(Logic::Zero);
-    let (q_out, q_obs) = registered_wire::<Logic, DstClk>(&clk_dst, Logic::Zero);
-    let dh_q = q_out.dirty_handle();
-    let reads = vec![d_in.wire_id()];
-    exec.spawn_wired(sync_1ff(clk_dst.clone(), d_in, q_out), vec![dh_q], reads);
-
-    let mut one_flop = Vec::new();
-    for _ in 0..8 {
-        d_drv.write(Logic::One);
-        exec.tick_clock(&mut clk_src);
-        exec.tick_clock(&mut clk_dst);
-        one_flop.push(if q_obs.read() == Logic::One { 1 } else { 0 });
-    }
-
-    let two_flop = trace(1, &[1; 8]);
-    assert_ne!(two_flop, one_flop, "sync_2ff must not behave like a single flop");
-    let two_at = two_flop.iter().position(|&q| q == 1).unwrap();
-    let one_at = one_flop.iter().position(|&q| q == 1).unwrap();
-    assert_eq!(
-        two_at,
-        one_at + 1,
-        "the second stage must cost exactly one more destination cycle \
-         (2-FF {two_flop:?} vs 1-FF {one_flop:?})"
+fn a_one_flop_synchronizer_is_refused_by_both_front_ends() {
+    let f: syn::ItemFn = syn::parse_str(SYNC_1FF).expect("sync_1ff parses");
+    let mode = copper_analysis::hardware_mode(&f).expect("attributed").expect("mode");
+    let macro_err = copper_analysis::check_front_end_rules(&f, mode)
+        .expect_err("the two-flop rule refuses a one-flop synchronizer")
+        .to_string();
+    assert!(macro_err.contains("the two-flop rule"), "{macro_err}");
+    let src = format!(
+        "use copper_core::{{Clock, ClockDomain, Logic}};\nuse copper_core::port::{{In, RegOut}};\n\
+         struct SrcClk; impl ClockDomain for SrcClk {{}}\nstruct DstClk; impl ClockDomain for DstClk {{}}\n{SYNC_1FF}"
     );
+    let t_err = copper_codegen::transpile_source(&src, None, &copper_codegen::EmitConfig::default())
+        .expect_err("the transpiler refuses it too");
+    assert_eq!(t_err, macro_err, "one message in both front-ends (SPEC II.1.3)");
+    // And the library synchronizer, the same port set with two stages, is admitted.
+    let lib: syn::ItemFn = syn::parse_str(
+        "#[hardware(synchronizer)] async fn s(clk: Clock<DstClk>, d: In<Logic, SrcClk>, q: RegOut<Logic, DstClk>) \
+         { let mut ff1 = Logic::Zero; loop { let ff2 = ff1; ff1 = d.read(); q.write(ff2); clk.tick().await; } }",
+    )
+    .unwrap();
+    assert!(copper_analysis::check_front_end_rules(&lib, copper_analysis::HardwareMode::Synchronizer).is_ok());
 }
 
 #[test]

@@ -6,10 +6,12 @@
 //! modules and read its output — never wire a foreign-domain signal into ordinary
 //! logic. See the audit and rationale in `copper-core/src/cdc.rs`.
 //!
-//! Synchronizers are restricted to single-bit `Logic`: a two-flip-flop
-//! synchronizer on a multi-bit bus is itself a CDC bug (bits can be sampled
-//! mid-transition). Multi-bit crossings need gray coding, a handshake, or an
-//! async FIFO — separate constructs, not yet provided.
+//! `sync_2ff` is single-bit `Logic` — a statement of its signature, not a rule. A
+//! synchronizer's foreign port may be `Bits<N>`, meaning N independent per-bit
+//! synchronizers (SPEC I.12.4(e), D-17 A4b): nothing relates the bits, so a word
+//! that changes between two destination edges may be read with some bits old and
+//! some new. A coherent multi-bit crossing is a gray-coded counter or a handshake
+//! built from single-bit crossings — a design of yours, not a primitive here.
 //!
 //! # A regular module may not cross clock domains
 //!
@@ -33,8 +35,13 @@
 //!
 //! `#[hardware(synchronizer)]` is the *only* mode allowed a foreign-domain port —
 //! an explicit, `unsafe`-like opt-in for when you need something other than the
-//! library `sync_2ff` (a deeper pipeline, a handshake, gray coding, …). You take
-//! responsibility for the timing correctness inside it.
+//! library `sync_2ff` (a deeper pipeline, a handshake, gray coding, …). Its one
+//! structural requirement is enforced in both front-ends: **the two-flop rule**
+//! (SPEC I.12.3, D-17 A3) — no `RegOut` write may depend, by value or by guard, on
+//! a foreign read of the same resumption. Assign the foreign read to a local (a
+//! register at the tick) and write the port from it in the next resumption; a
+//! one-flop `q.write(d.read())` is refused (`copper-macros/tests/ui/fail/
+//! sync_one_flop.rs`).
 //!
 //! ```
 //! use copper_core::port::{In, RegOut};

@@ -1,0 +1,19 @@
+error: `q.write(…)` depends, through its value, on a read of a foreign-domain input in the same resumption: one flop sampling an asynchronous wire, which the hardware cannot realize as the model's settled value (SPEC I.12.3, the two-flop rule, D-17 A3; II.1 realizability). Assign the foreign read to a local in this resumption — it is a register at the tick — and write the port from that local in the next: `let ff2 = ff1; ff1 = d.read(); q.write(ff2); clk.tick().await`.
+  --> tests/ui/fail/sync_one_flop.rs:17:9
+   |
+17 |         q.write(ff1);
+   |         ^^^^^^^^^^^^
+
+warning: unused imports: `Clock` and `Logic`
+ --> tests/ui/fail/sync_one_flop.rs:1:19
+  |
+1 | use copper_core::{Clock, ClockDomain, Logic};
+  |                   ^^^^^               ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/sync_one_flop.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^

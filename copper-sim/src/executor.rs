@@ -971,7 +971,7 @@ mod tests {
     // at edge N stays on the wire through obs_N, so it reads 1, 2, 3.
     fn wired_counter(
         clk: Clock<TestClk>,
-        out: Out<u8>,
+        out: Out<u8, TestClk>,
     ) -> HardwareModule<impl std::future::Future<Output = ()>> {
         HardwareModule::__new_in_domain::<TestClk>(async move {
             let mut value = 0u8;
@@ -984,8 +984,8 @@ mod tests {
     }
 
     fn wired_passthrough(
-        input: In<u8>,
-        out: Out<u8>,
+        input: In<u8, TestClk>,
+        out: Out<u8, TestClk>,
     ) -> HardwareModule<impl std::future::Future<Output = ()>> {
         HardwareModule::__new(async move {
             loop {
@@ -1000,7 +1000,7 @@ mod tests {
         let mut clk = Clock::<TestClk>::new();
         let mut exec = HardwareExecutor::new();
 
-        let (out, in_) = wire::<u8, ()>(0);
+        let (out, in_) = wire::<u8, TestClk>(0);
         let dirty = out.dirty_handle();
         exec.spawn_wired(wired_counter(clk.clone(), out), vec![dirty], vec![]);
 
@@ -1023,7 +1023,7 @@ mod tests {
         let mut clk = Clock::<TestClk>::new();
         let mut exec = HardwareExecutor::new();
 
-        let (out, _in) = wire::<u8, ()>(0);
+        let (out, _in) = wire::<u8, TestClk>(0);
         let dirty_for_exec = out.dirty_handle();
         let dirty_probe    = out.dirty_handle();
         exec.spawn_wired(wired_counter(clk.clone(), out), vec![dirty_for_exec], vec![]);
@@ -1037,11 +1037,11 @@ mod tests {
         let mut clk = Clock::<TestClk>::new();
         let mut exec = HardwareExecutor::new();
 
-        let (counter_out, counter_in) = wire::<u8, ()>(0);
+        let (counter_out, counter_in) = wire::<u8, TestClk>(0);
         let counter_dirty = counter_out.dirty_handle();
         exec.spawn_wired(wired_counter(clk.clone(), counter_out), vec![counter_dirty], vec![]);
 
-        let (pass_out, pass_in) = wire::<u8, ()>(0);
+        let (pass_out, pass_in) = wire::<u8, TestClk>(0);
         let pass_dirty = pass_out.dirty_handle();
         let pass_reads = vec![counter_in.wire_id()];
         exec.spawn_wired(wired_passthrough(counter_in, pass_out), vec![pass_dirty], pass_reads);
@@ -1059,7 +1059,7 @@ mod tests {
         // set, which would prevent the executor from finding a fixed point.
         let mut exec = HardwareExecutor::new();
 
-        let (out, in_) = wire::<u8, ()>(42);
+        let (out, in_) = wire::<u8, TestClk>(42);
         let dirty_probe    = out.dirty_handle();
         let dirty_for_exec = out.dirty_handle();
 
@@ -1085,7 +1085,7 @@ mod tests {
         let mut clk = Clock::<TestClk>::new();
         let mut exec = HardwareExecutor::new();
 
-        let (out, in_a) = wire::<u8, ()>(0);
+        let (out, in_a) = wire::<u8, TestClk>(0);
         let in_b = in_a.clone();
         let in_c = in_a.clone();
         let dirty = out.dirty_handle();
@@ -1105,7 +1105,7 @@ mod tests {
         let mut clk = Clock::<TestClk>::new();
         let mut exec = HardwareExecutor::new();
 
-        let (out, in_) = wire::<u8, ()>(0);
+        let (out, in_) = wire::<u8, TestClk>(0);
         exec.spawn_wired(wired_counter(clk.clone(), out), vec![], vec![]); // no dirty tracking
 
         exec.tick_clock(&mut clk);
@@ -1127,11 +1127,11 @@ mod tests {
             let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Fixpoint);
             exec.set_poll_order(order);
 
-            let (counter_out, counter_in) = wire::<u8, ()>(0);
+            let (counter_out, counter_in) = wire::<u8, TestClk>(0);
             let cd = counter_out.dirty_handle();
             exec.spawn_wired(wired_counter(clk.clone(), counter_out), vec![cd], vec![]);
 
-            let (pass_out, pass_in) = wire::<u8, ()>(0);
+            let (pass_out, pass_in) = wire::<u8, TestClk>(0);
             let pd = pass_out.dirty_handle();
             let pass_reads = vec![counter_in.wire_id()];
             exec.spawn_wired(wired_passthrough(counter_in, pass_out), vec![pd], pass_reads);
@@ -1161,11 +1161,11 @@ mod tests {
         let mut clk = Clock::<TestClk>::new();
         let mut exec = HardwareExecutor::new();
 
-        let (out_a, in_a) = wire::<u8, ()>(0);
+        let (out_a, in_a) = wire::<u8, TestClk>(0);
         let dirty_a = out_a.dirty_handle();
         exec.spawn_wired(wired_counter(clk.clone(), out_a), vec![dirty_a], vec![]);
 
-        let (out_b, in_b) = wire::<u8, ()>(0);
+        let (out_b, in_b) = wire::<u8, TestClk>(0);
         let dirty_b = out_b.dirty_handle();
         exec.spawn_wired(wired_counter(clk.clone(), out_b), vec![dirty_b], vec![]);
 
@@ -1191,11 +1191,11 @@ mod tests {
             let mut clk = Clock::<TestClk>::new();
             let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
 
-            let (counter_out, counter_in) = wire::<u8, ()>(0);
+            let (counter_out, counter_in) = wire::<u8, TestClk>(0);
             let cd = counter_out.dirty_handle();
             exec.spawn_wired(wired_counter(clk.clone(), counter_out), vec![cd], vec![]);
 
-            let (pass_out, pass_in) = wire::<u8, ()>(0);
+            let (pass_out, pass_in) = wire::<u8, TestClk>(0);
             let pd = pass_out.dirty_handle();
             let reads = vec![counter_in.wire_id()];
             exec.spawn_wired(wired_passthrough(counter_in, pass_out), vec![pd], reads);
@@ -1226,8 +1226,8 @@ mod tests {
             let mut exec = HardwareExecutor::new().with_scheduler_mode(mode);
 
             // Spawn the consumer FIRST (spawn index 0), producer second.
-            let (counter_out, counter_in) = wire::<u8, ()>(0);
-            let (pass_out, pass_in) = wire::<u8, ()>(0);
+            let (counter_out, counter_in) = wire::<u8, TestClk>(0);
+            let (pass_out, pass_in) = wire::<u8, TestClk>(0);
             let pd = pass_out.dirty_handle();
             let reads = vec![counter_in.wire_id()];
             exec.spawn_wired(wired_passthrough(counter_in, pass_out), vec![pd], reads);
@@ -1257,7 +1257,7 @@ mod tests {
         let mut clk = Clock::<TestClk>::new();
         let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Levelized);
 
-        let (counter_out, counter_in) = wire::<u8, ()>(0);
+        let (counter_out, counter_in) = wire::<u8, TestClk>(0);
         let cd = counter_out.dirty_handle();
         exec.spawn_wired(wired_counter(clk.clone(), counter_out), vec![cd], vec![]);
 
@@ -1265,7 +1265,7 @@ mod tests {
         exec.tick_clock(&mut clk);
 
         // Now add the passthrough consumer; the cached order must be invalidated.
-        let (pass_out, pass_in) = wire::<u8, ()>(0);
+        let (pass_out, pass_in) = wire::<u8, TestClk>(0);
         let pd = pass_out.dirty_handle();
         let reads = vec![counter_in.wire_id()];
         exec.spawn_wired(wired_passthrough(counter_in, pass_out), vec![pd], reads);
@@ -1278,7 +1278,7 @@ mod tests {
     // combinational loop: it forms one multi-task SCC that never reaches a fixed
     // point, so the per-SCC iteration must trip the same oscillation guard the
     // fixpoint settle does, rather than spin forever.
-    fn inc_u8(input: In<u8>, out: Out<u8>) -> HardwareModule<impl std::future::Future<Output = ()>> {
+    fn inc_u8(input: In<u8, TestClk>, out: Out<u8, TestClk>) -> HardwareModule<impl std::future::Future<Output = ()>> {
         HardwareModule::__new(async move {
             loop {
                 out.write(input.read().wrapping_add(1));
@@ -1286,7 +1286,7 @@ mod tests {
             }
         })
     }
-    fn buf_u8(input: In<u8>, out: Out<u8>) -> HardwareModule<impl std::future::Future<Output = ()>> {
+    fn buf_u8(input: In<u8, TestClk>, out: Out<u8, TestClk>) -> HardwareModule<impl std::future::Future<Output = ()>> {
         HardwareModule::__new(async move {
             loop {
                 out.write(input.read());
@@ -1296,7 +1296,7 @@ mod tests {
     }
     // `out = ext | fb` — with `fb` fed back from `out` this is a set-dominant latch:
     // a *convergent* combinational loop (monotone), legal and iterated, never rejected.
-    fn or_u8(ext: In<u8>, fb: In<u8>, out: Out<u8>) -> HardwareModule<impl std::future::Future<Output = ()>> {
+    fn or_u8(ext: In<u8, TestClk>, fb: In<u8, TestClk>, out: Out<u8, TestClk>) -> HardwareModule<impl std::future::Future<Output = ()>> {
         HardwareModule::__new(async move {
             loop {
                 out.write(ext.read() | fb.read());
@@ -1310,8 +1310,8 @@ mod tests {
     fn levelized_oscillating_scc_trips_threshold() {
         let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Levelized);
 
-        let (a_out, a_in) = wire::<u8, ()>(0);
-        let (b_out, b_in) = wire::<u8, ()>(0);
+        let (a_out, a_in) = wire::<u8, TestClk>(0);
+        let (b_out, b_in) = wire::<u8, TestClk>(0);
 
         let ad = a_out.dirty_handle();
         let a_reads = vec![b_in.wire_id()];
@@ -1333,9 +1333,9 @@ mod tests {
     fn levelized_three_module_cycle_reports_whole_scc() {
         let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Levelized);
 
-        let (a_out, a_in) = wire::<u8, ()>(0);
-        let (b_out, b_in) = wire::<u8, ()>(0);
-        let (c_out, c_in) = wire::<u8, ()>(0);
+        let (a_out, a_in) = wire::<u8, TestClk>(0);
+        let (b_out, b_in) = wire::<u8, TestClk>(0);
+        let (c_out, c_in) = wire::<u8, TestClk>(0);
 
         let ad = a_out.dirty_handle();
         let a_reads = vec![c_in.wire_id()];
@@ -1359,9 +1359,9 @@ mod tests {
     fn comb_cycles_reports_convergent_latch_without_rejecting_it() {
         let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Levelized);
 
-        let (ext_drv, ext_in) = wire::<u8, ()>(0);
-        let (a_out, a_in) = wire::<u8, ()>(0);
-        let (b_out, b_in) = wire::<u8, ()>(0);
+        let (ext_drv, ext_in) = wire::<u8, TestClk>(0);
+        let (a_out, a_in) = wire::<u8, TestClk>(0);
+        let (b_out, b_in) = wire::<u8, TestClk>(0);
 
         let ad = a_out.dirty_handle();
         let or_reads = vec![ext_in.wire_id(), b_in.wire_id()];
@@ -1394,11 +1394,11 @@ mod tests {
         let clk = Clock::<TestClk>::new();
         let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Levelized);
 
-        let (c_out, c_in) = wire::<u8, ()>(0);
+        let (c_out, c_in) = wire::<u8, TestClk>(0);
         let cd = c_out.dirty_handle();
         exec.spawn_wired(wired_counter(clk.clone(), c_out), vec![cd], vec![]);
 
-        let (p_out, _p_in) = wire::<u8, ()>(0);
+        let (p_out, _p_in) = wire::<u8, TestClk>(0);
         let pd = p_out.dirty_handle();
         let reads = vec![c_in.wire_id()];
         exec.spawn_wired(wired_passthrough(c_in, p_out), vec![pd], reads);
@@ -1415,8 +1415,8 @@ mod tests {
         // oracle regardless of `COPPER_SCHEDULER`.
         let mut exec = HardwareExecutor::new().with_scheduler_mode(SchedulerMode::Fixpoint);
 
-        let (a_out, a_in) = wire::<u8, ()>(0);
-        let (b_out, b_in) = wire::<u8, ()>(0);
+        let (a_out, a_in) = wire::<u8, TestClk>(0);
+        let (b_out, b_in) = wire::<u8, TestClk>(0);
 
         let ad = a_out.dirty_handle();
         exec.spawn_wired(inc_u8(b_in, a_out), vec![ad], vec![]);

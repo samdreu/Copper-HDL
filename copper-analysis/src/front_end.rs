@@ -1093,6 +1093,277 @@ pub const RUNTIME_FOR_BOUND_MESSAGE: &str = "this bound of a tick-free `for` is 
     I.2.5(c), I.8.5, I.14.4). Loop to a constant bound and test the run-time limit inside, or put \
     a tick in the body to make the loop a state machine.";
 
+
+// ── I.12.3 the two-flop rule; I.12.4(c) the combinational module's one domain ──
+
+/// The domain text of each port/clock parameter (`None` for a unit-domain port).
+fn param_domains(f: &ItemFn) -> Vec<(String, String, Option<String>, &syn::PatType)> {
+    f.sig
+        .inputs
+        .iter()
+        .filter_map(|a| match a {
+            FnArg::Typed(pt) => {
+                let kind = outer_type_name(&pt.ty)?;
+                let dom = match kind.as_str() {
+                    "Clock" => clock_domain(&pt.ty),
+                    "In" | "Out" | "RegOut" | "Memory" => port_domain(&pt.ty),
+                    _ => return None,
+                };
+                Some((param_ident(a)?, kind, dom, pt))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// SPEC I.12.4(c) (D-17 A4a; II.1 S0): every port of a `combinational` module lies
+/// in one domain — the module is evaluated in the domain of its ports, and two
+/// domains would make a wire of one a function of a register of the other with no
+/// flop between them. A unit-domain port (`In<T>`) names no domain and is not
+/// compared (its retirement, I.12.1, is MEASUREMENTS §P.2's stopped item).
+pub fn check_combinational_one_domain(f: &ItemFn) -> Result<(), Error> {
+    let mut first: Option<(String, String)> = None;
+    for (name, kind, dom, pt) in param_domains(f) {
+        if !matches!(kind.as_str(), "In" | "Out") {
+            continue;
+        }
+        let Some(d) = dom else { continue };
+        match &first {
+            None => first = Some((name, d)),
+            Some((n0, d0)) if *d0 != d => {
+                return Err(Error::new_spanned(
+                    pt,
+                    format!(
+                        "this combinational module's port `{name}` is in domain `{d}`, but `{n0}` is in \
+                         `{d0}`: a combinational module lies in the one domain of its ports, and an \
+                         evaluation reading one domain and driving another is a crossing no flop \
+                         samples (SPEC I.12.4(c), D-17; II.1 S0). Cross with a \
+                         `#[hardware(synchronizer)]` module, then compute in the destination domain."
+                    ),
+                ))
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// SPEC I.12.3, **the two-flop rule** (D-17 A3; a realizability rule of II.1):
+/// in a `synchronizer` module no `RegOut` write may depend on a foreign read of the
+/// same resumption — neither its value (through the resumption's locals) nor its
+/// guard (an `if`/`match` it stands under). A foreign read's value may be assigned
+/// to a local, which is then a register at the `tick` (I.7.1); the next resumption
+/// may write it to a `RegOut`: two flops in series. A read of an `In` in the
+/// clock's own domain is unconstrained.
+///
+/// The analysis is a taint of the resumption's locals: a local assigned from a
+/// foreign read or a tainted local, or under a tainted guard, is tainted; a
+/// `tick` ends the resumption and clears every taint. The module loop is walked
+/// twice — the second time from the taint its end leaves, because a resumption
+/// crosses the back edge (I.3.6) — and a branch's arms join by union (may-taint;
+/// direction **over** on a body whose arms disagree, exact on the corpus's
+/// straight-line synchronizers).
+pub fn check_two_flop(f: &ItemFn) -> Result<(), Error> {
+    let params = param_domains(f);
+    let Some(native) = params.iter().find(|p| p.1 == "Clock").and_then(|p| p.2.clone()) else {
+        return Ok(());
+    };
+    let foreign: HashSet<String> = params
+        .iter()
+        .filter(|p| p.1 == "In" && p.2.as_ref().is_some_and(|d| *d != native))
+        .map(|p| p.0.clone())
+        .collect();
+    if foreign.is_empty() {
+        return Ok(());
+    }
+    let regouts: HashSet<String> = params.iter().filter(|p| p.1 == "RegOut").map(|p| p.0.clone()).collect();
+    let mut w = TwoFlop { foreign: &foreign, regouts: &regouts, err: None };
+    let mut taint = HashSet::new();
+    let mut body: Option<&syn::Block> = None;
+    for st in &f.block.stmts {
+        match st {
+            syn::Stmt::Expr(syn::Expr::Loop(l), _) => body = Some(&l.body),
+            other => w.stmt(other, &mut taint, false),
+        }
+    }
+    if let Some(b) = body {
+        for _ in 0..2 {
+            for st in &b.stmts {
+                w.stmt(st, &mut taint, false);
+            }
+        }
+    }
+    w.err.map_or(Ok(()), Err)
+}
+
+struct TwoFlop<'a> {
+    foreign: &'a HashSet<String>,
+    regouts: &'a HashSet<String>,
+    err: Option<Error>,
+}
+
+impl TwoFlop<'_> {
+    /// Does `e` read a foreign port or a tainted local?
+    fn tainted(&self, e: &syn::Expr, taint: &HashSet<String>) -> bool {
+        struct V<'b> {
+            foreign: &'b HashSet<String>,
+            taint: &'b HashSet<String>,
+            hit: bool,
+        }
+        impl<'ast> Visit<'ast> for V<'_> {
+            fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+                if let Some(i) = p.path.get_ident() {
+                    let n = i.to_string();
+                    if self.taint.contains(&n) || self.foreign.contains(&n) {
+                        self.hit = true;
+                    }
+                }
+            }
+        }
+        let mut v = V { foreign: self.foreign, taint, hit: false };
+        v.visit_expr(e);
+        v.hit
+    }
+
+    fn stmt(&mut self, s: &syn::Stmt, taint: &mut HashSet<String>, guard: bool) {
+        match s {
+            syn::Stmt::Local(l) => {
+                let t = guard || l.init.as_ref().is_some_and(|i| self.tainted(&i.expr, taint));
+                if let Some(i) = &l.init {
+                    self.expr(&i.expr, taint, guard);
+                }
+                let mut ids = Vec::new();
+                collect_pat_idents(&l.pat, &mut ids);
+                for id in ids {
+                    if t {
+                        taint.insert(id.to_string());
+                    } else {
+                        taint.remove(&id.to_string());
+                    }
+                }
+            }
+            syn::Stmt::Expr(e, _) => self.expr(e, taint, guard),
+            _ => {}
+        }
+    }
+
+    fn block(&mut self, b: &syn::Block, taint: &mut HashSet<String>, guard: bool) {
+        for st in &b.stmts {
+            self.stmt(st, taint, guard);
+        }
+    }
+
+    fn expr(&mut self, e: &syn::Expr, taint: &mut HashSet<String>, guard: bool) {
+        use syn::Expr as E;
+        if crate::cfg::stmt_contains_tick(&syn::Stmt::Expr(e.clone(), None))
+            && matches!(e, E::Await(_))
+        {
+            taint.clear();
+            return;
+        }
+        match e {
+            E::If(i) => {
+                let g = guard || self.tainted(&i.cond, taint);
+                let mut a = taint.clone();
+                self.block(&i.then_branch, &mut a, g);
+                let mut b = taint.clone();
+                if let Some((_, eb)) = &i.else_branch {
+                    self.expr(eb, &mut b, g);
+                }
+                *taint = &a | &b;
+            }
+            E::Match(m) => {
+                let g = guard || self.tainted(&m.expr, taint);
+                let mut out = taint.clone();
+                for arm in &m.arms {
+                    let ga = g || arm.guard.as_ref().is_some_and(|(_, c)| self.tainted(c, taint));
+                    let mut a = taint.clone();
+                    self.expr(&arm.body, &mut a, ga);
+                    out = &out | &a;
+                }
+                *taint = out;
+            }
+            E::Block(b) => self.block(&b.block, taint, guard),
+            E::Loop(l) => {
+                for _ in 0..2 {
+                    self.block(&l.body, taint, guard);
+                }
+            }
+            E::While(w) => {
+                let g = guard || self.tainted(&w.cond, taint);
+                for _ in 0..2 {
+                    self.block(&w.body, taint, g);
+                }
+            }
+            E::ForLoop(fl) => {
+                for _ in 0..2 {
+                    self.block(&fl.body, taint, guard);
+                }
+            }
+            E::Assign(a) => {
+                if let Some(root) = assign_root(&a.left) {
+                    if guard || self.tainted(&a.right, taint) {
+                        taint.insert(root);
+                    } else if !guard && matches!(&*a.left, E::Path(_)) {
+                        taint.remove(&root);
+                    }
+                }
+            }
+            E::Binary(b) if is_compound_assign(&b.op) => {
+                if let Some(root) = assign_root(&b.left) {
+                    if guard || self.tainted(&b.right, taint) {
+                        taint.insert(root);
+                    }
+                }
+            }
+            E::MethodCall(mc) if mc.method == "write" => {
+                let port = match &*mc.receiver {
+                    E::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+                    _ => None,
+                };
+                if let Some(port) = port.filter(|p| self.regouts.contains(p)) {
+                    let by_value = mc.args.iter().any(|a| self.tainted(a, taint));
+                    if (guard || by_value) && self.err.is_none() {
+                        let how = if by_value { "its value" } else { "its guard" };
+                        self.err = Some(Error::new_spanned(mc, two_flop_message(&port, how)));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn assign_root(e: &syn::Expr) -> Option<String> {
+    match e {
+        syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+        syn::Expr::Index(i) => assign_root(&i.expr),
+        syn::Expr::Field(f) => assign_root(&f.base),
+        _ => None,
+    }
+}
+
+fn is_compound_assign(op: &syn::BinOp) -> bool {
+    use syn::BinOp::*;
+    matches!(
+        op,
+        AddAssign(_) | SubAssign(_) | MulAssign(_) | DivAssign(_) | RemAssign(_) | BitXorAssign(_)
+            | BitAndAssign(_) | BitOrAssign(_) | ShlAssign(_) | ShrAssign(_)
+    )
+}
+
+/// The two-flop rule's one message.
+pub fn two_flop_message(port: &str, how: &str) -> String {
+    format!(
+        "`{port}.write(…)` depends, through {how}, on a read of a foreign-domain input in the same \
+         resumption: one flop sampling an asynchronous wire, which the hardware cannot realize as \
+         the model's settled value (SPEC I.12.3, the two-flop rule, D-17 A3; II.1 realizability). \
+         Assign the foreign read to a local in this resumption — it is a register at the tick — \
+         and write the port from that local in the next: `let ff2 = ff1; ff1 = d.read(); \
+         q.write(ff2); clk.tick().await`."
+    )
+}
+
 /// The syntactic front-end rules of II.1 and II.2, in the one order both
 /// front-ends run them (II.1.3): the header first (R20, R9, R10), then the body
 /// rules. The CFG rules (R2/R3 reachability, R11, the memory rules) and the
@@ -1113,10 +1384,13 @@ pub fn check_front_end_rules(f: &ItemFn, mode: HardwareMode) -> Result<(), Error
     check_break_forms(f)?;
     check_tick_free_for_bounds(f)?;
     check_no_body_macros(f)?;
+    match mode {
+        HardwareMode::Sequential => check_cdc(f)?,
+        HardwareMode::Synchronizer => check_two_flop(f)?,
+        HardwareMode::Combinational => check_combinational_one_domain(f)?,
+        HardwareMode::Structural => {}
+    }
     if mode.is_sequential_like() {
-        if mode == HardwareMode::Sequential {
-            check_cdc(f)?;
-        }
         check_in_param_uses(f)?;
     }
     Ok(())
@@ -1505,5 +1779,49 @@ mod tests {
             fn gate(a: In<Logic>, b: In<Logic>, out: Out<Logic>) {}
         };
         assert!(validate_hardware_fn(&f, &HardwareMode::Combinational).is_ok());
+    }
+
+    // ── I.12.3 two-flop rule (Phase C step 10) ──────────────────────────────
+
+    fn two_flop(src: &str) -> Result<(), Error> {
+        check_two_flop(&syn::parse_str::<ItemFn>(src).unwrap())
+    }
+
+    #[test]
+    fn two_flop_admits_the_one_job_and_trailing_spellings_and_three_flops() {
+        for src in [
+            "async fn s<S: ClockDomain, D: ClockDomain>(clk: Clock<D>, d: In<Logic, S>, q: RegOut<Logic, D>) { let mut ff1 = Logic::Zero; loop { let ff2 = ff1; ff1 = d.read(); q.write(ff2); clk.tick().await; } }",
+            "async fn s(clk: Clock<Slow>, d: In<Logic, Fast>, q: RegOut<Logic, Slow>) { let mut ff1 = Logic::Zero; let mut ff2 = Logic::Zero; loop { q.write(ff2); clk.tick().await; ff2 = ff1; ff1 = d.read(); } }",
+            "async fn s(clk: Clock<Slow>, d: In<Logic, Fast>, q: RegOut<Logic, Slow>) { let mut a = Logic::Zero; let mut b = Logic::Zero; loop { let c = b; b = a; a = d.read(); q.write(c); clk.tick().await; } }",
+            // A native-domain read is unconstrained.
+            "async fn s(clk: Clock<Slow>, d: In<Logic, Fast>, en: In<Logic, Slow>, q: RegOut<Logic, Slow>) { let mut ff1 = Logic::Zero; loop { let e = en.read(); let ff2 = ff1; ff1 = d.read(); if e == Logic::One { q.write(ff2); } clk.tick().await; } }",
+        ] {
+            assert!(two_flop(src).is_ok(), "{src}: {:?}", two_flop(src));
+        }
+    }
+
+    #[test]
+    fn two_flop_refuses_one_flop_by_value_and_by_guard() {
+        for src in [
+            // sync_1ff_oj: emitted `q <= d`.
+            "async fn s(clk: Clock<Slow>, d: In<Logic, Fast>, q: RegOut<Logic, Slow>) { loop { let ff1 = d.read(); q.write(ff1); clk.tick().await; } }",
+            // sync_1ff (the anchor's neighbour): the trailing read reaches the head's write.
+            "async fn s(clk: Clock<Slow>, d: In<Logic, Fast>, q: RegOut<Logic, Slow>) { let mut ff1 = Logic::Zero; loop { q.write(ff1); clk.tick().await; ff1 = d.read(); } }",
+            // sync_guard: the guard.
+            "async fn s(clk: Clock<Slow>, d: In<Logic, Fast>, q: RegOut<Logic, Slow>) { let mut ff1 = Logic::Zero; loop { if d.read() == Logic::One { ff1 = Logic::One; } q.write(ff1); clk.tick().await; } }",
+            "async fn s(clk: Clock<Slow>, d: In<Logic, Fast>, q: RegOut<Logic, Slow>) { loop { let t = d.read(); if t == Logic::One { q.write(Logic::One); } clk.tick().await; } }",
+        ] {
+            assert!(two_flop(src).is_err(), "{src} must be refused");
+        }
+    }
+
+    #[test]
+    fn combinational_ports_lie_in_one_domain() {
+        let mixed: ItemFn = syn::parse_str("fn c(a: In<Logic, A>, o: Out<Logic, B>) { o.write(a.read()); }").unwrap();
+        assert!(check_combinational_one_domain(&mixed).is_err());
+        let one: ItemFn = syn::parse_str("fn c(a: In<Logic, A>, o: Out<Logic, A>) { o.write(a.read()); }").unwrap();
+        assert!(check_combinational_one_domain(&one).is_ok());
+        let generic: ItemFn = syn::parse_str("fn c<D: ClockDomain>(a: In<Logic, D>, o: Out<Logic, D>) { o.write(a.read()); }").unwrap();
+        assert!(check_combinational_one_domain(&generic).is_ok());
     }
 }

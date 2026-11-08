@@ -1,0 +1,19 @@
+error: this combinational module's port `o` is in domain `B`, but `a` is in `A`: a combinational module lies in the one domain of its ports, and an evaluation reading one domain and driving another is a crossing no flop samples (SPEC I.12.4(c), D-17; II.1 S0). Cross with a `#[hardware(synchronizer)]` module, then compute in the destination domain.
+  --> tests/ui/fail/combinational_two_domains.rs:13:29
+   |
+13 | fn c_mixed(a: In<Logic, A>, o: Out<Logic, B>) {
+   |                             ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Logic`
+ --> tests/ui/fail/combinational_two_domains.rs:1:32
+  |
+1 | use copper_core::{ClockDomain, Logic};
+  |                                ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `Out`
+ --> tests/ui/fail/combinational_two_domains.rs:2:25
+  |
+2 | use copper_core::port::{In, Out};
+  |                         ^^  ^^^

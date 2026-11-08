@@ -8,13 +8,18 @@
 use copper_core::port::{wire, WireKind};
 use copper_core::types::Bits;
 use copper_core::Logic;
+use copper_core::ClockDomain;
+
+// SPEC I.12.1 (D-17 A1): every port names a domain; the unit domain `()` is retired.
+struct TestDom;
+impl ClockDomain for TestDom {}
 
 // ── wire / port semantics ────────────────────────────────────────────────────
 
 /// A value written to an `Out` is observable through the paired `In`.
 #[test]
 fn write_is_visible_through_paired_input() {
-    let (out, inp) = wire::<Bits<8>, ()>(Bits::zero());
+    let (out, inp) = wire::<Bits<8>, TestDom>(Bits::zero());
     assert_eq!(inp.read().as_u8(), 0);
     out.write(Bits::from_u8(0xA5));
     assert_eq!(inp.read().as_u8(), 0xA5);
@@ -23,7 +28,7 @@ fn write_is_visible_through_paired_input() {
 /// A wire is born clean; a *changing* write dirties it; `take` consumes the flag.
 #[test]
 fn dirty_flag_tracks_changing_writes() {
-    let (out, _inp) = wire::<Bits<8>, ()>(Bits::zero());
+    let (out, _inp) = wire::<Bits<8>, TestDom>(Bits::zero());
     let dh = out.dirty_handle();
 
     assert!(!dh.take(), "a fresh wire is not dirty");
@@ -37,7 +42,7 @@ fn dirty_flag_tracks_changing_writes() {
 /// what lets the executor's fixpoint converge instead of oscillating forever.
 #[test]
 fn rewriting_the_same_value_does_not_dirty() {
-    let (out, _inp) = wire::<Bits<8>, ()>(Bits::from_u8(7));
+    let (out, _inp) = wire::<Bits<8>, TestDom>(Bits::from_u8(7));
     let dh = out.dirty_handle();
     // Drain any initial state.
     dh.take();
@@ -53,7 +58,7 @@ fn rewriting_the_same_value_does_not_dirty() {
 /// same identity. This is the producer↔consumer key the executor matches on.
 #[test]
 fn out_in_and_handle_share_one_wire_id() {
-    let (out, inp) = wire::<Logic, ()>(Logic::Zero);
+    let (out, inp) = wire::<Logic, TestDom>(Logic::Zero);
     assert_eq!(out.wire_id(), inp.wire_id(), "producer and consumer share a wire id");
     assert_eq!(out.dirty_handle().wire_id(), out.wire_id());
     assert_eq!(out.dirty_handle().wire_kind(), WireKind::Comb, "plain Out is combinational");
@@ -62,8 +67,8 @@ fn out_in_and_handle_share_one_wire_id() {
 /// Independent wires have distinct identities.
 #[test]
 fn distinct_wires_have_distinct_ids() {
-    let (a_out, _a_in) = wire::<Logic, ()>(Logic::Zero);
-    let (b_out, _b_in) = wire::<Logic, ()>(Logic::Zero);
+    let (a_out, _a_in) = wire::<Logic, TestDom>(Logic::Zero);
+    let (b_out, _b_in) = wire::<Logic, TestDom>(Logic::Zero);
     assert_ne!(a_out.wire_id(), b_out.wire_id());
 }
 
@@ -71,7 +76,7 @@ fn distinct_wires_have_distinct_ids() {
 /// writer.
 #[test]
 fn cloned_inputs_observe_the_same_wire() {
-    let (out, inp) = wire::<Bits<4>, ()>(Bits::zero());
+    let (out, inp) = wire::<Bits<4>, TestDom>(Bits::zero());
     let inp2 = inp.clone();
     out.write(Bits::from_usize(0xF));
     assert_eq!(inp.read().as_u8(), 0xF);
