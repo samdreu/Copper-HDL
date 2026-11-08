@@ -22,8 +22,12 @@
 //! `tick` in the kernel (the residue of I.3.3). `pc` states of the extraction
 //! route are many-to-one onto these (I.0.4), which `tests/` measures.
 //!
+//! [`memory`] is §I.10's memory model: a `Memory` bound in `s_pre` is a variable
+//! of H(M) beside the environment, its stagings effects of the resumption, its
+//! edge the read and write steps in the mode's order.
+//!
 //! **What it refuses** — every refusal names its SPEC row:
-//! a plain `Out` on a clocked module, `Memory` parameters and bindings, a second
+//! a plain `Out` on a clocked module, a `Memory` parameter (I.10.5), a second
 //! clock, `combinational` / `structural` modes (all *deferred*, [`RefError::Deferred`],
 //! the `REF_SKIP` classes of `build.rs`); a read inside macro tokens, a statement
 //! macro, `/`, a labelled or valued `break`, `return`, a non-`tick` `await`, a
@@ -38,6 +42,7 @@
 
 pub mod bits;
 pub mod interp;
+pub mod memory;
 pub mod module;
 pub mod types;
 pub mod value;
@@ -62,7 +67,8 @@ pub enum RefError {
     /// The source does not parse, or the named module is not in it.
     Parse(String),
     /// A module class the interpreter does not cover yet, with the SPEC clause
-    /// that owes it — the `REF_SKIP` classes: plain `Out` (D-8), `Memory` (I.10),
+    /// that owes it — the `REF_SKIP` classes: plain `Out` (D-8), a `Memory`
+    /// parameter (I.10.5),
     /// a second clock (I.12), `combinational` (I.11), `structural` (I.13).
     Deferred(String),
     /// A construct outside the kernel or in a dated refusal row, named by its

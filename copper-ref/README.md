@@ -23,6 +23,16 @@ at every suspension, a read before reassignment reported as `RefError::Poisoned`
 pins every operator against `copper_core::Bits<N>` at widths {1, 4, 8, 16, 32, 64, 128}
 on X-sprinkled random operands — the first executable check of I.14.
 
+**Memories (SPEC §I.10, Phase C step 9).** A `let m = Memory::<T, R, W, D, L, M>::{new,
+from_contents, from_fn}(clk, …)[.write_first() | .read_first()]` in `s_pre` is a
+variable of H(M) beside the environment (`src/memory.rs`, every behaviour cited to its
+clause, derived from the text and not from either implementation): `read_port::<k>().read(a)`
+and `write_port::<j>().write(a, e)` are stagings of the resumption, last wins
+(I.10.1(b)); `edge()` runs the read step and the write step in the instance's mode order
+(I.10.1(c), I.10.2); `is_ready()` / `data()` read the output stage the last edge left
+(I.10.1(d)), `data()` unready a `Runtime` failure; an out-of-range address likewise.
+Pinned by hand-derived traces in `tests/interp_memory.rs`.
+
 **How it is wired.** `build.rs` emits a `<name>_reference_leg` case per corpus module
 (the simulator's trace under the sweep's stimulus policy, replayed through the
 interpreter: `resume` with cycle N's inputs, `edge`, `observe` against `obs_{N+1}`;
@@ -34,9 +44,10 @@ Verilator, so it also runs under `--quick`.
 **What it refuses, and how.** Every refusal names its SPEC row (`RefError`):
 
 - `Deferred` — a class the interpreter does not cover yet, skipped by `build.rs`'s
-  `REF_SKIP` with the clause that owes it: a plain `Out` on a clocked module (D-8:
-  "awaits the Phase C rewrite"), a `Memory` parameter or binding (I.10), a second clock
-  (I.12), `combinational` (I.11), `structural` (I.13).
+  `REF_SKIP` with the clause that owes it: a plain `Out` on a clocked module (R8 refuses
+  it in both front-ends since Phase C step 3), a `Memory` **parameter** (I.10.5: its
+  depth and contents are the owner's), a second clock in one kernel (I.12),
+  `combinational` (I.11), `structural` (I.13).
 - `Unsupported` — outside the kernel or in a dated row: a read inside macro tokens or a
   statement macro (II.1 R13/R14), `/` (R15), a labelled or valued `break` (R12),
   `return` (I.2.5(d)), a non-`tick` `await` (R1), a `tick` before the loop (R21), recursion

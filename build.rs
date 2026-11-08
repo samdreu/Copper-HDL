@@ -201,84 +201,6 @@ const RESET: &[(&str, &str, bool)] = &[
 /// with a plain `Out` port "awaits the Phase C rewrite" and is skipped by class.
 const REF_SKIP: &[(&str, &str)] = &[
     (
-        "ram_r2w2",
-        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "ram_r3w1",
-        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "ram_r1w2_wf",
-        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "rom_from_fn",
-        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "rom_from_contents",
-        "a `Memory` binding in the body (`Memory::from_contents`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "rom_direct",
-        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "mp_reg",
-        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "wide_index_into_narrow_addr",
-        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "narrow_index_into_narrow_addr",
-        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "wide_index_sole_consumer",
-        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "ram_write_first",
-        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "ram_wf_priority",
-        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "ram_read_first_mem",
-        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
         "struct_latch",
         "a struct literal spelled `Self { .. }` inside an associated fn (`Latch::bubble()`): the \
          interpreter stops with \"unknown struct Self\" at the first call. Measured 2026-11-06 \
@@ -300,13 +222,6 @@ const REF_SKIP: &[(&str, &str)] = &[
          the first time; an interpreter front-end gap (I.14's struct values), not a meaning",
     ),
     (
-        "rv32i_cpu_transpilable",
-        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one. Reached 2026-11-06 when \
-         Phase C step 3 made the module `RegOut`-only",
-    ),
-    (
         "shift_register",
         "a `const { assert!(N - 1 == N_1, …) }` block in the body: a compile-time check of the \
          generic widths that the interpreter's front-end refuses as a statement macro (II.1 \
@@ -314,30 +229,6 @@ const REF_SKIP: &[(&str, &str)] = &[
          reference leg reached it for the first time; the macro and the transpiler evaluate \
          the assertion at monomorphization, the interpreter has no const evaluator for it yet \
          (I.14.4's shared evaluator)",
-    ),
-    (
-        "rom_paced",
-        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "rom_gated",
-        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "ram_arms",
-        "a `Memory` binding in the body (`Memory::new`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
-    ),
-    (
-        "mp_regout",
-        "a `Memory` binding in the body (`Memory::from_fn`): memories are SPEC §I.10, WRITTEN (D-16, \
-         2026-11-05), but the reference interpreter has no memory model yet — that model is a \
-         later Phase C step (D-16's first Phase C item), not this one",
     ),
 ];
 
@@ -871,8 +762,9 @@ impl Module {
         }
         if self.ports.iter().any(|p| p.kind == Kind::Memory) {
             return Some(
-                "a `Memory` parameter: memories are SPEC §I.10, written (D-16); the interpreter's \
-                 memory model is a later Phase C step"
+                "a `Memory` parameter: a received memory is the instantiating context's (SPEC \
+                 §I.10.5) — its depth and contents are the owner's, which a single-module run \
+                 cannot supply (the interpreter models a memory the module binds, I.10.1)"
                     .to_string(),
             );
         }

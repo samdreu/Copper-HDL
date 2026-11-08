@@ -28,7 +28,8 @@ use crate::value::{IntTy, Ty, Value};
 use crate::RefError;
 use copper_core::Logic;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use crate::memory::{MemState, Mode};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use syn::{BinOp, Expr, Pat, Stmt, UnOp};
 
 /// The index path of a `tick` statement — the suspension site (I.0.1).
@@ -133,6 +134,10 @@ pub struct Exec<'a> {
     pub env: &'a mut Env,
     pub inputs: &'a HashMap<String, Value>,
     pub pending: &'a mut HashMap<String, Value>,
+    /// The module's memories (SPEC I.10.1(a): variables of H(M) of their own
+    /// kind, beside the environment), by binding name; `None` in a constant
+    /// context, which has none.
+    pub mems: Option<&'a mut BTreeMap<String, MemState>>,
     /// Helper-function call stack, for the recursion refusal (R6).
     call_stack: Vec<String>,
 }
@@ -173,7 +178,7 @@ impl<'a> ConstEval for Exec<'a> {
         env.enter(0);
         let mut pending = HashMap::new();
         let inputs = HashMap::new();
-        let mut ex = Exec { prog: self.prog, env: &mut env, inputs: &inputs, pending: &mut pending, call_stack: Vec::new() };
+        let mut ex = Exec { prog: self.prog, env: &mut env, inputs: &inputs, pending: &mut pending, mems: None, call_stack: Vec::new() };
         let v = ex.eval_expr(e)?;
         v.as_index()
     }
@@ -186,7 +191,13 @@ impl<'a> Exec<'a> {
         inputs: &'a HashMap<String, Value>,
         pending: &'a mut HashMap<String, Value>,
     ) -> Self {
-        Exec { prog, env, inputs, pending, call_stack: Vec::new() }
+        Exec { prog, env, inputs, pending, mems: None, call_stack: Vec::new() }
+    }
+
+    /// Give the resumption the module's memories (I.10.1(a)).
+    pub fn with_mems(mut self, mems: &'a mut BTreeMap<String, MemState>) -> Self {
+        self.mems = Some(mems);
+        self
     }
 
     /// A const-evaluation context with no locals, for `Module::new`.
@@ -288,6 +299,9 @@ impl<'a> Exec<'a> {
         };
         if init.diverge.is_some() {
             return Err(unsup("`let … else` (I.2.5: OUTSIDE)"));
+        }
+        if memory_ctor(&init.expr).is_some() {
+            return self.exec_memory_binding(l, &init.expr);
         }
         let mut v = self.eval_expr(&init.expr)?;
         let (pat, ty) = split_pat_ty(&l.pat);
@@ -601,6 +615,9 @@ impl<'a> Exec<'a> {
     }
 
     fn exec_write(&mut self, mc: &syn::ExprMethodCall) -> Result<(), RefError> {
+        if self.memory_call(mc)?.is_some() {
+            return Ok(());
+        }
         let Expr::Path(p) = &*mc.receiver else {
             return Err(unsup("`.write()` on something other than a port parameter"));
         };
@@ -1326,6 +1343,9 @@ impl<'a> Exec<'a> {
     }
 
     fn eval_method_call(&mut self, mc: &syn::ExprMethodCall) -> Result<Value, RefError> {
+        if let Some(v) = self.memory_call(mc)? {
+            return Ok(v);
+        }
         let m = mc.method.to_string();
         // An `In` port read: the one form a read takes (I.2.3), yielding this
         // resumption's input (I.4.1).
@@ -2132,5 +2152,189 @@ fn collect_sites_expr(e: &Expr, prefix: &mut Vec<usize>, out: &mut BTreeSet<Tick
         }
         Expr::Block(b) => collect_tick_sites(&b.block.stmts, prefix, out),
         _ => {}
+    }
+}
+
+// ── memories (SPEC §I.10) ──────────────────────────────────────────────────
+
+/// A `Memory` builder expression: `Memory::<T, R, W, D, L, M>::{new, from_fn,
+/// from_contents}(clk, …)`, optionally followed by `.write_first()` /
+/// `.read_first()` (I.10.2: the mode is the builder's). Returns the constructor
+/// call and the mode the chain sets.
+fn memory_ctor(e: &Expr) -> Option<(&syn::ExprCall, Option<Mode>)> {
+    match e {
+        Expr::Call(c) => match &*c.func {
+            Expr::Path(p) if p.path.segments.first().is_some_and(|s| s.ident == "Memory") => Some((c, None)),
+            _ => None,
+        },
+        Expr::MethodCall(mc) if mc.args.is_empty() => {
+            let mode = match mc.method.to_string().as_str() {
+                "write_first" => Mode::WriteFirst,
+                "read_first" => Mode::ReadFirst,
+                _ => return None,
+            };
+            // The outermost setter is the last call on the builder: it wins.
+            memory_ctor(&mc.receiver).map(|(c, _)| (c, Some(mode)))
+        }
+        Expr::Paren(p) => memory_ctor(&p.expr),
+        _ => None,
+    }
+}
+
+/// `x.read_port::<K>()` / `x.write_port::<K>()`: the memory's name, read or
+/// write, and the port's const-generic argument.
+fn memory_port(e: &Expr) -> Option<(String, bool, &syn::GenericArgument)> {
+    let Expr::MethodCall(mc) = e else { return None };
+    let is_read = match mc.method.to_string().as_str() {
+        "read_port" => true,
+        "write_port" => false,
+        _ => return None,
+    };
+    let Expr::Path(p) = &*mc.receiver else { return None };
+    if p.path.segments.len() != 1 || !mc.args.is_empty() {
+        return None;
+    }
+    let arg = mc.turbofish.as_ref()?.args.first()?;
+    Some((p.path.segments[0].ident.to_string(), is_read, arg))
+}
+
+impl<'a> Exec<'a> {
+    /// `let m = Memory(init)` in `s_pre` (I.10.1(a), I.10.3): the instance with its
+    /// initial array, registered beside the environment — a variable of H(M) that
+    /// is not a local.
+    fn exec_memory_binding(&mut self, l: &syn::Local, init: &Expr) -> Result<(), RefError> {
+        let (call, mode) = memory_ctor(init).expect("checked by the caller");
+        let (pat, ann) = split_pat_ty(&l.pat);
+        let Some(name) = pat_ident(pat) else {
+            return Err(unsup("a `Memory` bound by a pattern"));
+        };
+        let Expr::Path(fp) = &*call.func else { unreachable!() };
+        let segs = &fp.path.segments;
+        let ctor = segs.last().map(|s| s.ident.to_string()).unwrap_or_default();
+        // The instance parameters: the turbofish on `Memory`, else the annotation.
+        let gargs: Vec<syn::GenericArgument> = match &segs[0].arguments {
+            syn::PathArguments::AngleBracketed(a) if segs.len() >= 2 => a.args.iter().cloned().collect(),
+            _ => match ann {
+                Some(syn::Type::Path(tp)) => match &tp.path.segments.last().map(|s| s.arguments.clone()) {
+                    Some(syn::PathArguments::AngleBracketed(a)) => a.args.iter().cloned().collect(),
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            },
+        };
+        if gargs.len() != 6 {
+            return Err(unsup(format!(
+                "memory `{name}`: `Memory<T, R, W, D, READ_LAT, WRITE_LAT>` with its six parameters spelled (I.10.1(a))"
+            )));
+        }
+        let syn::GenericArgument::Type(word_ty) = &gargs[0] else {
+            return Err(RefError::Parse(format!("memory `{name}`: the word type")));
+        };
+        let word = self.parse_ty(word_ty)?;
+        let reads = self.generic_arg_usize(&gargs[1])?;
+        let writes = self.generic_arg_usize(&gargs[2])?;
+        let read_lat = self.generic_arg_usize(&gargs[4])?;
+        let write_lat = self.generic_arg_usize(&gargs[5])?;
+        // Argument 0 is the clock the memory advances on (I.10.1(c)): the module's.
+        let args: Vec<&Expr> = call.args.iter().collect();
+        let init_words: Vec<Value> = match ctor.as_str() {
+            // I.10.3: the all-zero array, the zero of `T`.
+            "new" => {
+                let depth = self.eval_expr(args.get(1).ok_or_else(|| rt("`Memory::new(clk, depth)`"))?)?.as_index()?;
+                vec![Value::zero_of(&word)?; depth]
+            }
+            // I.10.3: the listed words.
+            "from_contents" => {
+                let a = args.get(1).ok_or_else(|| rt("`Memory::from_contents(clk, vec![…])`"))?;
+                let Expr::Macro(m) = a else {
+                    return Err(unsup("`from_contents` of something other than `vec![…]`"));
+                };
+                if path_name(&m.mac.path) != "vec" {
+                    return Err(unsup("`from_contents` of something other than `vec![…]`"));
+                }
+                let arr: Expr = syn::parse_str(&format!("[{}]", m.mac.tokens))
+                    .map_err(|e| RefError::Parse(format!("vec!: {e}")))?;
+                match self.eval_expr(&arr)? {
+                    Value::Array(v) => v,
+                    other => return Err(rt(format!("`vec!` evaluated to {other}"))),
+                }
+            }
+            // I.10.3: `A[i] = ⟦e⟧(i)`, `e` an expression in the index alone.
+            "from_fn" => {
+                let depth = self.eval_expr(args.get(1).ok_or_else(|| rt("`Memory::from_fn(clk, depth, |i| e)`"))?)?.as_index()?;
+                let Some(Expr::Closure(cl)) = args.get(2) else {
+                    return Err(unsup("`from_fn` with a third argument that is not a closure `|i| e`"));
+                };
+                if cl.inputs.len() != 1 {
+                    return Err(unsup("a `from_fn` closure of more than one argument"));
+                }
+                let (ip, _) = split_pat_ty(&cl.inputs[0]);
+                let iname = pat_ident(ip).ok_or_else(|| unsup("a `from_fn` closure parameter that is a pattern"))?;
+                let mut words = Vec::with_capacity(depth);
+                for i in 0..depth {
+                    let v = self.eval_with_bindings(&cl.body, &[(iname.clone(), Value::Int(i as i128, IntTy::Usize))])?;
+                    words.push(v);
+                }
+                words
+            }
+            other => return Err(unsup(format!("`Memory::{other}` (I.10.3 names `new`, `from_contents`, `from_fn`)"))),
+        };
+        // I.10.2: `new` / `from_contents` / `from_fn` are ReadFirst; the setter decides.
+        let st = MemState::new(
+            &name,
+            word,
+            reads,
+            writes,
+            read_lat,
+            write_lat,
+            mode.unwrap_or(Mode::ReadFirst),
+            init_words,
+        )?;
+        let Some(mems) = self.mems.as_deref_mut() else {
+            return Err(unsup("a `Memory` in a constant context"));
+        };
+        if mems.insert(name.clone(), st).is_some() {
+            return Err(unsup(format!("a second `Memory` bound to `{name}`")));
+        }
+        Ok(())
+    }
+
+    /// A port access `m.read_port::<k>().{read(a), is_ready(), data()}` or
+    /// `m.write_port::<j>().write(a, e)` on a memory of this module, or `None` if
+    /// `mc` is not one.
+    fn memory_call(&mut self, mc: &syn::ExprMethodCall) -> Result<Option<Value>, RefError> {
+        let Some((name, is_read, karg)) = memory_port(&mc.receiver) else {
+            return Ok(None);
+        };
+        if !self.mems.as_deref().is_some_and(|m| m.contains_key(&name)) {
+            return Ok(None);
+        }
+        let k = self.generic_arg_usize(karg)?;
+        let m = mc.method.to_string();
+        let args: Vec<Value> = mc.args.iter().map(|a| self.eval_expr(a)).collect::<Result<_, _>>()?;
+        for a in &args {
+            a.check_poison()?;
+        }
+        let mem = self.mems.as_deref_mut().and_then(|ms| ms.get_mut(&name)).expect("checked above");
+        let unit = Value::Tuple(Vec::new());
+        match (is_read, m.as_str(), args.as_slice()) {
+            // I.10.1(b): an effect of the resumption, consumed at the edge.
+            (true, "read", [a]) => {
+                mem.stage_read(k, a.as_index()?)?;
+                Ok(Some(unit))
+            }
+            // I.10.1(d): committed state, what the last edge delivered.
+            (true, "is_ready", []) => Ok(Some(Value::Bool(mem.is_ready(k)?))),
+            (true, "data", []) => Ok(Some(mem.data(k)?)),
+            (false, "write", [a, e]) => {
+                mem.stage_write(k, a.as_index()?, e.clone())?;
+                Ok(Some(unit))
+            }
+            _ => Err(unsup(format!(
+                "`{name}.{}_port::<{k}>().{m}(…)` with {} argument(s): not a memory access of I.10.1",
+                if is_read { "read" } else { "write" },
+                args.len()
+            ))),
+        }
     }
 }

@@ -3,12 +3,13 @@
 //! `README.md` for how to read a disagreement.
 
 use crate::interp::{collect_tick_sites, Env, Exec, Flow, Program, TickSite};
+use crate::memory::MemState;
 use crate::types::{parse_ty, ConstEval};
 use crate::value::{Ty, Value};
 use crate::RefError;
 use copper_core::Logic;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use syn::visit::Visit;
 use syn::{Expr, Item, ItemFn, Pat, Stmt};
 
@@ -45,6 +46,8 @@ pub struct Module {
     resumptions: usize,
     poison: Option<HashSet<String>>,
     mode: String,
+    /// The memories bound in `s_pre` (SPEC I.10.1(a)), by name.
+    mems: BTreeMap<String, MemState>,
 }
 
 impl std::fmt::Debug for Module {
@@ -198,7 +201,9 @@ impl Module {
                 }
                 "Memory" => {
                     return Err(RefError::Deferred(format!(
-                        "`Memory` parameter `{name}`: memories are SPEC I.10 (TBD, Round 2)"
+                        "`Memory` parameter `{name}`: a received memory is the instantiating context's \
+                         (SPEC I.10.5) — its depth and contents are the owner's, which a single-module \
+                         run cannot supply"
                     )))
                 }
                 other => {
@@ -230,7 +235,7 @@ impl Module {
         if loop_idx + 1 != item.block.stmts.len() {
             return Err(RefError::Unsupported("statements after the module loop (I.2.2: the loop is last)".into()));
         }
-        let mut scan = Scan { prog: &prog, pre_loop: true, err: None };
+        let mut scan = Scan { prog: &prog, pre_loop: true, in_preload: 0, err: None };
         for (i, s) in item.block.stmts.iter().enumerate() {
             scan.pre_loop = i < loop_idx;
             scan.visit_stmt(s);
@@ -254,6 +259,7 @@ impl Module {
             resumptions: 0,
             poison: None,
             mode,
+            mems: BTreeMap::new(),
         })
     }
 
@@ -359,7 +365,7 @@ impl Module {
             State::Parked(s) => Some(s.0.clone()),
         };
         let flow = {
-            let mut ex = Exec::new(&self.prog, &mut self.env, &map, &mut self.pending);
+            let mut ex = Exec::new(&self.prog, &mut self.env, &map, &mut self.pending).with_mems(&mut self.mems);
             ex.exec_block(&self.item.block.stmts, 0, resume_path.as_deref(), Vec::new())?
         };
         self.resumptions += 1;
@@ -404,6 +410,15 @@ impl Module {
                 slot.1 = v;
             }
         }
+        // I.0.2 (2), I.1.2: every memory advances at the edge (I.10.1(c)).
+        for m in self.mems.values_mut() {
+            m.edge();
+        }
+    }
+
+    /// The memories this module bound, by name (I.10.1(a)).
+    pub fn memories(&self) -> &BTreeMap<String, MemState> {
+        &self.mems
     }
 
     /// Every `RegOut`'s committed value, in signature order: `obs_N` after the
@@ -478,6 +493,9 @@ fn collect_item(it: &Item, prog: &mut Program) -> Result<(), RefError> {
 struct Scan<'a> {
     prog: &'a Program,
     pre_loop: bool,
+    /// Inside the arguments of a `Memory` builder: the one place a closure
+    /// (`from_fn`, I.10.3) and `vec!` (`from_contents`) are forms of the kernel.
+    in_preload: usize,
     err: Option<RefError>,
 }
 
@@ -508,7 +526,7 @@ impl<'ast, 'a> Visit<'ast> for Scan<'a> {
             }
             Expr::Macro(m) => {
                 let name = m.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
-                if name != "matches" {
+                if name != "matches" && !(name == "vec" && self.in_preload > 0) {
                     self.fail(RefError::Unsupported(format!(
                         "macro `{name}!` (II.1 R13/R14: statement macros and reads inside macro tokens are refused)"
                     )));
@@ -521,24 +539,24 @@ impl<'ast, 'a> Visit<'ast> for Scan<'a> {
             Expr::Continue(c) if c.label.is_some() => {
                 self.fail(RefError::Unsupported("a labelled `continue` (II.1 R12)".into()))
             }
-            Expr::Closure(_) => self.fail(RefError::Unsupported(
+            Expr::Closure(_) if self.in_preload == 0 => self.fail(RefError::Unsupported(
                 "a closure (I.2.4: OUTSIDE outside a `Memory` preload)".into(),
             )),
-            Expr::Unsafe(_) | Expr::Async(_) | Expr::Yield(_) | Expr::Try(_) | Expr::TryBlock(_) => {
-                self.fail(RefError::Unsupported("`unsafe` / nested `async` / `yield` / `?` (I.2.5)".into()))
-            }
-            Expr::Path(p) => {
-                let first = p.path.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
-                if first == "Memory" {
-                    self.fail(RefError::Deferred(
-                        "a `Memory` binding in the body: memories are SPEC I.10 (TBD, Round 2)".into(),
+            Expr::Call(c) if matches!(&*c.func, Expr::Path(p) if p.path.segments.first().is_some_and(|s| s.ident == "Memory")) => {
+                if !self.pre_loop {
+                    self.fail(RefError::Unsupported(
+                        "a `Memory` built inside the module loop (I.10.1(a): `let m = Memory(init)` is in `s_pre`)".into(),
                     ));
                 }
+                self.in_preload += 1;
+                for a in &c.args {
+                    self.visit_expr(a);
+                }
+                self.in_preload -= 1;
+                return;
             }
-            Expr::MethodCall(mc) if matches!(mc.method.to_string().as_str(), "read_port" | "write_port") => {
-                self.fail(RefError::Deferred(
-                    "a memory port access: memories are SPEC I.10 (TBD, Round 2)".into(),
-                ));
+            Expr::Unsafe(_) | Expr::Async(_) | Expr::Yield(_) | Expr::Try(_) | Expr::TryBlock(_) => {
+                self.fail(RefError::Unsupported("`unsafe` / nested `async` / `yield` / `?` (I.2.5)".into()))
             }
             _ => {}
         }
