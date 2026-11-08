@@ -41,18 +41,11 @@ use syn::visit::Visit;
 use syn::{Expr, Item, ItemFn, Stmt};
 
 /// `(site, reason)`: expressions only one evaluator evaluates. A site is
-/// `<file>::<what>` as the test prints it.
-const SELF_GAP: &str = "copper-ref cannot evaluate a `Self { .. }` literal inside an associated fn (\"unknown struct Self\"), the interpreter gap build.rs's REF_SKIP rows for struct_latch / struct_latch_cond / tuple_destructure record; the transpiler states each field";
-
-const ASYMMETRIC: &[(&str, &str)] = &[
-    ("examples/cpu/rv32i_cpu_pipelined.rs::rv32i_cpu_pipelined::let if_id = IFIDReg :: bubble ()", SELF_GAP),
-    ("examples/cpu/rv32i_cpu_pipelined.rs::rv32i_cpu_pipelined::let id_ex = IDEXReg :: bubble ()", SELF_GAP),
-    ("examples/cpu/rv32i_cpu_pipelined.rs::rv32i_cpu_pipelined::let ex_mem = EXMEMReg :: bubble ()", SELF_GAP),
-    ("examples/cpu/rv32i_cpu_pipelined.rs::rv32i_cpu_pipelined::let mem_wb = MEMWBReg :: bubble ()", SELF_GAP),
-    ("tests/fixtures/struct_pipeline_dut.rs::struct_latch::let latch = Latch :: bubble ()", SELF_GAP),
-    ("tests/fixtures/struct_pipeline_dut.rs::struct_latch_cond::let latch = Latch :: bubble ()", SELF_GAP),
-    ("tests/fixtures/struct_pipeline_dut.rs::tuple_destructure::let latch = Latch :: bubble ()", SELF_GAP),
-];
+/// `<file>::<what>` as the test prints it. Empty since Phase C step 9: its seven
+/// rows were the interpreter's `Self { .. }` gap (the `bubble()` initializers of
+/// `struct_pipeline_dut` and the pipelined CPU), closed then, and each is now
+/// compared both ways (MEASUREMENTS §O.2).
+const ASYMMETRIC: &[(&str, &str)] = &[];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
