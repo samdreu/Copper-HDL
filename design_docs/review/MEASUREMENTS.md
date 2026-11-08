@@ -3449,3 +3449,119 @@ modules without a stated `&clk` exemption).
    "detection is not rejection" is reversed in the code (I.13.7 (8), the coordinator's edit).
 8. **II.2 D2's implementation note:** `check_definite_assignment` reads the mode from the attribute when
    present; a structural body is not combinational though it has no loop.
+
+## Q. Phase C step 11 — §P.8's two decisions implemented: R6 (a), the unit domain (A1) (2026-11-07)
+
+Session phase-c-domains, branch `claude/phase-c-domains-f9b023` (cut from `paper` at `6c17e6e`; nothing
+pushed). The user decided both stopped items of §P.8 as recommended: R6's macro side **(a)**, the unit
+domain **(A1)**. Recorded as D-22. Commits: `1ebf010` (the unit domain), `5b22062` (R6), then docs.
+Every verdict below was predicted before it was run; the emitted-SV effect was measured against a
+transpiler built from `6c17e6e` over every `#[hardware]` module the CLI lists (273), each module alone
+and with `--hierarchy`.
+
+### Q.1 The unit domain removed (option A1; SPEC I.12.6 (4), I.12.4(c))
+
+**The type.** `In`, `Out` and `RegOut` bound `D: ClockDomain` on the struct and on every `impl`; `In`
+and `Out` lose `D = ()`; `wire` requires the bound (`registered_wire` and `net` already did). A
+testbench wire in the unit domain is rustc's E0277, pinned by `copper-core/tests/ui/fail/unit_domain_refused`.
+
+**The refusal on a module** — `copper_analysis::front_end::check_port_domains`, second in
+`check_front_end_rules` (after the header), both front-ends, one message (`UNIT_DOMAIN_MESSAGE`): a
+`Clock` needs one type argument, an `In`/`Out`/`RegOut`/`Memory` two, the last a path — not `()`, not
+missing. Without it the macro's user would see rustc's E0107/E0277 at the port and the transpiler would
+admit `In<T>` (it reads text). ui/fail `unit_domain_port` (`In<Logic, ()>`), `missing_domain_port`
+(`In<Logic>`); `front_end_parity_ui.rs` requires the transpiler's message equal to the macro's
+(measured: it is). The domain readers behind it (`check_cdc`, the one-domain and two-flop rules,
+`port_domain`'s `None`) meet named domains only.
+
+**The rewrites — predicted 32 modules / 100 ports (§P.2), measured 32.** A source rewrite gave every
+`#[hardware(combinational)]` fn with a `()`-domain or one-argument port a leading `D: ClockDomain`
+generic and `D` on each port: 10 in `examples/` (`bsg_adder_one_hot`, `bsg_encode_one_hot`,
+`bsg_gray_to_binary`, `bsg_mux_one_hot`, `full_adder`, `mux`, `one_bit_comparator`,
+`priority_encode`, `ripple_carry_adder`, `rotate_right`), 16 in `tests/fixtures/` (the six
+`cdo_*` of `comb_default_override_dut.rs`, `datapath16`, `const_encoder`, `gray_to_binary`,
+`logic_array_pack`, `mod8`, `one_bit_comparator`, `priority_encode`, `ripple_carry_adder`,
+`rotate_right`, `wide_alu`), 6 in `tests/*.rs` (`add_one`, `passthrough` in `executor_guardrails.rs`; `add_one`, `invert`, `invert_a`, `buffer_a` in `simulator_corner_cases.rs`). Testbenches name a
+concrete `MainClk` (declared in each example's `main`, at file scope in each test); a call with
+const generics writes `_` for `D` (`mux::<_, WIDTH, ELS, LG_ELS>`; 12 call sites). Beyond the corpus:
+two `ui/pass` cases (`combinational_mux_valid`, `function_typed_valid_tuple_return`), the
+`combinational_latch*` trio, `unsupported_idiom_panic` and the four `function_typed_*` fail cases
+(their `In<u8>`s given `MainClk` — refused first by the header, so each still tests its own claim;
+their `.stderr` changed by the source line only), copper-core's `out_not_clone_single_driver`, and the
+transpiler's inline test sources (`, ()>` → `, C>`, the convention their neighbours used; 12 files).
+
+**The sweep.** `build.rs` maps a port whose domain is a type generic of the module to `SweepDomain`
+(declared by the wrapper like any undeclared domain) and writes `_` for a type parameter in the
+turbofish (`generic_slots`). The `()` filter on declared domains is deleted.
+
+**Found — the structural call site (predicted, then measured).** `chir_lower::lower_structural_inst`'s
+CDC check compared a child port's domain *text* with the net's domain, so a domain-generic child wired
+in `ClkSlow` was refused as a crossing ("wiring `synced` (domain `ClkSlow`) into `slow_consumer` port
+`flag_in` (domain `D`)"). Fixed: a type generic of the callee is bound per instance to its first net's
+domain and every other `D` port of the instance is checked against the binding.
+`structural_hierarchy.rs::a_domain_generic_child_takes_the_domain_of_its_nets`: the generic child's
+`--hierarchy` text equals the concrete child's byte for byte, has no `parameter`; two instances in two
+domains admitted; one instance across two domains refused as a crossing.
+
+**SV — predicted byte-identical (the domain is phantom).** Measured: **270 modules transpiled, 270
+byte-identical, and their 270 `--hierarchy` outputs byte-identical**; the three modules the baseline
+refused (`ram_straddle`, `ram_prewrite`, `b_counted`) refused with the same messages; one new module
+(Q.2's witness) refused by R6. No SV parameter for `D` (the texts are the old ones; `copper-transpile
+examples/combinational/mux.rs` emits the same `#(parameter int WIDTH_P …)` header). BaseJump: the four
+combinational anchors pass as examples and in the sweep (Q.3).
+
+### Q.2 R6 — the one named exception (option (a); SPEC II.1.3, II.1.2 R6)
+
+**Predicted:** the macro admits a combinational module calling a recursive helper; the transpiler
+refuses it with "cannot inline recursive function"; the simulator runs a terminating instance as Rust
+does; no corpus module reaches a recursive helper. **Measured:** all four. The witness,
+`tests/recursive_helper_r6.rs`: `parity8<D>` writes `parity_of(a.read(), 8)`, `parity_of` recursing on
+`k`; simulated over all 256 inputs against `u8::count_ones` (PASS); the transpiler's message is now
+"cannot inline recursive function `parity_of` into hardware: " + `RECURSIVE_HELPER_MESSAGE` (it names
+R6, S3, I.2.5(c) and II.1.3). The ui row: `ui/pass/recursive_helper_r6` (the macro admits), and
+`front_end_parity_ui.rs`'s `NAMED_PARITY_EXCEPTION` requires the transpiler to refuse exactly it with
+exactly that message. **Cannot widen:** `front_end_parity.rs::the_one_named_parity_exception_is_r6`
+builds each file's helper call graph (free `fn`s at any `mod` depth, single-segment calls) and requires
+the set of `#[hardware]` fns reaching a helper on a cycle to be `{tests/recursive_helper_r6.rs::parity8}`
+(measured: it is); it also checks the scan on the ui row, a mutual recursion (found) and an acyclic
+chain (not found). What the scan does not see: a recursion through a method or a trait call, which the
+inliner does not inline either (it refuses those as unknown calls, a different message).
+
+### Q.3 The bare regression
+
+**Bare `tools/regression.sh` on `5b22062` (the final code commit; laptop): REGRESSION OK (580 s).**
+1417 passed, 0 failed, 16 ignored, 154 test binaries (G-C: 127 test files — +1, `recursive_helper_r6.rs`);
+examples **32/32** (the four BaseJump combinational anchors and the five combinational goldens on the
+generic spelling); G-D **213** differential cases (3 ignored-with-reason, unchanged); **G-F 213**;
+**G-G differential 1622 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**; **G-G reference
+1634 PASS / 0 DISAGREE**; **G-I** 162 clocked related, 0 uncovered; **G-J** 0 DISAGREE; G-E 5 anchored —
+every count equal to §P.7's except the test totals (+4 tests, +1 binary). `sv-baseline diff` against a
+snapshot taken on a `6c17e6e` checkout: **1 of 274 modules differ — `NEW tests_recursive_helper_r6.rs__parity8`**
+(a `REFUSED` sentinel, Q.2's witness); every other module byte-identical, as the scratch dump of Q.1
+found. Not run remotely (nothing pushed).
+
+### Q.4 SPEC items (§P.9) — applied or not
+
+1. II.1.2's table / II.1.3's open-break list — **applied**: the Parity cell of R5, R7, R10, R12, R13,
+   R14, R15, R16, R17, R18, R19, R20 annotated (D-22) with its shared function and ui case; II.1.3 gains
+   a D-22 note with the rule order, the closed breaks (the `cdc_*` one named) and R6; II.1.4 notes its
+   line numbers predate the move. D3 annotated in II.2.1.
+2. II.1.3's audit description — **applied** (in the same D-22 note).
+3. II.2.2's R3 and D2 rows narrowed, four new rows — **applied** (two-flop, comb-cycle refusal, R5,
+   the structural body rule).
+4. I.12.1 / I.12.6 (4)'s "measured 0" — **applied** (I.12.1's D-22 note: 32 modules, 100 ports, the
+   generic spelling); I.12.6 (4) marked discharged; the map's port types restated; I.12.4(c) gains the
+   generic module's per-instance domain.
+5. P11, P5, P20, P22 — **applied** (each row's last cell annotated).
+6. I.13.4(b) `.clone()` of a reader end / parent `In` — **applied**.
+7. I.11.6 / I.13.7 (1), (2), (4) discharged — **applied** as annotations; (3) recorded not done;
+   `LEVELIZED_SCHEDULING_SCOPE.md`'s "detection is not rejection" — **not applied**: I.13.7 (8) names it
+   the coordinator's edit, and it is not a SPEC file.
+8. II.2 D2's implementation note (the mode from the attribute) — **applied**.
+
+**Found stale, not edited** (normative text outside this step's list): II.1.2's R8 and R9 rows still say
+"both admit" (R8 is `check_no_plain_out` in both since step 3; R9's flag is refused, ui
+`retired_pretick_opt_out`); R21's row says "unmeasured" (ui `preloop_tick` exists); R1–R4's and R11's
+`M`/`T` line references predate the move to `front_end.rs`; the header messages of R20 still spell ports
+`In<T>`, `Out<T>` (pinned by 13 `.stderr` files; a message change, not a rule change). I.13.7 (3)
+(instantiation refused in behavioural bodies) stays open (§P.4).

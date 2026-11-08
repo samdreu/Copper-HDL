@@ -2067,7 +2067,9 @@ poll; the levelized settle polls a singleton SCC once (`poll_task_once`,
 `:577-632`; `comb_cycles` `:490`); the fixpoint oracle polls every task per delta pass until
 no dirty flag; `Out::write` sets the shared cell and the dirty flag
 (`copper-core/src/port.rs:86-92`), `In::read` clones the live cell (`:120-124`); the dirty
-flag is what re-evaluates a consumer (→ I.13; D-18: I.13.3 — a scheduler artifact). Analysis: `Cfg::build_combinational`
+flag is what re-evaluates a consumer (→ I.13; D-18: I.13.3 — a scheduler artifact). (D-22: `iterate_scc`
+is deleted — a multi-task component is refused at spawn by `refuse_comb_cycle` under both schedulers,
+Phase C step 10, §P.3; the levelized settle's multi-task branch is unreachable.) Analysis: `Cfg::build_combinational`
 (`copper-analysis/src/cfg.rs:332`: `head → body → exit`, no back-edge),
 `check_definite_assignment` (`:2514`, MAY − MUST at the exit; `lib.rs:274` returns `Ok` on a
 clocked body). Transpiler: `check_definite_assignment` at `copper-codegen/src/lib.rs:371`;
@@ -2156,7 +2158,12 @@ the same one (I.12.4(c)): the module lies in the domain of its ports. Corpus (D-
 port in `examples/`, `src/`, `tests/fixtures/` or `tests/*.rs` uses the unit domain (measured
 0); the thirteen sites that do are the executor's own unit tests (`copper-sim/src/executor.rs`,
 four helper functions) and the macro's `function_typed_*` ui cases — scaffolding, given a
-domain in Phase C when the default is removed. Prior work: a phantom domain on the signal type
+domain in Phase C when the default is removed. (D-22: **wrong** — D-17 (iii) counted the explicit `()`
+only; the default reached **32 corpus `combinational` modules, 100 ports** — 10 in `examples/`, four of
+the five BaseJump combinational anchors among them, 16 in `tests/fixtures/`, 6 in `tests/*.rs`
+(`review/MEASUREMENTS.md` §P.2). Option (A1): each is now generic over its domain, `fn m<D:
+ClockDomain>(a: In<T, D>, …)`, and lies in the domain of its ports (I.12.4(c)); its SystemVerilog is
+byte-identical (§Q).) Prior work: a phantom domain on the signal type
 is RHDL's [rhdl §2.2] ("a Signal type indicates the clock domain it belongs to"; crossings
 through library constructs) and Arch's domain-tagged `Clock<D>` [arch §3.4]; Arch runs domains
 on separate threads "synchronizing only at CDC crossings" [arch §7.3.4] with no model of
@@ -2278,7 +2285,15 @@ Measured (D-17 (v)): both front-ends admit it today (`c_mixed(a: In<Logic, A>, o
 B>)` compiles under the macro — the combinational arm runs no domain rule,
 `lib.rs:1371-1384` — and transpiles to `assign o = a`); only the wiring is checked. Phase C:
 `check_cdc`'s port-domain clause on the `combinational` mode in both front-ends, the module's
-domain being its ports', with a ui case from `c_mixed`. (d) **The structural parent.** A
+domain being its ports', with a ui case from `c_mixed`. (D-22: done — `front_end::check_combinational_one_domain`,
+ui `combinational_two_domains`. **A module generic over its domain** — `fn m<D: ClockDomain>(…)`, every
+port in `D` — is the spelling of a combinational module that serves any domain: each **instance** lies
+in the domain of the wires it is connected to; the testbench names `D` through its wires' types, a
+`structural` parent's call site binds `D` to the domain of the instance's first net and checks every
+other `D` port against it (`chir_lower.rs::lower_structural_inst`), and two instances may lie in two
+domains. The domain is phantom: no SV parameter, the text the concrete module's; the sweep names one
+concrete domain for it. One instance wired across two domains is still the crossing refused above —
+`structural_hierarchy.rs::a_domain_generic_child_takes_the_domain_of_its_nets`.) (d) **The structural parent.** A
 `structural` module receives several clocks and wires children in several domains
 (`two_domain_top`); I.13 gives the wiring its meaning (D-18: I.13.4 — a name for the design of its instances and wires). This section states only that every
 crossing instance in it is a `synchronizer` child — which the call-site check already enforces
@@ -2309,7 +2324,8 @@ marker), `Clock<D>` (`:863-927`: an `Arc`'d cycle counter and its listeners; `ad
 is the edge, `tick()` (`:913`) a `ClockTick<D>` with target cycle + 1), `ClockTick::poll`
 (`:985-1008`: Ready iff `cycle ≥ target` and the domain is resolving), `TICK_RESOLVING` per
 domain, defaulting to true (`:966-983`); ports `In<T, D = ()>`, `Out<T, D = ()>`
-(`port.rs:109`, `:79`; the default goes in Phase C), `RegOut<T, D>` with `registered_wire`
+(`port.rs:109`, `:79`; the default goes in Phase C; D-22: gone — `In`, `Out` and `RegOut` bound
+`D: ClockDomain`, no default, and `wire` requires it), `RegOut<T, D>` with `registered_wire`
 requiring `D: ClockDomain` (`:188-235`); `cdc.rs` — no code: its guarantees are pinned in
 `copper-core/tests/ui/fail/` (`in_port_foreign_domain`, `out_port_foreign_domain`,
 `clock_foreign_domain`, `second_driver_foreign_domain` — E0308; `out_is_not_clone`,
@@ -2351,7 +2367,14 @@ the barrier (D-8); probe (i) as a two-clock test (expected `q = 2`), and
 `copper-analysis`, both front-ends, ui case from `sync_1ff_oj`; the anchor test's `sync_1ff` a
 refusal pin; (3) the combinational one-domain rule of I.12.4(c) in both front-ends, ui case
 from `c_mixed`; (4) the unit domain removed — no `D = ()` default, `D: ClockDomain` on every
-port type, the thirteen scaffolding sites given a domain, `check_cdc`'s `()` clause deleted;
+port type, the thirteen scaffolding sites given a domain, `check_cdc`'s `()` clause deleted (D-22:
+**discharged**, Phase C step 11 — the bound and the default as stated; the scaffolding given domains in
+step 10; the 32 corpus modules of I.12.1's D-22 note generic over theirs; the refusal is rustc's in a
+testbench (E0277, copper-core ui `unit_domain_refused`) and, on a module, the shared
+`front_end::check_port_domains` in both front-ends with one message — a port, clock or memory naming no
+domain or `()` (ui/fail `unit_domain_port`, `missing_domain_port`; `front_end_parity_ui.rs`); the
+domain readers behind it (`check_cdc`, the one-domain and two-flop rules) meet named domains only, so
+their `()` arm is unreachable);
 (5) R10 refused in both front-ends (D-12); (6) `sync_2ff`, `flag_sync` and the fixture twin in
 the tick-last `RegOut` spelling (D-9), `src/sync.rs`'s header corrected (the single-bit sentence
 is a signature, the structural requirement is I.12.3's rule); (7) `REF_SKIP`'s multi-clock
@@ -2525,7 +2548,9 @@ in source order, **net declarations** `let n = net::<T, D>()` — Phase C's spel
 `wire::<T, D>(init)` and `registered_wire::<T, D>(&clk, init)` (c) — and **instantiations**
 `child(arg, …)`, one positional argument per parameter of a `#[hardware]` module of any mode,
 each argument a parent port, a net's driver end `n.0` or reader end `n.1`, or a clock (cloned
-where a clock reaches several children), and nothing else. (c) **The net — decided (D-18 A3).** A
+where a clock reaches several children), and nothing else (D-22: or a `.clone()` of a reader end or
+of a parent `In` — a net with several readers needs one in Rust, where an `In` moves; the rule
+admits it, Phase C step 10, §P.4). (c) **The net — decided (D-18 A3).** A
 net is a wire of I.13.1 and **carries no value of its own**: its value is its driver's — a
 `RegOut` child port's committed value, `init(q)` before the first edge (I.6.6); a `combinational`
 child port's evaluation (I.11.2(e)); a parent `In` the environment drives. The cell **kind**
@@ -2669,7 +2694,10 @@ and mode of a received memory in the parameter type (I.10.8), checked at the str
 site; (7) the sim-as-unit form, if taken, as a realization with its own differential test
 against the hand wiring — dated here, not owed; (8) `LEVELIZED_SCHEDULING_SCOPE.md` noted:
 "detection is not rejection" reversed by D-14, order independence a theorem of I.13.2(a);
-`SYNCHRONOUS_SEMANTICS.md`'s poll-order section pointed here (the coordinator's edits).
+`SYNCHRONOUS_SEMANTICS.md`'s poll-order section pointed here (the coordinator's edits). (D-22: (1), (2)
+and (4) discharged in Phase C step 10 — the shape rules and their ui cases (`s6a` vacuous with `net`),
+`net::<T, D>()` and the one structural module rewritten to it, the cycle refusal at spawn and over the
+parent, §P.3–§P.4; (3) not done, §P.4; (8) the coordinator's.)
 
 **I.13.8 Carried NOT-YET list.**
 - The **dual-clock memory** — a memory with one port in each of two domains — is a
@@ -3096,22 +3124,22 @@ refused now, in both front-ends, at a measured cost of 0 each.
 | R2 | a module-loop path that reaches no `tick`, including a tick-free body | S2 | `check_reachability` (:963, `cfg.rs:2405-2464`); `validate_hardware_fn` :1549 | `lib.rs:358` | holds — one function; ui `tickless_loop`, `partial_tick_path` |
 | R3 | a nested loop with a zero-time cycle, or an enclosing loop whose only boundary is a nested loop that can be left before it ticks | S2 (I.8.2(a), I.8.4(a)) | `check_reachability` over `nested_loop_cfg` (`cfg.rs:2896-2920`), the fold (`:3062-3119`), `may_exit_without_tick` / `ticks_before_any_break` (`:3594-3640`) | `lib.rs:358` | holds; **over-refuses** and **under-admits** (II.2.2); ui `for_break_before_tick` |
 | R4 | a tick-free nested `loop` or `while` | S3 (I.2.5(c)) | `check_nested_loop_shape` clauses 1–2 (:977; `shape.rs`) | `lib.rs:364` | holds — one function |
-| R5 | a tick-free `for` whose bound is not a constant of I.14 (D-19: I.14.4) | S3 (I.2.5(c), I.8.5) | **none** | **none** — emits `always_comb … for (…; _ < n; …)`, a loop with a run-time bound | both admit; **both owe** (D-12 A 2b) |
-| R6 | recursion through a helper `fn` | S3 (I.2.5(c)) | none (rustc admits non-`async` recursion) | the inliner (I.2.4), unmeasured | **unmeasured** → II-b |
-| R7 | `break` of the module loop; `return` | S4 (I.2.5(d), I.8.1) | **none** — admitted; the simulator panics at run time | `control_extract.rs:1786`, `chir_lower.rs:3603`; "return is not supported" (`:3892`) | **T-only** → M owes |
+| R5 | a tick-free `for` whose bound is not a constant of I.14 (D-19: I.14.4) | S3 (I.2.5(c), I.8.5) | **none** | **none** — emits `always_comb … for (…; _ < n; …)`, a loop with a run-time bound | both admit; **both owe** (D-12 A 2b) (D-22: **holds** — `front_end::check_tick_free_for_bounds`, a shared syntactic half, rustc's `const { }` in the macro, `ConstEnv` in the transpiler; ui `runtime_for_bound`; corpus 0; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
+| R6 | recursion through a helper `fn` | S3 (I.2.5(c)) | none (rustc admits non-`async` recursion) | the inliner (I.2.4), unmeasured | **unmeasured** → II-b (D-22: measured, M admits / T refuses — **the one named exception to II.1.3**, option (a): the macro holds the module's `ItemFn` only and cannot see a helper's body; the transpiler refuses when it inlines, `copper_analysis::front_end::RECURSIVE_HELPER_MESSAGE`, so no text is emitted for it, and a terminating recursion simulates as Rust runs it. Pins: `tests/recursive_helper_r6.rs` (simulated over all 256 inputs, refused with R6's message), ui/pass `recursive_helper_r6` with `front_end_parity_ui.rs`'s `NAMED_PARITY_EXCEPTION`, and `front_end_parity.rs::the_one_named_parity_exception_is_r6` — the tree's helper call graph, the witness the only module reaching a recursive helper; corpus 0) |
+| R7 | `break` of the module loop; `return` | S4 (I.2.5(d), I.8.1) | **none** — admitted; the simulator panics at run time | `control_extract.rs:1786`, `chir_lower.rs:3603`; "return is not supported" (`:3892`) | **T-only** → M owes (D-22: **holds** — `front_end::check_module_loop_exit`, one message; ui `module_loop_break`, `module_return`; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
 | R8 | a plain `Out` parameter on a `sequential` or `synchronizer` module | S5 (D-8) | none | none | both admit; D-8's Phase C rule; cost 88 (sweep) / 273 (all) — D-8's rewrites |
 | R9 | the flag `allow_pretick_alignment` | S0 (I.2.2) | none — parsed and honoured | none | both admit; Phase C; 3 (sweep) / 78 (all), the battery's |
-| R10 | a second `Clock` parameter on a `sequential` module | S0 (I.2.2: exactly one) / S2 (a second resumption protocol with no meaning until I.12; D-17: I.12.5 confirms the refusal) | none — the CDC check is skipped (:947) | none — measured accepted | both admit; **both owe** (D-12 A 2b); cost 0 |
+| R10 | a second `Clock` parameter on a `sequential` module | S0 (I.2.2: exactly one) / S2 (a second resumption protocol with no meaning until I.12; D-17: I.12.5 confirms the refusal) | none — the CDC check is skipped (:947) | none — measured accepted | both admit; **both owe** (D-12 A 2b); cost 0 (D-22: **holds** — `front_end::check_one_clock`; ui `two_clocks_sequential`; corpus 0; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
 | R11 | a pre-loop register initializer that is not a constant (registers only, D-21 C2); and (D-21 H1) a held pre-loop value — a pre-loop `let` the loop never reassigns, read in the loop, whose initializer reads an input | S3 (I.7.4(c), I.9.2; `s_pre ::= let v = c` for a register) | rustc: the initializer in a `const { }` block (D-21 A3); before it the shared `check_register_initializers` (`init.rs`): a run-time read, R11's message | the same function, then `check_register_initializer_calls_in` (a non-`const` callee) and the fold | holds — ui `register_init_reads_input` (R11's message), `register_init_not_constant`, `register_init_non_const_ctor` (E0015), `register_init_rust_constants_ok`; `copper-codegen/tests/register_init_parity.rs` transpiles those cases (D-21); the held value: `check_held_preloop_values` in both front-ends, ui `held_preloop_read`, `front_end_parity::no_corpus_module_holds_a_preloop_read` (corpus 0) |
-| R12 | a labelled or valued `break` | S0 (I.2.3; D-10 A5, I.8.3) | **none** | `control_extract.rs:1792`, `:1797` | **T-only** → M owes |
-| R13 | a macro in statement or expression position outside `const { }` (not `matches!`) | S0 (I.2.3: `e` pure, reads hoisted) | **none** | `parser.rs:275` → "macro invocation is not supported" | **T-only** → M owes; corpus 0 (one `vec!` inside a preload is DESUGARED, I.2.4) |
-| R14 | an input read inside macro tokens | S0 (I.2.3: `let t = read x` the only form; I.2.8, I.4.8) | **none** — the visitor does not enter tokens; `cfg.rs:2945` counts them as uses | refused with R13 | **T-only** → M owes (with R13) |
-| R15 | `/` | S0 via I.14 (`e` over I.14's operators; `/` has no meaning on `Bits` until I.14 gives one; D-19: I.14.3(b) — given, so R15 is a dated II.3 limitation, not a shape) | **none** | `chir_lower.rs:4822` | **T-only** → M owes (D-12 A 2b); corpus 0 |
-| R16 | a port payload or an annotated `let` whose type is outside I.14's set (D-19: I.14.1) | S0 (I.2.6) | `check_admissible` (:932; `copper-analysis/src/lib.rs:824-880`) | by lowering, another message ("cannot resolve type") | verdict parity on the probe; **rule parity owed**: T calls it, same message, a ui/fail case (D-12 A 2a) |
-| R17 | `Clock::new` / `Clock::default` in a body | S2 (I.2.5(b)) | `check_no_clock_construction` (:911, :295) | by accident ("cannot infer bit width") | verdict parity by accident → T owes the rule |
-| R18 | a `let` that shadows a port parameter | S0 (I.2.3's name classes) | `check_no_param_shadowing` (:937, :383) | **accepts** (measured) | **M-only** → T owes |
-| R19 | an `In` handle used other than as the receiver of `.read()` (cloned, rebound, passed on) | S0 (I.2.3) | `find_unprotectable_in_uses` (:1365, via `inject_synced_reads`, which D-8 removes) | unmeasured | M; kept as a check of its own in Phase C; → II-b to measure T |
-| R20 | the header: `async`, no return type, named parameters, port types only, at least one `Clock`, at least one output, every `Clock` ticked, one top-level `loop`, last and only | S0 (I.2.2) | `validate_hardware_fn` (:1403-1576) | `has_hardware_signature` (`lib.rs:596-610`), `chir_lower.rs:1978` (the loop) | partial; T owes the same messages |
+| R12 | a labelled or valued `break` | S0 (I.2.3; D-10 A5, I.8.3) | **none** | `control_extract.rs:1792`, `:1797` | **T-only** → M owes (D-22: **holds** — `front_end::check_break_forms`; ui `labelled_break`, `valued_break`; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
+| R13 | a macro in statement or expression position outside `const { }` (not `matches!`) | S0 (I.2.3: `e` pure, reads hoisted) | **none** | `parser.rs:275` → "macro invocation is not supported" | **T-only** → M owes; corpus 0 (one `vec!` inside a preload is DESUGARED, I.2.4) (D-22: **holds** — `front_end::check_no_body_macros` (`matches!`, `const { }` and a preload's `vec![…]` admitted); ui `body_macro`; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
+| R14 | an input read inside macro tokens | S0 (I.2.3: `let t = read x` the only form; I.2.8, I.4.8) | **none** — the visitor does not enter tokens; `cfg.rs:2945` counts them as uses | refused with R13 | **T-only** → M owes (with R13) (D-22: **holds** with R13; ui `input_read_in_macro`; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
+| R15 | `/` | S0 via I.14 (`e` over I.14's operators; `/` has no meaning on `Bits` until I.14 gives one; D-19: I.14.3(b) — given, so R15 is a dated II.3 limitation, not a shape) | **none** | `chir_lower.rs:4822` | **T-only** → M owes (D-12 A 2b); corpus 0 (D-22: **closed** — `/` has I.14.3(b)'s meaning and its emission (Phase C step 8); both admit; no rule) |
+| R16 | a port payload or an annotated `let` whose type is outside I.14's set (D-19: I.14.1) | S0 (I.2.6) | `check_admissible` (:932; `copper-analysis/src/lib.rs:824-880`) | by lowering, another message ("cannot resolve type") | verdict parity on the probe; **rule parity owed**: T calls it, same message, a ui/fail case (D-12 A 2a) (D-22: **holds** — `check_admissible` run by both from `check_front_end_rules`, one message; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
+| R17 | `Clock::new` / `Clock::default` in a body | S2 (I.2.5(b)) | `check_no_clock_construction` (:911, :295) | by accident ("cannot infer bit width") | verdict parity by accident → T owes the rule (D-22: **holds** — `front_end::check_no_clock_construction`, one message; ui `clock_construction`; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
+| R18 | a `let` that shadows a port parameter | S0 (I.2.3's name classes) | `check_no_param_shadowing` (:937, :383) | **accepts** (measured) | **M-only** → T owes (D-22: **holds** — `front_end::check_no_param_shadowing`; ui `param_shadowing`; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
+| R19 | an `In` handle used other than as the receiver of `.read()` (cloned, rebound, passed on) | S0 (I.2.3) | `find_unprotectable_in_uses` (:1365, via `inject_synced_reads`, which D-8 removes) | unmeasured | M; kept as a check of its own in Phase C; → II-b to measure T (D-22: **holds** — `front_end::check_in_param_uses`, its message no longer citing the retired injection; ui `sequential_unprotectable_read`; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
+| R20 | the header: `async`, no return type, named parameters, port types only, at least one `Clock`, at least one output, every `Clock` ticked, one top-level `loop`, last and only | S0 (I.2.2) | `validate_hardware_fn` (:1403-1576) | `has_hardware_signature` (`lib.rs:596-610`), `chir_lower.rs:1978` (the loop) | partial; T owes the same messages (D-22: **holds** — `front_end::check_header` with R9's flag parsed by one `parse_hardware_args`, and the port-domain clause `check_port_domains` (I.12.6 (4)); every `function_typed_*` case refused by both with the macro's message; Phase C step 10, `review/MEASUREMENTS.md` §P.1) |
 | R21 | a `tick` before the loop | S0 (I.2.2: `s_pre` tick-free; I.9.3) | none explicit (R2 sees it as a pre-loop statement) | unmeasured | corpus 0 → II-b to measure |
 | R22 | a second driver of a `RegOut` | S5 (I.6.8) | the type system (`RegOut` is not `Clone`) | the type system | holds by construction |
 
@@ -3126,7 +3154,12 @@ rules — `check_memory_staging` (:999; `lib.rs:531`) and `memory_result_drives_
 rule (`check_cdc`, :947) and the unit-domain `In<T>` are I.12's (D-17: I.12.4(a)–(c) — `check_cdc` holds and is widened to the `combinational` mode; the unit domain OUTSIDE, I.12.1; the two-flop rule of I.12.3 is a new realizability row). (D-13: the hex literal is row (g), the nested `continue` row (a), the arms-only loop row (b); `memory_result_drives_plain_out` is retired as vacuous, II.3.2.)
 
 **II.1.3 The parity obligation as a rule.** A module compiles under `#[hardware]` **iff** it
-transpiles (`SPEC_OVERVIEW.md` §3; I.2.1: both front-ends hold the same `syn::ItemFn`).
+transpiles (`SPEC_OVERVIEW.md` §3; I.2.1: both front-ends hold the same `syn::ItemFn`), **with one
+named exception** (D-22): R6, recursion through a helper `fn`, compiles and does not transpile —
+the macro cannot see a helper's body, the transpiler refuses the shape when it inlines, so the
+break is a refusal-only asymmetry and never a divergence (no text is emitted; a terminating
+recursion simulates as Rust runs it). The exception is pinned so it cannot widen (II.1.2's R6
+row); any other shape one front-end admits and the other refuses is a break of this rule.
 Every rule of II.1 and II.2 is **one function** of `copper-analysis`, called by both
 front-ends, with **one message**; a shape refused by both is a `copper-macros/tests/ui/fail`
 case and never a swept module. The audit is `copper-analysis/tests/front_end_parity.rs`
@@ -3146,8 +3179,26 @@ lowering (D-10); `front_end_parity.rs` gains R2, R16, `check_definite_assignment
 header rules, and a battery of I.2.4's OUTSIDE rows in the transpiler-admits direction
 (the probe set of D-12 §0 (v) is its seed). D-10's and D-11's parity notes (I.2.8, I.8.3,
 I.8.7) are closed into this list.
+(D-22: **the state after Phase C step 10** (`review/MEASUREMENTS.md` §P.1, §Q). The syntactic rules
+are one function, `copper_analysis::front_end::check_front_end_rules(f, mode)`, which both front-ends
+run first, in one order: R20 (with R9's flag and the port-domain clause of I.12.6 (4)), R10, R17,
+I.14.3's OUTSIDE methods, the memory port index, D3, R16, R18 — then, for a `structural` body, the
+rules of I.13.4(d) and nothing else; for any other, R7, R12, R5, R13/R14, the mode's CDC rule (the
+port rule, the two-flop rule, the combinational one-domain rule) and, on a clocked body, R19. The open breaks above are closed — R5, R7, R10, R12,
+R13/R14 hold in both; R16, R17, R18, D3 are shared; R15 is closed (I.14.3(b)); the `cdc_*` rule,
+macro-only and a break the list never named (the transpiler admitted `cdc_crossing` and
+`cdc_memory_parameter`), is shared — except R6, the named exception. **The audit** is two tests.
+`copper-analysis/tests/front_end_parity.rs` runs every shared rule, R2/R3 (`check_reachability`) on a
+clocked body and D2 on a combinational one over every `#[hardware]` fn of the tree in every mode
+(272 fns), plus the step-8 data rules, R11's halves, the held pre-loop value and R6's call-graph
+scan; `copper-codegen/tests/front_end_parity_ui.rs` is the transpiler-admits direction: every
+`ui/fail` case refused by the transpiler with the macro's first line (three rustc-judged rows
+named — E0015 ×2, E0308), every `ui/pass` case admitted (`register_init_constants_ok` a named
+lowering-limit row; `recursive_helper_r6` the R6 row, refused with R6's message). P10's blind
+spots are closed.)
 
-**II.1.4 Implementation map.** Rule home: `copper-analysis/src/lib.rs` (`check_awaits`,
+**II.1.4 Implementation map.** (D-22: the line numbers below predate Phase C step 10, which moved the
+macro's syntactic rules into `copper-analysis/src/front_end.rs`; II.1.3's D-22 note names the functions.) Rule home: `copper-analysis/src/lib.rs` (`check_awaits`,
 `check_nested_loop_shape` from `shape.rs`; `check_reachability` :219, `check_register_initializers`
 :51, `check_admissible` :824, `check_definite_assignment` :274, `multi_write_collapse` :109
 — retired, II.2.1; the alignment rules :70-205 — retired, D-8). Macro
@@ -3234,7 +3285,8 @@ I.6.4). The rules that survive:
   spelling (D-10 A1-i, I.8.2(b)). Both front-ends; ui `tick_first_wait`; corpus 0.
 - **D2 — combinational definite assignment** (`check_definite_assignment`,
   `cfg.rs:2514`; `combinational` modules only, `lib.rs:274` returns `Ok` on a clocked body):
-  every path writes every output. The principle, stated now and owed to I.11 as its clause (D-14: I.11.3, written; D2 stays here): a
+  every path writes every output (D-22: the mode is read from the attribute when one is present —
+a `structural` body has no loop and is not combinational, Phase C step 10, §P.5). The principle, stated now and owed to I.11 as its clause (D-14: I.11.3, written; D2 stays here): a
   combinational module is evaluated afresh at every instant and has no cycle to hold across
   (I.2.7, I.5.7), so an output unwritten on some path would be *state*, and state's spelling
   is the `RegOut` of a sequential module (one spelling per meaning). Both front-ends since
@@ -3246,7 +3298,8 @@ I.6.4). The rules that survive:
   pair of wires and an error is a port, which is the message the rule prints; I.2.5(a)'s
   "no cycle to fail in" is the reason there is nothing else they could mean. Macro only; the
   transpiler refuses the same probes by other arms (`cannot resolve type`, the macro
-  refusal) — rule parity owed (II.1.3); corpus 0.
+  refusal) — rule parity owed (II.1.3); corpus 0. (D-22: shared since Phase C step 10 —
+  `front_end::check_no_unsupported_idioms`, both front-ends, one message.)
 - **D4** — retired. `multi_write_collapse` (rule 8; `cfg.rs:439-480`): its predicate names a
   bare tick with the same **plain `Out`** written on both sides after a leading read, over
   `comb_outputs` only (`RegOut` excluded by construction), so under D-8 it is identically
@@ -3284,15 +3337,19 @@ refuse a well-formed coroutine; *under* = may admit an ill-formed one; *exact* =
 |---|---|---|---|
 | `check_awaits` (`shape.rs`) | S1 | exact (syntactic) | — |
 | `check_reachability` on the module CFG (`cfg.rs:2405-2464`) | S2: every execution's loop path reaches a `tick` | exact on a body without nested loops (a `Comb` cycle from the head is a tickless path and conversely) | ui `tickless_loop`, `partial_tick_path` |
-| `may_exit_without_tick` / `ticks_before_any_break` (`cfg.rs:3594-3640`), the fold's zero-time edge (`:2432`) | "the nested loop can be left with no `tick` behind it" (I.8.4(a)) | **both ways**. *Over*: the walk returns "exitable" at the first statement that contains a tick without being one (`:3634-3636`), whatever its arms do — `livelock_a` (an `if` with a tick, no `break`, the bare tick last) and `livelock_b` (an `if`/`else` whose both arms tick, then the `break`, then the tick) are refused by both front-ends though every path ticks (measured 2026-11-05; a `continue`-carrying wait of the same shape too). *Under*: a `for` over a literal-empty range is counted as a boundary (`:3594-3598`; RULES open 5, I.8.4(b)), so an enclosing loop whose only tick it holds passes and livelocks the simulator. | D-12 §0 (iii); Phase C: an all-paths walk of each arm, literal ranges evaluated |
+| `may_exit_without_tick` / `ticks_before_any_break` (`cfg.rs:3594-3640`), the fold's zero-time edge (`:2432`) | "the nested loop can be left with no `tick` behind it" (I.8.4(a)) | **both ways**. *Over*: the walk returns "exitable" at the first statement that contains a tick without being one (`:3634-3636`), whatever its arms do — `livelock_a` (an `if` with a tick, no `break`, the bare tick last) and `livelock_b` (an `if`/`else` whose both arms tick, then the `break`, then the tick) are refused by both front-ends though every path ticks (measured 2026-11-05; a `continue`-carrying wait of the same shape too). *Under*: a `for` over a literal-empty range is counted as a boundary (`:3594-3598`; RULES open 5, I.8.4(b)), so an enclosing loop whose only tick it holds passes and livelocks the simulator. | D-12 §0 (iii); Phase C: an all-paths walk of each arm, literal ranges evaluated (D-22: **narrowed both ways** in Phase C step 10 — an all-paths walk (`cfg.rs::untick_seq`): a `loop` is left untick'd only through a `break` reached before any tick, a `for` also through an untick'd fall-through or a literal-empty range. Still **over** by path-insensitivity (complementary `if`s) and **under** at a range empty only through a constant (`0..EMPTY`). Witnesses: ui/pass `livelock_a`, `livelock_b`; ui/fail `literal_empty_for_boundary`; the swept fixture `all_paths_boundary_dut.rs`; `static_predicate_directions.rs`; §P.5) |
 | `check_nested_loop_shape` clauses 1–2 (`shape.rs`) | S3: a tick-free nested `loop`/`while` | exact (syntactic) | — |
 | `ends_at_clock_boundary` (clause 3) | D-10's spelling (I.8.2(b)) | exact — it is the definition of the spelling | — |
 | `infer_registers` (`cfg.rs:394-415`) | I.7.1: live at a `tick` | **over** by the head clause (8 wires in 7 modules, I.7.5) and by the fold's added local; **under** by the fold's missed local (a local assigned before a ticking `for` and read inside it after its tick); the poison run that decides I.0.5(a) → III.1 (D-20: P2, P3) | I.7.5, I.7.7 |
 | R11: rustc's `const { }` in the macro; `check_register_initializers` + `check_register_initializer_calls_in` and the fold in the transpiler (`init.rs`, D-21 A3) | I.14's constants (R11; D-19: I.14.4) | **exact** in the macro (rustc); in the transpiler **over** only where its fold's grammar is narrower than rustc's — a `const` method call (`K.wrapping_add(1)`), a tuple-struct ctor, a `static` — each reported as a lowering error, never a dropped value; corpus 0 each | `init.rs` header; `register_init_parity.rs`; `register_initializer_corpus.rs` |
 | `check_admissible` (`lib.rs:824-880`) | I.14's type set (R16; D-19: I.14.1) | **under** by design: unannotated `let`s and array lengths are not checked; calibrated never to over-reject (`admissible_calibration.rs`: admissible Err ⟹ transpile Err) | `tuple_local` (D-12 §0 (v)) |
-| `check_definite_assignment` (`cfg.rs:2514`) | D2: every path writes every output | **under**: a folded loop is taken to write every port; a port never written is not flagged (`TODO:1366`) | `comb_definite_assignment_parity.rs` |
+| `check_definite_assignment` (`cfg.rs:2514`) | D2: every path writes every output | **under**: a folded loop is taken to write every port; a port never written is not flagged (`TODO:1366`) | `comb_definite_assignment_parity.rs` (D-22: **narrowed** in Phase C step 10 — the combinational CFG expands its loops, and the never-written port is refused (D-14); still **over** by path-insensitivity. Witnesses: ui/fail `combinational_latch_in_for`, `combinational_never_written`; `static_predicate_directions.rs`; the cfg tests `comb_output_never_written_is_refused`, `comb_write_under_an_if_in_a_for_is_partial`; §P.5) |
 | `check_no_param_shadowing`, `check_no_clock_construction`, the idiom visitor, `find_unprotectable_in_uses` | S0 productions, R17, D3, R19 | exact (syntactic) on what they name; R19's visitor does not enter macro tokens (R13/R14 close that) | — |
 | `has_top_level_loop` / `check_single_top_level_loop` / `validate_hardware_fn` | S0 (I.2.2), R20 | exact (syntactic) | ui `multiple_top_level_loops`, `function_typed_*` |
+| `front_end::check_two_flop` (D-22: new, Phase C step 10) | I.12.3's two-flop rule | **over** by path-insensitivity (arms joined by union) | ui `sync_one_flop`, `sync_one_flop_guard`; `static_predicate_directions.rs` |
+| `HardwareExecutor::refuse_comb_cycle`, `chir_lower::refuse_structural_comb_cycle` (D-22: new, step 10) | I.11.4 / I.13.2: a combinational cycle | **exact** on the graph the testbench declares (`reads`, `dirties`) and on a parent's nets; **under** for a cycle through a read the testbench does not declare (the fixpoint oracle's oscillation guard stays for it) | `executor.rs::fixpoint_oscillating_loop_trips_threshold`; `structural_hierarchy.rs::combinational_cycle_through_a_structural_parent_is_refused` |
+| `front_end::check_tick_free_for_bounds` (R5; D-22: new, step 10) | I.14.4's constants as a tick-free `for` bound | **exact** in the macro (rustc's `const { }`); in the transpiler **over** where `ConstEnv` is narrower than rustc (as R11) | corpus 24/24 bounds fold; ui `runtime_for_bound` |
+| `front_end::check_structural_body` (D-22: new, step 10) | I.13.4(d)'s S0 rows | **exact** (syntactic) | the seven `structural_*` ui/fail cases, ui/pass `structural_net_ok` |
 
 Retired with D-8 and named once, not derived: `classify_reads` (the barrier placement),
 `leading_read_reaches`, `deferred_read_reaches`, `seen_in_read`, `passthrough_read`,
@@ -3573,13 +3630,13 @@ proposition that no surviving rule or realization consumes is **retired**, not d
 | P2 | **The register proposition** (I.0.5(a)): overwriting every non-register at every `tick` suspension leaves the trace unchanged | I.0.5, I.7.1 | coroutine (via the interpreter) | MEASURED: the poison run, `tests/reference_leg_measurements.rs:381` — 47 modules clean; the tick-last `sync_2ff`'s `ff2` poisonable (first negative), `ff1` not (first positive) (§D.4) | re-run over the corpus once D-8's rewrite puts the 83 plain-`Out` modules in the leg |
 | P3 | **`infer_registers` computes I.7.1**: over by the head clause (8 wires in 7 modules) and by the fold's added local, under by the fold's missed local | I.7.5, II.2.2 | analysis | MEASURED: the poison run flags nothing on the corpus and flags `v` on the fold probe (`tests/ref_probes/sync_2ff_tick_last.rs::fold_defect`); `copper-codegen/tests/register_reconciliation.rs` (fixtures only) | Phase C: delete the head clause, descend into the nested loop's CFG, two reconciliation fixtures (I.7.6) |
 | P4 | **rustc's `Future` layout ⊇ I.7.1**, tight up to the counted-`for` iterators | I.0.5(c), I.7.7 | simulator | MEASURED: seven fixtures, `-Zprint-type-sizes` under `RUSTC_BOOTSTRAP=1`, `tests/reference_leg_measurements.rs:466` (§D.5) | none; not a standing pin (the flag is unstable) |
-| P5 | **Order independence**: the levelized settle and the fixpoint oracle compute the same settled wires on every acyclic design | I.13.2(a), (c) | simulator | THEOREM (I.13.2(a): a DAG has one fixpoint) and MEASURED: `tests/levelized_differential.rs` 6/6, `tests/poll_order_fuzz.rs` 2/2, `tests/golden_traces.rs` 6+6, a 65-case corpus sample under the oracle (D-18 (i)) | the static cycle refusal at spawn (I.11.6, I.13.7 (4)) |
+| P5 | **Order independence**: the levelized settle and the fixpoint oracle compute the same settled wires on every acyclic design | I.13.2(a), (c) | simulator | THEOREM (I.13.2(a): a DAG has one fixpoint) and MEASURED: `tests/levelized_differential.rs` 6/6, `tests/poll_order_fuzz.rs` 2/2, `tests/golden_traces.rs` 6+6, a 65-case corpus sample under the oracle (D-18 (i)) | the static cycle refusal at spawn (I.11.6, I.13.7 (4)) (D-22: discharged — the refusal at spawn under both schedulers and over a structural parent, Phase C step 10, §P.3) |
 | P6 | **The simulator's X algebra equals IEEE 1800 4-state** on every operator but `eq_logic`/`ne_logic` | I.14.2 | simulator, interpreter | ANCHORED: Icarus Verilog 12.0, 400 rows per operator (D-19 (i-b)), a recorded table not in the tree | Phase C: `eq_logic`/`ne_logic` IEEE-exact; the table as a standing pin (I.14.7 (1)) |
 | P7 | **`RefBits` ≡ `Bits<N>`** | I.14.7 | interpreter | MEASURED: `copper-ref/tests/bits_property.rs` (widths {1, 4, 8, 16, 32, 64, 128}, X-sprinkled operands) | the uncovered operators of I.14.8 |
 | P8 | **Realizability**: for every shape both front-ends admit, the emitted text realizes the resumption's effects in every cycle — its reads of `x_{N+1}`, its register updates, its pending values, shown from `obs_{N+1}` — except the ADMITTED-AND-DIVERGENT rows of II.3.3 | I.0.6, II.3.1 | transpiler | MEASURED (consistency): the sweep over 166 modules (G-D); ANCHORED for the 5 `REFERENCE` modules and the goldens of III.2.11; the six defect rows measured divergent (D-13 §0, D-19) | the II.3.6 fix list; mechanization proposed (III.1.4) |
 | P9 | **Two iterations suffice** (FORMAL_SEMANTICS P6/G6, [anvil Lemma C.19]) | I.3.6 | analysis | **retired** (D-20): its consumers were the trailing alignment rules, retired by D-8; the surviving analyses (`check_reachability`, `infer_registers`) are fixpoints over the CFG and unroll nothing. I.3.6's lemma (a segment crosses the back edge at most once) stays a fact Part I uses | none |
 | P10 | **Front-end parity**: a module compiles under `#[hardware]` iff it transpiles | II.1.3 | macro, transpiler | MEASURED: `copper-analysis/tests/front_end_parity.rs:121`, `:158`; blind spots — R2, R16, `check_definite_assignment`, the header rules, I.2.4's syntactic shapes, the transpiler-admits direction; the open breaks of II.1.3 measured on probes (D-12 §0 (v), D-13 §0 (i)) | the II.1.3 fixes and the audit's extension |
-| P11 | **Per-domain determinism**: a module none of whose inputs another domain drives has one trace under every interleaving | I.12.1 | simulator | THEOREM (I.12.1, I.0.2) and MEASURED (`two_domain_counter` under two interleavings, D-17 (vi); `tests/two_domain_counter_behavioral.rs:124` at three ratios); **false today** at startup: the first settle of any domain resumes every coroutine (D-17 (i), probe not in the tree) | Phase C I.12.6 (1) with probe (i) as a two-clock pin (III.2.8) |
+| P11 | **Per-domain determinism**: a module none of whose inputs another domain drives has one trace under every interleaving | I.12.1 | simulator | THEOREM (I.12.1, I.0.2) and MEASURED (`two_domain_counter` under two interleavings, D-17 (vi); `tests/two_domain_counter_behavioral.rs:124` at three ratios); **false today** at startup: the first settle of any domain resumes every coroutine (D-17 (i), probe not in the tree) | Phase C I.12.6 (1) with probe (i) as a two-clock pin (III.2.8) (D-22: no longer false — `tests/two_clock_pins.rs::never_ticked_startup_one_resumption_agrees_on_all_three_legs`, sim ≡ SV ≡ ref, Phase C steps 2–3; checked in step 10, §P.2) |
 | P12 | **The simulator is the coroutine**: rustc's lowering of the unchanged body, resumed once per tick at `t_{N+1}⁻` | I.0.1, I.0.7 | simulator, macro | MEASURED: sim ≡ ref on 46 modules (G-F); **false today** on a read after the last tick (`regout_trailing_single_tick`, sim = SV ≠ ref, pinned at `tests/reference_leg_measurements.rs:136`) and wherever the macro injects the barrier (`copper-macros/src/lib.rs:712-725`) | Phase C: one resumption per tick, the injection removed; the pin flips |
 | P13 | **Hoisted and promoted locals ⊆ registers** (∪ carriers; none known) | I.7.7, I.0.8 | transpiler | MEASURED on fixtures only (`register_reconciliation.rs`); unmeasured on the corpus | a corpus measurement |
 | P14 | **The hoisted initializer's forwarding is unobservable** (`control_extract.rs`'s comment that "a registered output can forward the flop before" its assignment) | I.7.7, II.3.3 | transpiler | ASSERTED | a probe; a II.3 row if it is observable |
@@ -3588,9 +3645,9 @@ proposition that no surviving rule or realization consumes is **retired**, not d
 | P17 | **A re-poll of a parked coroutine runs no statement** | I.13.2(b) | simulator | THEOREM (`ClockTick`'s target is fixed at `tick()`, I.0.7) | none |
 | P18 | **The order of the clock's listeners is unobservable** for a `RegOut` | I.6.8 | simulator | THEOREM (the pending value is a copy) | none |
 | P19 | **Hand wiring ≡ the emitted hierarchy** | I.13.4, I.13.6 | simulator, transpiler | ANCHORED at 2:1 (`tests/two_domain_hierarchy_cdc.rs`, 3/3 vs `examples/cdc/sv/two_domain_hierarchy.sv`); MEASURED for the received memory (`tests/received_memory_abi.rs`, 1/1) | a single-domain hierarchy reference (III.2.11) |
-| P20 | **A wiring across domains outside a synchronizer is a type error** | I.12.4 | types | MEASURED: `copper-core/tests/ui/fail/` (E0308, E0599; trybuild) | the two-flop rule (I.12.6 (2)) |
+| P20 | **A wiring across domains outside a synchronizer is a type error** | I.12.4 | types | MEASURED: `copper-core/tests/ui/fail/` (E0308, E0599; trybuild) | the two-flop rule (I.12.6 (2)) (D-22: discharged — `front_end::check_two_flop`, both front-ends, Phase C step 10; and `()` is no domain, I.12.6 (4), step 11) |
 | P21 | **`check_admissible` never over-rejects** (admissible Err ⟹ transpile Err) | II.2.2 | analysis | MEASURED: `copper-codegen/tests/admissible_calibration.rs` | none |
-| P22 | **Every direction of II.2.2 is as stated** | II.2.2 | analysis | MEASURED by the witnesses in the table (`livelock_a`/`livelock_b`, the fold probe, `tuple_local`, `comb_definite_assignment_parity.rs`); D2's folded loop and unwritten port unpinned | the pins of II.2.3 |
+| P22 | **Every direction of II.2.2 is as stated** | II.2.2 | analysis | MEASURED by the witnesses in the table (`livelock_a`/`livelock_b`, the fold probe, `tuple_local`, `comb_definite_assignment_parity.rs`); D2's folded loop and unwritten port unpinned | the pins of II.2.3 (D-22: D2's two directions pinned — `static_predicate_directions.rs`, Phase C step 10, §P.5) |
 | P23 | **The memory**: `ReadFirst`, latency 1, dual port | I.10 | simulator, transpiler | ANCHORED (`examples/memory/sv/dual_port_ram.sv`; `ram_read_first` `REFERENCE`); latency above 1, port priority and preloads sim ≡ SV only; no interpreter leg | the interpreter's memory model (D-16); the references of III.2.11 |
 | P24 | **A combinational module** is a function evaluated per settle; the Mealy composition | I.11 | simulator, transpiler | ANCHORED: the five `examples/combinational/sv` goldens, `bit_not_bits`, the Mealy pair (D-14 (v)) | no interpreter leg (25 modules skipped by class) |
 

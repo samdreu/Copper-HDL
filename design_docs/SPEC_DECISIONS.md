@@ -3562,3 +3562,55 @@ is not merged. Obligations: the follow-ups of §N.5.
 Coroutine terms: a register's power-on value is the value the coroutine's first resumption finds in it,
 and rustc is the one tool that computes Rust's constants; the transpiler and the interpreter each
 compute it again, and the sweep and G-J say whether all three agree.
+
+### D-22 — R6 the one named parity exception; the unit domain removed by a generic domain   (2026-11-07)
+Clause: SPEC §II.1.3 (the "iff" gains its one exception; a D-22 note on the state after Phase C step
+10), II.1.2's R6 row (and, as step 10's SPEC items, the Parity cells of R5, R7, R10, R12–R20), II.1.4,
+II.2.1 D2 and D3, II.2.2 (R3, D2, four new rows), §I.12.1, I.12.4(c), I.12.6 (the map and obligation
+(4)), I.13.4(b), I.11.6, I.13.7, and III.1's P5, P11, P20, P22. Nothing else normative changed.
+Question: (1) The macro cannot see a helper `fn`'s body, so it cannot refuse recursion through one,
+which the transpiler refuses when it inlines: how is this break of II.1.3 resolved? (2) D-17 A1 retired
+the unit domain `()` believing no corpus port used it; 32 combinational modules (100 ports) do, through
+the default of `In<T, D = ()>`: how are they written once `()` is gone?
+Docs say: II.1.3 ("compiles iff it transpiles"); II.1.2 R6 ("unmeasured"); I.12.1 / I.12.6 (4) (D-17 A1,
+"measured 0"); I.12.4(c) (a combinational module lies in the domain of its ports);
+`review/MEASUREMENTS.md` §P.8 (the packet), §P.2 (the 32 modules).
+Code does (6c17e6e): the macro runs the shared `check_front_end_rules` on the module's `ItemFn`; the
+transpiler's inliner refuses a recursive helper ("cannot inline recursive function"); `In<T, D = ()>`,
+`Out<T, D = ()>` with no bound, the 32 modules written `In<T, ()>` / `In<T>`.
+Anchor: none for (1) — decided; the witness is checked against `u8::count_ones`. For (2) the four BaseJump
+combinational anchors (`bsg_adder_one_hot`, `bsg_encode_one_hot`, `bsg_gray_to_binary`,
+`bsg_mux_one_hot`) and the five `examples/combinational/sv` goldens, re-run on the generic spelling.
+Prior work: (1) not covered by the notes (no surveyed language's notes state how an embedded front-end
+treats host-level recursion it cannot see). (2) RHDL's and Arch's domain-tagged signals (I.12.1); a
+function generic over a phantom domain parameter is that type's ordinary use.
+Options: (1) (a) record R6 as the one named exception to II.1.3 — a shape only the inliner can see; (b)
+an attribute on every helper plus a marker trait the body's calls are checked against (mutual recursion
+still invisible; every corpus helper annotated); (c) give the macro the file (D-21's A4). (2) (A1) each
+module generic over its domain, `D: ClockDomain`; (A2) each in one concrete domain; (B) amend D-17 A1 to
+keep `()` as "domain-polymorphic" on combinational modules.
+Recommendation: (a), (A1) (§P.8).
+Decision: **(a) and (A1)** — the user, as recommended (relayed by the coordinator, 2026-11-07).
+Changes (branch `claude/phase-c-domains-f9b023`, `review/MEASUREMENTS.md` §Q): (1) the transpiler's
+refusal names its clause (`copper_analysis::front_end::RECURSIVE_HELPER_MESSAGE`); the witness
+`tests/recursive_helper_r6.rs` (simulated, refused with R6's message); ui/pass `recursive_helper_r6`
+with `front_end_parity_ui.rs`'s `NAMED_PARITY_EXCEPTION` (refused with exactly that message);
+`front_end_parity.rs::the_one_named_parity_exception_is_r6` (the tree's helper call graph: the witness
+is the only module that reaches a recursive helper). (2) `In`, `Out`, `RegOut` bound `D: ClockDomain`,
+no default; the shared `front_end::check_port_domains` refuses a port, clock or memory naming no domain
+or `()` in both front-ends with one message (ui/fail `unit_domain_port`, `missing_domain_port`;
+copper-core ui `unit_domain_refused`, rustc's E0277 in a testbench); the 32 modules take a leading
+`D: ClockDomain` and their testbenches name `MainClk` (`_` in a const-generic turbofish); the sweep
+names `SweepDomain` for a module generic over its domain; the transpiler's structural call-site CDC
+check binds a child's domain generic per instance (it falsely refused a generic child as a crossing —
+found, fixed, pinned by `structural_hierarchy.rs::a_domain_generic_child_takes_the_domain_of_its_nets`).
+Measured basis: (1) predicted and measured — the macro admits, the transpiler refuses with R6's
+message, the simulator agrees with `count_ones` on all 256 inputs, corpus 0 other modules reach a
+recursive helper. (2) predicted 32 modules / 100 ports, measured 32; the emitted SV **byte-identical**
+for every module the CLI lists (270 transpiled, each alone and with `--hierarchy`; the three refused
+modules refused with the same messages), so no SV parameter for `D`; the four BaseJump anchors and the
+five combinational goldens pass; bare regression on `5b22062`: REGRESSION OK — G-G 1622 PASS / 12 OUTSIDE / 0 DISAGREE, reference 1634 / 0, G-F 213, G-I 162, G-J 0, examples 32/32; `sv-baseline diff` vs `6c17e6e`: only the new witness (refused).
+Coroutine terms: a combinational module is a function, evaluated wherever it is wired; its domain is
+the domain of the wires it reads and drives, so it is a parameter of the module, bound at each
+instance. A helper `fn` is a function the coroutine calls; the macro sees the coroutine, the inliner
+sees the call graph, and only the inliner can refuse a cycle in it.

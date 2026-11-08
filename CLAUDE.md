@@ -337,6 +337,16 @@ per-domain check. `copper-core/src/cdc.rs` has no runtime code — its
 fails if a guarantee regresses. A module may not *construct* a clock, only
 receive/clone one.
 
+**`()` is not a clock domain** (SPEC I.12.6 (4), D-22, Phase C step 11): `In`, `Out` and
+`RegOut` bound `D: ClockDomain` with no default, so `In<T>` / `wire::<T, ()>` in a testbench is
+a rustc error, and on a module both front-ends refuse it with one message
+(`copper_analysis::front_end::check_port_domains`). A combinational module that serves any
+domain is **generic over it** — `fn m<D: ClockDomain>(a: In<T, D>, o: Out<T, D>)` — and each
+instance lies in the domain of its ports (I.12.4(c)): a testbench names `D` through its wires'
+types (a const-generic call writes `_` for it, `mux::<_, 8, 4, 2>`), a structural parent's call
+site binds it per instance, and the sweep names a concrete `SweepDomain`. The domain is phantom:
+the emitted SV is the concrete module's, with no parameter for `D`.
+
 ## Conventions
 
 - **Verify empirically, and check "which behavior is correct" against an
@@ -406,7 +416,12 @@ receive/clone one.
   to measure what is left unstated), R8 (no
   plain `Out` on a clocked module, one shared message) and the memory rules. A module
   that compiles therefore
-  transpiles, or is refused by both. The standing audit is
+  transpiles, or is refused by both — with **one named exception, R6** (D-22): recursion
+  through a helper `fn` compiles (the macro sees the module's `ItemFn`, never the helper's
+  body) and the transpiler refuses it when it inlines (`RECURSIVE_HELPER_MESSAGE`), so no wrong
+  text is emitted. It cannot widen silently: `front_end_parity.rs::the_one_named_parity_exception_is_r6`
+  reads the tree's helper call graph and requires `tests/recursive_helper_r6.rs` to be the only
+  module reaching a recursive helper, and `front_end_parity_ui.rs` pins its ui/pass row. The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one
