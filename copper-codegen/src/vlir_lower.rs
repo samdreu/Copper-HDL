@@ -248,7 +248,15 @@ fn lower_comb(c: &SHIRCombBody, leg: &Legalizer) -> LowerResult<VLIRCombBody> {
     // 2026-11-02 that write became a module-level `assign` and the module was
     // refused as a latch, although the macro's definite-assignment check admitted
     // it (§10.12) — the routing §10.10 gave single-phase sequential bodies.
-    let in_comb: HashSet<String> = nested_port_drives(&c.stmts).into_iter().map(|p| leg.get(&p)).collect();
+    // The same holds for a port written twice or more at the top level (I.11.2(c): the last
+    // write wins, in program order): two module-level `assign`s of one port are a Verilator
+    // MULTIDRIVEN error, so every write of such a port is an `always_comb` statement (line
+    // `II.3 found comb-double-write`, MEASUREMENTS §U.5).
+    let in_comb: HashSet<String> = nested_port_drives(&c.stmts)
+        .into_iter()
+        .chain(top_level_multiply_driven_ports(&c.stmts))
+        .map(|p| leg.get(&p))
+        .collect();
     let (mut comb_stmts, output_assigns) = lower_flat_stmts(&c.stmts, leg, &in_comb, &MemWidths::default(), &MemBinding::new())?;
     // A combinational module has no registers, so nothing is exempt.
     hoist_branch_local_defaults(&mut comb_stmts, &HashSet::new());
@@ -1156,6 +1164,20 @@ fn shir_port_drives(stmts: &[SHIRStmt], out: &mut Vec<(String, HashSet<String>)>
 
 /// The ports driven inside a top-level `if`/`match`/`for` of `stmts` (any depth
 /// below it) — the drives that lower into `always_comb` whatever the port is.
+/// Ports a top-level statement list drives two or more times directly (not inside a branch).
+fn top_level_multiply_driven_ports(stmts: &[SHIRStmt]) -> HashSet<String> {
+    let mut seen = HashSet::new();
+    let mut twice = HashSet::new();
+    for s in stmts {
+        if let SHIRStmt::PortDrive { port_name, .. } = s {
+            if !seen.insert(port_name.clone()) {
+                twice.insert(port_name.clone());
+            }
+        }
+    }
+    twice
+}
+
 fn nested_port_drives(stmts: &[SHIRStmt]) -> HashSet<String> {
     let mut d = Vec::new();
     for s in stmts {
