@@ -2183,6 +2183,7 @@ fn lower_seq_body(
     ctx.struct_locals = pre_struct_locals;
     ctx.array_regs = array_regs;
     ctx.memories = mem_infos;
+    ctx.scalar_regs = registers.iter().map(|r: &CHIRRegDecl| r.name.clone()).collect();
 
     // Preloads, now that expressions can be lowered. Each word is retyped and
     // width-cast to the element type, the same treatment a `let` binding's
@@ -2751,6 +2752,9 @@ pub(crate) struct LowerCtx<'a> {
     file_consts: Vec<copper_core::frontend_ir::ItemConst>,
     /// File consts emitted as a sized `localparam` (`u8`/`u16`/`i8`/`i16`): name → width.
     narrow_consts: std::collections::HashMap<String, usize>,
+    /// The pre-loop (scalar) registers of a sequential body, whose bit writes are
+    /// whole-value updates (MEASUREMENTS §U.3).
+    scalar_regs: std::collections::HashSet<String>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -2780,6 +2784,7 @@ impl<'a> LowerCtx<'a> {
             pattern_consts: Vec::new(),
             file_consts: Vec::new(),
             narrow_consts: std::collections::HashMap::new(),
+            scalar_regs: std::collections::HashSet::new(),
         }
     }
 }
@@ -3890,6 +3895,33 @@ fn lower_expr_stmt(
                 }
                 let index = peel_widening_resize(lower_expr(peel_index_views(&idx.index), ctx)?, ctx);
                 let value = lower_expr(&assign.right, ctx)?;
+                // A bit write on a REGISTER — a `Bits<N>` or a `[Logic; N]` (a packed vector of
+                // one-bit elements) declared before the loop — is a whole-value update
+                // `v = (v & ~(1 << i)) | (W'(e) << i)`, so it reaches the edge through the
+                // register path like any other assignment (line `II.3 found preload-ok`,
+                // MEASUREMENTS §U.3). A partial drive of a register has no emitted form: the
+                // register is updated in `always_ff` from a forwarded value, and an
+                // `IndexAssign` there was refused as a latch. A wire keeps its `IndexAssign`.
+                if ctx.scalar_regs.contains(&base) {
+                    if let Some(Width::Concrete(w)) = ctx.symbols.get(&base).map(type_width) {
+                        let ty = CHIRType::UInt { width: Width::Concrete(w) };
+                        let one = CHIRExpr::Lit(CHIRLit { ty, value: 1 });
+                        let bit = |e: CHIRExpr| CHIRExpr::BinOp {
+                            left: Box::new(e),
+                            op: CHIRBinOp::Shl,
+                            right: Box::new(index.clone()),
+                        };
+                        let keep = CHIRExpr::BinOp {
+                            left: Box::new(CHIRExpr::Var(base.clone())),
+                            op: CHIRBinOp::BitAnd,
+                            right: Box::new(CHIRExpr::UnOp { op: CHIRUnOp::BitNot, expr: Box::new(bit(one)) }),
+                        };
+                        let set = bit(CHIRExpr::Resize { expr: Box::new(value), width: Width::Concrete(w) });
+                        let value = CHIRExpr::BinOp { left: Box::new(keep), op: CHIRBinOp::BitOr, right: Box::new(set) };
+                        out.push(CHIRStmt::Assign { target: base, value, span });
+                        return Ok(());
+                    }
+                }
                 out.push(CHIRStmt::IndexAssign { base, index, value, span });
                 return Ok(());
             }
@@ -4203,6 +4235,20 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
                     // For or-patterns in case expression, emit one arm per pattern
                     for pattern in patterns {
                         arms.push(CHIRCaseArm { pattern, guard: guard.clone(), value: value.clone() });
+                    }
+                }
+            }
+            // No wildcard arm: the macro admitted the `match`, so rustc proved it
+            // exhaustive, and a case-compatible match has no guards — every value no
+            // earlier arm takes reaches the last one. Its value is the `default` (its
+            // labels are then redundant and dropped; the codes no arm names are unreachable
+            // values of the scrutinee's type). Line `II.3 found preload-ok`, MEASUREMENTS §U.3.
+            if default.is_none() {
+                if let Some(last) = match_expr.arms.last() {
+                    let n = parse_or_patterns(&last.pattern_text, match_expr.span, &ctx.enums)?.len();
+                    if n > 0 && n <= arms.len() {
+                        let tail = arms.split_off(arms.len() - n);
+                        default = Some(Box::new(tail[0].value.clone()));
                     }
                 }
             }

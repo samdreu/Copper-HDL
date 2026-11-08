@@ -55,13 +55,10 @@ fn transpile(path: &Path) -> Result<String, String> {
 }
 
 /// ui/pass cases the transpiler refuses, each with its reviewed reason. A case
-/// here is a recorded parity break, not a silent exclusion.
-const PASS_NOT_TRANSPILED: &[(&str, &str)] = &[(
-    "register_init_constants_ok.rs",
-    "a match-as-expression with no wildcard arm and a `[Logic; 4]` register's element writes \
-     refused as a latch — two lowering limits unrelated to the rules this case pins (R11's \
-     constants); the transpilable twin is register_init_rust_constants_ok.rs (MEASUREMENTS §N)",
-)];
+/// here is a recorded parity break, not a silent exclusion. Empty since 2026-11-08
+/// (MEASUREMENTS §U.3): `register_init_constants_ok.rs` — a match-as-expression with no
+/// wildcard arm and a `[Logic; 4]` register's element writes — transpiles.
+const PASS_NOT_TRANSPILED: &[(&str, &str)] = &[];
 
 /// SPEC II.1.3's two named exceptions: ui/pass cases the macro admits and the
 /// transpiler refuses, each with its message. R6 (D-22): the macro cannot see a
