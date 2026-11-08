@@ -41,8 +41,10 @@
 #        reference rather than only cross-checked against the transpiler (printed,
 #        not enforced)
 #   G-F  the REFERENCE-INTERPRETER leg (copper-ref, the spec made executable —
-#        design_docs/SPEC_OVERVIEW.md §7) ran on every module it covers, and the
-#        modules it skips are skipped with a sentence (build.rs REF_SKIP)
+#        design_docs/SPEC_OVERVIEW.md §7) ran on every module it covers — as many
+#        `ok` cases as build.rs generated to run, the clocked, memory (I.10) and
+#        combinational (I.11) legs each non-empty, and the design leg (I.13) — and
+#        the modules it skips are skipped with a sentence (build.rs REF_SKIP)
 #   G-G  the AGREEMENT RELATION's verdicts (SPEC §III.2): every swept case wrote its
 #        per-sequence verdicts to the ledger, the counts of PASS, OUTSIDE (an X vs the
 #        SV), TRUNCATED (a run-time failure), EXCUSED (a signature class — none since
@@ -233,8 +235,10 @@ if [ "$RUN_TEST" -eq 1 ]; then
   # G-J's coverage line (tests/const_evaluators_agree.rs writes it on a pass).
   CONST_REPORT="$TMP/const_eval.txt"
   rm -f "$CONST_REPORT"
+  REFLEG_REPORT="$TMP/ref_leg.txt"
+  rm -f "$REFLEG_REPORT"
   COPPER_VERDICT_LEDGER="$LEDGER" COPPER_PROJECTION_REPORT="$PROJ_REPORT" COPPER_CONST_EVAL_REPORT="$CONST_REPORT" \
-    cargo test --workspace > "$TMP/test.log" 2>&1
+    COPPER_REF_LEG_REPORT="$REFLEG_REPORT" cargo test --workspace > "$TMP/test.log" 2>&1
   TEST_RC=$?
 
   grep -E "^test result:" "$TMP/test.log" | awk '
@@ -315,17 +319,30 @@ if [ "$RUN_TEST" -eq 1 ]; then
   # §I.0's one-resumption protocol with no rustc lowering and no executor, so it is
   # the one leg that can say the simulator is wrong (SPEC_OVERVIEW.md §7: sim ≠ ref
   # with SV = ref is a simulator/macro bug). build.rs generates one
-  # `<name>_reference_leg` case per module — `#[ignore]`d with a sentence where the
-  # interpreter defers the class (plain `Out` awaiting Phase C, memories, a second
-  # clock, combinational, structural) or a REF_SKIP row names the module. The leg
-  # needs no Verilator. Zero cases run means the leg silently stopped covering the
-  # corpus, which is the bug class every other guard exists for.
+  # `<name>_reference_leg` case per module — `#[ignore]`d with a sentence where a
+  # REF_SKIP row names the module or the interpreter defers the class (a `Memory`
+  # parameter, a second clock in one kernel, a structural parent — none swept today).
+  # The leg needs no Verilator. Since Phase C step 9 it has four legs, and each must
+  # have RUN: the clocked kernel (I.0), the memory model (I.10), the combinational
+  # evaluation (I.11) — counted by build.rs and written by
+  # corpus_generated.rs::the_reference_leg_covers_every_leg — and the design leg
+  # (I.13), tests/two_domain_hierarchy_cdc.rs::reference_interpreter_design_matches_sim.
+  # The `ok` count must EQUAL the generated run count: a case that should run and did
+  # not is the bug class every other guard exists for.
   REF_RAN=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ok" "$TMP/test.log")
   REF_SKIPPED=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ignored" "$TMP/test.log")
   [ "$REF_RAN" -gt 0 ] || fail "G-F: the reference-interpreter leg ran on zero modules"
+  grep -q "^test the_reference_leg_covers_every_leg \.\.\. ok" "$TMP/test.log" \
+    || fail "G-F: the reference-leg coverage test did not run or did not pass (a leg is empty)"
+  [ -s "$REFLEG_REPORT" ] || fail "G-F: the reference-leg coverage test wrote no report"
+  REF_LINE=$(grep -h "^reference leg: run=" "$REFLEG_REPORT" | tail -1 | sed 's/^reference leg: //')
+  REF_WANT=$(echo "$REF_LINE" | sed -E 's/^run=([0-9]+) .*/\1/')
+  [ "$REF_RAN" -eq "${REF_WANT:-0}" ] 2>/dev/null \
+    || fail "G-F: $REF_RAN reference-leg case(s) passed, build.rs generated ${REF_WANT:-?} to run"
+  grep -q "^test reference_interpreter_design_matches_sim \.\.\. ok" "$TMP/test.log" \
+    || fail "G-F: the design leg (tests/two_domain_hierarchy_cdc.rs::reference_interpreter_design_matches_sim) did not run or did not pass"
   echo "  G-F ok: reference-interpreter leg ran on $REF_RAN module(s) ($REF_SKIPPED skipped with a reason)"
-  REF_LINE=$(grep -h "reference leg:" "$TMP"/*.log 2>/dev/null | grep "REF_SKIP" | tail -1 | sed 's/.*reference leg: //')
-  [ -n "$REF_LINE" ] && echo "       coverage: $REF_LINE"
+  echo "       coverage: $REF_LINE; design leg: two_domain_top (I.13) ran"
 
   # G-G — the AGREEMENT RELATION (SPEC §III.2). A differential case no longer has
   # two outcomes: a sequence can PASS, leave the relation OUTSIDE (an X observation
@@ -376,7 +393,10 @@ if [ "$QUICK" -eq 1 ]; then
   # Not `-q`: quiet mode drops the per-test lines the count below reads.
   LEDGER="$TMP/ledger"
   rm -rf "$LEDGER"; mkdir -p "$LEDGER"
-  COPPER_VERDICT_LEDGER="$LEDGER" cargo test --test corpus_generated -- reference_leg > "$TMP/refleg.log" 2>&1
+  REFLEG_REPORT="$TMP/ref_leg.txt"
+  rm -f "$REFLEG_REPORT"
+  COPPER_VERDICT_LEDGER="$LEDGER" COPPER_REF_LEG_REPORT="$REFLEG_REPORT" \
+    cargo test --test corpus_generated -- reference_leg > "$TMP/refleg.log" 2>&1
   REF_RC=$?
   REF_RAN=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ok" "$TMP/refleg.log")
   REF_SKIPPED=$(grep -cE "^test (fx|ex)_[a-z0-9_]+::[a-z0-9_]+_reference_leg \.\.\. ignored" "$TMP/refleg.log")
@@ -385,6 +405,9 @@ if [ "$QUICK" -eq 1 ]; then
     fail "reference-interpreter leg"
   fi
   [ "$REF_RAN" -gt 0 ] || fail "G-F: the reference-interpreter leg ran on zero modules"
+  REF_WANT=$(grep -h "^reference leg: run=" "$REFLEG_REPORT" 2>/dev/null | sed -E 's/^reference leg: run=([0-9]+) .*/\1/')
+  [ "$REF_RAN" -eq "${REF_WANT:-0}" ] 2>/dev/null \
+    || fail "G-F: $REF_RAN reference-leg case(s) passed, build.rs generated ${REF_WANT:-?} to run"
   echo "  G-F ok: reference-interpreter leg ran on $REF_RAN module(s) ($REF_SKIPPED skipped with a reason)"
   gg_relation "$LEDGER" 0 "$REF_RAN" 0
 fi

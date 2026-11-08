@@ -3761,17 +3761,22 @@ D-8's rewrite), the 7 `SKIP` modules not asked. Measured by the full regression 
 cases plus 7 ignored with a reason, G-E 5 anchored and 161 transpiler-only, G-F 46 run and 120
 skipped with a reason (the 113 above plus the 7 `SKIP` modules) — the ledger's counts confirmed.
 
-**III.2.10 The excusing rows, by precondition** (2026-11-05). `SKIP` (`build.rs:52-139`, 7):
-`probe`, `out_from_reg_before_commit`, `vr_sink_mealy`, `vr_skid` — the two-job body's
-demonstrations, outside the one-job language (D-8; deleted with their fixtures, II.3.2); `mod8`
-— (b), an X observation (`% 0`); `rv32i_cpu_pipelined` — (g), a `Memory` parameter the harness
-cannot own (its own lane, `tests/rv32i_pipelined_verilator.rs`, sim ≡ SV under a hand-written
-owner); `two_domain_top` — (f)/(g), a structural two-clock parent. `RESET` (`build.rs:206-230`,
-3): `shift_register`, `simple_counter` — (b)/(e), a `Bits::x()` register; `rv32i_cpu_transpilable`
-— (b), a memory the reset defines. `REF_SKIP` (`build.rs:239-270`, 5 named): `rom_paced`,
-`rom_gated`, `ram_arms`, `mp_regout` — the interpreter's memory model (D-16; their sentences
-still name I.10 as unwritten, stale since D-16); `regout_trailing_single_tick` — (h), the residue;
-by class, 25 combinational (no combinational leg) and 83 plain `Out` (D-8's rewrite).
+**III.2.10 The excusing rows, by precondition** (2026-11-05; lists and counts re-derived from
+the code at Phase C step 9, 2026-11-07). `SKIP` (`build.rs:52-99`, 3): `mod8` — (b), an X
+observation (`% 0`); `rv32i_cpu_pipelined` — (g), a `Memory` parameter the harness cannot own
+(its own lane, `tests/rv32i_pipelined_verilator.rs`, sim ≡ SV under a hand-written owner);
+`two_domain_top` — (f)/(g), a structural two-clock parent (the reference leg runs it as the
+design it names outside the sweep, `tests/two_domain_hierarchy_cdc.rs::reference_interpreter_design_matches_sim`,
+against the hand-wired simulation at 2:1, 3:1 and 1:1). `RESET` (`build.rs:169-191`, 3):
+`shift_register`, `simple_counter` — (b)/(e), a `Bits::x()` register; `rv32i_cpu_transpilable`
+— (b), a memory the reset defines. `REF_SKIP` (`build.rs:202-203`): **0** named rows, and
+`REF_SKIP_PATTERN` is empty. The signature classes of `ref_skip_reason` (`build.rs:725`) — a
+`Memory` parameter (I.10.5: the owner's storage), a second clock in one kernel (I.12), a
+`structural` parent (I.13.4(a): a design, not a module) — excuse **0** swept modules: each is
+reached only by a module `SKIP` already names. The plain-`Out` class and the combinational
+class are deleted (R8 left the first empty; the interpreter evaluates the second, I.11). The
+reference leg runs **211** of the sweep's 214 modules: 159 clocked (18 of them binding a
+`Memory`, I.10) and 52 combinational (I.11).
 
 **III.2.11 (j) Anchors.** An independent reference — one nobody derived from the simulator, the
 transpiler or the interpreter — is the only evidence of correctness (`SPEC_OVERVIEW.md` §7,

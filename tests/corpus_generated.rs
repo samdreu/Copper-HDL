@@ -225,6 +225,28 @@ fn the_stimulus_policy_is_what_the_design_doc_says() {
 /// Keys are `<wrapper>::<module>`, not bare module names: two different modules
 /// legitimately share a name (`fast_counter` exists in both `two_domain_counter.rs`
 /// and `two_domain_hierarchy.rs`), and a set of bare names would silently merge them.
+/// G-F's coverage line (Phase C step 9): the reference leg covers every class it
+/// has a meaning for — clocked kernels (I.0), the memory model (I.10), the
+/// combinational evaluation (I.11) — and the driver checks the `_reference_leg ... ok`
+/// count against the run count written here, so a leg that silently stops running
+/// fails the regression. The design leg (I.13) runs in
+/// `tests/two_domain_hierarchy_cdc.rs`, which G-F checks by name.
+#[test]
+fn the_reference_leg_covers_every_leg() {
+    let (all, comb, mem) = REF_LEG_EXPECTED;
+    assert!(all > comb, "no clocked module runs through the reference leg");
+    assert!(comb > 0, "no combinational module runs through the reference leg (SPEC I.11)");
+    assert!(mem > 0, "no memory-binding module runs through the reference leg (SPEC I.10)");
+    let line = format!(
+        "reference leg: run={all} clocked={} memory={mem} combinational={comb} skipped={REF_LEG_SKIPPED}",
+        all - comb
+    );
+    println!("{line}");
+    if let Ok(p) = std::env::var("COPPER_REF_LEG_REPORT") {
+        std::fs::write(&p, format!("{line}\n")).expect("write the reference-leg report");
+    }
+}
+
 #[test]
 fn every_corpus_module_has_a_generated_case() {
     use std::collections::BTreeSet;

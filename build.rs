@@ -264,6 +264,10 @@ fn main() {
     // The reference-interpreter leg's coverage: modules it runs on, and the ones
     // it skips by class (a REF_SKIP row or a signature class).
     let mut ref_leg = 0usize;
+    // Of those, by leg (G-F requires each to be non-empty): a combinational module is
+    // evaluated (I.11), a clocked one resumed (I.0), a memory-binding one also
+    // exercises the memory model (I.10).
+    let (mut ref_comb, mut ref_mem) = (0usize, 0usize);
     let mut ref_skip: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
 
     for path in &files {
@@ -286,7 +290,15 @@ fn main() {
             let q = format!("{key}::{}", m.name);
             if m.skip_reason(&q).is_none() {
                 match m.ref_skip_reason() {
-                    None => ref_leg += 1,
+                    None => {
+                        ref_leg += 1;
+                        if m.mode == "combinational" {
+                            ref_comb += 1;
+                        }
+                        if m.binds_memory {
+                            ref_mem += 1;
+                        }
+                    }
                     Some(why) => {
                         let class = if why.starts_with("MEASURED DISAGREEMENT") {
                             "measured disagreement (REF_SKIP row)"
@@ -439,6 +451,20 @@ fn main() {
         covered.len() - anchored
     );
 
+    // The reference leg's expected coverage, by leg (G-F, Phase C step 9): the
+    // generated `_reference_leg` cases that must RUN, and how many of them are
+    // combinational (I.11) or bind a Memory (I.10). `tests/corpus_generated.rs`
+    // writes them to `COPPER_REF_LEG_REPORT`; the driver checks the `ok` count
+    // equals the run count and that no leg is empty.
+    let _ = writeln!(
+        code,
+        "/// Reference-leg cases build.rs generated to run: (all, combinational, memory-binding).\n\
+         pub const REF_LEG_EXPECTED: (usize, usize, usize) = ({ref_leg}, {ref_comb}, {ref_mem});\n\
+         /// Reference-leg cases ignored by a REF_SKIP row or a signature class.\n\
+         pub const REF_LEG_SKIPPED: usize = {};",
+        ref_skip.values().sum::<usize>()
+    );
+
     // The policy's constants, for the generated cases and for the pin — one
     // definition, so the generator and the plan cannot disagree about them.
     let _ = writeln!(
@@ -453,7 +479,9 @@ fn main() {
     // Surfaced in the build log too, so the counts are visible without running.
     println!("cargo:warning=corpus sweep: {emitted} generated, {ignored} ignored-with-reason");
     println!(
-        "cargo:warning=reference leg: {ref_leg} module(s) run through copper-ref, {} REF_SKIP'd ({})",
+        "cargo:warning=reference leg: {ref_leg} module(s) run through copper-ref ({} clocked, {ref_mem} of \
+         them binding a Memory; {ref_comb} combinational), {} REF_SKIP'd ({})",
+        ref_leg - ref_comb,
         ref_skip.values().sum::<usize>(),
         ref_skip.iter().map(|(k, v)| format!("{v} {k}")).collect::<Vec<_>>().join(", ")
     );
@@ -550,6 +578,8 @@ struct Module {
     /// at the widths `PARAMS` records for it.
     generics: Vec<String>,
     ports: Vec<Port>,
+    /// The body binds a `Memory` (SPEC I.10.1(a)) — counted for G-F's memory leg.
+    binds_memory: bool,
 }
 
 struct Port {
@@ -606,7 +636,8 @@ impl Module {
                 _ => None,
             })
             .collect();
-        Some(Module { name: f.sig.ident.to_string(), mode, generics, ports })
+        let binds_memory = f.block.to_token_stream().to_string().contains("Memory ::");
+        Some(Module { name: f.sig.ident.to_string(), mode, generics, ports, binds_memory })
     }
 
     fn clock(&self) -> Option<&Port> {
