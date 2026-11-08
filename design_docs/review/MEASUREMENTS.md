@@ -2990,3 +2990,193 @@ single-tick), 0 uncovered; **G-J** as N.3, 0 DISAGREE; G-E 5 anchored, 209 trans
 unchanged (`xp_div`, `xw_port`). New `SKIP` / `REF_SKIP` / `PARAMS` / `RESET` rows: none. Not run
 remotely (nothing pushed), so 559 s is a laptop number. sv-baseline: N.1 (267 modules, no changes;
 the fixtures are new modules, not changes).
+
+## O. Phase C step 9 — the reference interpreter's remaining legs (2026-11-07)
+
+Session phase-c-interp, branch `claude/phase-c-interp-6c865c` (cut from `paper` at `65c0f17`; nothing
+pushed). D-20 item (9): the interpreter gets its memory, combinational and design legs, so the
+excusing rows of III.2.10 shrink to the rows a sentence explains. One commit per leg: `b5e75e6`
+(memory), `fa72765` (combinational + the body gaps), `560907a` (design), `13e7b1c` (G-F, III.2.10).
+`copper-ref` still depends on `copper-core` and `copper-analysis` only — no transpiler code (D-21 B2).
+Predictions were written before each first run (scratchpad `predictions.md`) and are quoted here.
+
+### O.1 Leg 1 — the memory model (SPEC I.10, D-16)
+
+`copper-ref/src/memory.rs`, derived from I.10's text with each behaviour cited: an array, per read
+port a staged address `s_k` and an `L`-stage pipeline `P_k`, per write port a staged `w_j` and an
+`M`-stage `Q_j` (I.10.1(a)); `read`/`write` stagings are effects of the resumption, last wins
+(I.10.1(b), D-16 (b) B); the edge runs the read step and the write step in the mode's order
+(I.10.1(c), I.10.2: ReadFirst read-then-write, WriteFirst write-then-read; higher write port wins);
+`is_ready()`/`data()` read the output stage the last edge left, `data()` unready and an out-of-range
+address `Runtime` failures (I.10.1(d), D-16 1A, I.14.6(b)); the initial array of `new`/`from_contents`/
+`from_fn` (I.10.3), every pipeline empty. A binding outside `s_pre` is refused (I.10.1(a)); a
+`Memory` **parameter** stays `Deferred` (I.10.5: the owner's storage). The user's decision (b)
+(§G.3) needs no code: the two anchors are already array registers and the 13 unanchored modules
+already carry the +1 cycle in their source spelling, which I.10.1(d) gives.
+
+**Predicted:** the 17 small memory modules agree on every sequence; `rv32i_cpu_transpilable` stops on
+some front-end gap of a 400-line body (low confidence). **Measured:** all **18** agree (the CPU
+included — the CPU prediction was wrong), 0 truncated; 832–1312 cycles each, observation 0 compared
+on every sequence. The 18 `REF_SKIP` memory rows are deleted. Hand-derived traces:
+`copper-ref/tests/interp_memory.rs` (latency 1 and 2, unready `data()`, out-of-range address, last
+staging wins, ReadFirst ≠ WriteFirst at a collision, `M = 2` commits at edge N+M, higher write port
+wins, the two refusals) — 9/9.
+
+**Teeth (mutations of the model, run on the whole leg, then reverted):**
+
+| mutation | modules that disagree |
+|---|---|
+| the write step in I.10.1(c)'s sentence order (commit the oldest stage, then shift and take `w_j`) | 8: `ram_arms`, `wide_index_into_narrow_addr` (1 cycle), `ram_r1w2_wf`, `ram_r2w2`, `ram_r3w1`, `ram_read_first_mem`, `ram_write_first`, `ram_wf_priority` |
+| the mode order swapped | 7: every RAM with a write except `wide_index_*` |
+| latency ignored (observe stage 0) | 2: `ram_r2w2`, `ram_r3w1` (the `L > 1` RAMs) |
+
+`rv32i_cpu_transpilable` is caught by none: under the sweep's random `rstn` its fetch and load never
+collide with a store and its trace does not depend on the write order — a weak witness for memory
+semantics, though it does exercise the model end to end.
+
+**Finding (SPEC wording, O.7 item 1).** Read in order, I.10.1(c)'s write step ("commits the oldest
+stage of every `Q_j` … then shifts `Q_j` and takes `w_j` into stage 0") puts a write staged before
+edge N+1 into `A` at edge N+M+1. The same clause then states "a write staged in that resumption is
+in `A` from edge N+M", and I.10.2's ReadFirst/WriteFirst distinction at `M = 1` needs the write to
+commit at the edge its read captures. The interpreter implements the stated consequence (take `w_j`
+into stage 0 and shift, then commit stage `M-1`); the literal order is the first mutation above and
+disagrees with the simulator on 8 RAMs. Not a design question — the clause's consequence and I.10.2
+settle it; the procedural sentence's order is the text to fix.
+
+### O.2 Leg 2 — the combinational leg (SPEC I.11, D-14)
+
+`Module::evaluate`: one evaluation runs the body once from a fresh environment (every local a wire
+of that evaluation, I.7.2(e)) over the settled reads (I.11.1); writes set `Out` wires, last wins and
+the dead write admitted (I.11.2(b)–(c)); a never-written port is refused at construction and a path
+that leaves a port unwritten at the evaluation (I.11.3, D-14 A3); the fragment has no `loop`/`while`/
+`break`/`continue` (I.2.7) and no `Clock`, `RegOut` or `Memory` parameter (I.11.1, I.10.6). The
+harness evaluates once per vector (the vector is the settle); there is no observation 0 for a module
+without a clock (the sweep records none). The combinational class of `ref_skip_reason` is deleted.
+
+**Predicted:** all 52 agree, except 3–6 that stop on interpreter front-end gaps (BaseJump idioms);
+no disagreement. **Measured, first run:** 199 of 206 ok; **7 stopped, all front-end gaps, 0
+disagreements**: `const { assert!(…) }` refused by the construction scan (`mux`, `priority_encode`
+×2, `rotate_right` ×2) and a bit assigned into a still-unsized `Bits::zero()` whose width rustc
+infers from a later use (`gray_to_binary`, `ripple_carry_adder`). Fixed in the interpreter, no
+meaning changed:
+- `const { assert!(c) }` is elaboration (I.2.4): erased at run time as before, and now evaluated at
+  construction with the interpreter's own constant evaluator at the bound parameters — a failing
+  one is a `Parse` error, as rustc's monomorphization error is (pinned:
+  `interp_comb.rs::a_failing_const_assert_refuses_the_instance`). This also closes the
+  `shift_register` row (×2).
+- an element assignment into an unsized literal sets that bit of the literal, which is sized at
+  first contact (I.14.4); an index past the width it is later given fails when it is sized.
+- `Self { .. }` in an associated fn names the impl's type (closes `struct_latch`,
+  `struct_latch_cond`, `tuple_destructure`; N.5 item 3) — and G-J's seven `SELF_GAP` asymmetry
+  rows with them (O.6).
+
+**Measured, second run:** **211 of 211 eligible modules run, all agree; `REF_SKIP` is empty.** The 52
+combinational modules: 256–260 vectors each (the truth table up to 8 bits). Mutation —
+first-write-wins in place of I.11.2(b)'s last write: all six `cdo_*` cases disagree (128–254 of
+~260 vectors), plus 5 clocked modules through I.6.2. Pins: `copper-ref/tests/interp_comb.rs` 5/5. The
+poison run (`reference_leg_measurements.rs` (iii)) now reaches the memory modules: 157 clean,
+0 flagged (combinational modules not eligible — no suspension).
+
+### O.3 Leg 3 — the design leg (SPEC I.13, D-18)
+
+`copper_ref::Design` (`copper-ref/src/design.rs`): a `structural` module is run as the design it
+names (I.13.4(a)) — its body read as nets (`net`/`wire`/`registered_wire`, the `init` no value of the
+net, I.13.4(c)) and instantiations of `#[hardware]` fns of the same file, each a `Module`; one driver
+per wire, every net driven, payload types equal on both ends (I.13.1); a combinational cycle refused
+naming its instances (I.11.4, D-14 A4). `settle()` evaluates every function once in a topological
+order of the network from the sources (I.13.2(a)); `pre_edge(clk)` / `post_edge(clk)` are I.13.2(b)'s
+cycle for the domain of the parent clock `clk` — settle, resume that domain's coroutines, edge (their
+pending values and memories), settle.
+
+The sweep has one structural module, `two_domain_top`, two-clock and `SKIP`ped; the harness drives
+one module, not a design, so the design leg runs in its anchor's test.
+**Predicted:** `two_domain_top` through `Design` equals the hand-wired simulation (`sim_trace`) at
+2:1, 3:1, 1:1. **Measured:** identical at all three (10, 10, 16 slow cycles) —
+`tests/two_domain_hierarchy_cdc.rs::reference_interpreter_design_matches_sim`. The 2:1 trace is the
+one the independent `two_domain_hierarchy.sv` reference reproduces under Verilator, so the design leg
+agrees with an anchor at 2:1. Pins (hand-derived): `copper-ref/tests/interp_design.rs` 4/4 — the Mealy
+pair of I.11.5 (`obs_N(rdy) = ~full_N | drain_N`, and `obs_0 = f(init, x_1)`), one settle in
+topological order whatever the body's order, the cycle refused, the second driver and the undriven
+net refused.
+
+**Multi-clock fell out at the design level and not below it.** A domain is the clock a child
+receives, and only that domain's coroutines resume at its edge (I.12.1), so a two-clock parent of
+one-clock children runs by cycling each clock. What step 10 still owes (I.12): (i) a kernel with two
+`Clock` parameters stays `Deferred` in `Module::new` (corpus: none swept — the sweep `SKIP`s every
+module with two clocks); (ii) the sweep harness drives one clock, so a two-clock design reaches the
+reference leg only through a hand-written test like this one; a generated two-clock case needs a
+stated clock ratio per module (a `PARAMS`-like table) and a testbench that drives two clocks;
+(iii) a structural parent in the sweep at all needs the harness to hand-wire the design (or the
+sim-as-unit form, I.13.8) — the interpreter side is done.
+
+### O.4 Leg 4 — the classes, G-F, III.2.10
+
+- `ref_skip_reason`'s **plain-`Out` class measured 0** once combinational modules were exempted (R8
+  refuses a plain `Out` on a clocked module in both front-ends) and is deleted; the combinational
+  class is deleted with leg 2. The remaining classes (a `Memory` parameter, a second clock, a
+  structural parent) excuse 0 swept modules — each is reached only by a module `SKIP` names — and are
+  kept as guards with I.10.5 / I.12 / I.13.4(a) sentences.
+- **G-F extended:** build.rs counts the reference-leg cases it generates to run, by leg
+  (`REF_LEG_EXPECTED` = 211 / 52 combinational / 18 memory-binding);
+  `corpus_generated.rs::the_reference_leg_covers_every_leg` fails if any leg is empty and writes
+  `COPPER_REF_LEG_REPORT`; the driver requires the `_reference_leg … ok` count to **equal** the
+  generated run count, and the design leg's test to have run and passed (`--quick` checks the count
+  too). Before, G-F failed only on zero.
+- **III.2.10** re-derived from the code (the only SPEC text edited): `SKIP` 3, `RESET` 3, `REF_SKIP`
+  0 rows, the signature classes excusing 0, the reference leg on 211 of 214.
+
+**Remaining `REF_SKIP` rows: none.** The three reference-leg cases still ignored are the sweep's own
+`SKIP` rows (`mod8`, `rv32i_cpu_pipelined`, `two_domain_top`), each with its sentence;
+`two_domain_top` runs on the design leg outside the sweep.
+
+### O.5 Findings
+
+- **Simulator or transpiler bugs: none.** Every new reference-leg case agrees with the simulator on
+  every sequence, and the simulator agrees with the SV on all of them (G-G differential unchanged);
+  no `sim≠ref` pattern of any kind.
+- **Interpreter gaps** (front end, no meaning): three, fixed (O.2). One interpreter-side refusal kept:
+  `write_port::<j>().is_ready()` (the simulator answers `true`) has no clause in I.10, so the
+  interpreter refuses it; corpus uses: 0.
+- **SPEC wording:** I.10.1(c)'s write-step order (O.1). Settled by the clause's own consequence and
+  I.10.2, measured by the mutation.
+
+### O.6 The bare regression
+
+The first bare run, on `13e7b1c`, **failed in G-J**, as that test is built to: closing the
+`Self { .. }` gap made its seven `SELF_GAP` `ASYMMETRIC` rows stale (the `bubble()` initializers of
+`struct_pipeline_dut` ×3 and the pipelined CPU ×4 now evaluate in both evaluators). Not predicted —
+I had not looked for consumers of the gap outside `REF_SKIP`. The rows are deleted (`3f9fa29`); each
+field now compares both ways, 0 DISAGREE.
+
+**Bare `tools/regression.sh` on `3f9fa29` (the final code commit; laptop): REGRESSION OK (563 s).**
+1393 passed, 0 failed, 16 ignored, 151 test binaries (G-C: 124 test files); examples **32/32**; G-D
+**211** differential cases (3 ignored-with-reason, unchanged); **G-F 211 modules** (136 at §N.6),
+coverage `run=211 clocked=159 memory=18 combinational=52 skipped=0`, design leg ran; **G-G
+differential 1608 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE** (unchanged, as
+predicted — no SV-side change); **G-G reference 1620 PASS / 0 DISAGREE** (1118 at §N.6: +502
+sequences, the 75 newly-run modules); pins 0; **G-I** 160 clocked related, 0 uncovered (unchanged);
+**G-J** 0 asymmetric, 0 DISAGREE; G-E 5 anchored, 209 transpiler-only. Ignored tests 91 → 16 (the 75
+`REF_SKIP`/class-ignored reference-leg cases now run). Not run remotely (nothing pushed).
+
+### O.7 For the coordinator — SPEC items (SPEC files untouched except III.2.10)
+
+1. **I.10.1(c):** the write step's sentence order contradicts its stated consequence ("in `A` from
+   edge N+M") and I.10.2's collision; it should read "takes `w_j` into stage 0, shifting `Q_j`, and
+   commits the stage that reaches `M-1`, in ascending port order" (O.1; the literal order measured
+   against the simulator: 8 RAMs disagree).
+2. **I.10.7 / I.10.8:** obligation (1) — the interpreter's memory model, the `REF_SKIP` memory rows
+   deleted, `Deferred` narrowed to the parameter — is discharged; I.10.8's "the interpreter's memory
+   leg and its guard count (G-F)" closes. I.10.7's "`copper-ref` defers … a binding or port access"
+   is stale.
+3. **I.11.6 / I.13.7:** the interpreter now has a combinational leg (`Module::evaluate`) and a design
+   leg (`Design`); I.13.7's "`copper-ref` runs one coroutine; a design is an environment of III.2"
+   is realized, and I.13.2(a)'s topological single evaluation is what `Design::settle` does.
+4. **III.2.8's table:** the `sim = SV ≠ ref` row still cites `regout_trailing_single_tick`'s
+   `REF_SKIP` row, gone since step 4 (the module agrees on three legs).
+5. **I.14.4:** an element assignment does not size an unsized `Bits` value (it sets a bit of the
+   literal, sized at the first contact that fixes a width) — the interpreter's reading; one sentence
+   would state it.
+6. **II.1 parity:** `write_port::<j>().is_ready()` exists in the simulator's API and in no clause.
+7. **III.1 P5 / I.13.2(c):** order independence now has a third witness — the interpreter's settle
+   evaluates each function once in a topological order and agrees with the levelized simulator on
+   every combinational module and on `two_domain_top`.

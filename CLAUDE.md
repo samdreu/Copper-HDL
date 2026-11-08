@@ -37,7 +37,11 @@ been a recurring bug class here: **G-A** every `examples/**.rs` is registered as
 corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
-hand-written Verilog reference, **G-F** the reference-interpreter leg ran, and
+hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
+`_reference_leg` cases as build.rs generated to run (211 of 214 since Phase C step 9: 159
+clocked, 18 of them binding a `Memory` (I.10), 52 combinational (I.11); `REF_SKIP` empty), each
+leg non-empty, and the design leg (I.13, `copper_ref::Design` on `two_domain_top` vs the hand-wired
+simulation, `tests/two_domain_hierarchy_cdc.rs`) — and
 **G-G** every swept case wrote its per-sequence verdicts under the agreement
 relation of `design_docs/SPEC.md` §III.2 (`tests/common/relation.rs`, a ledger in
 `COPPER_VERDICT_LEDGER`) and each count is printed, and **G-I** the projection test
