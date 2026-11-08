@@ -312,7 +312,8 @@ continuous `assign`, the every-path mux, the Moore default hoist, the mux +
 `<port>_hold` form, the phase-scoped flop) chosen by an opening/closing drive tag,
 and the trailing region was FOLDED into the last phase's edge; all of that is gone
 (`design_docs/review/MEASUREMENTS.md` §H). A combinational module still emits a
-top-level drive as `assign` and a branch-nested one in `always_comb`.
+top-level drive as `assign` and a branch-nested one (or a port written twice at the top level,
+§U.5) in `always_comb`. A `u8`/`u16`/`i8`/`i16` file const is a sized `localparam` (§U.6).
 
 ### Execution / timing model (sim)
 
@@ -451,8 +452,12 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   and `tests/let_instance_d24.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins one
   ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). These are the only *named* exceptions, not the only
   breaks: re-verified 2026-11-08 (MEASUREMENTS §S.4, §T), shapes the macro admits and the transpiler
-  refuses remain, each an OPEN `II.3 found` line of SPEC §III.3.4 (array-for, const-call,
-  body-wire, tickfree-continue, const-pattern — a non-integer `const` in a pattern). The standing audit is
+  refuses remain, each an OPEN `II.3 found` line of SPEC §III.3.4 (const-call-body and
+  runtime-empty-boundary, §V; array-for-generic — an array-register write in a `for` over a
+  const-generic bound — and file-x-const-pattern — an X-valued file `const` in a pattern, refused by
+  the transpiler with D-24's message, §U; 2026-11-08 §V closed body-wire and const-call, §U closed
+  array-for, tickfree-continue, const-pattern, preload-ok, u8-const, comb-double-write and
+  signed/`u128` `saturating_*`). The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one

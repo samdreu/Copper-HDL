@@ -3984,6 +3984,160 @@ After the run, docs only: D-24 (`SPEC_DECISIONS.md`), III.3.6's counts, this sec
 Disk: the run needed the cargo `target/` dirs of six merged, idle worktrees deleted first (the user's
 approval, ~51 GiB; 4.2 GiB was free).
 
+## U. The copper-codegen-owned OPEN lines of SPEC §III.3 (2026-11-08)
+
+Session open-lines-codegen, branch `claude/open-lines-codegen-2c913f` (cut from `paper` at `e4a9aae`;
+nothing pushed). One of three parallel batches over III.3's 21 OPEN lines (§V is another session's).
+Instrument for every prediction: `sv-baseline` (`copper-codegen/src/bin/sv-baseline.rs`), snapshot of
+the untouched tree at `e4a9aae`, **277 modules**. Probes in the session scratchpad, not in the tree.
+Code commits `09eec30`, `5f56131`, `ccd1f63`… (see `git log`), ledger `7dc5c89`.
+
+**Every change: predicted no corpus module's SV changes; measured — none did.** The final
+`sv-baseline diff`: 13 of 290 modules differ, all 13 NEW (the fixture modules below and the
+`tests/ref_probes` module); no corpus module changed, no REFUSED sentinel appeared or disappeared.
+
+### U.1 `II.3 found tickfree-continue`
+
+**Change.** `copper-codegen/src/for_continue.rs`, a FIR→FIR pass run first in `lower_fir_to_chir`: in a
+tick-free `for` body, the first statement holding this loop's `continue` (not a nested loop's) is
+rewritten — `continue;` drops the rest; `if c {T} else {E}` becomes `if c {elim(T ++ rest)} else
+{elim(E ++ rest)}`; each `match` arm and a block likewise. It declines (leaves the `continue`, and
+`chir_lower` refuses with a message about the `for`, not the module loop) a labelled `continue`, one
+inside a `let` or an expression, and a rest that names a binding made in the branch (the copied rest
+would capture it). **Found and fixed on the way:** copper-ref's `CombFragment` refused any `continue`
+in a combinational body ("I.2.7: the tick-free fragment has none"); it now admits an unlabelled one
+inside a `for` (the unrolled `for`'s, I.2.4); the sequential case already ran. Fixture
+`tickfree_continue_dut.rs` (`tfc_sum_set_bits` sequential, `tfc_branches` combinational: `continue`
+after work in an `if`, in an `else`-paired `if`, in a `match` arm). **Found, not fixed:**
+`Bits::from_usize(i)` of a `for` variable emits as the 32-bit `i` (`s = (s + i)`, Verilator
+WIDTHEXPAND/WIDTHTRUNC); the fixture uses `from_lit` instead.
+
+### U.2 `II.3 found const-pattern`
+
+**Change.** A pattern identifier that is neither a `localparam` (`params`) nor an enum variant and
+names a body `const` (any depth; it shadows) or a file `const` is lowered by its value:
+`pattern_const` parses the initializer and folds it with `fold_const_init` (the register-initializer
+fold) at the declared type's width — a `CHIRPattern::Lit` (statement `match`, `size_patterns_to_
+scrutinee`) or a `PatElem::Lit` (expression / tuple `match`). An integer file const stays the
+`localparam` case label (`x12`, byte-identical). Probes `x7`–`x12` of §T re-run: `x8`, `x10`, `x11`
+lower (`1'b1:`, `2'd2:`); `x7`, `x9` (file consts `Logic::X`, `Bits::x()`) are refused with D-24's
+`X_PATTERN_MESSAGE`. Fixture `const_pattern_dut.rs` (`cp_statement`: `Logic`, `Bits<2>` and `u8` file
+consts; `cp_tuple_expr`: a tuple expression `match` with a body const). Its `u8` arm lint-failed until
+U.6 (the `case (n)` label `CP_K` was a 32-bit `localparam int`) — the two lines share a fixture.
+
+**Decision packet — the file-level X const (line `II.3 found file-x-const-pattern`, OPEN).**
+*Question:* the macro admits `const UX: Logic = Logic::X; … match v { UX => … }`; the transpiler now
+refuses it as OUTSIDE (D-24 (2)). Is that the final disposition, and how does the macro refuse it?
+*Docs:* I.14.3(d)–(e) and D-24 (2) make an X pattern OUTSIDE; the X-pattern row of I.14 says a file
+const is outside the `ItemFn` the shared rule holds. *Code:* `check_outside_methods` sees body consts
+only; the macro expands from the `ItemFn`; rustc admits the pattern (`Logic` is a structural-match
+type). *Options:* (a) keep it a REFUSED-one break, a third named exception of II.1.3 (the transpiler
+refuses, the simulator would match X structurally); (b) the macro emits, per single-identifier path
+pattern, a `const _: () = assert!(…)` that X is not the value — needs a const-evaluable `is_x` on
+`Logic`/`Bits` and must not fire on enum variants, which it cannot tell apart syntactically (it would
+need the type, i.e. a trait-based check such as `<T as XProbe>::IS_X`); (c) refuse every pattern naming
+a file const of type `Logic`/`Bits` in both front-ends (over-refuses `x8`/`x10`). *Recommendation:*
+(a) now — corpus 0, no text emitted, the message is D-24's — and (b) if parity must be exact.
+
+### U.3 `II.3 found preload-ok`
+
+**Changes.** (1) An expression `match` that reaches the `case` form with no wildcard arm: rustc proved
+it exhaustive and a case-compatible `match` has no guards, so the last arm's value is the `default`
+and its labels are dropped (`shir_lower` refused a `Case` with no default). (2) A bit write `v[i] = e`
+on a pre-loop register (`ctx.scalar_regs`, the `CHIRRegDecl`s) whose width is concrete becomes the
+assignment `v = (v & ~(W'1 << i)) | (W'(e) << i)`, which the register path forwards like any other;
+a wire keeps its `IndexAssign`. Measured before: `lv1` (`[Logic; 4]`), `lv3`, `lv4` (`Bits<4>`, the same
+class — not only one-bit-element arrays), `lv5` (head writes) all refused as latches; after, each
+lowers. `ui/pass/register_init_constants_ok.rs` transpiles and lints clean (`-Wall`, only
+DECLFILENAME on the scratch file name); `front_end_parity_ui.rs`'s `PASS_NOT_TRANSPILED` is empty.
+Fixture `packed_bit_write_dut.rs` (`pb_shift_and_phase`: a 3-variant enum `match` expression, a
+`[Logic; 4]` shift by element writes; `pb_dynamic_bit`: a `Bits<4>` bit at a run-time index, read back
+in the same resumption). The emitted expressions grow with each forwarded write (four writes in
+`pb_shift_and_phase` nest four deep) — correct, not compact.
+
+### U.4 `II.3 found array-for`
+
+**Change.** In `chir_lower`'s `for` arm, a body that writes an element of an array register
+(`stmts_write_array_reg`) and whose bounds fold (`eval_const_usize`) is unrolled: the body lowered
+once per iteration with the loop variable bound (`ctx.bindings`) to a 32-bit literal, at most
+`MAX_UNROLL` = 1024 iterations. Each iteration's write is its own statement and so its own write port
+— row (c)'s form; a later iteration's read sees an earlier one's word through the staging-net mux.
+Fixture `array_for_write_dut.rs` (`afw_accumulate`: the §J.6 witness; `afw_shift_cond`: a shift
+through the array, a conditional write in a second `for`, reads after both — six write ports). The pin
+`an_array_register_element_write_inside_a_combinational_for_is_unrolled_unless_the_bound_is_generic`
+replaces the refusal pin.
+
+**Decision packet — a const-generic bound (line `II.3 found array-for-generic`, OPEN).** *Question:*
+`for j in 0..N { arr[j] = … }` with `N` a const generic: the transpiler still refuses (the old
+message); the macro admits. *Docs:* I.2.4 — a tick-free constant-bound `for` is unrolled; `N` is a
+constant of the instance, not of the definition the transpiler emits. *Code:* the SV is one
+parametric module; the write-port form needs a port per iteration, i.e. the trip count. *Options:*
+(a) refuse in both front-ends with one message (a shared rule: an array-register element write inside
+a `for` whose bound is not a file constant or literal); (b) a new emitted form for this case — the
+cycle's words computed into an array copy in `always_comb` (`arr_n = arr; for (…) arr_n[j] = …;`) and
+committed whole in `always_ff`, which is a second array-register form beside row (c)'s; (c) emit per
+instance (the transpiler takes the concrete parameters). Corpus 0. *Recommendation:* (a) — corpus 0,
+and (b) adds a form for no live module.
+
+### U.5 `II.3 found comb-double-write` and I.11.2
+
+**Change.** `vlir_lower::lower_comb` routes into `always_comb` every port the top level drives two or
+more times (`top_level_multiply_driven_ports`), joining §10.12's nested-drive set. Probes `cdw1`
+(`assign o = a; assign o = b;` before) and `cdw2` (another port between) now emit one `always_comb`
+with both writes in program order; a once-written port keeps its `assign`. Fixture modules
+`comb_default_override_dut.rs::{cdo_double_write, cdo_double_write_mixed}`.
+
+### U.6 `II.3 found u8-const`
+
+**Prediction (written before the change):** the corpus's emitted `localparam`s are all `u32`/`usize`
+(27 consts in 13 files), so no corpus module changes. **Change:** `ModuleLocalParam`/`VLIRLocalParam`
+gain `sv_type`; a `u8`/`u16`/`i8`/`i16` file const emits `localparam logic [W-1:0] K = W'(e)`
+(`signed` for `i8`/`i16`, the size cast so `CI_START / 30` does not trip WIDTHTRUNC), and the width
+inference reads its width instead of 32 (`ctx.narrow_consts`). **Measured:** as predicted. Fixture
+`const_init_dut.rs::init_file_const_in_body` (`c.wrapping_add(CI_STEP)`, the spelling §N.5 item 1
+measured lint-failing, and `a ^ CI_START`) and `const_pattern_dut.rs::cp_statement`'s `CP_K` label.
+
+### U.7 II.3.3 (e) `saturating_add`, `saturating_sub`
+
+**Change.** A signed operand (a `SignCast`): on the raw bits, `s = a ± b` wrapping; overflow iff the
+operands' sign bits are equal (`+`) / differ (`-`) and `s`'s sign differs from `a`'s; then MIN when
+`a` is negative, MAX otherwise; the result re-wrapped signed. `saturating_mul` signed stays refused.
+The unsigned clamp is lowered up to 128 bits (`saturating_mul` still ≤ 64). Fixture
+`saturating_signed_wide_dut.rs::sat_signed` (`i8`, `i16`), swept. **Found — the `u128` case cannot be
+swept:** (i) copper-ref's `IntTy::U128` range is `(0, i128::MAX)` and its `saturating_add` computes
+`v + o` in `i128`, which panics (overflow) on the first operand ≥ 2^127 — both sweep cases of a `u128`
+module died there (the differential case runs the interpreter too); (ii) the Verilator testbench
+compares a port through a 64-bit integer (`verification.rs` `logic_vec_to_int`, a shift overflow on a
+128-bit port). So the `u128` module is `tests/ref_probes/saturating_u128_probe.rs` (64-bit port halves,
+`u128` arithmetic) and `tests/saturating_u128_equivalence.rs` checks sim vs SV on twelve operand pairs
+that reach both clamps (and asserts the simulator against Rust's own `saturating_*`). Mutation check:
+`max = u128::MAX - 1` makes the test fail. Interpreter `u128`/`i128` and the testbench's 64-bit port
+limit are follow-ups (copper-ref, copper-sim), not fixed here.
+
+### U.8 Ledger counts
+
+Predicted 187 → 189 lines (two residue lines opened), 166 → 175 CLOSED (tickfree-continue,
+const-pattern, preload-ok, array-for, comb-double-write, I.11.2, u8-const, `saturating_add`,
+`saturating_sub`), 21 → 14 OPEN. Measured by `conformance_ledger.rs` on `7dc5c89`: **189 lines — 175
+CLOSED, 14 OPEN; fixtures 5 coreui, 3 example, 11 gone, 156 sweep, 123 test, 89 ui; 174 run checks.**
+I.2.4 stays OPEN, narrowed to array-for-generic; II.1.3 stays OPEN with four residues (const-call,
+body-wire, array-for-generic, file-x-const-pattern).
+
+### U.9 What the first bare regression found — G-J
+
+**Bare `tools/regression.sh` on `7dc5c89`: REGRESSION FAIL** at `cargo test --workspace`
+(`const_evaluators_agree.rs`, 1190 s wall). Not predicted. Two items, both in the test, neither a
+semantic disagreement: (i) **1 DISAGREE** — `packed_bit_write_dut.rs::pb_shift_and_phase`'s
+`let bits = [Logic::Zero; 4]`: the transpiler states 0 (the packed vector), the interpreter has an
+array of four `1'0`, and the test's `ref_int` read no array. No transpiled corpus module had a
+`[Logic; N]` pre-loop register before U.3. `ref_int` now packs an array of `Bits` with element 0 in
+the low bits, the layout `fold_const_init`'s `[elem; n]` states → 0 DISAGREE (273 initializers vs
+the transpiler, one more). (ii) **5 unpinned asymmetries**, the const-pattern fixture's `Logic` /
+`Bits` consts (`CP_ONE`, `CP_ZERO`, `CP_TWO`, `CP_THREE`, `BODY_TWO`): `ConstEnv` is integer-valued, so
+only the interpreter evaluates them. They are the corpus's first non-integer consts, and they are
+pinned as `ASYMMETRIC` with that reason (the transpiler folds a pattern const with `fold_const_init`,
+and the sweep checks that against rustc). Commit `Open lines (codegen): G-J reads a packed-vector …`.
+
 ## V. The front-end batch of SPEC §III.3's OPEN lines (2026-11-08)
 
 Branch `claude/open-lines-frontend-f6a287` (from `paper` at `e4a9aae`), one of three parallel batches
