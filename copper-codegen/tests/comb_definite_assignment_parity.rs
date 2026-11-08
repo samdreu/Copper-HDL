@@ -33,7 +33,7 @@ const ROWS: &[(&str, &str, bool, &str)] = &[
     (
         "default_then_override",
         r#"#[hardware(combinational)]
-        fn m(c: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+        fn m(c: In<Logic, C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
             o.write(Bits::from_lit::<3>());
             if c.read() == Logic::One { o.write(x.read()); }
         }"#,
@@ -43,7 +43,7 @@ const ROWS: &[(&str, &str, bool, &str)] = &[
     (
         "override_then_default",
         r#"#[hardware(combinational)]
-        fn m(c: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+        fn m(c: In<Logic, C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
             if c.read() == Logic::One { o.write(x.read()); }
             o.write(Bits::from_lit::<3>());
         }"#,
@@ -53,7 +53,7 @@ const ROWS: &[(&str, &str, bool, &str)] = &[
     (
         "nested_overrides",
         r#"#[hardware(combinational)]
-        fn m(c: In<Logic, ()>, x: In<Bits<8>, ()>, y: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+        fn m(c: In<Logic, C>, x: In<Bits<8>, C>, y: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
             o.write(Bits::from_lit::<3>());
             if c.read() == Logic::One {
                 let xv = x.read();
@@ -67,7 +67,7 @@ const ROWS: &[(&str, &str, bool, &str)] = &[
     (
         "match_default_arm",
         r#"#[hardware(combinational)]
-        fn m(s: In<Bits<2>, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+        fn m(s: In<Bits<2>, C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
             o.write(Bits::from_lit::<3>());
             match s.read().as_usize() {
                 0 => o.write(x.read()),
@@ -80,7 +80,7 @@ const ROWS: &[(&str, &str, bool, &str)] = &[
     (
         "for_override",
         r#"#[hardware(combinational)]
-        fn m(x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+        fn m(x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
             let xv = x.read();
             o.write(Bits::zero());
             for i in 0..8 { if xv[i] == Logic::One { o.write(Bits::from_usize(i)); } }
@@ -91,7 +91,7 @@ const ROWS: &[(&str, &str, bool, &str)] = &[
     (
         "partial",
         r#"#[hardware(combinational)]
-        fn m(c: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+        fn m(c: In<Logic, C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
             if c.read() == Logic::One { o.write(x.read()); }
         }"#,
         false,
@@ -100,7 +100,7 @@ const ROWS: &[(&str, &str, bool, &str)] = &[
     (
         "partial_match",
         r#"#[hardware(combinational)]
-        fn m(s: In<Bits<2>, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+        fn m(s: In<Bits<2>, C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
             match s.read().as_usize() {
                 0 => o.write(x.read()),
                 _ => {}
@@ -113,7 +113,7 @@ const ROWS: &[(&str, &str, bool, &str)] = &[
         // `o`'s default does not cover `p`.
         "partial_second_port",
         r#"#[hardware(combinational)]
-        fn m(c: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>, p: Out<Bits<8>, ()>) {
+        fn m(c: In<Logic, C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>, p: Out<Bits<8>, C>) {
             o.write(Bits::from_lit::<3>());
             if c.read() == Logic::One { o.write(x.read()); p.write(x.read()); }
         }"#,
@@ -124,7 +124,7 @@ const ROWS: &[(&str, &str, bool, &str)] = &[
         // Two partial writes are not a default: neither runs on every path.
         "partial_two_ifs",
         r#"#[hardware(combinational)]
-        fn m(c: In<Logic, ()>, d: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+        fn m(c: In<Logic, C>, d: In<Logic, C>, x: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
             if c.read() == Logic::One { o.write(Bits::from_lit::<3>()); }
             if d.read() == Logic::One { o.write(x.read()); }
         }"#,

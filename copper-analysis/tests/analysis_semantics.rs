@@ -115,7 +115,7 @@ fn fsm_state_variable_is_a_register() {
 fn combinational_module_has_no_registers() {
     let src = r#"
         #[hardware(combinational)]
-        fn andgate(a: In<Logic, ()>, b: In<Logic, ()>, o: Out<Logic, ()>) {
+        fn andgate(a: In<Logic, C>, b: In<Logic, C>, o: Out<Logic, C>) {
             o.write(a.read() & b.read());
         }
     "#;
@@ -211,7 +211,7 @@ fn uneven_but_nonzero_tick_counts_are_well_formed() {
 fn fully_driven_combinational_output_is_ok() {
     let src = r#"
         #[hardware(combinational)]
-        fn mux(sel: In<Logic, ()>, a: In<Bits<8>, ()>, b: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+        fn mux(sel: In<Logic, C>, a: In<Bits<8>, C>, b: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
             if sel.read() == Logic::One { o.write(a.read()); } else { o.write(b.read()); }
         }
     "#;
@@ -224,7 +224,7 @@ fn fully_driven_combinational_output_is_ok() {
 fn conditionally_driven_combinational_output_infers_latch() {
     let src = r#"
         #[hardware(combinational)]
-        fn leaky(sel: In<Logic, ()>, a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+        fn leaky(sel: In<Logic, C>, a: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
             if sel.read() == Logic::One { o.write(a.read()); }
         }
     "#;

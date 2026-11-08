@@ -20,7 +20,7 @@ fn transpile(src: &str) -> Result<String, String> {
 
 const LOGIC_ARRAY_DUT: &str = r#"
 #[hardware(combinational)]
-fn logic_array<const N: usize>(i: In<Bits<N>, ()>, o: Out<Bits<N>, ()>) {
+fn logic_array<const N: usize>(i: In<Bits<N>, C>, o: Out<Bits<N>, C>) {
     let x = i.read();
     let mut a = [Logic::Zero; N];
     for k in 0..N {
@@ -36,7 +36,7 @@ fn pair(a: Logic, b: Logic) -> (Logic, Logic) {
 }
 
 #[hardware(combinational)]
-fn use_pair(i0: In<Logic, ()>, i1: In<Logic, ()>, o: Out<Logic, ()>) {
+fn use_pair(i0: In<Logic, C>, i1: In<Logic, C>, o: Out<Logic, C>) {
     let (x, _y) = pair(i0.read(), i1.read());
     o.write(x);
 }
@@ -94,7 +94,7 @@ fn tuple_returning_helper_transpiles() {
 fn both_spellings_of_usize_give_the_same_width() {
     let src = r#"
 #[hardware(combinational)]
-fn m(i: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn m(i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let mut suffixed = 0usize;
     let mut annotated: usize = 0;
     if i.read()[0] == Logic::One {
@@ -149,7 +149,7 @@ fn an_integer_local_from_a_const_expression_infers_a_width() {
 const WIDTH: usize = 8;
 
 #[hardware(combinational)]
-fn m(i: In<Bits<WIDTH>, ()>, o: Out<Logic, ()>) {
+fn m(i: In<Bits<WIDTH>, C>, o: Out<Logic, C>) {
     let k = WIDTH - 1;
     o.write(i.read()[k]);
 }
@@ -171,7 +171,7 @@ fn m(i: In<Bits<WIDTH>, ()>, o: Out<Logic, ()>) {
 fn an_integer_local_from_a_generic_const_param_infers_a_width() {
     let src = r#"
 #[hardware(combinational)]
-fn m<const N: usize>(i: In<Bits<N>, ()>, o: Out<Logic, ()>) {
+fn m<const N: usize>(i: In<Bits<N>, C>, o: Out<Logic, C>) {
     let k = N - 1;
     o.write(i.read()[k]);
 }

@@ -12,18 +12,19 @@
 
 use copper_core::port::{wire, In, Out};
 use copper_core::types::Bits;
+use copper_core::ClockDomain;
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
 // ── combinational building blocks ─────────────────────────────────────────────
 
 #[hardware(combinational)]
-fn add_one(a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn add_one<D: ClockDomain>(a: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
     o.write(a.read() + Bits::from_lit::<1>());
 }
 
 #[hardware(combinational)]
-fn invert(a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn invert<D: ClockDomain>(a: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
     o.write(!a.read());
 }
 
@@ -36,10 +37,10 @@ fn invert(a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
 fn acyclic_combinational_chain_converges_in_one_settle() {
     let mut exec = HardwareExecutor::new();
 
-    let (in_drv, in_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (w1_out, w1_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (w2_out, w2_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (out_out, out_obs) = wire::<Bits<8>, ()>(Bits::zero());
+    let (in_drv, in_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (w1_out, w1_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (w2_out, w2_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_out, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
 
     let (in_id, w1_read_id, w2_read_id) = (in_in.wire_id(), w1_in.wire_id(), w2_in.wire_id());
 
@@ -68,12 +69,12 @@ fn acyclic_combinational_chain_converges_in_one_settle() {
 // ── combinational oscillation detection ───────────────────────────────────────
 
 #[hardware(combinational)]
-fn invert_a(a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn invert_a<D: ClockDomain>(a: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
     o.write(!a.read());
 }
 
 #[hardware(combinational)]
-fn buffer_a(a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn buffer_a<D: ClockDomain>(a: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
     o.write(a.read());
 }
 
@@ -88,9 +89,9 @@ fn non_convergent_combinational_loop_is_refused_at_spawn() {
     let mut exec = HardwareExecutor::new();
 
     // wire_x: driven by the buffer, read by the inverter.
-    let (x_out, x_in) = wire::<Bits<8>, ()>(Bits::zero());
+    let (x_out, x_in) = wire::<Bits<8>, MainClk>(Bits::zero());
     // wire_y: driven by the inverter, read by the buffer.
-    let (y_out, y_in) = wire::<Bits<8>, ()>(Bits::zero());
+    let (y_out, y_in) = wire::<Bits<8>, MainClk>(Bits::zero());
 
     let (x_read_id, y_read_id) = (x_in.wire_id(), y_in.wire_id());
 
@@ -103,3 +104,8 @@ fn non_convergent_combinational_loop_is_refused_at_spawn() {
 
     unreachable!("the second spawn closes the cycle and must panic");
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

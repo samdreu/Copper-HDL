@@ -118,7 +118,7 @@ async fn m(clk: Clock<MainClk>, en_i: In<Logic, MainClk>, d_i: In<Bits<4>, MainC
 fn a_branch_local_with_a_literal_initializer_still_moves_whole() {
     let src = r#"
 #[hardware(combinational)]
-fn m(sel: In<Logic, ()>, o: Out<Bits<4>, ()>) {
+fn m(sel: In<Logic, C>, o: Out<Bits<4>, C>) {
     let mut r = Bits::<4>::zero();
     if sel.read() == Logic::One {
         let bump = Bits::<4>::from_lit::<3>();

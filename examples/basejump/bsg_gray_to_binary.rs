@@ -8,6 +8,7 @@
 // swept as gray = count ^ (count >> 1) for count = 0 .. 2^width-1. Golden:
 // binary_o == count.
 
+use copper_core::ClockDomain;
 use copper_core::port::{wire, In, Out};
 use copper_core::{Bits, Logic};
 use copper_macros::hardware;
@@ -17,7 +18,7 @@ const WIDTH: usize = 8;
 
 // binary_o[width-1] = gray_i[width-1]; binary_o[k] = gray_i[k] ^ binary_o[k+1].
 #[hardware(combinational)]
-fn bsg_gray_to_binary(gray_i: In<Bits<WIDTH>, ()>, binary_o: Out<Bits<WIDTH>, ()>) {
+fn bsg_gray_to_binary<D: ClockDomain>(gray_i: In<Bits<WIDTH>, D>, binary_o: Out<Bits<WIDTH>, D>) {
     let g = gray_i.read();
     let mut b = [Logic::Zero; WIDTH];
     b[WIDTH - 1] = g[WIDTH - 1];
@@ -32,10 +33,13 @@ fn bsg_gray_to_binary(gray_i: In<Bits<WIDTH>, ()>, binary_o: Out<Bits<WIDTH>, ()
 }
 
 fn main() {
+    // The testbench picks the domain; the module is generic over it (SPEC I.12.4(c)).
+    struct MainClk;
+    impl ClockDomain for MainClk {}
     let mut exec = HardwareExecutor::new();
 
-    let (g_drv, g_in) = wire::<Bits<WIDTH>, ()>(Bits::zero());
-    let (b_drv, b_obs) = wire::<Bits<WIDTH>, ()>(Bits::zero());
+    let (g_drv, g_in) = wire::<Bits<WIDTH>, MainClk>(Bits::zero());
+    let (b_drv, b_obs) = wire::<Bits<WIDTH>, MainClk>(Bits::zero());
     let dh = b_drv.dirty_handle();
     let reads = vec![g_in.wire_id()];
     exec.spawn_wired(bsg_gray_to_binary(g_in, b_drv), vec![dh], reads);

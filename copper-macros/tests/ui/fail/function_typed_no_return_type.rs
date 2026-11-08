@@ -7,7 +7,7 @@ impl ClockDomain for MainClk {}
 
 // Should fail: sequential must be async
 #[hardware(sequential)]
-fn counter(clk: Clock<MainClk>, input: In<u8>, out: Out<u8>) {
+fn counter(clk: Clock<MainClk>, input: In<u8, MainClk>, out: Out<u8, MainClk>) {
     loop {}
 }
 

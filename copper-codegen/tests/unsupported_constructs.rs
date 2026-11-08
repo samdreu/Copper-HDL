@@ -24,7 +24,7 @@ fn transpile(src: &str) -> Result<String, String> {
 /// the corpus sweep of `tests/fixtures/data_i14_dut.rs::xp_div`.
 const DIV_DUT: &str = r#"
 #[hardware(combinational)]
-fn div8(a: In<Bits<8>, ()>, b: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn div8(a: In<Bits<8>, C>, b: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     o.write(a.read() / b.read());
 }
 "#;
@@ -36,7 +36,7 @@ fn div8(a: In<Bits<8>, ()>, b: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
 /// `tests/fixtures/struct_pipeline_dut.rs::sra_method`.
 const ASR_DUT: &str = r#"
 #[hardware(combinational)]
-fn asr8(a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn asr8(a: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     o.write(a.read().arithmetic_shift_right(2));
 }
 "#;
@@ -55,7 +55,7 @@ fn remainder_operator_is_supported() {
     let sv = transpile(
         r#"
         #[hardware(combinational)]
-        fn rem8(a: In<Bits<8>, ()>, b: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+        fn rem8(a: In<Bits<8>, C>, b: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
             o.write(a.read() % b.read());
         }
         "#,

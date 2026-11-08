@@ -23,6 +23,7 @@ use common::EquivalenceTest;
 use copper_core::port::{wire, In, Out};
 use copper_core::types::Bits;
 use copper_core::Logic;
+use copper_core::ClockDomain;
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -46,9 +47,9 @@ fn file_scope_consts_sim_matches_transpiled_verilog() {
     let mut eq = EquivalenceTest::new("const_encoder", DUT_SRC);
 
     let mut exec = HardwareExecutor::new();
-    let (i_drv, i_in) = wire::<Bits<WIDTH>, ()>(Bits::zero());
-    let (addr_out, addr_obs) = wire::<Bits<ADDR_W>, ()>(Bits::zero());
-    let (v_out, v_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (i_drv, i_in) = wire::<Bits<WIDTH>, MainClk>(Bits::zero());
+    let (addr_out, addr_obs) = wire::<Bits<ADDR_W>, MainClk>(Bits::zero());
+    let (v_out, v_obs) = wire::<Logic, MainClk>(Logic::Zero);
     let dh_a = addr_out.dirty_handle();
     let dh_v = v_out.dirty_handle();
     let reads = vec![i_in.wire_id()];
@@ -80,3 +81,8 @@ fn file_scope_consts_sim_matches_transpiled_verilog() {
 
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

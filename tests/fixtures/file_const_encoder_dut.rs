@@ -13,10 +13,10 @@ const WIDTH: usize = 8;
 const ADDR_W: usize = 3;
 
 #[hardware(combinational)]
-pub fn const_encoder(
-    i: In<Bits<WIDTH>, ()>,
-    addr_o: Out<Bits<ADDR_W>, ()>,
-    v_o: Out<Logic, ()>,
+pub fn const_encoder<D: ClockDomain>(
+    i: In<Bits<WIDTH>, D>,
+    addr_o: Out<Bits<ADDR_W>, D>,
+    v_o: Out<Logic, D>,
 ) {
     let inp = i.read();
     let mut addr = Bits::<ADDR_W>::zero();

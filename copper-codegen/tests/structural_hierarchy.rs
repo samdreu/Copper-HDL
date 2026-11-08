@@ -254,3 +254,114 @@ fn combinational_cycle_through_a_structural_parent_is_refused() {
     transpile_source(COMB_CYCLE_SRC, Some("broken_by_a_register"), &EmitConfig::default())
         .expect("a RegOut between the two breaks the cycle");
 }
+
+/// SPEC I.12.4(c), D-22 (Phase C step 11): a combinational child generic over its
+/// domain lies in the domain of its ports, so an instance takes the domain of the
+/// nets it is wired to — one domain per instance, possibly a different one per
+/// instance. The domain is phantom: the hierarchy is the concrete child's, byte for
+/// byte, and no SV parameter appears for `D`.
+const GENERIC_CHILD_SRC: &str = r#"
+use copper_core::{Bits, Clock, ClockDomain, Logic};
+use copper_core::port::{net, In, Out, RegOut};
+use copper_macros::hardware;
+
+struct ClkFast;
+impl ClockDomain for ClkFast {}
+struct ClkSlow;
+impl ClockDomain for ClkSlow {}
+
+#[hardware(sequential)]
+async fn fast_counter(
+    clk: Clock<ClkFast>,
+    count_out: RegOut<Bits<8>, ClkFast>,
+    flag_out: RegOut<Logic, ClkFast>,
+) {
+    let mut count: Bits<8> = Bits::zero();
+    let mut latched = Logic::Zero;
+    loop {
+        if count[3] == Logic::One { latched = Logic::One; }
+        count = count + Bits::from_lit::<1>();
+        count_out.write(count);
+        flag_out.write(latched);
+        clk.tick().await;
+    }
+}
+
+#[hardware(synchronizer)]
+async fn sync_2ff(clk: Clock<ClkSlow>, d: In<Logic, ClkFast>, q: RegOut<Logic, ClkSlow>) {
+    let mut ff1 = Logic::Zero;
+    loop {
+        let ff2 = ff1;
+        ff1 = d.read();
+        q.write(ff2);
+        clk.tick().await;
+    }
+}
+
+#[hardware(combinational)]
+fn slow_consumer<D: ClockDomain>(flag_in: In<Logic, D>, out: Out<Logic, D>) {
+    out.write(flag_in.read());
+}
+
+#[hardware(structural)]
+async fn two_domain_top(
+    wr_clk: Clock<ClkFast>,
+    rd_clk: Clock<ClkSlow>,
+    count_out: RegOut<Bits<8>, ClkFast>,
+    flag_sync_out: Out<Logic, ClkSlow>,
+) {
+    let flag = net::<Logic, ClkFast>();
+    let synced = net::<Logic, ClkSlow>();
+    fast_counter(wr_clk, count_out, flag.0);
+    sync_2ff(rd_clk, flag.1, synced.0);
+    slow_consumer(synced.1, flag_sync_out);
+}
+
+#[hardware(structural)]
+async fn one_child_two_domains(
+    wr_clk: Clock<ClkFast>,
+    rd_clk: Clock<ClkSlow>,
+    count_out: RegOut<Bits<8>, ClkFast>,
+    fast_copy: Out<Logic, ClkFast>,
+    slow_copy: Out<Logic, ClkSlow>,
+) {
+    let flag = net::<Logic, ClkFast>();
+    let synced = net::<Logic, ClkSlow>();
+    fast_counter(wr_clk, count_out, flag.0);
+    slow_consumer(flag.1.clone(), fast_copy);
+    sync_2ff(rd_clk, flag.1, synced.0);
+    slow_consumer(synced.1, slow_copy);
+}
+
+#[hardware(structural)]
+async fn generic_child_crosses(
+    wr_clk: Clock<ClkFast>,
+    count_out: RegOut<Bits<8>, ClkFast>,
+    flag_sync_out: Out<Logic, ClkSlow>,
+) {
+    let flag = net::<Logic, ClkFast>();
+    fast_counter(wr_clk, count_out, flag.0);
+    slow_consumer(flag.1, flag_sync_out);
+}
+"#;
+
+#[test]
+fn a_domain_generic_child_takes_the_domain_of_its_nets() {
+    let generic = transpile_source_hierarchy(GENERIC_CHILD_SRC, Some("two_domain_top"), &EmitConfig::default())
+        .expect("a domain-generic child wired in one domain transpiles");
+    let concrete = transpile_source_hierarchy(DUAL_CLOCK_SRC, Some("two_domain_top"), &EmitConfig::default())
+        .unwrap();
+    assert_eq!(generic, concrete, "the domain is phantom: the hierarchy is the concrete child's");
+    assert!(!generic.contains("parameter"), "no SV parameter for a domain:\n{generic}");
+    let child = transpile_source(GENERIC_CHILD_SRC, Some("slow_consumer"), &EmitConfig::default()).unwrap();
+    assert!(child.contains("module slow_consumer ("), "a non-parametric module:\n{child}");
+
+    // One instance per domain is legal: each instance lies in its own nets' domain.
+    transpile_source(GENERIC_CHILD_SRC, Some("one_child_two_domains"), &EmitConfig::default())
+        .expect("two instances of a generic child, one per domain");
+
+    // A single instance wired across two domains is still a crossing (I.12.4(c)).
+    let err = transpile_source(GENERIC_CHILD_SRC, Some("generic_child_crosses"), &EmitConfig::default())
+        .expect_err("one instance cannot lie in two domains");
+    assert!(err.contains("clock-domain crossing"), "{err}");
+}

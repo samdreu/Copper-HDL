@@ -25,6 +25,7 @@ use common::EquivalenceTest;
 use copper_core::port::{wire, In, Out};
 use copper_core::types::Bits;
 use copper_core::Logic;
+use copper_core::ClockDomain;
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -36,11 +37,11 @@ fn logic_array_pack_sim_matches_transpiled_verilog() {
     let mut eq = EquivalenceTest::new("logic_array_pack", DUT_SRC);
 
     let mut exec = HardwareExecutor::new();
-    let (n0_drv, n0_in) = wire::<Bits<4>, ()>(Bits::zero());
-    let (n1_drv, n1_in) = wire::<Bits<4>, ()>(Bits::zero());
-    let (n2_drv, n2_in) = wire::<Bits<4>, ()>(Bits::zero());
-    let (n3_drv, n3_in) = wire::<Bits<4>, ()>(Bits::zero());
-    let (word_out, word_obs) = wire::<Bits<16>, ()>(Bits::zero());
+    let (n0_drv, n0_in) = wire::<Bits<4>, MainClk>(Bits::zero());
+    let (n1_drv, n1_in) = wire::<Bits<4>, MainClk>(Bits::zero());
+    let (n2_drv, n2_in) = wire::<Bits<4>, MainClk>(Bits::zero());
+    let (n3_drv, n3_in) = wire::<Bits<4>, MainClk>(Bits::zero());
+    let (word_out, word_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
 
     let dh = word_out.dirty_handle();
     let reads = vec![
@@ -91,3 +92,8 @@ fn logic_array_pack_sim_matches_transpiled_verilog() {
 
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

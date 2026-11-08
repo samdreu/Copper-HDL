@@ -5,7 +5,7 @@
 // bit-read (`b[k+1]` was written a prior iteration). Modeled on BaseJump STL
 // `bsg_gray_to_binary`.
 #[hardware(combinational)]
-pub fn gray_to_binary(gray_i: In<Bits<8>, ()>, binary_o: Out<Bits<8>, ()>) {
+pub fn gray_to_binary<D: ClockDomain>(gray_i: In<Bits<8>, D>, binary_o: Out<Bits<8>, D>) {
     let g = gray_i.read();
     let mut b = Bits::zero();
     b[7] = g[7];

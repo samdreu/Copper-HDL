@@ -11,11 +11,11 @@ fn full_adder(a: Logic, b: Logic, cin: Logic) -> (Logic, Logic) {
 }
 
 #[hardware(combinational)]
-fn ripple_carry_adder<const N: usize>(
-    a_i: In<Bits<N>, ()>,
-    b_i: In<Bits<N>, ()>,
-    sum_o: Out<Bits<N>, ()>,
-    cout_o: Out<Logic, ()>,
+fn ripple_carry_adder<D: ClockDomain, const N: usize>(
+    a_i: In<Bits<N>, D>,
+    b_i: In<Bits<N>, D>,
+    sum_o: Out<Bits<N>, D>,
+    cout_o: Out<Logic, D>,
 ) {
     let a = a_i.read();
     let b = b_i.read();
@@ -34,18 +34,21 @@ fn ripple_carry_adder<const N: usize>(
 }
 
 fn main() {
+    // The testbench picks the domain; the module is generic over it (SPEC I.12.4(c)).
+    struct MainClk;
+    impl ClockDomain for MainClk {}
     const N: usize = 8;
 
     let mut exec = HardwareExecutor::new();
 
-    let (a_drv, a_in) = wire::<Bits<N>, ()>(Bits::zero());
-    let (b_drv, b_in) = wire::<Bits<N>, ()>(Bits::zero());
-    let (sum_out, sum_obs) = wire::<Bits<N>, ()>(Bits::zero());
-    let (cout_out, cout_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (a_drv, a_in) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (b_drv, b_in) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (sum_out, sum_obs) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (cout_out, cout_obs) = wire::<Logic, MainClk>(Logic::Zero);
 
     let dhs = vec![sum_out.dirty_handle(), cout_out.dirty_handle()];
     let reads = vec![a_in.wire_id(), b_in.wire_id()];
-    exec.spawn_wired(ripple_carry_adder::<N>(a_in, b_in, sum_out, cout_out), dhs, reads);
+    exec.spawn_wired(ripple_carry_adder::<_, N>(a_in, b_in, sum_out, cout_out), dhs, reads);
 
     let mut test = HardwareTest::new("bsg_adder_ripple_carry")
         .with_verilog("examples/combinational/sv/ripple_carry_adder.sv")

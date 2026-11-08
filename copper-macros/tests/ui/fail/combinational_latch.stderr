@@ -1,7 +1,7 @@
 error: would infer a latch: combinational output `o` is assigned on some control paths but not all. Assign `o` on every path (add the missing branch / `_` arm) (SPEC I.11.3, II.2 D2)
  --> tests/ui/fail/combinational_latch.rs:9:4
   |
-9 | fn leaky_mux(sel: In<Logic, ()>, a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+9 | fn leaky_mux<D: ClockDomain>(sel: In<Logic, D>, a: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
   |    ^^^^^^^^^
 
 warning: unused imports: `Bits`, `ClockDomain`, and `Logic`

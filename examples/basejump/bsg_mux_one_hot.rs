@@ -8,6 +8,7 @@
 // and sel_one_hot_i sweeps 001 -> 010 -> 100 (one bit set, shifting left). Its
 // golden check is `data_o == index(sel)`, which is what we assert here.
 
+use copper_core::ClockDomain;
 use copper_core::port::{wire, In, Out};
 use copper_core::{Bits, Logic};
 use copper_macros::hardware;
@@ -18,10 +19,10 @@ const ELS: usize = 3;
 
 // data_o = OR over i of (data_i[i] masked by sel_one_hot_i[i]).
 #[hardware(combinational)]
-fn bsg_mux_one_hot(
-    data_i: In<[Bits<WIDTH>; ELS], ()>,
-    sel_one_hot_i: In<Bits<ELS>, ()>,
-    data_o: Out<Bits<WIDTH>, ()>,
+fn bsg_mux_one_hot<D: ClockDomain>(
+    data_i: In<[Bits<WIDTH>; ELS], D>,
+    sel_one_hot_i: In<Bits<ELS>, D>,
+    data_o: Out<Bits<WIDTH>, D>,
 ) {
     let d = data_i.read();
     let sel = sel_one_hot_i.read();
@@ -42,11 +43,14 @@ fn bsg_mux_one_hot(
 // harness without pulling in a second `main` (same structure as sipo_block).
 #[cfg(not(test))]
 fn main() {
+    // The testbench picks the domain; the module is generic over it (SPEC I.12.4(c)).
+    struct MainClk;
+    impl ClockDomain for MainClk {}
     let mut exec = HardwareExecutor::new();
 
-    let (data_drv, data_in) = wire::<[Bits<WIDTH>; ELS], ()>([Bits::zero(); ELS]);
-    let (sel_drv, sel_in) = wire::<Bits<ELS>, ()>(Bits::zero());
-    let (out_drv, out_obs) = wire::<Bits<WIDTH>, ()>(Bits::zero());
+    let (data_drv, data_in) = wire::<[Bits<WIDTH>; ELS], MainClk>([Bits::zero(); ELS]);
+    let (sel_drv, sel_in) = wire::<Bits<ELS>, MainClk>(Bits::zero());
+    let (out_drv, out_obs) = wire::<Bits<WIDTH>, MainClk>(Bits::zero());
     let dh = out_drv.dirty_handle();
     let reads = vec![data_in.wire_id(), sel_in.wire_id()];
     exec.spawn_wired(bsg_mux_one_hot(data_in, sel_in, out_drv), vec![dh], reads);

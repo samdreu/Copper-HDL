@@ -15,6 +15,7 @@
 //! See `tests/common/mod.rs` for the shared harness and how to read a failure.
 
 mod common;
+use copper_core::ClockDomain;
 
 use common::{EquivalenceTest, Rng};
 use copper_core::port::wire;
@@ -28,12 +29,14 @@ mod adder {
     use copper_core::port::{In, Out};
     use copper_core::types::Bits;
     use copper_core::Logic;
+    use copper_core::ClockDomain;
     use copper_macros::hardware;
     include!("fixtures/ripple_carry_adder_dut.rs");
 }
 mod cmp {
     use copper_core::port::{In, Out};
     use copper_core::Logic;
+    use copper_core::ClockDomain;
     use copper_macros::hardware;
     include!("fixtures/one_bit_comparator_dut.rs");
 }
@@ -41,6 +44,7 @@ mod gray {
     use copper_core::port::{In, Out};
     use copper_core::types::Bits;
     
+    use copper_core::ClockDomain;
     use copper_macros::hardware;
     include!("fixtures/gray_to_binary_dut.rs");
 }
@@ -48,6 +52,7 @@ mod rot {
     use copper_core::port::{In, Out};
     use copper_core::types::Bits;
     
+    use copper_core::ClockDomain;
     use copper_macros::hardware;
     include!("fixtures/rotate_right_dut.rs");
 }
@@ -55,6 +60,7 @@ mod prio {
     use copper_core::port::{In, Out};
     use copper_core::types::Bits;
     use copper_core::Logic;
+    use copper_core::ClockDomain;
     use copper_macros::hardware;
     include!("fixtures/priority_encode_dut.rs");
 }
@@ -103,13 +109,13 @@ fn ripple_carry_adder_random_inputs() {
     let mut eq = EquivalenceTest::new("ripple_carry_adder", ADDER_SRC).with_params(&[("N", 8)]);
 
     let mut exec = HardwareExecutor::new();
-    let (a_drv, a_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (b_drv, b_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (sum_out, sum_obs) = wire::<Bits<8>, ()>(Bits::zero());
-    let (cout_out, cout_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (a_drv, a_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (b_drv, b_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (sum_out, sum_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (cout_out, cout_obs) = wire::<Logic, MainClk>(Logic::Zero);
     let dhs = vec![sum_out.dirty_handle(), cout_out.dirty_handle()];
     let reads = vec![a_in.wire_id(), b_in.wire_id()];
-    exec.spawn_wired(adder::ripple_carry_adder::<8>(a_in, b_in, sum_out, cout_out), dhs, reads);
+    exec.spawn_wired(adder::ripple_carry_adder::<_, 8>(a_in, b_in, sum_out, cout_out), dhs, reads);
 
     let mut rng = Rng::new(0xADDE_5EED);
     for _ in 0..ITERS {
@@ -135,9 +141,9 @@ fn one_bit_comparator_random_inputs() {
     let mut eq = EquivalenceTest::new("one_bit_comparator", CMP_SRC);
 
     let mut exec = HardwareExecutor::new();
-    let (i0_drv, i0_in) = wire::<Logic, ()>(Logic::Zero);
-    let (i1_drv, i1_in) = wire::<Logic, ()>(Logic::Zero);
-    let (eq_out, eq_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (i0_drv, i0_in) = wire::<Logic, MainClk>(Logic::Zero);
+    let (i1_drv, i1_in) = wire::<Logic, MainClk>(Logic::Zero);
+    let (eq_out, eq_obs) = wire::<Logic, MainClk>(Logic::Zero);
     let dh = eq_out.dirty_handle();
     let reads = vec![i0_in.wire_id(), i1_in.wire_id()];
     exec.spawn_wired(cmp::one_bit_comparator(i0_in, i1_in, eq_out), vec![dh], reads);
@@ -164,8 +170,8 @@ fn gray_to_binary_random_inputs() {
     let mut eq = EquivalenceTest::new("gray_to_binary", GRAY_SRC);
 
     let mut exec = HardwareExecutor::new();
-    let (g_drv, g_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (b_out, b_obs) = wire::<Bits<8>, ()>(Bits::zero());
+    let (g_drv, g_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (b_out, b_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
     let dh = b_out.dirty_handle();
     let reads = vec![g_in.wire_id()];
     exec.spawn_wired(gray::gray_to_binary(g_in, b_out), vec![dh], reads);
@@ -191,12 +197,12 @@ fn rotate_right_random_inputs() {
     let mut eq = EquivalenceTest::new("rotate_right", ROT_SRC).with_params(&[("N", 8), ("N_LOG", 3)]);
 
     let mut exec = HardwareExecutor::new();
-    let (data_drv, data_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (rot_drv, rot_in) = wire::<Bits<3>, ()>(Bits::zero());
-    let (o_out, o_obs) = wire::<Bits<8>, ()>(Bits::zero());
+    let (data_drv, data_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (rot_drv, rot_in) = wire::<Bits<3>, MainClk>(Bits::zero());
+    let (o_out, o_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
     let dh = o_out.dirty_handle();
     let reads = vec![data_in.wire_id(), rot_in.wire_id()];
-    exec.spawn_wired(rot::rotate_right::<8, 3>(data_in, rot_in, o_out), vec![dh], reads);
+    exec.spawn_wired(rot::rotate_right::<_, 8, 3>(data_in, rot_in, o_out), vec![dh], reads);
 
     let mut rng = Rng::new(0x2013A7E);
     for _ in 0..ITERS {
@@ -224,12 +230,12 @@ fn priority_encode_random_inputs() {
     let mut eq = EquivalenceTest::new("priority_encode", PRIO_SRC).with_params(&[("N", 8), ("N_LOG", 3)]);
 
     let mut exec = HardwareExecutor::new();
-    let (in_drv, in_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (res_out, res_obs) = wire::<Bits<3>, ()>(Bits::zero());
-    let (v_out, v_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (in_drv, in_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (res_out, res_obs) = wire::<Bits<3>, MainClk>(Bits::zero());
+    let (v_out, v_obs) = wire::<Logic, MainClk>(Logic::Zero);
     let dhs = vec![res_out.dirty_handle(), v_out.dirty_handle()];
     let reads = vec![in_in.wire_id()];
-    exec.spawn_wired(prio::priority_encode::<8, 3>(in_in, res_out, v_out), dhs, reads);
+    exec.spawn_wired(prio::priority_encode::<_, 8, 3>(in_in, res_out, v_out), dhs, reads);
 
     let mut rng = Rng::new(0x9165_17ED);
     for _ in 0..ITERS {
@@ -246,3 +252,8 @@ fn priority_encode_random_inputs() {
     }
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

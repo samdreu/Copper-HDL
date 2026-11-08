@@ -2917,7 +2917,7 @@ mod e2e_tests {
         // its default to the top of always_comb, so it transpiles from unmodified,
         // natural Rust.
         let src = r#"
-            fn m(a: In<Bits<8>, ()>, en: In<Logic, ()>, out: Out<Bits<8>, ()>) {
+            fn m(a: In<Bits<8>, C>, en: In<Logic, C>, out: Out<Bits<8>, C>) {
                 let mut r: Bits<8> = Bits::from_u8(0);
                 if en.read() == Logic::One {
                     let mut tmp: Bits<8> = Bits::from_u8(0);
@@ -2940,7 +2940,7 @@ mod e2e_tests {
         // The loop body reassigns a combinational local — this is what makes a
         // for-loop produce real hardware (previously the reassign was dropped).
         let src = r#"
-            fn accumulate<const N: usize>(a: In<Bits<32>, ()>, out: Out<Bits<32>, ()>) {
+            fn accumulate<const N: usize>(a: In<Bits<32>, C>, out: Out<Bits<32>, C>) {
                 let mut acc: Bits<32> = a.read();
                 for i in 0..N {
                     acc = acc + Bits::from_u32(1);
@@ -2960,7 +2960,7 @@ mod e2e_tests {
     fn lhs_bit_assign_with_dynamic_index_emits() {
         // `o[i] = a[i]` inside a loop: LHS bit-assign + dynamic bit-select read.
         let src = r#"
-            fn copy_bits<const N: usize>(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) {
+            fn copy_bits<const N: usize>(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) {
                 let mut o: Bits<8> = Bits::from_u8(0);
                 for i in 0..N {
                     o[i] = a.read()[i];
@@ -3061,7 +3061,7 @@ endmodule
     #[test]
     fn logic_comb_module_golden_output() {
         let src = r#"
-            fn one_bit_comparator(i0: In<Logic, ()>, i1: In<Logic, ()>, eq: Out<Logic, ()>) {
+            fn one_bit_comparator(i0: In<Logic, C>, i1: In<Logic, C>, eq: Out<Logic, C>) {
                 let p0 = !i0.read() & !i1.read();
                 let p1 = i0.read() & i1.read();
                 eq.write(p0 | p1);

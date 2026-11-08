@@ -11,7 +11,7 @@
 
 /// The shape the task reported: a constant default, then a conditional override.
 #[hardware(combinational)]
-pub fn cdo_default_then_override(c: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+pub fn cdo_default_then_override<D: ClockDomain>(c: In<Logic, D>, x: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
     o.write(Bits::from_lit::<3>());
     if c.read() == Logic::One {
         o.write(x.read());
@@ -20,7 +20,7 @@ pub fn cdo_default_then_override(c: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bi
 
 /// The reverse: the trailing unconditional write wins on every path (always 3).
 #[hardware(combinational)]
-pub fn cdo_override_then_default(c: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+pub fn cdo_override_then_default<D: ClockDomain>(c: In<Logic, D>, x: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
     if c.read() == Logic::One {
         o.write(x.read());
     }
@@ -29,11 +29,11 @@ pub fn cdo_override_then_default(c: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bi
 
 /// Nested overrides: the inner one only under the outer one.
 #[hardware(combinational)]
-pub fn cdo_nested_overrides(
-    c: In<Logic, ()>,
-    x: In<Bits<8>, ()>,
-    y: In<Bits<8>, ()>,
-    o: Out<Bits<8>, ()>,
+pub fn cdo_nested_overrides<D: ClockDomain>(
+    c: In<Logic, D>,
+    x: In<Bits<8>, D>,
+    y: In<Bits<8>, D>,
+    o: Out<Bits<8>, D>,
 ) {
     o.write(Bits::from_lit::<3>());
     if c.read() == Logic::One {
@@ -47,11 +47,11 @@ pub fn cdo_nested_overrides(
 
 /// A default, then a `match` whose `_` arm writes nothing.
 #[hardware(combinational)]
-pub fn cdo_match_default_arm(
-    s: In<Bits<2>, ()>,
-    x: In<Bits<8>, ()>,
-    y: In<Bits<8>, ()>,
-    o: Out<Bits<8>, ()>,
+pub fn cdo_match_default_arm<D: ClockDomain>(
+    s: In<Bits<2>, D>,
+    x: In<Bits<8>, D>,
+    y: In<Bits<8>, D>,
+    o: Out<Bits<8>, D>,
 ) {
     o.write(Bits::from_lit::<3>());
     match s.read().as_usize() {
@@ -63,7 +63,7 @@ pub fn cdo_match_default_arm(
 
 /// A default, then overrides inside a `for` (the last set bit wins).
 #[hardware(combinational)]
-pub fn cdo_for_override(x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+pub fn cdo_for_override<D: ClockDomain>(x: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
     let xv = x.read();
     o.write(Bits::zero());
     for i in 0..8 {
@@ -76,11 +76,11 @@ pub fn cdo_for_override(x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
 /// Control: every arm writes, no default — transpiled before the fix too, and
 /// its SystemVerilog is unchanged by it.
 #[hardware(combinational)]
-pub fn cdo_match_every_arm(
-    s: In<Bits<2>, ()>,
-    x: In<Bits<8>, ()>,
-    y: In<Bits<8>, ()>,
-    o: Out<Bits<8>, ()>,
+pub fn cdo_match_every_arm<D: ClockDomain>(
+    s: In<Bits<2>, D>,
+    x: In<Bits<8>, D>,
+    y: In<Bits<8>, D>,
+    o: Out<Bits<8>, D>,
 ) {
     match s.read().as_usize() {
         0 => o.write(x.read()),

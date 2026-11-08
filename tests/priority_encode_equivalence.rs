@@ -7,6 +7,7 @@
 //! See `tests/common/mod.rs` for the shared harness and how to read a failure.
 
 mod common;
+use copper_core::ClockDomain;
 
 use common::EquivalenceTest;
 use copper_core::port::{wire, In, Out};
@@ -40,14 +41,14 @@ fn priority_encode_sim_matches_transpiled_verilog() {
         .with_params(&[("N", N as i64), ("N_LOG", N_LOG as i64)]);
 
     let mut exec = HardwareExecutor::new();
-    let (in_drv, in_port) = wire::<Bits<N>, ()>(Bits::zero());
-    let (res_drv, res_obs) = wire::<Bits<N_LOG>, ()>(Bits::zero());
-    let (valid_drv, valid_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (in_drv, in_port) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (res_drv, res_obs) = wire::<Bits<N_LOG>, MainClk>(Bits::zero());
+    let (valid_drv, valid_obs) = wire::<Logic, MainClk>(Logic::Zero);
     let dh_r = res_drv.dirty_handle();
     let dh_v = valid_drv.dirty_handle();
     let reads = vec![in_port.wire_id()];
     exec.spawn_wired(
-        priority_encode::<N, N_LOG>(in_port, res_drv, valid_drv),
+        priority_encode::<_, N, N_LOG>(in_port, res_drv, valid_drv),
         vec![dh_r, dh_v],
         reads,
     );
@@ -83,3 +84,8 @@ fn priority_encode_sim_matches_transpiled_verilog() {
 
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

@@ -1,14 +1,14 @@
 error: would infer a latch: combinational output `p` is assigned on some control paths but not all. Assign `p` on every path (add the missing branch / `_` arm) (SPEC I.11.3, II.2 D2)
  --> tests/ui/fail/combinational_latch_second_port.rs:8:4
   |
-8 | fn half_defaulted(c: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>, p: Out<Bits<8>, ()>) {
+8 | fn half_defaulted<D: ClockDomain>(c: In<Logic, D>, x: In<Bits<8>, D>, o: Out<Bits<8>, D>, p: Out<Bits<8>, D>) {
   |    ^^^^^^^^^^^^^^
 
-warning: unused imports: `Bits` and `Logic`
+warning: unused imports: `Bits`, `ClockDomain`, and `Logic`
  --> tests/ui/fail/combinational_latch_second_port.rs:1:19
   |
-1 | use copper_core::{Bits, Logic};
-  |                   ^^^^  ^^^^^
+1 | use copper_core::{Bits, ClockDomain, Logic};
+  |                   ^^^^  ^^^^^^^^^^^  ^^^^^
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 

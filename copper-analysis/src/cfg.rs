@@ -3122,7 +3122,7 @@ mod tests {
     fn comb_output_all_paths_ok() {
         let src = r#"
             #[hardware(combinational)]
-            fn m(sel: In<Logic, ()>, o: Out<Logic, ()>) {
+            fn m(sel: In<Logic, C>, o: Out<Logic, C>) {
                 if sel.read() == Logic::One { o.write(Logic::One); }
                 else { o.write(Logic::Zero); }
             }
@@ -3135,7 +3135,7 @@ mod tests {
     fn comb_output_unconditional_ok() {
         let src = r#"
             #[hardware(combinational)]
-            fn m(a: In<Logic, ()>, b: In<Logic, ()>, o: Out<Logic, ()>) {
+            fn m(a: In<Logic, C>, b: In<Logic, C>, o: Out<Logic, C>) {
                 let p = a.read() & b.read();
                 o.write(p);
             }
@@ -3148,7 +3148,7 @@ mod tests {
     fn comb_output_partial_is_latch() {
         let src = r#"
             #[hardware(combinational)]
-            fn m(sel: In<Logic, ()>, o: Out<Logic, ()>) {
+            fn m(sel: In<Logic, C>, o: Out<Logic, C>) {
                 if sel.read() == Logic::One { o.write(Logic::One); }
             }
         "#;
@@ -3160,7 +3160,7 @@ mod tests {
     fn comb_output_partial_match_is_latch() {
         let src = r#"
             #[hardware(combinational)]
-            fn m(sel: In<Bits<2>, ()>, o: Out<Logic, ()>) {
+            fn m(sel: In<Bits<2>, C>, o: Out<Logic, C>) {
                 match sel.read() {
                     s if s == Bits::from_u32(0) => { o.write(Logic::One); }
                     _ => {}
@@ -3178,7 +3178,7 @@ mod tests {
     fn comb_output_never_written_is_refused() {
         let src = r#"
             #[hardware(combinational)]
-            fn m(a: In<Logic, ()>, o: Out<Logic, ()>) {
+            fn m(a: In<Logic, C>, o: Out<Logic, C>) {
                 let _ = a.read();
             }
         "#;
@@ -3193,7 +3193,7 @@ mod tests {
     fn comb_write_under_an_if_in_a_for_is_partial() {
         let partial = r#"
             #[hardware(combinational)]
-            fn m(a: In<Bits<4>, ()>, o: Out<Logic, ()>) {
+            fn m(a: In<Bits<4>, C>, o: Out<Logic, C>) {
                 let t = a.read();
                 for i in 0..4 { if t[i] == Logic::One { o.write(Logic::One); } }
             }
@@ -3201,7 +3201,7 @@ mod tests {
         assert!(da(partial).is_err());
         let total = r#"
             #[hardware(combinational)]
-            fn m(a: In<Bits<4>, ()>, o: Out<Logic, ()>) {
+            fn m(a: In<Bits<4>, C>, o: Out<Logic, C>) {
                 let t = a.read();
                 for i in 0..4 { if t[i] == Logic::One { o.write(Logic::One); } else { o.write(Logic::Zero); } }
             }
@@ -3209,7 +3209,7 @@ mod tests {
         assert!(da(total).is_ok());
         let default_first = r#"
             #[hardware(combinational)]
-            fn m(a: In<Bits<4>, ()>, o: Out<Logic, ()>) {
+            fn m(a: In<Bits<4>, C>, o: Out<Logic, C>) {
                 let t = a.read();
                 o.write(Logic::Zero);
                 for i in 0..4 { if t[i] == Logic::One { o.write(Logic::One); } }

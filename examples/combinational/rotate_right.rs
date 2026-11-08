@@ -18,10 +18,10 @@ const fn safe_clog2(n: usize) -> usize {
 }
 
 #[hardware(combinational)]
-fn rotate_right<const N: usize, const N_LOG: usize>(
-    data_i: In<Bits<N>, ()>,
-    rot_i: In<Bits<N_LOG>, ()>,
-    o: Out<Bits<N>, ()>,
+fn rotate_right<D: ClockDomain, const N: usize, const N_LOG: usize>(
+    data_i: In<Bits<N>, D>,
+    rot_i: In<Bits<N_LOG>, D>,
+    o: Out<Bits<N>, D>,
 ) {
     const { assert!(N_LOG == safe_clog2(N), "N_LOG must equal safe_clog2(N)") };
 
@@ -37,18 +37,21 @@ fn rotate_right<const N: usize, const N_LOG: usize>(
 }
 
 fn main() {
+    // The testbench picks the domain; the module is generic over it (SPEC I.12.4(c)).
+    struct MainClk;
+    impl ClockDomain for MainClk {}
     const N: usize = 8;
     const N_LOG: usize = safe_clog2(N); // 3
 
     let mut exec = HardwareExecutor::new();
 
-    let (data_drv, data_in) = wire::<Bits<N>, ()>(Bits::zero());
-    let (rot_drv, rot_in) = wire::<Bits<N_LOG>, ()>(Bits::zero());
-    let (o_out, o_obs) = wire::<Bits<N>, ()>(Bits::zero());
+    let (data_drv, data_in) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (rot_drv, rot_in) = wire::<Bits<N_LOG>, MainClk>(Bits::zero());
+    let (o_out, o_obs) = wire::<Bits<N>, MainClk>(Bits::zero());
 
     let dh = o_out.dirty_handle();
     let reads = vec![data_in.wire_id(), rot_in.wire_id()];
-    exec.spawn_wired(rotate_right::<N, N_LOG>(data_in, rot_in, o_out), vec![dh], reads);
+    exec.spawn_wired(rotate_right::<_, N, N_LOG>(data_in, rot_in, o_out), vec![dh], reads);
 
     let mut test = HardwareTest::new("bsg_rotate_right")
         .with_verilog("examples/combinational/sv/rotate_right.sv")

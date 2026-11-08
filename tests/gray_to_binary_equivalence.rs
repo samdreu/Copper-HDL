@@ -13,6 +13,7 @@ mod common;
 use common::EquivalenceTest;
 use copper_core::port::{wire, In, Out};
 use copper_core::types::Bits;
+use copper_core::ClockDomain;
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -24,8 +25,8 @@ fn gray_to_binary_sim_matches_transpiled_verilog() {
     let mut eq = EquivalenceTest::new("gray_to_binary", DUT_SRC);
 
     let mut exec = HardwareExecutor::new();
-    let (g_drv, g_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (b_out, b_obs) = wire::<Bits<8>, ()>(Bits::zero());
+    let (g_drv, g_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (b_out, b_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
     let dh = b_out.dirty_handle();
     let reads = vec![g_in.wire_id()];
     exec.spawn_wired(gray_to_binary(g_in, b_out), vec![dh], reads);
@@ -45,3 +46,8 @@ fn gray_to_binary_sim_matches_transpiled_verilog() {
 
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

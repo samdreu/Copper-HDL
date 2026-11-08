@@ -8,6 +8,7 @@
 // a_i/b_i swept as (1 << ctr[1:0]) / (1 << ctr[3:2]) over ctr = 0..15, i.e. every
 // pair of one-hot inputs. Golden: o == 1 << (index(a) + index(b)).
 
+use copper_core::ClockDomain;
 use copper_core::port::{wire, In, Out};
 use copper_core::{Bits, Logic};
 use copper_macros::hardware;
@@ -18,10 +19,10 @@ const OUT_W: usize = 7; // 2*WIDTH - 1
 
 // o[ia+ib] = a_i[ia] & b_i[ib], OR-reduced per output bit (one-hot in, one-hot out).
 #[hardware(combinational)]
-fn bsg_adder_one_hot(
-    a_i: In<Bits<WIDTH>, ()>,
-    b_i: In<Bits<WIDTH>, ()>,
-    o: Out<Bits<OUT_W>, ()>,
+fn bsg_adder_one_hot<D: ClockDomain>(
+    a_i: In<Bits<WIDTH>, D>,
+    b_i: In<Bits<WIDTH>, D>,
+    o: Out<Bits<OUT_W>, D>,
 ) {
     let a = a_i.read();
     let b = b_i.read();
@@ -43,11 +44,14 @@ fn one_hot<const N: usize>(idx: usize) -> Bits<N> {
 }
 
 fn main() {
+    // The testbench picks the domain; the module is generic over it (SPEC I.12.4(c)).
+    struct MainClk;
+    impl ClockDomain for MainClk {}
     let mut exec = HardwareExecutor::new();
 
-    let (a_drv, a_in) = wire::<Bits<WIDTH>, ()>(one_hot(0));
-    let (b_drv, b_in) = wire::<Bits<WIDTH>, ()>(one_hot(0));
-    let (o_drv, o_obs) = wire::<Bits<OUT_W>, ()>(Bits::zero());
+    let (a_drv, a_in) = wire::<Bits<WIDTH>, MainClk>(one_hot(0));
+    let (b_drv, b_in) = wire::<Bits<WIDTH>, MainClk>(one_hot(0));
+    let (o_drv, o_obs) = wire::<Bits<OUT_W>, MainClk>(Bits::zero());
     let dh = o_drv.dirty_handle();
     let reads = vec![a_in.wire_id(), b_in.wire_id()];
     exec.spawn_wired(bsg_adder_one_hot(a_in, b_in, o_drv), vec![dh], reads);

@@ -18,10 +18,10 @@ const fn safe_clog2(n: usize) -> usize {
 }
 
 #[hardware(combinational)]
-pub fn rotate_right<const N: usize, const N_LOG: usize>(
-    data_i: In<Bits<N>, ()>,
-    rot_i: In<Bits<N_LOG>, ()>,
-    o: Out<Bits<N>, ()>,
+pub fn rotate_right<D: ClockDomain, const N: usize, const N_LOG: usize>(
+    data_i: In<Bits<N>, D>,
+    rot_i: In<Bits<N_LOG>, D>,
+    o: Out<Bits<N>, D>,
 ) {
     const { assert!(N_LOG == safe_clog2(N), "N_LOG must equal safe_clog2(N)") };
 

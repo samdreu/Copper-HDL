@@ -21,7 +21,7 @@ fn transpile(src: &str) -> Result<String, String> {
 fn an_array_port_declares_both_packed_dimensions() {
     let src = r#"
 #[hardware(combinational)]
-fn mux4(data_i: In<[Bits<8>; 4], ()>, sel_i: In<Bits<2>, ()>, data_o: Out<Bits<8>, ()>) {
+fn mux4(data_i: In<[Bits<8>; 4], C>, sel_i: In<Bits<2>, C>, data_o: Out<Bits<8>, C>) {
     data_o.write(data_i.read()[sel_i.read().as_u128() as usize]);
 }
 "#;
@@ -40,9 +40,9 @@ fn an_array_port_with_symbolic_dimensions_needs_no_width_arithmetic() {
     let src = r#"
 #[hardware(combinational)]
 fn mux<const WIDTH_P: usize, const ELS_P: usize, const LG_ELS_LP: usize>(
-    data_i: In<[Bits<WIDTH_P>; ELS_P], ()>,
-    sel_i: In<Bits<LG_ELS_LP>, ()>,
-    data_o: Out<Bits<WIDTH_P>, ()>,
+    data_i: In<[Bits<WIDTH_P>; ELS_P], C>,
+    sel_i: In<Bits<LG_ELS_LP>, C>,
+    data_o: Out<Bits<WIDTH_P>, C>,
 ) {
     data_o.write(data_i.read()[sel_i.read().as_u128() as usize]);
 }
@@ -64,7 +64,7 @@ fn mux<const WIDTH_P: usize, const ELS_P: usize, const LG_ELS_LP: usize>(
 fn indexing_an_array_port_is_a_direct_element_select() {
     let src = r#"
 #[hardware(combinational)]
-fn mux4(data_i: In<[Bits<8>; 4], ()>, sel_i: In<Bits<2>, ()>, data_o: Out<Bits<8>, ()>) {
+fn mux4(data_i: In<[Bits<8>; 4], C>, sel_i: In<Bits<2>, C>, data_o: Out<Bits<8>, C>) {
     data_o.write(data_i.read()[sel_i.read().as_u128() as usize]);
 }
 "#;
@@ -82,7 +82,7 @@ fn mux4(data_i: In<[Bits<8>; 4], ()>, sel_i: In<Bits<2>, ()>, data_o: Out<Bits<8
 fn a_local_holding_an_array_keeps_both_dimensions() {
     let src = r#"
 #[hardware(combinational)]
-fn oh(data_i: In<[Bits<4>; 3], ()>, sel_i: In<Bits<3>, ()>, data_o: Out<Bits<4>, ()>) {
+fn oh(data_i: In<[Bits<4>; 3], C>, sel_i: In<Bits<3>, C>, data_o: Out<Bits<4>, C>) {
     let d = data_i.read();
     let sel = sel_i.read();
     let mut acc = Bits::<4>::zero();
@@ -107,7 +107,7 @@ fn oh(data_i: In<[Bits<4>; 3], ()>, sel_i: In<Bits<3>, ()>, data_o: Out<Bits<4>,
 fn a_nested_array_port_is_refused() {
     let src = r#"
 #[hardware(combinational)]
-fn nested(data_i: In<[[Bits<4>; 2]; 3], ()>, data_o: Out<Bits<4>, ()>) {
+fn nested(data_i: In<[[Bits<4>; 2]; 3], C>, data_o: Out<Bits<4>, C>) {
     data_o.write(data_i.read()[0][0]);
 }
 "#;

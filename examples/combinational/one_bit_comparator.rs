@@ -4,7 +4,7 @@ use copper_sim::*;
 use copper_macros::hardware;
 
 #[hardware(combinational)]
-fn one_bit_comparator(i0: In<Logic, ()>, i1: In<Logic, ()>, eq: Out<Logic, ()>) {
+fn one_bit_comparator<D: ClockDomain>(i0: In<Logic, D>, i1: In<Logic, D>, eq: Out<Logic, D>) {
     let p0 = !i0.read() & !i1.read();
     let p1 = i0.read() & i1.read();
     eq.write(p0 | p1);
@@ -12,11 +12,14 @@ fn one_bit_comparator(i0: In<Logic, ()>, i1: In<Logic, ()>, eq: Out<Logic, ()>) 
 
 
 fn main() {
+    // The testbench picks the domain; the module is generic over it (SPEC I.12.4(c)).
+    struct MainClk;
+    impl ClockDomain for MainClk {}
     let mut executor = HardwareExecutor::new();
 
-    let (i0_drv, i0_in) = wire::<Logic, ()>(Logic::Zero);
-    let (i1_drv, i1_in) = wire::<Logic, ()>(Logic::Zero);
-    let (eq_out, eq_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (i0_drv, i0_in) = wire::<Logic, MainClk>(Logic::Zero);
+    let (i1_drv, i1_in) = wire::<Logic, MainClk>(Logic::Zero);
+    let (eq_out, eq_obs) = wire::<Logic, MainClk>(Logic::Zero);
 
     let dh = eq_out.dirty_handle();
 

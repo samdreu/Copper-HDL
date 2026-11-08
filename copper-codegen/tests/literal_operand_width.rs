@@ -57,7 +57,7 @@ fn from_usize_literal_takes_the_register_operands_width() {
 fn from_usize_literal_takes_an_input_operands_width() {
     let src = r#"
 #[hardware(combinational)]
-fn f(i: In<Bits<12>, ()>, eq_o: Out<Logic, ()>, and_o: Out<Bits<12>, ()>) {
+fn f(i: In<Bits<12>, C>, eq_o: Out<Logic, C>, and_o: Out<Bits<12>, C>) {
     let x = i.read();
     eq_o.write(if x == Bits::from_usize(5) { Logic::One } else { Logic::Zero });
     and_o.write(x & Bits::from_usize(0xFF0));
@@ -75,7 +75,7 @@ fn f(i: In<Bits<12>, ()>, eq_o: Out<Logic, ()>, and_o: Out<Bits<12>, ()>) {
 fn from_usize_literal_arm_takes_the_other_arms_width() {
     let src = r#"
 #[hardware(combinational)]
-fn f(sel: In<Logic, ()>, i: In<Bits<6>, ()>, o: Out<Bits<6>, ()>) {
+fn f(sel: In<Logic, C>, i: In<Bits<6>, C>, o: Out<Bits<6>, C>) {
     let x = i.read();
     o.write(if sel.read() == Logic::One { Bits::from_usize(3) } else { x });
 }
@@ -91,7 +91,7 @@ fn f(sel: In<Logic, ()>, i: In<Bits<6>, ()>, o: Out<Bits<6>, ()>) {
 fn a_literal_that_does_not_fit_the_operands_width_is_a_spanned_error() {
     let src = r#"
 #[hardware(combinational)]
-fn f(i: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn f(i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     o.write(i.read() + Bits::from_usize(300));
 }
 "#;
@@ -109,7 +109,7 @@ fn f(i: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
 fn the_largest_fitting_literal_is_accepted() {
     let src = r#"
 #[hardware(combinational)]
-fn f(i: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn f(i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     o.write(i.read() + Bits::from_usize(255));
 }
 "#;

@@ -73,16 +73,16 @@ impl DirtyHandle {
 /// ```ignore
 /// use copper_core::port::wire;
 /// use copper_core::Logic;
-/// let (out, _in) = wire::<Logic, ()>(Logic::Zero);
-/// let _second_driver = out.clone(); // error: `Out<Logic>` is not `Clone`
+/// let (out, _in) = wire::<Logic, Dom>(Logic::Zero);
+/// let _second_driver = out.clone(); // error: `Out<Logic, Dom>` is not `Clone`
 /// ```
-pub struct Out<T, D = ()> {
+pub struct Out<T, D: ClockDomain> {
     inner: Arc<Mutex<T>>,
     dirty: Arc<AtomicBool>,
     _domain: PhantomData<D>
 }
 
-impl<T: PartialEq + Clone, D> Out<T, D> {
+impl<T: PartialEq + Clone, D: ClockDomain> Out<T, D> {
     pub fn write(&self, value: T) {
         let mut g = self.inner.lock().unwrap();
         if *g != value {
@@ -96,7 +96,7 @@ impl<T: PartialEq + Clone, D> Out<T, D> {
     }
 }
 
-impl<T, D> Out<T, D> {
+impl<T, D: ClockDomain> Out<T, D> {
     /// The identity of the wire this output drives. Equal to the [`WireId`] of
     /// every `In` reading the same wire, so the executor can match producer to
     /// consumer.
@@ -106,24 +106,24 @@ impl<T, D> Out<T, D> {
 }
 
 // Clone - multiple readers allowed
-pub struct In<T, D = ()> {
+pub struct In<T, D: ClockDomain> {
     inner: Arc<Mutex<T>>,
     _domain: PhantomData<D>
 }
 
-impl<T, D> Clone for In<T, D> {
+impl<T, D: ClockDomain> Clone for In<T, D> {
     fn clone(&self) -> Self {
         In { inner: self.inner.clone(), _domain: PhantomData }
     }
 }
 
-impl<T: Clone, D> In<T, D> {
+impl<T: Clone, D: ClockDomain> In<T, D> {
     pub fn read(&self) -> T {
         self.inner.lock().unwrap().clone()
     }
 }
 
-impl<T, D> In<T, D> {
+impl<T, D: ClockDomain> In<T, D> {
     /// The identity of the wire this input reads. Equal to the [`WireId`] of the
     /// `Out`/`RegOut` that drives the same wire, so the executor can record this
     /// task's dependency-graph in-edges from the `In` handles it is spawned with.
@@ -132,7 +132,7 @@ impl<T, D> In<T, D> {
     }
 }
 
-pub fn wire<T: Clone + PartialEq, D>(initial: T) -> (Out<T, D>, In<T, D>) {
+pub fn wire<T: Clone + PartialEq, D: ClockDomain>(initial: T) -> (Out<T, D>, In<T, D>) {
     let inner = Arc::new(Mutex::new(initial));
     let dirty = Arc::new(AtomicBool::new(false));
     let out = Out {
@@ -185,12 +185,12 @@ impl<T: Clone + PartialEq + Send + Sync> ClockEdgeListener for RegOutShared<T> {
 /// The write handle for a registered output. Same surface as `Out` (`write`,
 /// `dirty_handle`), so a module body is identical whether its output is plain or
 /// registered.
-pub struct RegOut<T, D> {
+pub struct RegOut<T, D: ClockDomain> {
     shared: Arc<RegOutShared<T>>,
     _domain: PhantomData<D>,
 }
 
-impl<T: Clone + PartialEq + Send + Sync, D> RegOut<T, D> {
+impl<T: Clone + PartialEq + Send + Sync, D: ClockDomain> RegOut<T, D> {
     pub fn write(&self, value: T) {
         *self.shared.pending.lock().unwrap() = Some(value);
     }
@@ -204,7 +204,7 @@ impl<T: Clone + PartialEq + Send + Sync, D> RegOut<T, D> {
     }
 }
 
-impl<T, D> RegOut<T, D> {
+impl<T, D: ClockDomain> RegOut<T, D> {
     /// The identity of the wire this registered output drives — the committed
     /// cell the reader observes, so it matches the [`WireId`] of every `In` on the
     /// same wire. (A `RegOut` commits at the clock edge, so it is a phase *source*
@@ -273,8 +273,7 @@ pub fn net<T, D: ClockDomain, W: NetDriver<T, D>>() -> (W, In<T, D>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Every port names a domain (SPEC I.12.1, D-17 A1); the unit default `()` is
-    // still in the type (removing it refuses 32 corpus modules, MEASUREMENTS §P.2).
+    // Every port names a domain (SPEC I.12.1, D-17 A1); `()` is not one (I.12.6 (4)).
     struct TestDom;
     impl ClockDomain for TestDom {}
 

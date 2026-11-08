@@ -1,7 +1,7 @@
 //! Behavioral-equivalence test for a const-generic ripple-carry adder.
 //!
 //! Promotes the `examples/combinational/ripple_carry_adder` self-check into the
-//! `cargo test` suite. A parametric combinational DUT (clockless `()` domain) with
+//! `cargo test` suite. A parametric combinational DUT (clockless, generic over its domain) with
 //! **two** outputs — an N-bit sum and a carry-out — transpiled to a parametric SV
 //! module and Verilated at N=8 via `.with_params`, at the same monomorphization the
 //! simulator runs. Reference: `{cout, sum} == a + b` (9-bit unsigned).
@@ -9,6 +9,7 @@
 //! See `tests/common/mod.rs` for the shared harness and how to read a failure.
 
 mod common;
+use copper_core::ClockDomain;
 
 use common::EquivalenceTest;
 use copper_core::port::{wire, In, Out};
@@ -27,13 +28,13 @@ fn ripple_carry_adder_sim_matches_transpiled_verilog() {
     let mut eq = EquivalenceTest::new("ripple_carry_adder", DUT_SRC).with_params(&[("N", N as i64)]);
 
     let mut exec = HardwareExecutor::new();
-    let (a_drv, a_in) = wire::<Bits<N>, ()>(Bits::zero());
-    let (b_drv, b_in) = wire::<Bits<N>, ()>(Bits::zero());
-    let (sum_out, sum_obs) = wire::<Bits<N>, ()>(Bits::zero());
-    let (cout_out, cout_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (a_drv, a_in) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (b_drv, b_in) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (sum_out, sum_obs) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (cout_out, cout_obs) = wire::<Logic, MainClk>(Logic::Zero);
     let dhs = vec![sum_out.dirty_handle(), cout_out.dirty_handle()];
     let reads = vec![a_in.wire_id(), b_in.wire_id()];
-    exec.spawn_wired(ripple_carry_adder::<N>(a_in, b_in, sum_out, cout_out), dhs, reads);
+    exec.spawn_wired(ripple_carry_adder::<_, N>(a_in, b_in, sum_out, cout_out), dhs, reads);
 
     // A spread including boundary carries (overflow, max+max, half+half).
     let cases: &[(u8, u8)] = &[
@@ -69,3 +70,8 @@ fn ripple_carry_adder_sim_matches_transpiled_verilog() {
 
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

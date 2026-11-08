@@ -1371,7 +1371,7 @@ mod tests {
         };
         let comb: ItemFn = parse_quote! {
             #[hardware(combinational)]
-            fn m(d: In<Logic, ()>) {}
+            fn m(d: In<Logic, C>) {}
         };
         let sync: ItemFn = parse_quote! {
             #[hardware(synchronizer)]

@@ -90,14 +90,43 @@ pub(crate) fn outer_type_name(ty: &Type) -> Option<String> {
 // ── Clock domains (I.12.4) ──────────────────────────────────────────────────
 
 
+/// SPEC I.12.6 (4), I.12.4(c) (D-17 A1; D-22): every port, clock and memory names a
+/// clock domain, and `()` is not one. A combinational module that serves any domain
+/// is generic over it (`fn m<D: ClockDomain>(a: In<T, D>, …)`) and lies in the domain
+/// of its ports. rustc refuses the same shapes in a testbench (`In`, `Out`, `RegOut`
+/// bound `D: ClockDomain` and have no default); on a module this rule refuses them
+/// first, in both front-ends, with one message.
+pub const UNIT_DOMAIN_MESSAGE: &str = "this parameter names no clock domain: every `Clock<D>`, \
+    `In<T, D>`, `Out<T, D>`, `RegOut<T, D>` and `Memory<…, D, …>` names a `D: ClockDomain`, and `()` \
+    is not one — a combinational module that serves any domain is generic over it, \
+    `fn m<D: ClockDomain>(a: In<T, D>, …)` (SPEC I.12.6 (4), I.12.4(c); D-17 A1)";
+
+/// The rule of [`UNIT_DOMAIN_MESSAGE`], over the signature: a `Clock` needs one type
+/// argument, an `In`/`Out`/`RegOut`/`Memory` two (the payload and the domain, the
+/// domain last); the domain must be a path, not `()` or another tuple.
+pub fn check_port_domains(f: &ItemFn) -> Result<(), Error> {
+    for arg in &f.sig.inputs {
+        let FnArg::Typed(pt) = arg else { continue };
+        let min_args = match outer_type_name(&pt.ty).as_deref() {
+            Some("Clock") => 1,
+            Some("In" | "Out" | "RegOut" | "Memory") => 2,
+            _ => continue,
+        };
+        if type_domain_at(&pt.ty, min_args).is_none() {
+            return Err(Error::new_spanned(&pt.ty, UNIT_DOMAIN_MESSAGE));
+        }
+    }
+    Ok(())
+}
+
 /// The domain type name at the end of a generic type, but only when there are at
 /// least `min_args` type arguments. Returns `None` for a non-`Path` domain (e.g.
-/// the `()` unit domain) or too few arguments.
+/// `()`, which [`check_port_domains`] refuses) or too few arguments.
 ///
 /// Used two ways: `Clock<D>` has one type arg (`min_args = 1` → the domain),
 /// while `In<T, D>` / `Out<T, D>` need two (`min_args = 2` → the *last* is the
-/// domain). A one-argument `In<T>` therefore carries the *default* `()` domain,
-/// not an explicit one, and is treated as domain-agnostic.
+/// domain). A port without one is refused by [`check_port_domains`] before any
+/// rule that reads a domain runs.
 fn type_domain_at(ty: &Type, min_args: usize) -> Option<String> {
     let Type::Path(tp) = ty else { return None };
     let seg = tp.path.segments.last()?;
@@ -115,7 +144,7 @@ fn type_domain_at(ty: &Type, min_args: usize) -> Option<String> {
     }
     match type_args.last() {
         Some(Type::Path(p)) => p.path.segments.last().map(|s| s.ident.to_string()),
-        _ => None, // e.g. a `()` unit domain
+        _ => None, // e.g. `()`, refused by `check_port_domains`
     }
 }
 
@@ -124,8 +153,8 @@ fn clock_domain(ty: &Type) -> Option<String> {
     type_domain_at(ty, 1)
 }
 
-/// *Explicit* domain of an `In<T, D>` / `Out<T, D>` — `None` when the domain is
-/// left default (`In<T>` → `()`), which is not considered a crossing.
+/// Domain of an `In<T, D>` / `Out<T, D>` — `None` only for a port
+/// [`check_port_domains`] refuses.
 fn port_domain(ty: &Type) -> Option<String> {
     type_domain_at(ty, 2)
 }
@@ -1096,7 +1125,7 @@ pub const RUNTIME_FOR_BOUND_MESSAGE: &str = "this bound of a tick-free `for` is 
 
 // ── I.12.3 the two-flop rule; I.12.4(c) the combinational module's one domain ──
 
-/// The domain text of each port/clock parameter (`None` for a unit-domain port).
+/// The domain text of each port/clock parameter (`None` only for a port `check_port_domains` refuses).
 fn param_domains(f: &ItemFn) -> Vec<(String, String, Option<String>, &syn::PatType)> {
     f.sig
         .inputs
@@ -1119,8 +1148,8 @@ fn param_domains(f: &ItemFn) -> Vec<(String, String, Option<String>, &syn::PatTy
 /// SPEC I.12.4(c) (D-17 A4a; II.1 S0): every port of a `combinational` module lies
 /// in one domain — the module is evaluated in the domain of its ports, and two
 /// domains would make a wire of one a function of a register of the other with no
-/// flop between them. A unit-domain port (`In<T>`) names no domain and is not
-/// compared (its retirement, I.12.1, is MEASUREMENTS §P.2's stopped item).
+/// flop between them. A module generic over its domain (`D: ClockDomain`) names it on
+/// every port, so the rule compares `D` with `D` (I.12.4(c), D-22).
 pub fn check_combinational_one_domain(f: &ItemFn) -> Result<(), Error> {
     let mut first: Option<(String, String)> = None;
     for (name, kind, dom, pt) in param_domains(f) {
@@ -1557,6 +1586,7 @@ pub const RETIRED_NET_MESSAGE: &str = "`wire`/`registered_wire` in a `#[hardware
 /// mode-specific rules each front-end runs after this, from the same functions.
 pub fn check_front_end_rules(f: &ItemFn, mode: HardwareMode) -> Result<(), Error> {
     check_header(f, mode)?;
+    check_port_domains(f)?;
     check_one_clock(f, mode)?;
     check_no_clock_construction(f)?;
     crate::check_outside_methods(f)?;
@@ -1780,7 +1810,7 @@ mod tests {
     #[test]
     fn sequential_must_be_async() {
         let f: syn::ItemFn = parse_quote! {
-            fn counter(clk: Clock<MainClk>, input: In<u8>, out: Out<u8>) {}
+            fn counter(clk: Clock<MainClk>, input: In<u8, C>, out: Out<u8, C>) {}
         };
         assert!(validate_hardware_fn(&f, &HardwareMode::Sequential).is_err());
     }
@@ -1788,7 +1818,7 @@ mod tests {
     #[test]
     fn combinational_must_not_be_async() {
         let f: syn::ItemFn = parse_quote! {
-            async fn gate(a: In<Logic>, out: Out<Logic>) {}
+            async fn gate(a: In<Logic, C>, out: Out<Logic, C>) {}
         };
         assert!(validate_hardware_fn(&f, &HardwareMode::Combinational).is_err());
     }
@@ -1796,7 +1826,7 @@ mod tests {
     #[test]
     fn rejects_return_value() {
         let f: syn::ItemFn = parse_quote! {
-            async fn counter(clk: Clock<MainClk>, input: In<u8>, out: Out<u8>) -> u8 { loop {} }
+            async fn counter(clk: Clock<MainClk>, input: In<u8, C>, out: Out<u8, C>) -> u8 { loop {} }
         };
         assert!(validate_hardware_fn(&f, &HardwareMode::Sequential).is_err());
     }
@@ -1804,7 +1834,7 @@ mod tests {
     #[test]
     fn rejects_raw_parameter_type() {
         let f: syn::ItemFn = parse_quote! {
-            async fn counter(clk: Clock<MainClk>, input: u8, out: Out<u8>) { loop {} }
+            async fn counter(clk: Clock<MainClk>, input: u8, out: Out<u8, C>) { loop {} }
         };
         assert!(validate_hardware_fn(&f, &HardwareMode::Sequential).is_err());
     }
@@ -1812,7 +1842,7 @@ mod tests {
     #[test]
     fn sequential_requires_clock() {
         let f: syn::ItemFn = parse_quote! {
-            async fn counter(input: In<u8>, out: Out<u8>) { loop {} }
+            async fn counter(input: In<u8, C>, out: Out<u8, C>) { loop {} }
         };
         assert!(validate_hardware_fn(&f, &HardwareMode::Sequential).is_err());
     }
@@ -1820,7 +1850,7 @@ mod tests {
     #[test]
     fn combinational_rejects_clock() {
         let f: syn::ItemFn = parse_quote! {
-            fn gate(clk: Clock<MainClk>, a: In<Logic>, out: Out<Logic>) {}
+            fn gate(clk: Clock<MainClk>, a: In<Logic, C>, out: Out<Logic, C>) {}
         };
         assert!(validate_hardware_fn(&f, &HardwareMode::Combinational).is_err());
     }
@@ -1829,7 +1859,7 @@ mod tests {
     fn allows_missing_in() {
         // A free-running module (no reset/enable) legitimately has no In<T>.
         let f: syn::ItemFn = parse_quote! {
-            async fn counter(clk: Clock<MainClk>, out: Out<u8>) { loop { clk.tick().await; } }
+            async fn counter(clk: Clock<MainClk>, out: Out<u8, C>) { loop { clk.tick().await; } }
         };
         assert!(validate_hardware_fn(&f, &HardwareMode::Sequential).is_ok());
     }
@@ -1837,7 +1867,7 @@ mod tests {
     #[test]
     fn requires_at_least_one_out() {
         let f: syn::ItemFn = parse_quote! {
-            async fn counter(clk: Clock<MainClk>, input: In<u8>) { loop {} }
+            async fn counter(clk: Clock<MainClk>, input: In<u8, C>) { loop {} }
         };
         assert!(validate_hardware_fn(&f, &HardwareMode::Sequential).is_err());
     }
@@ -1845,7 +1875,7 @@ mod tests {
     #[test]
     fn valid_sequential() {
         let f: syn::ItemFn = parse_quote! {
-            async fn counter(clk: Clock<MainClk>, input: In<u8>, out: Out<u8>) {
+            async fn counter(clk: Clock<MainClk>, input: In<u8, C>, out: Out<u8, C>) {
                 loop { clk.tick().await; }
             }
         };
@@ -1855,7 +1885,7 @@ mod tests {
     #[test]
     fn sequential_missing_tick_await() {
         let f: syn::ItemFn = parse_quote! {
-            async fn counter(clk: Clock<MainClk>, input: In<u8>, out: Out<u8>) { loop {} }
+            async fn counter(clk: Clock<MainClk>, input: In<u8, C>, out: Out<u8, C>) { loop {} }
         };
         assert!(validate_hardware_fn(&f, &HardwareMode::Sequential).is_err());
     }
@@ -1864,7 +1894,7 @@ mod tests {
     fn sequential_missing_top_level_loop() {
         // Has a tick but no `loop` — a straight-line sequential body is rejected.
         let f: syn::ItemFn = parse_quote! {
-            async fn counter(clk: Clock<MainClk>, input: In<u8>, out: Out<u8>) {
+            async fn counter(clk: Clock<MainClk>, input: In<u8, C>, out: Out<u8, C>) {
                 clk.tick().await;
             }
         };
@@ -1875,7 +1905,7 @@ mod tests {
     fn sequential_loop_after_lets_is_ok() {
         // Pre-loop `let` declarations before the top-level loop are fine.
         let f: syn::ItemFn = parse_quote! {
-            async fn counter(clk: Clock<MainClk>, input: In<u8>, out: Out<u8>) {
+            async fn counter(clk: Clock<MainClk>, input: In<u8, C>, out: Out<u8, C>) {
                 let mut c = 0u8;
                 loop { out.write(c); clk.tick().await; c = c + 1; }
             }
@@ -1887,7 +1917,7 @@ mod tests {
     fn param_shadowing_rejected() {
         // `let out` shadows the output port `out`.
         let f: syn::ItemFn = parse_quote! {
-            async fn m(clk: Clock<MainClk>, out: Out<u8>) {
+            async fn m(clk: Clock<MainClk>, out: Out<u8, C>) {
                 loop { let out = 0u8; clk.tick().await; }
             }
         };
@@ -1898,7 +1928,7 @@ mod tests {
     fn param_shadowing_in_tuple_pattern_rejected() {
         // Shadowing hidden inside a tuple `let` is still caught.
         let f: syn::ItemFn = parse_quote! {
-            async fn m(clk: Clock<MainClk>, step: In<u8>, out: Out<u8>) {
+            async fn m(clk: Clock<MainClk>, step: In<u8, C>, out: Out<u8, C>) {
                 loop { let (step, _c) = (0u8, 1u8); out.write(step); clk.tick().await; }
             }
         };
@@ -1909,7 +1939,7 @@ mod tests {
     fn non_shadowing_local_is_ok() {
         // A local whose name differs from every port is fine.
         let f: syn::ItemFn = parse_quote! {
-            async fn m(clk: Clock<MainClk>, step: In<u8>, out: Out<u8>) {
+            async fn m(clk: Clock<MainClk>, step: In<u8, C>, out: Out<u8, C>) {
                 loop { let next = step.read(); out.write(next); clk.tick().await; }
             }
         };
@@ -1919,7 +1949,7 @@ mod tests {
     #[test]
     fn multiple_top_level_loops_rejected() {
         let f: syn::ItemFn = parse_quote! {
-            async fn m(clk: Clock<MainClk>, out: Out<u8>) {
+            async fn m(clk: Clock<MainClk>, out: Out<u8, C>) {
                 loop { out.write(0u8); clk.tick().await; }
                 loop { clk.tick().await; }
             }
@@ -1930,7 +1960,7 @@ mod tests {
     #[test]
     fn code_after_top_level_loop_rejected() {
         let f: syn::ItemFn = parse_quote! {
-            async fn m(clk: Clock<MainClk>, out: Out<u8>) {
+            async fn m(clk: Clock<MainClk>, out: Out<u8, C>) {
                 loop { out.write(0u8); clk.tick().await; }
                 out.write(1u8);
             }
@@ -1953,7 +1983,7 @@ mod tests {
         // Combinational modules have no user-written loop (the macro adds it), so
         // the loop check must not apply to them.
         let f: syn::ItemFn = parse_quote! {
-            fn gate(a: In<Logic>, b: In<Logic>, out: Out<Logic>) {
+            fn gate(a: In<Logic, C>, b: In<Logic, C>, out: Out<Logic, C>) {
                 out.write(a.read());
             }
         };
@@ -1963,7 +1993,7 @@ mod tests {
     #[test]
     fn valid_combinational() {
         let f: syn::ItemFn = parse_quote! {
-            fn gate(a: In<Logic>, b: In<Logic>, out: Out<Logic>) {}
+            fn gate(a: In<Logic, C>, b: In<Logic, C>, out: Out<Logic, C>) {}
         };
         assert!(validate_hardware_fn(&f, &HardwareMode::Combinational).is_ok());
     }

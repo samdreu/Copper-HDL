@@ -1,8 +1,8 @@
 error: #[hardware(combinational)] cannot have a Clock parameter (SPEC II.1 S0, R20; I.2.2)
   --> tests/ui/fail/function_typed_mutable_ref_input.rs:10:1
    |
-10 | fn gate(clk: Clock<MainClk>, a: In<u8>, out: Out<u8>) {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+10 | fn gate(clk: Clock<MainClk>, a: In<u8, MainClk>, out: Out<u8, MainClk>) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused import: `Clock`
  --> tests/ui/fail/function_typed_mutable_ref_input.rs:1:19

@@ -1,6 +1,6 @@
 //! Behavioral-equivalence test for a const-generic barrel rotate-right.
 //!
-//! A **combinational** parametric DUT (clockless, `()` domain): transpiled to a
+//! A **combinational** parametric DUT (clockless, generic over its domain): transpiled to a
 //! parametric SV module and Verilated at N=8, N_LOG=3 via `.with_params`, at the
 //! same monomorphization the simulator runs. Exercises const generics, a `for`
 //! loop, LHS bit-assign, dynamic bit-select, and `%`.
@@ -12,6 +12,7 @@ mod common;
 use common::EquivalenceTest;
 use copper_core::port::{wire, In, Out};
 use copper_core::types::Bits;
+use copper_core::ClockDomain;
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -38,12 +39,12 @@ fn rotate_right_sim_matches_transpiled_verilog() {
         .with_params(&[("N", N as i64), ("N_LOG", N_LOG as i64)]);
 
     let mut exec = HardwareExecutor::new();
-    let (data_drv, data_in) = wire::<Bits<N>, ()>(Bits::zero());
-    let (rot_drv, rot_in) = wire::<Bits<N_LOG>, ()>(Bits::zero());
-    let (o_drv, o_obs) = wire::<Bits<N>, ()>(Bits::zero());
+    let (data_drv, data_in) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (rot_drv, rot_in) = wire::<Bits<N_LOG>, MainClk>(Bits::zero());
+    let (o_drv, o_obs) = wire::<Bits<N>, MainClk>(Bits::zero());
     let dh = o_drv.dirty_handle();
     let reads = vec![data_in.wire_id(), rot_in.wire_id()];
-    exec.spawn_wired(rotate_right::<N, N_LOG>(data_in, rot_in, o_drv), vec![dh], reads);
+    exec.spawn_wired(rotate_right::<_, N, N_LOG>(data_in, rot_in, o_drv), vec![dh], reads);
 
     // (data, rot) — a spread of patterns and rotation amounts.
     let cases: &[(u8, usize)] = &[
@@ -73,3 +74,8 @@ fn rotate_right_sim_matches_transpiled_verilog() {
 
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

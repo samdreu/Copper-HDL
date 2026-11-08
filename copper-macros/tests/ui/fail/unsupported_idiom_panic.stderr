@@ -4,11 +4,11 @@ error: `panic!` is not synthesizable in a hardware module — an unreachable/err
 11 |         panic!("cannot happen");
    |         ^^^^^
 
-warning: unused import: `copper_core::Logic`
- --> tests/ui/fail/unsupported_idiom_panic.rs:1:5
+warning: unused imports: `ClockDomain` and `Logic`
+ --> tests/ui/fail/unsupported_idiom_panic.rs:1:19
   |
-1 | use copper_core::Logic;
-  |     ^^^^^^^^^^^^^^^^^^
+1 | use copper_core::{ClockDomain, Logic};
+  |                   ^^^^^^^^^^^  ^^^^^
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 

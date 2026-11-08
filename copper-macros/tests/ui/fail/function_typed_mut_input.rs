@@ -7,7 +7,7 @@ impl ClockDomain for MainClk {}
 
 // Should fail: raw parameter type — all params must be Clock<D>, In<T>, or Out<T>
 #[hardware(sequential)]
-async fn counter(clk: Clock<MainClk>, input: u8, out: RegOut<u8>) {
+async fn counter(clk: Clock<MainClk>, input: u8, out: RegOut<u8, MainClk>) {
     loop {
         out.write(input);
         clk.tick().await;

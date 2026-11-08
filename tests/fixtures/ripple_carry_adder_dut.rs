@@ -5,11 +5,11 @@
 // bit-assign into a `Bits<N>`, a `Logic` accumulator reassigned each iteration,
 // and two outputs (a `Bits<N>` sum and a `Logic` carry-out). Verilated at N=8.
 #[hardware(combinational)]
-pub fn ripple_carry_adder<const N: usize>(
-    a_i: In<Bits<N>, ()>,
-    b_i: In<Bits<N>, ()>,
-    sum_o: Out<Bits<N>, ()>,
-    cout_o: Out<Logic, ()>,
+pub fn ripple_carry_adder<D: ClockDomain, const N: usize>(
+    a_i: In<Bits<N>, D>,
+    b_i: In<Bits<N>, D>,
+    sum_o: Out<Bits<N>, D>,
+    cout_o: Out<Logic, D>,
 ) {
     let a = a_i.read();
     let b = b_i.read();

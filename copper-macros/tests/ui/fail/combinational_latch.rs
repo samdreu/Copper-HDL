@@ -6,7 +6,7 @@ use copper_macros::hardware;
 // path. A some-but-not-all drive of a *combinational* output infers a latch —
 // the shared definite-assignment check, enforced in the macro, rejects it.
 #[hardware(combinational)]
-fn leaky_mux(sel: In<Logic, ()>, a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn leaky_mux<D: ClockDomain>(sel: In<Logic, D>, a: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
     if sel.read() == Logic::One {
         o.write(a.read());
     }

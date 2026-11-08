@@ -2517,8 +2517,8 @@ fn parse_wire_net(init: &ExprType, span: SourceSpan) -> Result<(CHIRType, Option
 }
 
 /// The clock domain a port/clock type text is in, if determinable.
-/// `In<T,D>` / `Out<T,D>` / `RegOut<T,D>` → `D` (the 2nd generic arg; the
-/// unit domain `()` for the one-arg shorthand `In<T>`). `Clock<D>` → `D`.
+/// `In<T,D>` / `Out<T,D>` / `RegOut<T,D>` → `D` (the 2nd generic arg; a port
+/// without one is refused by `check_port_domains`, SPEC I.12.6 (4)). `Clock<D>` → `D`.
 /// Any other type → `None`.
 fn domain_of_type_text(ty_text: &str) -> Option<String> {
     let compact = compact_type(ty_text);
@@ -2576,10 +2576,29 @@ fn lower_structural_inst(
         });
     }
 
+    // A child generic over its domain (`fn m<D: ClockDomain>(a: In<T, D>, …)`) lies
+    // in the domain of its ports (SPEC I.12.4(c), D-22): each instance binds `D` to
+    // the domain of the first net it is wired to, and every other `D` port of that
+    // instance must agree — a different instance may bind another domain.
+    let domain_generics: std::collections::HashSet<&str> = callee
+        .signature
+        .generics
+        .iter()
+        .filter(|g| matches!(g.kind, copper_core::frontend_ir::GenericParamKind::Type))
+        .map(|g| g.name.as_str())
+        .collect();
+    let mut bound_domains: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
     let mut clocks: Vec<(String, String)> = Vec::new();
     let mut port_nets: Vec<(String, String)> = Vec::new();
     for (param, arg) in params.iter().zip(call.args.iter()) {
         let signal = structural_signal_name(arg, call.span)?;
+        let declared_domain = domain_of_type_text(&param.ty.ty_text).map(|d| {
+            match (domain_generics.contains(d.as_str()), signal_domains.get(&signal)) {
+                (true, Some(sig_dom)) => bound_domains.entry(d).or_insert_with(|| sig_dom.clone()).clone(),
+                _ => d,
+            }
+        });
 
         // Call-site CDC / domain-consistency check. The connected signal's clock
         // domain must equal the child port's declared domain. For compiled code
@@ -2591,9 +2610,7 @@ fn lower_structural_inst(
         // rejected here; a `#[hardware(synchronizer)]` child legitimately
         // declares a foreign-domain input, so its net domains still match and it
         // passes — the sanctioned crossing point.
-        if let (Some(port_dom), Some(sig_dom)) =
-            (domain_of_type_text(&param.ty.ty_text), signal_domains.get(&signal))
-        {
+        if let (Some(port_dom), Some(sig_dom)) = (declared_domain, signal_domains.get(&signal)) {
             if &port_dom != sig_dom {
                 return Err(CHIRLowerError::UnsupportedConstruct {
                     description: format!(
@@ -7183,7 +7200,7 @@ mod tests {
     fn infers_logic_read_and_bitand_as_one_bit() {
         // `.read()` on a `Logic` port + bitwise `&` → 1-bit. Previously ambiguous.
         let ty = comb_wire_type(
-            "fn f(a: In<Logic, ()>, b: In<Logic, ()>, o: Out<Logic, ()>) \
+            "fn f(a: In<Logic, C>, b: In<Logic, C>, o: Out<Logic, C>) \
              { let w = a.read() & b.read(); o.write(w); }",
             "w",
         );
@@ -7194,7 +7211,7 @@ mod tests {
     fn infers_read_of_bits_port_width() {
         // `.read()` on a `Bits<16>` port carries its width through a bitwise op.
         let ty = comb_wire_type(
-            "fn f(a: In<Bits<16>, ()>, b: In<Bits<16>, ()>, o: Out<Bits<16>, ()>) \
+            "fn f(a: In<Bits<16>, C>, b: In<Bits<16>, C>, o: Out<Bits<16>, C>) \
              { let w = a.read() | b.read(); o.write(w); }",
             "w",
         );
@@ -7205,7 +7222,7 @@ mod tests {
     fn infers_comparison_as_bool() {
         // A comparison is 1-bit boolean regardless of operand width.
         let ty = comb_wire_type(
-            "fn f(a: In<u8, ()>, b: In<u8, ()>, o: Out<bool, ()>) \
+            "fn f(a: In<u8, C>, b: In<u8, C>, o: Out<bool, C>) \
              { let c = a.read() == b.read(); o.write(c); }",
             "c",
         );
@@ -7235,7 +7252,7 @@ mod tests {
     #[test]
     fn lowers_bit_index_to_single_bit_slice() {
         // `d.read()[3]` → 1-bit slice `Slice { high: 3, low: 3 }`.
-        let fir = make_fir("fn f(d: In<Bits<8>, ()>, o: Out<Logic, ()>) { let w = d.read()[3]; o.write(w); }");
+        let fir = make_fir("fn f(d: In<Bits<8>, C>, o: Out<Logic, C>) { let w = d.read()[3]; o.write(w); }");
         let module = lower_to_chir(&fir, &no_hw(), &empty_registry()).unwrap();
         let body = match &module.body {
             CHIRBody::Combinational(b) => b,
@@ -7253,7 +7270,7 @@ mod tests {
     fn non_constant_bit_index_lowers_to_dynbit() {
         // A variable bit index is now a dynamic single-bit select `d[i]`
         // (CHIRExpr::DynBit), not an error. A constant index still uses Slice.
-        let fir = make_fir("fn f(d: In<Bits<8>, ()>, i: In<u8, ()>, o: Out<Logic, ()>) { let w = d.read()[i.read() as usize]; o.write(w); }");
+        let fir = make_fir("fn f(d: In<Bits<8>, C>, i: In<u8, C>, o: Out<Logic, C>) { let w = d.read()[i.read() as usize]; o.write(w); }");
         let chir = lower_to_chir(&fir, &no_hw(), &empty_registry())
             .expect("dynamic bit index should lower to DynBit");
         let CHIRBody::Combinational(b) = chir.body else { panic!("expected comb body") };
@@ -7283,7 +7300,7 @@ mod tests {
             discriminant: d.map(|s| s.to_string()),
             span: span(),
         };
-        let mut fir = make_fir("fn f(o: Out<Logic, ()>) { o.write(Logic::Zero); }");
+        let mut fir = make_fir("fn f(o: Out<Logic, C>) { o.write(Logic::Zero); }");
         fir.enums = vec![ItemEnum {
             name: "State".to_string(),
             variants: vec![mk("A", Some("0")), mk("B", None), mk("C", Some("5"))],
@@ -7320,7 +7337,7 @@ mod tests {
         // `Bits::from_u16(..)` with no annotation → 16-bit wire (previously the
         // parser mis-extracted `Bits::from_u16` as a type and failed).
         let ty = comb_wire_type(
-            "fn f(o: Out<Bits<16>, ()>) { let w = Bits::from_u16(5); o.write(w); }",
+            "fn f(o: Out<Bits<16>, C>) { let w = Bits::from_u16(5); o.write(w); }",
             "w",
         );
         assert_eq!(ty, CHIRType::UInt { width: Width::Concrete(16) });
@@ -7330,7 +7347,7 @@ mod tests {
     fn lowers_bits_constructor_to_widthed_literal() {
         // The constructor lowers to its argument, retyped to the constructor
         // width — so `Bits::from_u8(5)` becomes an 8-bit literal `5`.
-        let fir = make_fir("fn f(o: Out<Bits<8>, ()>) { let w = Bits::from_u8(5); o.write(w); }");
+        let fir = make_fir("fn f(o: Out<Bits<8>, C>) { let w = Bits::from_u8(5); o.write(w); }");
         let module = lower_to_chir(&fir, &no_hw(), &empty_registry()).unwrap();
         let body = match &module.body {
             CHIRBody::Combinational(b) => b,
@@ -8495,7 +8512,7 @@ mod tests {
     fn inline_end_to_end_lowers_helper_into_combinational_module() {
         // The module calls a file-scope helper; the call must inline and lower.
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           out.write(add_one(a.read())); \
                       }";
         let mut fir = make_fir_hw(module, &no_hw());
@@ -8509,7 +8526,7 @@ mod tests {
     fn inline_unknown_fn_still_errors() {
         // A call to a function that isn't a captured file_fn stays unsupported.
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           out.write(mystery(a.read())); \
                       }";
         let fir = make_fir_hw(module, &no_hw()); // no file_fns injected
@@ -8526,7 +8543,7 @@ mod tests {
     #[test]
     fn fn_registry_keys_assoc_fns_by_qualified_name() {
         let mut fir = make_fir_hw(
-            "#[hardware(combinational)] fn m(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) {}",
+            "#[hardware(combinational)] fn m(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) {}",
             &no_hw(),
         );
         fir.file_impls = capture_impls("impl Opcode { fn from_bits(op: Bits<8>) -> Bits<8> { op } }");
@@ -8540,7 +8557,7 @@ mod tests {
     fn inline_impl_associated_fn_end_to_end() {
         // `Doubler::double(a.read())` inlines its impl-block associated fn.
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           out.write(Doubler::double(a.read())); \
                       }";
         let mut fir = make_fir_hw(module, &no_hw());
@@ -8554,7 +8571,7 @@ mod tests {
     fn instance_methods_are_not_registered_for_inlining() {
         // A `&self` method is not an associated fn; it is not (yet) inlinable.
         let mut fir = make_fir_hw(
-            "#[hardware(combinational)] fn m(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) {}",
+            "#[hardware(combinational)] fn m(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) {}",
             &no_hw(),
         );
         fir.file_impls = capture_impls("impl Foo { fn get(&self) -> Bits<8> { x } }");
@@ -8590,7 +8607,7 @@ mod tests {
         // `let mut acc = Bits::zero()` has no annotation and an ambiguous width;
         // it is inferred from `out.write(acc)` where `out` is `Bits<8>`.
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           let mut acc = Bits::zero(); \
                           acc = a.read(); \
                           out.write(acc); \
@@ -8604,7 +8621,7 @@ mod tests {
         // `tmp`'s width isn't set by a port write; it comes from `r = tmp`, and
         // `r` from `out.write(r)`.
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           let mut r = Bits::zero(); \
                           let mut tmp = Bits::zero(); \
                           tmp = a.read(); \
@@ -8622,7 +8639,7 @@ mod tests {
         // `for i in 0..N { .. }` → CHIRStmt::ForLoop with the param bound and the
         // loop variable in scope for the (non-empty) body.
         let module = "#[hardware(combinational)] \
-                      fn m<const N: usize>(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m<const N: usize>(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           let mut acc: Bits<8> = a.read(); \
                           for i in 0..N { acc = acc + Bits::from_u8(1); } \
                           out.write(acc); \
@@ -8648,7 +8665,7 @@ mod tests {
         // `const { assert!(..) }` is a compile-time check; it lowers to nothing
         // and does not block the module.
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           const { assert!(8 == 8, \"width\") }; \
                           out.write(a.read()); \
                       }";
@@ -8693,7 +8710,7 @@ mod tests {
     fn struct_binding_emits_one_wire_per_field() {
         // `let p = Point { x: a.read(), y: b.read() }` → wires `p_x`, `p_y`.
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, b: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, b: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           let p = Point { x: a.read(), y: b.read() }; \
                           out.write(p.x); \
                       }";
@@ -8708,7 +8725,7 @@ mod tests {
     fn struct_field_access_reads_the_field_wire() {
         // `out.write(p.y)` must drive from wire `p_y`, not a scalar `p`.
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, b: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, b: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           let p = Point { x: a.read(), y: b.read() }; \
                           out.write(p.y); \
                       }";
@@ -8728,7 +8745,7 @@ mod tests {
         // `let p = make(a.read())` where `make` returns a `Point { .. }` literal
         // must still produce per-field wires (inline-through-call).
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           let p = make(a.read()); \
                           out.write(p.x); \
                       }";
@@ -8748,7 +8765,7 @@ mod tests {
         // alu_exec-shaped: `let r = match (tuple) { partial-wildcard arms }` with
         // value arms, one an if-expression, and a trailing `_` over the tuple.
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, b: In<Bits<8>, ()>, sel: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, b: In<Bits<8>, C>, sel: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           let r: Bits<8> = match (sel.read().as_usize(), a.read().as_usize()) { \
                               (0, 0) => a.read(), \
                               (1, _) => b.read(), \
@@ -8769,7 +8786,7 @@ mod tests {
         // so this exercises the arity fix directly: `_` must not be rejected on an
         // element-count check, and the value lowers to a `Mux` chain.
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, b: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, b: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           let r: Bits<8> = match (a.read().as_usize(), b.read().as_usize()) { \
                               (0, _) => a.read(), \
                               _      => b.read(), \
@@ -8791,7 +8808,7 @@ mod tests {
     fn struct_field_type_falls_back_to_enum_width() {
         // A field typed as an enum resolves to the enum's encoding width.
         let module = "#[hardware(combinational)] \
-                      fn m(a: In<Bits<8>, ()>, out: Out<Bits<8>, ()>) { \
+                      fn m(a: In<Bits<8>, C>, out: Out<Bits<8>, C>) { \
                           let p = Wrap { inner: a.read() }; \
                           out.write(p.inner); \
                       }";

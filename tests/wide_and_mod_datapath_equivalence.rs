@@ -11,6 +11,7 @@ mod common;
 use common::{EquivalenceTest, Rng};
 use copper_core::port::{wire, In, Out};
 use copper_core::types::Bits;
+use copper_core::ClockDomain;
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -25,14 +26,14 @@ fn run_wide_alu<const N: usize>(seed: u64, mask: u128) {
     let mut eq = EquivalenceTest::new("wide_alu", WIDE_SRC).with_params(&[("N", N as i64)]);
 
     let mut exec = HardwareExecutor::new();
-    let (a_drv, a_in) = wire::<Bits<N>, ()>(Bits::zero());
-    let (b_drv, b_in) = wire::<Bits<N>, ()>(Bits::zero());
-    let (sum_o, sum_obs) = wire::<Bits<N>, ()>(Bits::zero());
-    let (prod_o, prod_obs) = wire::<Bits<N>, ()>(Bits::zero());
-    let (diff_o, diff_obs) = wire::<Bits<N>, ()>(Bits::zero());
+    let (a_drv, a_in) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (b_drv, b_in) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (sum_o, sum_obs) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (prod_o, prod_obs) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (diff_o, diff_obs) = wire::<Bits<N>, MainClk>(Bits::zero());
     let dhs = vec![sum_o.dirty_handle(), prod_o.dirty_handle(), diff_o.dirty_handle()];
     let reads = vec![a_in.wire_id(), b_in.wire_id()];
-    exec.spawn_wired(wide_alu::<N>(a_in, b_in, sum_o, prod_o, diff_o), dhs, reads);
+    exec.spawn_wired(wide_alu::<_, N>(a_in, b_in, sum_o, prod_o, diff_o), dhs, reads);
 
     // Values are all < 2^N ≤ 2^64, so they round-trip through `usize`
     // (`from_u128` requires N ≥ 128; `from_usize` covers N ≤ 64).
@@ -79,9 +80,9 @@ fn mod8_matches_transpiled_verilog() {
     let mut eq = EquivalenceTest::new("mod8", MOD_SRC);
 
     let mut exec = HardwareExecutor::new();
-    let (a_drv, a_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (b_drv, b_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (o_out, o_obs) = wire::<Bits<8>, ()>(Bits::zero());
+    let (a_drv, a_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (b_drv, b_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (o_out, o_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
     let dh = o_out.dirty_handle();
     let reads = vec![a_in.wire_id(), b_in.wire_id()];
     exec.spawn_wired(mod8(a_in, b_in, o_out), vec![dh], reads);
@@ -103,3 +104,8 @@ fn mod8_matches_transpiled_verilog() {
     }
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

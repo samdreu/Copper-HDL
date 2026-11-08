@@ -4,7 +4,7 @@
 //! own sim ≡ BaseJump check.
 //!
 //! The first module with an **array-typed port** to transpile at all. Its
-//! `data_i: In<[Bits<WIDTH>; ELS], ()>` emits as a packed 2-D vector,
+//! `data_i: In<[Bits<WIDTH>; ELS], MainClk>` emits as a packed 2-D vector,
 //! `[ELS-1:0][WIDTH-1:0]` — the same declaration BaseJump's own
 //! `bsg_mux_one_hot.sv` uses. See `design_docs/ARRAY_PORT_ABI.md`.
 //!
@@ -28,9 +28,9 @@ fn bsg_mux_one_hot_sim_matches_transpiled_verilog() {
     let mut eq = EquivalenceTest::new("bsg_mux_one_hot", SRC);
 
     let mut exec = HardwareExecutor::new();
-    let (data_drv, data_in) = wire::<[Bits<WIDTH>; ELS], ()>([Bits::zero(); ELS]);
-    let (sel_drv, sel_in) = wire::<Bits<ELS>, ()>(Bits::zero());
-    let (out_o, out_obs) = wire::<Bits<WIDTH>, ()>(Bits::zero());
+    let (data_drv, data_in) = wire::<[Bits<WIDTH>; ELS], MainClk>([Bits::zero(); ELS]);
+    let (sel_drv, sel_in) = wire::<Bits<ELS>, MainClk>(Bits::zero());
+    let (out_o, out_obs) = wire::<Bits<WIDTH>, MainClk>(Bits::zero());
     let dh = out_o.dirty_handle();
     let reads = vec![data_in.wire_id(), sel_in.wire_id()];
     exec.spawn_wired(bsg_mux_one_hot(data_in, sel_in, out_o), vec![dh], reads);
@@ -71,3 +71,8 @@ fn bsg_mux_one_hot_sim_matches_transpiled_verilog() {
 
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

@@ -11,12 +11,12 @@
 // (`[Logic::Zero; 16]`), indexed writes with computed indices into that array,
 // and the identity pack back to `Bits<16>`.
 #[hardware(combinational)]
-pub fn logic_array_pack(
-    n0_i: In<Bits<4>, ()>,
-    n1_i: In<Bits<4>, ()>,
-    n2_i: In<Bits<4>, ()>,
-    n3_i: In<Bits<4>, ()>,
-    word_o: Out<Bits<16>, ()>,
+pub fn logic_array_pack<D: ClockDomain>(
+    n0_i: In<Bits<4>, D>,
+    n1_i: In<Bits<4>, D>,
+    n2_i: In<Bits<4>, D>,
+    n3_i: In<Bits<4>, D>,
+    word_o: Out<Bits<16>, D>,
 ) {
     let n0 = n0_i.read();
     let n1 = n1_i.read();

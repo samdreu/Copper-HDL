@@ -84,7 +84,7 @@ fn the_while_and_loop_spellings_emit_identical_verilog() {
 fn a_combinational_while_is_refused_and_points_at_for() {
     let src = r#"
 #[hardware(combinational)]
-fn m(i: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn m(i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     let g = i.read();
     let mut b = [Logic::Zero; 8];
     let mut k: usize = 7;

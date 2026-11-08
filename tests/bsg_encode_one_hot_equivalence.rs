@@ -30,9 +30,9 @@ fn bsg_encode_one_hot_sim_matches_transpiled_verilog() {
     let mut eq = EquivalenceTest::new("bsg_encode_one_hot", SRC);
 
     let mut exec = HardwareExecutor::new();
-    let (i_drv, i_in) = wire::<Bits<WIDTH>, ()>(Bits::zero());
-    let (addr_o, addr_obs) = wire::<Bits<ADDR_W>, ()>(Bits::zero());
-    let (v_o, v_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (i_drv, i_in) = wire::<Bits<WIDTH>, MainClk>(Bits::zero());
+    let (addr_o, addr_obs) = wire::<Bits<ADDR_W>, MainClk>(Bits::zero());
+    let (v_o, v_obs) = wire::<Logic, MainClk>(Logic::Zero);
     let dirties = vec![addr_o.dirty_handle(), v_o.dirty_handle()];
     exec.spawn_wired(bsg_encode_one_hot(i_in.clone(), addr_o, v_o), dirties, vec![i_in.wire_id()]);
 
@@ -63,3 +63,8 @@ fn bsg_encode_one_hot_sim_matches_transpiled_verilog() {
 
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

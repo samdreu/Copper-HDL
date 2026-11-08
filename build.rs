@@ -575,6 +575,9 @@ fn wrapper_name(manifest: &Path, path: &Path) -> String {
 }
 
 /// One `#[hardware]` module, as much of it as generation needs.
+/// The concrete domain a case names for a module generic over its domain.
+const SWEEP_DOMAIN: &str = "SweepDomain";
+
 struct Module {
     name: String,
     /// The mode word of `#[hardware(mode[, flags])]`, read off the attribute's first
@@ -584,6 +587,11 @@ struct Module {
     /// A generic module emits a PARAMETRIC SystemVerilog module, so it can be swept —
     /// at the widths `PARAMS` records for it.
     generics: Vec<String>,
+    /// Every generic parameter in signature order: `Some(name)` a const generic (its
+    /// `PARAMS` value), `None` a type parameter — a clock domain the module is generic
+    /// over (SPEC I.12.4(c)), which the turbofish leaves to inference (`_`) from the
+    /// concrete domain its wires name.
+    generic_slots: Vec<Option<String>>,
     ports: Vec<Port>,
     /// The body binds a `Memory` (SPEC I.10.1(a)) — counted for G-F's memory leg.
     binds_memory: bool,
@@ -626,13 +634,45 @@ impl Module {
             },
             _ => String::new(),
         };
+        // A domain the module is generic over (`fn m<D: ClockDomain>(a: In<T, D>, …)`,
+        // SPEC I.12.4(c)): the module lies in the domain of its ports, so the case
+        // names one concrete domain for all of them — `SweepDomain`, declared by the
+        // wrapper like any domain the file does not declare. The domain is phantom, so
+        // which one is chosen changes nothing the sweep compares.
+        let domain_generics: BTreeSet<String> = f
+            .sig
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(t) => Some(t.ident.to_string()),
+                _ => None,
+            })
+            .collect();
         let mut ports = Vec::new();
         for arg in &f.sig.inputs {
             let syn::FnArg::Typed(pt) = arg else { return None };
             let name = pt.pat.to_token_stream().to_string();
-            let (kind, ty, domain) = classify(&pt.ty)?;
+            let (kind, mut ty, mut domain) = classify(&pt.ty)?;
+            if domain_generics.contains(&domain) {
+                if kind == Kind::Clock {
+                    ty = SWEEP_DOMAIN.to_string();
+                }
+                domain = SWEEP_DOMAIN.to_string();
+            }
             ports.push(Port { name, ty, domain, kind });
         }
+        let generic_slots = f
+            .sig
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Const(c) => Some(Some(c.ident.to_string())),
+                syn::GenericParam::Type(_) => Some(None),
+                syn::GenericParam::Lifetime(_) => None,
+            })
+            .collect();
         let generics = f
             .sig
             .generics
@@ -644,7 +684,7 @@ impl Module {
             })
             .collect();
         let binds_memory = f.block.to_token_stream().to_string().contains("Memory ::");
-        Some(Module { name: f.sig.ident.to_string(), mode, generics, ports, binds_memory })
+        Some(Module { name: f.sig.ident.to_string(), mode, generics, generic_slots, ports, binds_memory })
     }
 
     fn clock(&self) -> Option<&Port> {
@@ -894,7 +934,7 @@ fn emit_file(
         .iter()
         .flat_map(|m| m.ports.iter())
         .map(|p| p.domain.as_str())
-        .filter(|d| *d != "()" && !declared_domains.contains(*d))
+        .filter(|d| !declared_domains.contains(*d))
         .collect();
 
     let _ = writeln!(code, "#[allow(unused_imports, dead_code)]");
@@ -1175,7 +1215,11 @@ fn emit_test(code: &mut String, m: &Module, body: bool, leg: Leg, wrapper: &str)
     let turbofish = match params {
         Some(_) if !m.generics.is_empty() => format!(
             "::<{}>",
-            m.generics.iter().map(|g| format!("P_{g}")).collect::<Vec<_>>().join(", ")
+            m.generic_slots
+                .iter()
+                .map(|g| g.as_ref().map_or_else(|| "_".to_string(), |g| format!("P_{g}")))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         _ => String::new(),
     };

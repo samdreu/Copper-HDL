@@ -9,6 +9,7 @@
 // from bit 0 upward, plus the all-zero case. Here width_p=8 (addr_o is 3 bits).
 // Golden: addr_o == index of the set bit, v_o == (input != 0).
 
+use copper_core::ClockDomain;
 use copper_core::port::{wire, In, Out};
 use copper_core::{Bits, Logic};
 use copper_macros::hardware;
@@ -18,10 +19,10 @@ const WIDTH: usize = 8;
 const ADDR_W: usize = 3; // $clog2(8)
 
 #[hardware(combinational)]
-fn bsg_encode_one_hot(
-    i: In<Bits<WIDTH>, ()>,
-    addr_o: Out<Bits<ADDR_W>, ()>,
-    v_o: Out<Logic, ()>,
+fn bsg_encode_one_hot<D: ClockDomain>(
+    i: In<Bits<WIDTH>, D>,
+    addr_o: Out<Bits<ADDR_W>, D>,
+    v_o: Out<Logic, D>,
 ) {
     let inp = i.read();
     // `Bits<ADDR_W>`, not a bare `usize`: a `usize` local is a 32-bit signal, so
@@ -43,11 +44,14 @@ fn bsg_encode_one_hot(
 // harness without pulling in a second `main` (same structure as sipo_block).
 #[cfg(not(test))]
 fn main() {
+    // The testbench picks the domain; the module is generic over it (SPEC I.12.4(c)).
+    struct MainClk;
+    impl ClockDomain for MainClk {}
     let mut exec = HardwareExecutor::new();
 
-    let (i_drv, i_in) = wire::<Bits<WIDTH>, ()>(Bits::zero());
-    let (addr_drv, addr_obs) = wire::<Bits<ADDR_W>, ()>(Bits::zero());
-    let (v_drv, v_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (i_drv, i_in) = wire::<Bits<WIDTH>, MainClk>(Bits::zero());
+    let (addr_drv, addr_obs) = wire::<Bits<ADDR_W>, MainClk>(Bits::zero());
+    let (v_drv, v_obs) = wire::<Logic, MainClk>(Logic::Zero);
     let dh_a = addr_drv.dirty_handle();
     let dh_v = v_drv.dirty_handle();
     let reads = vec![i_in.wire_id()];

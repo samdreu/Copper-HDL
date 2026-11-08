@@ -15,12 +15,12 @@ use copper_sim::*;
 use copper_macros::hardware;
 
 #[hardware(combinational)]
-fn full_adder(
-    a_i: In<Logic, ()>,
-    b_i: In<Logic, ()>,
-    cin_i: In<Logic, ()>,
-    sum_o: Out<Logic, ()>,
-    cout_o: Out<Logic, ()>,
+fn full_adder<D: ClockDomain>(
+    a_i: In<Logic, D>,
+    b_i: In<Logic, D>,
+    cin_i: In<Logic, D>,
+    sum_o: Out<Logic, D>,
+    cout_o: Out<Logic, D>,
 ) {
     let a = a_i.read();
     let b = b_i.read();
@@ -34,13 +34,16 @@ fn logic(bit: u8) -> Logic {
 }
 
 fn main() {
+    // The testbench picks the domain; the module is generic over it (SPEC I.12.4(c)).
+    struct MainClk;
+    impl ClockDomain for MainClk {}
     let mut executor = HardwareExecutor::new();
 
-    let (a_drv, a_in) = wire::<Logic, ()>(Logic::Zero);
-    let (b_drv, b_in) = wire::<Logic, ()>(Logic::Zero);
-    let (cin_drv, cin_in) = wire::<Logic, ()>(Logic::Zero);
-    let (sum_out, sum_obs) = wire::<Logic, ()>(Logic::Zero);
-    let (cout_out, cout_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (a_drv, a_in) = wire::<Logic, MainClk>(Logic::Zero);
+    let (b_drv, b_in) = wire::<Logic, MainClk>(Logic::Zero);
+    let (cin_drv, cin_in) = wire::<Logic, MainClk>(Logic::Zero);
+    let (sum_out, sum_obs) = wire::<Logic, MainClk>(Logic::Zero);
+    let (cout_out, cout_obs) = wire::<Logic, MainClk>(Logic::Zero);
 
     let dhs = vec![sum_out.dirty_handle(), cout_out.dirty_handle()];
     let reads = vec![a_in.wire_id(), b_in.wire_id(), cin_in.wire_id()];

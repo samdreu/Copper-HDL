@@ -5,12 +5,12 @@
 // `*` multiply operator, `-` (two's-complement subtract), and output fan-in (three
 // `Out`s from shared reads).
 #[hardware(combinational)]
-fn datapath16(
-    a: In<Bits<16>, ()>,
-    b: In<Bits<16>, ()>,
-    sum: Out<Bits<16>, ()>,
-    prod: Out<Bits<16>, ()>,
-    diff: Out<Bits<16>, ()>,
+fn datapath16<D: ClockDomain>(
+    a: In<Bits<16>, D>,
+    b: In<Bits<16>, D>,
+    sum: Out<Bits<16>, D>,
+    prod: Out<Bits<16>, D>,
+    diff: Out<Bits<16>, D>,
 ) {
     let av = a.read();
     let bv = b.read();

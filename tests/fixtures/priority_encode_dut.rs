@@ -16,10 +16,10 @@ const fn safe_clog2(n: usize) -> usize {
 }
 
 #[hardware(combinational)]
-pub fn priority_encode<const N: usize, const N_LOG: usize>(
-    inputs: In<Bits<N>, ()>,
-    result: Out<Bits<N_LOG>, ()>,
-    valid: Out<Logic, ()>,
+pub fn priority_encode<D: ClockDomain, const N: usize, const N_LOG: usize>(
+    inputs: In<Bits<N>, D>,
+    result: Out<Bits<N_LOG>, D>,
+    valid: Out<Logic, D>,
 ) {
     const { assert!(N_LOG == safe_clog2(N), "N_LOG must equal safe_clog2(N)") };
 

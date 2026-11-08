@@ -8,6 +8,7 @@
 //! See `tests/common/mod.rs` for the shared harness and how to read a failure.
 
 mod common;
+use copper_core::ClockDomain;
 
 use common::EquivalenceTest;
 use copper_core::port::{wire, In, Out};
@@ -23,9 +24,9 @@ fn one_bit_comparator_sim_matches_transpiled_verilog() {
     let mut eq = EquivalenceTest::new("one_bit_comparator", DUT_SRC);
 
     let mut exec = HardwareExecutor::new();
-    let (i0_drv, i0_in) = wire::<Logic, ()>(Logic::Zero);
-    let (i1_drv, i1_in) = wire::<Logic, ()>(Logic::Zero);
-    let (eq_out, eq_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (i0_drv, i0_in) = wire::<Logic, MainClk>(Logic::Zero);
+    let (i1_drv, i1_in) = wire::<Logic, MainClk>(Logic::Zero);
+    let (eq_out, eq_obs) = wire::<Logic, MainClk>(Logic::Zero);
     let dh = eq_out.dirty_handle();
     let reads = vec![i0_in.wire_id(), i1_in.wire_id()];
     exec.spawn_wired(one_bit_comparator(i0_in, i1_in, eq_out), vec![dh], reads);
@@ -51,3 +52,8 @@ fn one_bit_comparator_sim_matches_transpiled_verilog() {
 
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

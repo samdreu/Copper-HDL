@@ -18,10 +18,10 @@ const fn safe_clog2(n: usize) -> usize {
 }
 
 #[hardware(combinational)]
-fn priority_encode<const N: usize, const N_LOG: usize>(
-    inputs: In<Bits<N>, ()>,
-    result: Out<Bits<N_LOG>, ()>,
-    valid: Out<Logic, ()>,
+fn priority_encode<D: ClockDomain, const N: usize, const N_LOG: usize>(
+    inputs: In<Bits<N>, D>,
+    result: Out<Bits<N_LOG>, D>,
+    valid: Out<Logic, D>,
 ) {
     const { assert!(N_LOG == safe_clog2(N), "N_LOG must equal safe_clog2(N)") };
 
@@ -41,18 +41,21 @@ fn priority_encode<const N: usize, const N_LOG: usize>(
 }
 
 fn main() {
+    // The testbench picks the domain; the module is generic over it (SPEC I.12.4(c)).
+    struct MainClk;
+    impl ClockDomain for MainClk {}
     const N: usize = 8;
     const N_LOG: usize = safe_clog2(N); // 3
 
     let mut exec = HardwareExecutor::new();
 
-    let (in_drv, in_wire) = wire::<Bits<N>, ()>(Bits::zero());
-    let (result_out, result_obs) = wire::<Bits<N_LOG>, ()>(Bits::zero());
-    let (valid_out, valid_obs) = wire::<Logic, ()>(Logic::Zero);
+    let (in_drv, in_wire) = wire::<Bits<N>, MainClk>(Bits::zero());
+    let (result_out, result_obs) = wire::<Bits<N_LOG>, MainClk>(Bits::zero());
+    let (valid_out, valid_obs) = wire::<Logic, MainClk>(Logic::Zero);
 
     let dhs = vec![result_out.dirty_handle(), valid_out.dirty_handle()];
     let reads = vec![in_wire.wire_id()];
-    exec.spawn_wired(priority_encode::<N, N_LOG>(in_wire, result_out, valid_out), dhs, reads);
+    exec.spawn_wired(priority_encode::<_, N, N_LOG>(in_wire, result_out, valid_out), dhs, reads);
 
     let mut test = HardwareTest::new("priority_encode")
         .with_verilog("examples/combinational/sv/priority_encode.sv")

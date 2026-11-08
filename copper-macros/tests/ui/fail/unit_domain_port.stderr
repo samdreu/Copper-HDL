@@ -1,0 +1,19 @@
+error: this parameter names no clock domain: every `Clock<D>`, `In<T, D>`, `Out<T, D>`, `RegOut<T, D>` and `Memory<…, D, …>` names a `D: ClockDomain`, and `()` is not one — a combinational module that serves any domain is generic over it, `fn m<D: ClockDomain>(a: In<T, D>, …)` (SPEC I.12.6 (4), I.12.4(c); D-17 A1)
+ --> tests/ui/fail/unit_domain_port.rs:9:11
+  |
+9 | fn inv(a: In<Logic, ()>, o: Out<Logic, ()>) {
+  |           ^^^^^^^^^^^^^
+
+warning: unused import: `copper_core::Logic`
+ --> tests/ui/fail/unit_domain_port.rs:1:5
+  |
+1 | use copper_core::Logic;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `Out`
+ --> tests/ui/fail/unit_domain_port.rs:2:25
+  |
+2 | use copper_core::port::{In, Out};
+  |                         ^^  ^^^

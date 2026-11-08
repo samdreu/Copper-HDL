@@ -7,7 +7,7 @@ impl ClockDomain for MainClk {}
 
 // Should fail: combinational cannot have a Clock parameter
 #[hardware(combinational)]
-fn gate(clk: Clock<MainClk>, a: In<u8>, out: Out<u8>) {
+fn gate(clk: Clock<MainClk>, a: In<u8, MainClk>, out: Out<u8, MainClk>) {
     out.write(a.read());
 }
 

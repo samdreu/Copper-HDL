@@ -31,12 +31,12 @@ fn mux_sim_matches_transpiled_verilog() {
         .with_params(&[("WIDTH_P", W as i64), ("ELS_P", E as i64), ("LG_ELS_LP", LG as i64)]);
 
     let mut exec = HardwareExecutor::new();
-    let (data_drv, data_in) = wire::<[Bits<W>; E], ()>([Bits::zero(); E]);
-    let (sel_drv, sel_in) = wire::<Bits<LG>, ()>(Bits::zero());
-    let (out_o, out_obs) = wire::<Bits<W>, ()>(Bits::zero());
+    let (data_drv, data_in) = wire::<[Bits<W>; E], MainClk>([Bits::zero(); E]);
+    let (sel_drv, sel_in) = wire::<Bits<LG>, MainClk>(Bits::zero());
+    let (out_o, out_obs) = wire::<Bits<W>, MainClk>(Bits::zero());
     let dh = out_o.dirty_handle();
     let reads = vec![data_in.wire_id(), sel_in.wire_id()];
-    exec.spawn_wired(mux::<W, E, LG>(data_in, sel_in, out_o), vec![dh], reads);
+    exec.spawn_wired(mux::<_, W, E, LG>(data_in, sel_in, out_o), vec![dh], reads);
 
     // Distinct values so any selection error is visible rather than cancelling.
     let data: [Bits<W>; E] = [
@@ -66,3 +66,8 @@ fn mux_sim_matches_transpiled_verilog() {
 
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

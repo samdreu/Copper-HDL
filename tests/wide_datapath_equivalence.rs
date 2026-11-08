@@ -12,6 +12,7 @@ mod common;
 use common::{EquivalenceTest, Rng};
 use copper_core::port::{wire, In, Out};
 use copper_core::types::Bits;
+use copper_core::ClockDomain;
 use copper_macros::hardware;
 use copper_sim::HardwareExecutor;
 
@@ -23,11 +24,11 @@ fn datapath16_sim_matches_transpiled_verilog() {
     let mut eq = EquivalenceTest::new("datapath16", DUT_SRC);
 
     let mut exec = HardwareExecutor::new();
-    let (a_drv, a_in) = wire::<Bits<16>, ()>(Bits::zero());
-    let (b_drv, b_in) = wire::<Bits<16>, ()>(Bits::zero());
-    let (sum_o, sum_obs) = wire::<Bits<16>, ()>(Bits::zero());
-    let (prod_o, prod_obs) = wire::<Bits<16>, ()>(Bits::zero());
-    let (diff_o, diff_obs) = wire::<Bits<16>, ()>(Bits::zero());
+    let (a_drv, a_in) = wire::<Bits<16>, MainClk>(Bits::zero());
+    let (b_drv, b_in) = wire::<Bits<16>, MainClk>(Bits::zero());
+    let (sum_o, sum_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
+    let (prod_o, prod_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
+    let (diff_o, diff_obs) = wire::<Bits<16>, MainClk>(Bits::zero());
     let dhs = vec![sum_o.dirty_handle(), prod_o.dirty_handle(), diff_o.dirty_handle()];
     let reads = vec![a_in.wire_id(), b_in.wire_id()];
     exec.spawn_wired(datapath16(a_in, b_in, sum_o, prod_o, diff_o), dhs, reads);
@@ -64,3 +65,8 @@ fn datapath16_sim_matches_transpiled_verilog() {
     }
     eq.finish();
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

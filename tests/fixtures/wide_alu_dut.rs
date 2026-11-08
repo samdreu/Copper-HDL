@@ -5,12 +5,12 @@
 // N = 32 and N = 64 (via `.with_params`) to exercise the wide-datapath boundary
 // past 16 bits, including a full-width `*` multiply.
 #[hardware(combinational)]
-fn wide_alu<const N: usize>(
-    a: In<Bits<N>, ()>,
-    b: In<Bits<N>, ()>,
-    sum: Out<Bits<N>, ()>,
-    prod: Out<Bits<N>, ()>,
-    diff: Out<Bits<N>, ()>,
+fn wide_alu<D: ClockDomain, const N: usize>(
+    a: In<Bits<N>, D>,
+    b: In<Bits<N>, D>,
+    sum: Out<Bits<N>, D>,
+    prod: Out<Bits<N>, D>,
+    diff: Out<Bits<N>, D>,
 ) {
     let av = a.read();
     let bv = b.read();

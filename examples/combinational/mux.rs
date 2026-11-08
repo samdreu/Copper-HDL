@@ -19,13 +19,14 @@ const fn safe_clog2(n: usize) -> usize {
 
 #[hardware(combinational)]
 fn mux<
+    D: ClockDomain,
     const WIDTH_P: usize,
     const ELS_P: usize,
     const LG_ELS_LP: usize,
 > (
-    data_i: In<[Bits<WIDTH_P>; ELS_P], ()>,
-    sel_i: In<Bits<LG_ELS_LP>, ()>,
-    data_o: Out<Bits<WIDTH_P>, ()>,
+    data_i: In<[Bits<WIDTH_P>; ELS_P], D>,
+    sel_i: In<Bits<LG_ELS_LP>, D>,
+    data_o: Out<Bits<WIDTH_P>, D>,
 ) {
     const { assert!(LG_ELS_LP == safe_clog2(ELS_P), "LG_ELS_LP must equal safe_clog2(ELS_P)") };
 
@@ -40,21 +41,24 @@ fn mux<
 // harness without pulling in a second `main` (same structure as sipo_block).
 #[cfg(not(test))]
 fn main() {
+    // The testbench picks the domain; the module is generic over it (SPEC I.12.4(c)).
+    struct MainClk;
+    impl ClockDomain for MainClk {}
     const WIDTH: usize = 8;
     const ELS: usize = 4;
     const LG_ELS: usize = safe_clog2(ELS); // 2
 
     let mut executor = HardwareExecutor::new();
 
-    let (data_drv, data_in)  = wire::<[Bits<WIDTH>; ELS], ()>([Bits::zero(); ELS]);
-    let (sel_drv,  sel_in)   = wire::<Bits<LG_ELS>, ()>(Bits::zero());
-    let (data_out, data_obs) = wire::<Bits<WIDTH>, ()>(Bits::zero());
+    let (data_drv, data_in)  = wire::<[Bits<WIDTH>; ELS], MainClk>([Bits::zero(); ELS]);
+    let (sel_drv,  sel_in)   = wire::<Bits<LG_ELS>, MainClk>(Bits::zero());
+    let (data_out, data_obs) = wire::<Bits<WIDTH>, MainClk>(Bits::zero());
 
     let dh = data_out.dirty_handle();
 
     let reads = vec![data_in.wire_id(), sel_in.wire_id()];
     executor.spawn_wired(
-        mux::<WIDTH, ELS, LG_ELS>(data_in, sel_in, data_out),
+        mux::<_, WIDTH, ELS, LG_ELS>(data_in, sel_in, data_out),
         vec![dh],
         reads,
     );

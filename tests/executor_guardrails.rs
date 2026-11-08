@@ -9,16 +9,17 @@
 
 use copper_core::port::{wire, In, Out};
 use copper_core::types::Bits;
+use copper_core::ClockDomain;
 use copper_macros::hardware;
 use copper_sim::{HardwareExecutor, HardwareModule};
 
 #[hardware(combinational)]
-fn add_one(a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn add_one<D: ClockDomain>(a: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
     o.write(a.read() + Bits::from_lit::<1>());
 }
 
 #[hardware(combinational)]
-fn passthrough(a: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn passthrough<D: ClockDomain>(a: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
     o.write(a.read());
 }
 
@@ -54,9 +55,9 @@ fn module_whose_future_returns_panics() {
 fn untracked_producer_output_settle_behavior_is_pinned() {
     let mut exec = HardwareExecutor::new();
 
-    let (in_drv, in_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (w_out, w_in) = wire::<Bits<8>, ()>(Bits::zero());
-    let (out_out, out_obs) = wire::<Bits<8>, ()>(Bits::zero());
+    let (in_drv, in_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (w_out, w_in) = wire::<Bits<8>, MainClk>(Bits::zero());
+    let (out_out, out_obs) = wire::<Bits<8>, MainClk>(Bits::zero());
 
     let in_id = in_in.wire_id();
     let w_read_id = w_in.wire_id();
@@ -88,3 +89,8 @@ fn untracked_producer_output_settle_behavior_is_pinned() {
     exec.poll_tasks();
     assert_eq!(out_obs.read().as_u8(), 6, "second settle propagates the untracked producer's output");
 }
+
+/// The testbench's domain: the combinational modules here are generic over theirs
+/// (SPEC I.12.4(c)); `()` is not a clock domain (I.12.6 (4)).
+struct MainClk;
+impl copper_core::ClockDomain for MainClk {}

@@ -8,9 +8,12 @@
 // adjacent .stderr.
 
 use copper_core::port::wire;
-use copper_core::Logic;
+use copper_core::{ClockDomain, Logic};
+
+struct Dom;
+impl ClockDomain for Dom {}
 
 fn main() {
-    let (out, _in) = wire::<Logic, ()>(Logic::Zero);
-    let _second_driver = out.clone(); // error: `Out<Logic>` is not `Clone`
+    let (out, _in) = wire::<Logic, Dom>(Logic::Zero);
+    let _second_driver = out.clone(); // error: `Out<Logic, Dom>` is not `Clone`
 }

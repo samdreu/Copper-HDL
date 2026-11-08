@@ -30,7 +30,7 @@ fn a_const_used_in_a_port_width_and_a_loop_bound_becomes_a_localparam() {
 const WIDTH: usize = 8;
 
 #[hardware(combinational)]
-fn enc(i: In<Bits<WIDTH>, ()>, v_o: Out<Logic, ()>) {
+fn enc(i: In<Bits<WIDTH>, C>, v_o: Out<Logic, C>) {
     let mut valid = Logic::Zero;
     for k in 0..WIDTH {
         if i.read()[k] == Logic::One {
@@ -61,7 +61,7 @@ fn a_const_is_not_emitted_as_an_overridable_parameter() {
 const WIDTH: usize = 4;
 
 #[hardware(combinational)]
-fn passthru(i: In<Bits<WIDTH>, ()>, o: Out<Bits<WIDTH>, ()>) {
+fn passthru(i: In<Bits<WIDTH>, C>, o: Out<Bits<WIDTH>, C>) {
     o.write(i.read());
 }
 "#;
@@ -84,7 +84,7 @@ const WIDTH: usize = 8;
 const CYCLES: usize = 200;
 
 #[hardware(combinational)]
-fn passthru(i: In<Bits<WIDTH>, ()>, o: Out<Bits<WIDTH>, ()>) {
+fn passthru(i: In<Bits<WIDTH>, C>, o: Out<Bits<WIDTH>, C>) {
     o.write(i.read());
 }
 "#;
@@ -106,7 +106,7 @@ const PTR_W: usize = 3;
 const MOD: usize = 1 << PTR_W;
 
 #[hardware(combinational)]
-fn wrap(i: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn wrap(i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     o.write(i.read() % Bits::from_usize(MOD));
 }
 "#;
@@ -136,7 +136,7 @@ const fn clog2(n: usize) -> usize { if n <= 1 { 0 } else { 1 + clog2(n / 2) } }
 const ADDR_W: usize = clog2(8);
 
 #[hardware(combinational)]
-fn enc(i: In<Bits<8>, ()>, o: Out<Bits<8>, ()>) {
+fn enc(i: In<Bits<8>, C>, o: Out<Bits<8>, C>) {
     o.write(i.read() + Bits::from_usize(ADDR_W));
 }
 "#;
@@ -156,7 +156,7 @@ fn a_non_integer_const_is_refused_with_its_own_reason() {
 const ENABLED: bool = true;
 
 #[hardware(combinational)]
-fn g(i: In<Logic, ()>, o: Out<Logic, ()>) {
+fn g(i: In<Logic, C>, o: Out<Logic, C>) {
     o.write(if ENABLED { i.read() } else { Logic::Zero });
 }
 "#;
@@ -178,7 +178,7 @@ const WIDTH: usize = 8;
 const WIDTH_P: usize = 4;
 
 #[hardware(combinational)]
-fn passthru(i: In<Bits<WIDTH_P>, ()>, o: Out<Bits<WIDTH_P>, ()>) {
+fn passthru(i: In<Bits<WIDTH_P>, C>, o: Out<Bits<WIDTH_P>, C>) {
     o.write(i.read());
 }
 "#;
