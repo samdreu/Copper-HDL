@@ -11,7 +11,7 @@
 //! dropped without being consumed by a spawn or `copper_sim::__instance` panics with
 //! `UNSTARTED_MODULE_MESSAGE` (the drop guard, D-24 (1) (a)).
 //!
-//! `copper-analysis/tests/front_end_parity.rs::the_named_parity_exceptions_are_r6_and_the_let_instance`
+//! `copper-analysis/tests/front_end_parity.rs::the_three_named_parity_exceptions_have_exactly_their_witnesses`
 //! scans the tree and requires this file to hold the only behavioural bodies that
 //! bind a `#[hardware]` call; `copper-macros/tests/ui/pass/let_instance_d24.rs` is its
 //! ui row.

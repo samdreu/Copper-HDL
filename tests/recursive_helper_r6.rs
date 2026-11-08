@@ -9,7 +9,7 @@
 //! not a divergence: a terminating recursion simulates as Rust runs it, which this
 //! test checks over the whole input space against `u8::count_ones`.
 //!
-//! `copper-analysis/tests/front_end_parity.rs::the_named_parity_exceptions_are_r6_and_the_let_instance`
+//! `copper-analysis/tests/front_end_parity.rs::the_three_named_parity_exceptions_have_exactly_their_witnesses`
 //! scans the tree's helper call graph and requires this file to hold the only
 //! `#[hardware]` module that reaches a recursive helper, so the exception cannot
 //! widen silently; `copper-macros/tests/ui/pass/recursive_helper_r6.rs` is its ui row.

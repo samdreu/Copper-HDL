@@ -3783,3 +3783,49 @@ property of the instance its owner built, outside the receiving coroutine; a res
 one port are its effects in program order, the last consumed at the edge.
 Obligations: III.3.6's counts; the coordinator's notes in `RECEIVED_MEMORY_ABI.md` (done in this change:
 `WRITE_LAT` REFUSED-both, the defaulted spelling).
+
+### D-26 — An array-register write in a const-generic-bound `for` refused in both; the file-level X-const pattern the third named parity exception   (2026-11-08)
+Clause: SPEC §II.1.3 (three named exceptions), I.2.4's `arr[i] = e` and tick-free `for` rows (the
+residue of the unrolling), and III.3.4's lines (`II.3 found array-for-generic`, `II.3 found
+file-x-const-pattern` CLOSED; I.2.4's line CLOSED; II.1.3's line updated). II.3.3 unchanged: (1) is a
+refusal of a shape the unrolling cannot carry, not a dated lowering row; (2) is not a lowering
+limitation. Nothing else normative changed.
+Question: (1) an element write to an array register inside a tick-free `for` whose bound names a const
+generic (`for j in 0..N { arr[j] = … }`) — the transpiler cannot unroll it (the emitted module is
+parametric), the macro admits it: lower it some other way, or refuse it in both? (2) a pattern naming a
+FILE-level `const` whose value is X (`const UX: Logic = Logic::X; … UX =>`) — OUTSIDE by D-24 (2), refused
+by the transpiler once it folds the const (§U.2), admitted by the macro, which cannot see the value: a
+third named exception, a macro-side check, or an over-refusal?
+Docs say: (1) I.2.4 (a tick-free constant-bound `for` is unrolled), II.3.3 (c) (one write port per
+element-write statement); (2) I.14.3(d)–(e), D-24 (2) (an X pattern OUTSIDE), II.1.3 (two named
+exceptions; any other one-sided shape is a break). The packets: `review/MEASUREMENTS.md` §U.4, §U.2.
+Code does (9c0272a): (1) the transpiler refuses with its lowering message (an element write to array
+register … inside a combinational `for`), the macro admits; (2) the transpiler refuses with
+`X_PATTERN_MESSAGE`, the macro admits. Corpus 0 for both.
+Anchor: none — decided.
+Options: (1) (a) refuse in both with one message; (b) a second array-register form (the cycle's words
+computed into an array copy in `always_comb`, committed whole); (c) emit per instance. (2) (a) the third
+named exception, pinned like R6 and the let-instance; (b) a macro-side `const` assertion per pattern
+identifier (needs a trait-based X probe, since the macro cannot tell a const from an enum variant);
+(c) refuse every pattern naming a `Logic`/`Bits` file const in both (over-refuses 2-state consts).
+Decided (the user, 2026-11-08, as recommended): (1) (a), (2) (a).
+Realized (MEASUREMENTS §U.11): (1) `copper_analysis::front_end::check_array_write_in_generic_for`, run
+by both front-ends from `check_front_end_rules`, with `ARRAY_WRITE_GENERIC_FOR_MESSAGE`: an array
+register is a pre-loop `let mut x = [e; n]` (or an array literal) whose element is not one bit wide
+(`Logic::…`, `bool`, `Bits::<1>`: a packed vector) and that `infer_registers` calls a register — the
+transpiler's own classification; the rule fires on an element write (plain or compound) to one inside
+a tick-free `for` whose range names a const generic of the module. ui/fail `array_write_generic_for`;
+witnesses and twins (literal bound, packed vector, ticking `for`) in
+`front_end_parity.rs::the_2026_11_08_rules_refuse_their_witnesses_and_admit_their_twins`; the
+transpiler's pin requires the shared message. (2) `front_end_parity_ui.rs`'s `NAMED_PARITY_EXCEPTIONS`
+gains `("file_x_const_pattern_d26.rs", X_PATTERN_MESSAGE)` (ui/pass); `front_end_parity.rs`'s audit is
+renamed `the_three_named_parity_exceptions_have_exactly_their_witnesses` and gains a third scan — every
+`#[hardware]` fn whose body has an identifier pattern naming a file `const` whose initializer is
+`Logic::X` or `Bits::x()` / `Bits::<N>::x()` — whose set must equal `tests/file_x_const_pattern_d26.rs`'s
+`fx_logic`, `fx_bits` (that file pins the transpiler's refusal and the simulator's structural match).
+Measured basis (§U.11): corpus 0 for both, as predicted; sv-baseline no corpus module changed.
+Coroutine terms: (1) an unrolling is a rewrite of the coroutine's body that needs the trip count; a
+parametric module has none to give it. (2) the X pattern asks the coroutine's third value; the macro
+admits the question only where it cannot see that it is one.
+Obligations: III.3.6's counts; CLAUDE.md's front-end parity paragraph (three named exceptions; the
+audit's new name) — the user's to approve.
