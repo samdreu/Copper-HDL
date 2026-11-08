@@ -232,7 +232,7 @@ entries in `Cargo.toml`.
   interpreter (`copper-ref`) keeps its own, so the reference leg shares no constant code with
   the transpiler, and `tests/const_evaluators_agree.rs` (G-J) pins the two against each other;
   R11 is rustc's (see front-end parity below), and `data` — the I.14 shape rules both front-ends run
-  (`check_outside_methods`: `checked_*`/`is_valid()` and `==`/`!=` with an X literal OUTSIDE, D-23; `check_memory_port_index`;
+  (`check_outside_methods`: `checked_*`/`is_valid()`, `==`/`!=` with an X literal (D-23) and a `Logic::X` pattern (D-24) OUTSIDE; `check_memory_port_index`;
   Phase C step 8). `usize`/`isize` are 64 bits in the transpiler since step 8 (SPEC
   I.14.1(b)), and `eq_logic`/`ne_logic` are IEEE 1800 `==`/`!=`, pinned with every other
   operator by the recorded table `tests/ieee1800_table.rs` (P6). It is also where
@@ -259,6 +259,10 @@ entries in `Cargo.toml`.
   `sequential`/`synchronizer`/`combinational` body is a rustc error; the transpiler refuses the
   same call from its registry (`front_end::check_no_behavioural_instance`), and its old
   expression form (`lower_hardware_call`, the behavioural `submodules` fields) is deleted.
+  A `let`-bound call (`let _ = child(..)`) still compiles — II.1.3's second named exception
+  (D-24) — so a `HardwareModule` **must be consumed**: dropped without a spawn or
+  `copper_sim::__instance`, it panics with `UNSTARTED_MODULE_MESSAGE` (the drop guard; silent
+  while another panic unwinds). A testbench that builds a module value must spawn it.
 - **`copper-codegen`** — the transpiler and the `copper-transpile` CLI
   (`bin/`, `main.rs`). Owns the lowering pipeline and Verilog emission.
 - **`copper-sim`** — the async simulation executor and the Verilator
@@ -428,16 +432,20 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   to measure what is left unstated), R8 (no
   plain `Out` on a clocked module, one shared message) and the memory rules. A module
   that compiles therefore
-  transpiles, or is refused by both — with **one named exception, R6** (D-22): recursion
+  transpiles, or is refused by both — with **two named exceptions**. **R6** (D-22): recursion
   through a helper `fn` compiles (the macro sees the module's `ItemFn`, never the helper's
-  body) and the transpiler refuses it when it inlines (`RECURSIVE_HELPER_MESSAGE`), so no wrong
-  text is emitted. It cannot widen silently: `front_end_parity.rs::the_one_named_parity_exception_is_r6`
-  reads the tree's helper call graph and requires `tests/recursive_helper_r6.rs` to be the only
-  module reaching a recursive helper, and `front_end_parity_ui.rs` pins its ui/pass row. R6 is the
-  only *named* exception, not the only break: re-verified 2026-11-08 (MEASUREMENTS §S.4), shapes the
-  macro admits and the transpiler refuses remain, each an OPEN `II.3 found` line of SPEC §III.3.4
-  (array-for, const-call, let-instance — `let _ = child(..)`, which rustc's own help suggests —
-  body-wire, x-pattern, tickfree-continue). The standing audit is
+  body) and the transpiler refuses it when it inlines (`RECURSIVE_HELPER_MESSAGE`). **The
+  let-bound instance** (D-24): `let _ = child(..)` / `let m = child(..)` in a behavioural body
+  compiles (a binding is a use, so D-23's denied `#[must_use]` does not fire) and the transpiler
+  refuses it with I.13.5's message; the simulator's `HardwareModule` drop guard panics when the
+  child is dropped unstarted. In neither is wrong text emitted. Neither can widen silently:
+  `front_end_parity.rs::the_named_parity_exceptions_are_r6_and_the_let_instance` reads the tree's
+  helper call graph and every behavioural body's `let`s, and requires `tests/recursive_helper_r6.rs`
+  and `tests/let_instance_d24.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins one
+  ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). These are the only *named* exceptions, not the only
+  breaks: re-verified 2026-11-08 (MEASUREMENTS §S.4, §T), shapes the macro admits and the transpiler
+  refuses remain, each an OPEN `II.3 found` line of SPEC §III.3.4 (array-for, const-call,
+  body-wire, tickfree-continue, const-pattern — a non-integer `const` in a pattern). The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one

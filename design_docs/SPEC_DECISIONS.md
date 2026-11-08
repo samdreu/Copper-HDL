@@ -3677,3 +3677,65 @@ coroutine that never runs. A `continue` of a ticking `for` is a zero-time jump t
 increment and test, which the coroutine takes and the emitted state machine has no state for yet. An
 `== X` asks the coroutine's third value, which the emitted machine does not hold.
 Obligations: the four found lines (two decisions — §S.5); the lowering of row (h); III.3.6's counts.
+
+### D-24 — The let-bound instance the second named parity exception, with a drop guard; a `Logic::X` pattern OUTSIDE   (2026-11-08)
+Clause: SPEC §II.1.3 (two named exceptions), I.13.5 (a D-24 note: the drop guard), I.14.3(d) (a new
+row: the X pattern) and (e) (an X scrutinee matches `_` only), II.1.2's R6 row (the pin renamed), and
+III.3.4's lines (`II.3 found let-instance`, `II.3 found x-pattern` CLOSED; `II.3 found const-pattern`
+opened). II.3.3 unchanged: neither shape is a lowering limitation. Nothing else normative changed.
+Question: (1) should `let _ = child(..)` / `let m = child(..)` in a `sequential`, `synchronizer` or
+`combinational` body be refused by the macro, and how? (2) Is `match v { Logic::X => … }` the OUTSIDE
+question D-23 (3) refused for `==`, or a value?
+Docs say: (1) I.13.5 (D-18 A2, D-23 (1): a behavioural body contains no instantiation; rustc decides);
+II.1.3 (a shape one front-end admits and the other refuses is a break; R6 the one named exception).
+(2) I.14.3(e) (an X scrutinee matches `Logic::X` or `_`, structurally, as the derived `==`); I.14.3(d)
+and D-23 (3) (`==`/`!=` with an X literal OUTSIDE). The packets: `review/MEASUREMENTS.md` §S.5 (1), (2).
+Code does (7c9483f): (1) the denied `unused_must_use` fires on an unused *statement* only — a `let`
+binding is a use — so the macro admits both spellings and the child's coroutine is dropped unstarted;
+the transpiler refuses with I.13.5's message. (2) the macro admits (a structural match); the
+transpiler refuses ("unsupported pattern: Logic :: X"). Corpus 0 for both.
+Anchor: none — decided.
+Prior work: not re-surveyed (§S.5; the questions are the front-ends' reach, not a semantics).
+Options: (1) (a) a run-time refusal: `HardwareModule` gains a drop guard that panics when it is
+dropped unconsumed by a spawn or `__instance`; (b) the macro refuses, syntactically, a `let` bound to
+a bare call of a path not known to be a non-module (over-refuses helper calls, or needs an exemption
+list by name); (c) a second named parity exception beside R6. (2) (a) OUTSIDE: `check_outside_methods`
+also refuses a `Logic::X` pattern (and an X-valued const it can see); (b) a value: lower the arm as
+never taken; (c) leave the break.
+Recommendation: (1) (c) with (a); (2) (a) (§S.5).
+Decision: **(1) (c) + (a), (2) (a)** — the user, both as recommended (relayed by the coordinator,
+2026-11-08).
+Changes (branch `claude/phase-c-s5-decisions-c662aa`, `review/MEASUREMENTS.md` §T): (1) (a)
+`copper-sim/src/executor.rs`: `HardwareModule::future` is an `Option`; `into_future` and `__instance`
+take it; `impl Drop` panics with `UNSTARTED_MODULE_MESSAGE` and the module's name when it is still
+`Some` and `!std::thread::panicking()` (a panic in a drop during unwinding aborts). (c) II.1.3 names two
+exceptions; `front_end_parity_ui.rs`'s `NAMED_PARITY_EXCEPTION` becomes `NAMED_PARITY_EXCEPTIONS`, two
+rows each required to fail with its message and to exist; `front_end_parity.rs`'s
+`the_one_named_parity_exception_is_r6` is renamed `the_named_parity_exceptions_are_r6_and_the_let_instance`
+and gains a second scan — every behavioural `#[hardware]` fn whose body binds, in a `let`, a call of
+a `#[hardware]` fn of the same file (any depth) — whose set must equal the two witnesses of
+`tests/let_instance_d24.rs`; ui/pass `let_instance_d24`. (2) `check_outside_methods` visits patterns:
+a `Logic::X` path pattern anywhere (`match`, or-patterns, `if let`, `let`, tuple sub-patterns, the
+pattern of `matches!`, which it parses), and an identifier pattern naming a `const` item of the body
+whose initializer is an X literal (`X_PATTERN_MESSAGE`, citing I.14.3(d)); ui/fail `outside_x_pattern`.
+The constant evaluator (`ConstEnv`) is integer-valued and cannot hold X, so "a const whose value is X"
+is decided syntactically on the body's own `const` items; a file-level `const` lies outside the
+`ItemFn` both rules hold.
+Measured basis (§T): predicted and measured — the drop guard tripped on one legitimate path, not the
+predicted zero: `tests/reference_leg_measurements.rs::future_size_bounds_the_register_storage` built
+seven module values only to measure `size_of_val` and dropped them; it now spawns each into an
+executor that is never ticked (a consumption, no design choice), and the measured sizes grow by 8
+bytes each (`Option`'s discriminant; 112 → 120 for `counted_repetition`). With that, the bare
+regression on `7589204` is REGRESSION OK: every swept case, test, example and `copper-ref` leg passes; `let _ = child(..)` panics
+at the parent's first resumption, `let m = child(..)` before the loop when the parent's coroutine is
+dropped (the binding is live across the module loop); the X pattern refused by both with one message
+in six positions, corpus 0. Found: a pattern naming a non-integer `const` (`const ONE: Logic =
+Logic::One`, file-level or in the body; `const UB: Bits<2>`) is admitted by the macro and refused by the
+transpiler with a tuple-pattern message (it reads the identifier as an enum variant) — `II.3 found
+const-pattern`, OPEN, copper-codegen.
+Coroutine terms: a `#[hardware]` fn's value is a coroutine not yet started; dropping it unstarted is
+now an observable failure of the simulation, at the instant the value is dropped, rather than a
+coroutine that silently never runs. An X pattern asks the coroutine's third value, which the emitted
+machine does not hold.
+Obligations: `II.3 found const-pattern` (the lowering; how a file-level X-valued `const` pattern is
+then refused is a decision for that change); III.3.6's counts.

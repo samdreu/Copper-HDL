@@ -3896,3 +3896,90 @@ its refusal, +1 `unsupported_constructs` test of row (h)); the three new ui/fail
 one trybuild test. Not run remotely (nothing pushed).
 
 After the run, docs only: D-23 (`SPEC_DECISIONS.md`), III.3.6's counts, this section, CLAUDE.md.
+
+## T. Phase C step 11c — D-24: the two decisions of §S.5 implemented (2026-11-08)
+
+Session phase-c-s5-decisions, branch `claude/phase-c-s5-decisions-c662aa` (cut from `paper` at
+`7c9483f`; nothing pushed). The user took §S.5's two decisions as recommended — (1) the let-bound
+instance = (c) + (a), (2) the `Logic::X` pattern = (a), OUTSIDE — recorded as D-24. Probes in the
+session scratchpad (a crate `p11c` over this tree's `copper-core`/`copper-macros`/`copper-sim`, one bin
+per shape, the transpiler leg by `copper-transpile`), not in the tree. Code commits `dbba229` and
+`7589204`; docs after.
+
+### T.1 Predictions (written before any code change or probe)
+
+| # | Prediction | Measured |
+|---|---|---|
+| P1 | the drop guard trips on 0 legitimate paths (every swept case, test, example, `copper-ref`'s design leg) | **not as predicted — one**: `reference_leg_measurements.rs::future_size_bounds_the_register_storage` built seven module values to measure `size_of_val` and dropped them (the first bare regression, on `dbba229`, failed there: 601 passed, 1 failed). Fixed by consuming each with a spawn into a never-ticked executor (`7589204`); then `cargo test --workspace --no-fail-fast` 1424 passed / 0 failed and the bare regression REGRESSION OK. No swept case, example, sweep harness path or `copper-ref` leg tripped it |
+| P2 | `let _ = child(..)` before the loop panics at the parent's first resumption, with the message | as predicted (`let_wildcard_instance_panics_at_the_first_resumption`: the first `tick_clock`; the payload ends "(module `child`)") |
+| P3 | `let _m = child(..)` before the loop panics only when the parent's coroutine is dropped (the binding is live across the module loop) | as predicted: four ticks silent, then `drop(exec)` panics (`let_named_instance_panics_when_the_parent_is_dropped`) |
+| P4 | the tree holds no behavioural body binding a `#[hardware]` call besides the witnesses | as predicted: the scan finds exactly `tests/let_instance_d24.rs::{parent_named, parent_wildcard}` |
+| P5 | a `Logic::X` arm, or-pattern, `if let`, tuple sub-pattern: refused by both, one message; corpus 0 | as predicted, plus `matches!(v, Logic::X)` and a body `const U: Logic = Logic::X` pattern (probes `x1`–`x6`: macro and transpiler both print `X_PATTERN_MESSAGE`); the twin (`Logic::One =>`) admitted by both; corpus 0 (`every_corpus_module_passes_every_shared_rule_in_its_mode` and the sweep pass) |
+| P6 | a pattern naming a file-level `const U: Logic = Logic::X`: the macro admits; the transpiler refuses with "unsupported pattern" | **half**: the macro admits; the transpiler refuses with a *different* message, "tuple-pattern match lowering is not yet implemented (M2)", and not because of X — see T.3 |
+| P7 | the guard counts of §S.6 unchanged | as predicted: G-D 213 (3 ignored), G-F 213, G-G differential 1622 PASS / 12 OUTSIDE / 0 / 0 / 0, reference 1634 PASS / 0 DISAGREE, G-I 162 related / 0 uncovered, G-J 0 DISAGREE, G-E 5 |
+| P8 | G-K 186 → 186 lines, 164 → 166 CLOSED, 22 → 20 OPEN | **187 lines — 166 CLOSED, 21 OPEN** (one more line than predicted: T.3's found shape); 168 required |
+| P9 | tests 1417 → ~1421 | **1424** (+6 `let_instance_d24.rs`, +1 `unsupported_constructs.rs`; the extended parity tests are the same tests); 156 test binaries, G-C 129 test files |
+
+### T.2 What changed
+
+**(1) The drop guard.** `HardwareModule::future` is an `Option<F>`; `into_future` (the spawns) and
+`__instance` take it; `impl Drop` panics with `UNSTARTED_MODULE_MESSAGE` plus "(module `<name>`)" when it
+is still `Some`, unless `std::thread::panicking()` (pinned by
+`the_guard_is_silent_while_another_panic_unwinds`, a `should_panic` test that drops an unconsumed module
+during unwinding and does not abort). A hand-built module is guarded too. The guard fires when the
+value is dropped, which is the parent's first resumption for `let _ =` and for a binding scoped inside
+the loop body (at the end of that iteration), but for a `let m =` before the loop only when the parent's
+coroutine is dropped — at the executor's drop, or never if a testbench leaks the executor or exits the
+process first. The guard turns the silent non-execution into a loud failure *when the value dies*, not
+at a fixed instant. **The named exception.** `front_end_parity_ui.rs`'s `NAMED_PARITY_EXCEPTIONS` (two
+rows, each required to exist in ui/pass and to fail with its message); the R6 audit renamed
+`the_named_parity_exceptions_are_r6_and_the_let_instance`, with a second scan (behavioural fns, any
+depth including test fn bodies, binding in a `let` a call of a same-file `#[hardware]` name) whose set
+must equal the two witnesses; ui/pass `let_instance_d24`. Side effect: `ui/fail/structural_plain_fn_call.stderr`
+re-blessed — rustc's note quotes `__instance`'s signature line, now `pub fn __instance<F>(mut module:
+HardwareModule<F>) {`.
+
+**(2) The X pattern.** `check_outside_methods` gains `visit_pat` (a `Logic::X` path pattern anywhere;
+an identifier pattern naming a body `const` whose initializer is an X literal) and parses `matches!`'s
+pattern. `ConstEnv` is integer-valued and cannot hold X, so the "const whose value is X" clause is
+syntactic over the body's own `const` items. ui/fail `outside_x_pattern`; witnesses and twins added to
+`the_step_8_data_rules_refuse_their_witnesses_and_admit_their_twins`; the transpiler's
+`unsupported pattern` arm is now a backstop.
+
+### T.3 Found — one macro-admits / transpiler-refuses shape (II.1.3 re-verified)
+
+| Line | Probe | Macro | Transpiler | Owner |
+|---|---|---|---|---|
+| `II.3 found const-pattern` | `x7` `const U: Logic = Logic::X;` (file); `x8` `const ONE: Logic = Logic::One;` (file); `x9` `const UB: Bits<2> = Bits::x();` (file); `x11` `const ONE: Logic = Logic::One;` (in the body) — each `match a.read() { K => …, _ => … }` | admits | "tuple-pattern match lowering is not yet implemented (M2)" — `parse_pattern` reads an uppercase identifier as an enum variant | copper-codegen |
+
+An integer const pattern (`x12`, `const K: u8 = 3; … K =>`) transpiles. No text is emitted for any of
+the four. The shape is not X-specific (`x8`, `x11`), so it is not D-24's: an OPEN line. A file-level
+X-valued const (`x7`, `x9`) is outside the `ItemFn` both front-ends' rule holds; once the lowering
+reads a const pattern's value, how that case is refused is a decision for that change.
+
+**Surprises.** (i) P1: a test that only *measures* module values was a legitimate path the guard
+refused — "every legitimate path consumes the value" was false of the tree by one test. (ii) The guard
+grows every module value by 8 bytes (`Option`'s discriminant; the futures have no niche rustc uses):
+measured on `future_size_bounds_the_register_storage` at `7c9483f` (in the r6-decisions worktree,
+same commit) vs `7589204` — `counted_repetition` 112 → 120, `capture_after_wait` 104 → 112, `mac_fsm`
+128 → 136, `uart_rx_dut` 128 → 136, `regout_multiphase` 104 → 112, `handshake` 104 → 112,
+`regout_trailing_single_tick` 96 → 104; the test's bound (≥ 16) holds. The sizes are of the
+`HardwareModule`, not the bare future, as before. (iii) P6: the file-level X const was refused for the
+wrong reason, and the same refusal hits a `Logic::One` const.
+
+### T.4 The bare regression — measured
+
+**Bare `tools/regression.sh` on `dbba229`: REGRESSION FAIL** at `cargo test --workspace` (601 passed,
+1 failed: `future_size_bounds_the_register_storage`, the drop guard, T.1 P1). **Bare
+`tools/regression.sh` on `7589204` (the final code commit; laptop): REGRESSION OK (13259 s wall — the
+laptop slept; 7 min user CPU, not a timing number).** 1424 passed, 0 failed, 16 ignored, 156 test
+binaries (G-C: 129 test files); examples **32/32**; G-D **213** differential cases (3
+ignored-with-reason); **G-F 213**; **G-G differential 1622 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED /
+0 DISAGREE**; **G-G reference 1634 PASS / 0 DISAGREE**; **G-I** 162 clocked related, 0 uncovered;
+**G-J** 0 DISAGREE; G-E 5 anchored; **G-K** `187 lines — 166 CLOSED, 21 OPEN; 168 required by the SPEC;
+fixtures: 5 coreui, 3 example, 11 gone, 137 sweep, 116 test, 89 ui; 156 run checks`, the 3 example
+fixtures PASS. Not run remotely (nothing pushed).
+
+After the run, docs only: D-24 (`SPEC_DECISIONS.md`), III.3.6's counts, this section, CLAUDE.md.
+Disk: the run needed the cargo `target/` dirs of six merged, idle worktrees deleted first (the user's
+approval, ~51 GiB; 4.2 GiB was free).
