@@ -4621,3 +4621,20 @@ CLOSED, 13 OPEN; 170 required by the SPEC; fixtures: 8 coreui, 3 example, 11 gon
 
 After the run, docs only: D-25 (`SPEC_DECISIONS.md`), `RECEIVED_MEMORY_ABI.md`, III.3.6's counts, this
 section, CLAUDE.md.
+
+### W.6 The rebase onto the other two batches and the bare regression
+
+Rebased onto `paper` at `9c0272a` (the codegen batch, §U, after the front-end batch, §V). The code and
+§W commits applied without conflict (`chir_lower.rs`, `unsupported_constructs.rs` merged by git); the docs
+commit conflicted in III.3.6 only, re-measured below. II.3.3's row letters: §U added no row, so (i) and
+(j) stand. Commits: §W `9c1fd56`, code `14739d6`, docs after.
+
+**Bare `tools/regression.sh` on the rebased tree (code `14739d6`; laptop): REGRESSION OK (594 s wall —
+not a timing number).** 1492 passed, 0 failed, 16 ignored, 157 test binaries (G-C: 130 test files);
+examples **32/32**; G-D **236** differential cases (3 ignored-with-reason); **G-F 236**; **G-G
+differential 1860 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**; **G-G reference 1872 PASS /
+0 DISAGREE**; **G-I** 180 clocked related, 0 uncovered, 239/239 sweep modules examined; **G-J** 5
+asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; **G-K** `193 lines — 187 CLOSED, 6 OPEN; 170 required by
+the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 168 sweep, 143 test, 114 ui; 199 run checks`, the 3
+example fixtures PASS. The pre-rebase run of W.5 (on `8f21db8`, `paper` at `d022fbe`) is superseded. Not
+run remotely (nothing pushed).
