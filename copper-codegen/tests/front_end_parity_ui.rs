@@ -63,6 +63,14 @@ const PASS_NOT_TRANSPILED: &[(&str, &str)] = &[(
      constants); the transpilable twin is register_init_rust_constants_ok.rs (MEASUREMENTS §N)",
 )];
 
+/// SPEC II.1.3's one named exception (R6, D-22): a ui/pass case the macro admits and
+/// the transpiler refuses, with R6's message. The macro cannot see a helper's body;
+/// the transpiler inlines it. Exactly one row, required to fail with exactly that
+/// message — a second macro-admits/transpiler-refuses shape is a parity break, not
+/// another exception.
+const NAMED_PARITY_EXCEPTION: (&str, &str) =
+    ("recursive_helper_r6.rs", copper_analysis::front_end::RECURSIVE_HELPER_MESSAGE);
+
 /// ui/fail cases whose transpiler message is not the macro's, with the reason.
 /// rustc, not the macro, refuses these — E0015 for a non-`const` callee inside the
 /// macro's `const { }` wrap (R11), E0308 for a plain `fn` called where the macro
@@ -115,6 +123,14 @@ fn the_transpiler_admits_every_shape_the_macro_admits() {
     for p in &pass {
         let name = p.file_name().unwrap().to_string_lossy().to_string();
         let r = transpile(p);
+        if name == NAMED_PARITY_EXCEPTION.0 {
+            match r {
+                Err(e) if e.contains(NAMED_PARITY_EXCEPTION.1) => {}
+                Err(e) => refused.push(format!("{name}: refused, but not with R6's message: {e}")),
+                Ok(_) => refused.push(format!("{name}: transpiles — R6's exception no longer holds")),
+            }
+            continue;
+        }
         let excused = PASS_NOT_TRANSPILED.iter().any(|(n, _)| *n == name);
         match (r, excused) {
             (Ok(_), false) | (Err(_), true) => {}

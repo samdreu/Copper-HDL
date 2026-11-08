@@ -420,7 +420,10 @@ fn lower_inlined_fn_call(call: &ExprCall, ctx: &mut LowerCtx) -> Result<CHIRExpr
 
     if ctx.inlining.contains(&name) {
         return Err(CHIRLowerError::UnsupportedConstruct {
-            description: format!("cannot inline recursive function `{name}` into hardware"),
+            description: format!(
+                "cannot inline recursive function `{name}` into hardware: {}",
+                copper_analysis::front_end::RECURSIVE_HELPER_MESSAGE
+            ),
             span: call.span,
             suggested_rewrite: None,
         });

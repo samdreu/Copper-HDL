@@ -412,3 +412,100 @@ fn every_hardware_fn_including_fn_bodies() -> Vec<(String, ItemFn)> {
     }
     out
 }
+
+/// Free `fn`s of one file (any `mod` depth) by name, and the free-fn names each calls.
+fn helper_call_graph(items: &[Item]) -> (std::collections::BTreeMap<String, BTreeSet<String>>, Vec<ItemFn>) {
+    use syn::visit::Visit;
+    struct Calls(BTreeSet<String>);
+    impl<'a> Visit<'a> for Calls {
+        fn visit_expr_call(&mut self, c: &'a syn::ExprCall) {
+            if let syn::Expr::Path(p) = &*c.func {
+                if let Some(seg) = p.path.segments.last() {
+                    self.0.insert(seg.ident.to_string());
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+    }
+    fn walk(items: &[Item], fns: &mut Vec<ItemFn>) {
+        for item in items {
+            match item {
+                Item::Fn(f) => fns.push(f.clone()),
+                Item::Mod(m) => {
+                    if let Some((_, items)) = &m.content {
+                        walk(items, fns);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut fns = Vec::new();
+    walk(items, &mut fns);
+    let names: BTreeSet<String> = fns.iter().map(|f| f.sig.ident.to_string()).collect();
+    let mut graph = std::collections::BTreeMap::new();
+    for f in &fns {
+        let mut c = Calls(BTreeSet::new());
+        c.visit_block(&f.block);
+        graph.insert(f.sig.ident.to_string(), c.0.intersection(&names).cloned().collect());
+    }
+    let hardware = fns.into_iter().filter(|f| hardware_attr(f).is_some()).collect();
+    (graph, hardware)
+}
+
+/// The `#[hardware]` fns of `items` that reach a helper `fn` lying on a call cycle.
+fn modules_reaching_a_recursive_helper(items: &[Item]) -> Vec<String> {
+    let (graph, hardware) = helper_call_graph(items);
+    let reach = |from: &str| -> BTreeSet<String> {
+        let mut seen = BTreeSet::new();
+        let mut stack: Vec<String> = graph.get(from).into_iter().flatten().cloned().collect();
+        while let Some(n) = stack.pop() {
+            if seen.insert(n.clone()) {
+                stack.extend(graph.get(&n).into_iter().flatten().cloned());
+            }
+        }
+        seen
+    };
+    hardware
+        .iter()
+        .filter(|m| reach(&m.sig.ident.to_string()).iter().any(|h| reach(h).contains(h)))
+        .map(|m| m.sig.ident.to_string())
+        .collect()
+}
+
+/// SPEC II.1.3's one named exception (R6, D-22; MEASUREMENTS §Q): recursion through a
+/// helper `fn` compiles — the macro holds the module's `ItemFn` only, never a helper's
+/// body (I.2.1), and rustc admits a non-`async` recursion — and the transpiler refuses
+/// it when it inlines (`RECURSIVE_HELPER_MESSAGE`). Neither front-end can widen it
+/// unseen, because this audit can see what the macro cannot: it reads each file's
+/// helper call graph, and the only `#[hardware]` module of the tree that reaches a
+/// recursive helper is the exception's witness. Any other is a module that simulates
+/// and does not transpile — a parity break to fix, not a second exception.
+#[test]
+fn the_one_named_parity_exception_is_r6() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    for dir in ["examples", "src", "tests"] {
+        rs_files(&root.join(dir), &mut files);
+    }
+    files.sort();
+    let mut found = BTreeSet::new();
+    for path in &files {
+        let Ok(src) = fs::read_to_string(path) else { continue };
+        let Ok(file) = syn::parse_file(&src) else { continue };
+        let rel = path.strip_prefix(&root).unwrap_or(path).display().to_string();
+        for m in modules_reaching_a_recursive_helper(&file.items) {
+            found.insert(format!("{rel}::{m}"));
+        }
+    }
+    let expected: BTreeSet<String> = ["tests/recursive_helper_r6.rs::parity8".to_string()].into();
+    assert_eq!(found, expected, "R6 is the one named exception, and its witness the one module");
+
+    // The scan sees the ui row too, and a direct, a mutual and an absent recursion.
+    let ui = fs::read_to_string(root.join("copper-macros/tests/ui/pass/recursive_helper_r6.rs")).unwrap();
+    assert_eq!(modules_reaching_a_recursive_helper(&syn::parse_file(&ui).unwrap().items), vec!["parity8"]);
+    let probe = |src: &str| modules_reaching_a_recursive_helper(&syn::parse_file(src).unwrap().items);
+    let m = "#[hardware(combinational)] fn m<D: ClockDomain>(a: In<u8, D>, o: Out<u8, D>) { o.write(f(a.read())); }";
+    assert_eq!(probe(&format!("fn f(x: u8) -> u8 {{ g(x) }} fn g(x: u8) -> u8 {{ if x == 0 {{ 0 }} else {{ f(x - 1) }} }} {m}")), vec!["m"]);
+    assert!(probe(&format!("fn f(x: u8) -> u8 {{ g(x) }} fn g(x: u8) -> u8 {{ x }} {m}")).is_empty());
+}
