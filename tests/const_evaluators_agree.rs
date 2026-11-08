@@ -44,8 +44,15 @@ use syn::{Expr, Item, ItemFn, Stmt};
 /// `<file>::<what>` as the test prints it. Empty since Phase C step 9: its seven
 /// rows were the interpreter's `Self { .. }` gap (the `bubble()` initializers of
 /// `struct_pipeline_dut` and the pipelined CPU), closed then, and each is now
-/// compared both ways (MEASUREMENTS §O.2).
-const ASYMMETRIC: &[(&str, &str)] = &[];
+/// compared both ways (MEASUREMENTS §O.2). Since §U.2 (2026-11-08) the rows are the first
+/// non-integer consts of the corpus, the const-pattern fixture's.
+const ASYMMETRIC: &[(&str, &str)] = &[
+    ("tests/fixtures/const_pattern_dut.rs::const CP_ONE", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler folds a pattern naming it with `fold_const_init`, and the sweep checks that fold against rustc (`const_pattern_dut`, MEASUREMENTS §U.2)"),
+    ("tests/fixtures/const_pattern_dut.rs::const CP_ZERO", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler folds a pattern naming it with `fold_const_init`, and the sweep checks that fold against rustc (`const_pattern_dut`, MEASUREMENTS §U.2)"),
+    ("tests/fixtures/const_pattern_dut.rs::const CP_TWO", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler folds a pattern naming it with `fold_const_init`, and the sweep checks that fold against rustc (`const_pattern_dut`, MEASUREMENTS §U.2)"),
+    ("tests/fixtures/const_pattern_dut.rs::const CP_THREE", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler folds a pattern naming it with `fold_const_init`, and the sweep checks that fold against rustc (`const_pattern_dut`, MEASUREMENTS §U.2)"),
+    ("tests/fixtures/const_pattern_dut.rs::cp_tuple_expr::const BODY_TWO", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler folds a pattern naming it with `fold_const_init`, and the sweep checks that fold against rustc (`const_pattern_dut`, MEASUREMENTS §U.2)"),
+];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -121,6 +128,22 @@ fn ref_int(v: &Value) -> Option<i128> {
         Value::Bool(b) => Some(*b as i128),
         Value::Lit(u) => i128::try_from(*u).ok(),
         Value::Bits(b) => b.as_uint().and_then(|u| i128::try_from(u).ok()),
+        // A packed vector register (`[Logic; N]`, an array of `Bits`): element 0 in the low
+        // bits, the layout the transpiler states it in (`fold_const_init`'s `[elem; n]`). Reached
+        // since MEASUREMENTS §U.3, when a `[Logic; N]` register's bit writes began to transpile.
+        Value::Array(vs) => {
+            let mut acc: u128 = 0;
+            let mut off: u32 = 0;
+            for v in vs {
+                let Value::Bits(b) = v else { return None };
+                acc |= b.as_uint()?.checked_shl(off)?;
+                off = off.checked_add(b.width)?;
+                if off > 127 {
+                    return None;
+                }
+            }
+            i128::try_from(acc).ok()
+        }
         _ => None,
     }
 }
