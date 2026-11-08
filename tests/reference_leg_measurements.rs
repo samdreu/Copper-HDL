@@ -523,6 +523,10 @@ fn poison_run_for_the_register_proposition() {
 fn future_size_bounds_the_register_storage() {
     let clk = Clock::<MainClk>::new();
     let mut rows: Vec<(&str, usize, Vec<String>, &str)> = Vec::new();
+    // Each module value is measured, then consumed by a spawn into an executor that
+    // is never ticked: a `HardwareModule` dropped unconsumed panics (the drop guard,
+    // SPEC I.13.5, D-24; MEASUREMENTS §T).
+    let mut sink = copper_sim::HardwareExecutor::new();
     macro_rules! row {
         ($name:literal, $src:literal, $fut:expr) => {{
             let f = syn::parse_file(include_str!($src)).unwrap();
@@ -535,7 +539,9 @@ fn future_size_bounds_the_register_storage() {
                 })
                 .unwrap();
             let regs = copper_analysis::infer_registers(&item);
-            rows.push(($name, std::mem::size_of_val(&$fut), regs, $src));
+            let m = $fut;
+            rows.push(($name, std::mem::size_of_val(&m), regs, $src));
+            sink.spawn_untracked(m, vec![]);
         }};
     }
     row!("counted_repetition", "fixtures/counted_repetition_dut.rs", {
