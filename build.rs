@@ -77,8 +77,15 @@ const SKIP: &[(&str, &str)] = &[
     // a reason that names emitted text.
     (
         "two_domain_top",
-        "a `#[hardware(structural)]` parent: transpile-only by design, with no simulatable body \
-         to drive (item 4 — the sim wires the hierarchy by hand)",
+        "a `#[hardware(structural)]` parent, which names a design rather than a module the \
+         generated harness can drive (SPEC I.13.4(a)), and a two-clock one, while the sweep is \
+         one-clock by decision (SPEC III.2.6, D-20: a generated case would have to invent the \
+         two domains' interleaving, a design decision). Its three children are swept here one \
+         by one; the design is covered by tests/two_domain_hierarchy_cdc.rs (hand-wired sim = \
+         transpiled hierarchy = the independent two_domain_hierarchy.sv at 2:1, and \
+         copper_ref::Design = sim at 2:1, 3:1, 1:1) and by tests/two_clock_pins.rs (III.2.6's \
+         two pins: the never-ticked startup on three legs, and the interleavings P and Q of the \
+         same hierarchy, sim against SV per domain). Re-verified Phase C step 10",
     ),
     (
         "mod8",
@@ -694,9 +701,10 @@ impl Module {
         }
         if self.ports.iter().filter(|p| p.kind == Kind::Clock).count() > 1 {
             return Some(
-                "more than one clock port: the generated harness drives a single clock, and the \
-                 ratio between two domains is a design decision the sweep must not invent — \
-                 phase 4"
+                "more than one clock port: only a `structural` parent can have one (R10 refuses a \
+                 second `Clock` on a clocked module in both front-ends, SPEC I.12.5), and the \
+                 sweep is one-clock by decision — a two-domain interleaving is a design decision \
+                 it must not invent (SPEC III.2.6, D-20)"
                     .to_string(),
             );
         }
@@ -754,8 +762,9 @@ impl Module {
         }
         if self.ports.iter().filter(|p| p.kind == Kind::Clock).count() > 1 {
             return Some(
-                "more than one clock: per-domain gating is SPEC §I.12 (written, D-17); the \
-                 interpreter defers a second clock (a later Phase C step)"
+                "more than one clock: a clocked module has one (R10, SPEC I.12.5), so only a \
+                 `structural` parent reaches here, and the interpreter runs that as \
+                 `copper_ref::Design` in its own test (SPEC I.13.4(a), III.2.6)"
                     .to_string(),
             );
         }

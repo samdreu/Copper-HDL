@@ -281,7 +281,9 @@ impl Module {
         }
         if prog.clocks.len() > 1 {
             return Err(RefError::Deferred(format!(
-                "{} clock parameters: per-domain gating is SPEC I.12 (TBD, Round 3)",
+                "{} clock parameters: a clocked module has exactly one (R10, SPEC I.12.5 — refused \
+                 by both front-ends); a two-domain design is a `structural` parent, run as \
+                 `copper_ref::Design`",
                 prog.clocks.len()
             )));
         }
