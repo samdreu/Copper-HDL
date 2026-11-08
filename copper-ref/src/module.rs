@@ -17,6 +17,8 @@ use syn::{Expr, Item, ItemFn, Pat, Stmt};
 pub enum PortKind {
     In,
     RegOut,
+    /// A `combinational` module's output wire (SPEC I.11.2).
+    Out,
 }
 
 #[derive(Clone, Debug)]
@@ -118,16 +120,14 @@ impl Module {
             RefError::Parse(format!("no `#[hardware]` fn named `{module}` in the source"))
         })?;
         let mode = hardware_mode(&item).unwrap_or_default();
+        let comb = mode == "combinational";
         match mode.as_str() {
-            "sequential" | "synchronizer" => {}
-            "combinational" => {
-                return Err(RefError::Deferred(
-                    "a `combinational` module: one evaluation per settle, SPEC I.11 (TBD, Round 3)".into(),
-                ))
-            }
+            "sequential" | "synchronizer" | "combinational" => {}
             "structural" => {
                 return Err(RefError::Deferred(
-                    "a `structural` module: a wiring language, SPEC I.13 (TBD, Round 3)".into(),
+                    "a `structural` module is no coroutine and no function but the design it names \
+                     (SPEC I.13.4(a)): run it with `copper_ref::Design`"
+                        .into(),
                 ))
             }
             other => return Err(RefError::Parse(format!("unknown #[hardware] mode `{other}`"))),
@@ -150,6 +150,7 @@ impl Module {
                 prog.generics.insert(n, v);
             }
         }
+        check_const_asserts(&item, &prog)?;
         // Ports.
         let mut ports: Vec<Port> = Vec::new();
         for arg in &item.sig.inputs {
@@ -181,6 +182,26 @@ impl Module {
                 Ok(ty)
             };
             match kind.as_str() {
+                "Clock" if comb => {
+                    return Err(RefError::Unsupported(format!(
+                        "a `Clock` parameter `{name}` on a `combinational` module (I.11.1: a function, no tick)"
+                    )))
+                }
+                "RegOut" if comb => {
+                    return Err(RefError::Unsupported(format!(
+                        "a `RegOut` port `{name}` on a `combinational` module (I.11.1: its outputs are `Out` wires)"
+                    )))
+                }
+                "Memory" if comb => {
+                    return Err(RefError::Unsupported(format!(
+                        "a `Memory` parameter `{name}` on a `combinational` module (I.10.6: OUTSIDE)"
+                    )))
+                }
+                "Out" if comb => {
+                    let ty = payload()?;
+                    prog.outputs.push((name.clone(), ty.clone()));
+                    ports.push(Port { name, ty, kind: PortKind::Out });
+                }
                 "Clock" => prog.clocks.push(name),
                 "In" => {
                     let ty = payload()?;
@@ -212,6 +233,51 @@ impl Module {
                     )))
                 }
             }
+        }
+        if comb {
+            if prog.outputs.is_empty() {
+                return Err(RefError::Parse("a module with no output (I.2.2: at least one output)".into()));
+            }
+            // I.11.3, D-14 A3: a declared `Out` no path writes is refused.
+            for (o, _) in &prog.outputs {
+                let mut w = WritesPort { port: o, found: false };
+                w.visit_block(&item.block);
+                if !w.found {
+                    return Err(RefError::Unsupported(format!(
+                        "`Out` port `{o}` is written on no path: no evaluation gives it a value \
+                         (SPEC I.11.3, D-14 A3: the never-written port is refused)"
+                    )));
+                }
+            }
+            // I.2.7, I.11.1: the tick-free fragment — no tick, `loop`, `while`,
+            // `break`, `continue`, memory.
+            let mut scan = Scan { prog: &prog, pre_loop: false, in_preload: 0, err: None };
+            let mut frag = CombFragment { err: None };
+            for s in &item.block.stmts {
+                scan.visit_stmt(s);
+                frag.visit_stmt(s);
+                if let Some(e) = scan.err.take().or(frag.err.take()) {
+                    return Err(e);
+                }
+            }
+            let committed = prog
+                .outputs
+                .iter()
+                .map(|(n, t)| Ok((n.clone(), Value::zero_of(t)?)))
+                .collect::<Result<Vec<_>, RefError>>()?;
+            return Ok(Module {
+                item,
+                prog,
+                env: Env::default(),
+                state: State::Entry,
+                committed,
+                pending: HashMap::new(),
+                reached: BTreeSet::new(),
+                resumptions: 0,
+                poison: None,
+                mode,
+                mems: BTreeMap::new(),
+            });
         }
         if prog.clocks.len() > 1 {
             return Err(RefError::Deferred(format!(
@@ -288,7 +354,8 @@ impl Module {
                     if let Some(t) = self.prog.inputs.get(&n) {
                         out.push(Port { name: n, ty: t.clone(), kind: PortKind::In });
                     } else if let Some((_, t)) = self.prog.outputs.iter().find(|(o, _)| *o == n) {
-                        out.push(Port { name: n, ty: t.clone(), kind: PortKind::RegOut });
+                        let kind = if self.is_combinational() { PortKind::Out } else { PortKind::RegOut };
+                        out.push(Port { name: n, ty: t.clone(), kind });
                     }
                 }
             }
@@ -301,7 +368,80 @@ impl Module {
     }
 
     pub fn output_ports(&self) -> Vec<Port> {
-        self.ports().into_iter().filter(|p| p.kind == PortKind::RegOut).collect()
+        self.ports().into_iter().filter(|p| p.kind != PortKind::In).collect()
+    }
+
+    /// A `combinational` module: a function, run by [`Module::evaluate`] (I.11.1).
+    pub fn is_combinational(&self) -> bool {
+        self.mode == "combinational"
+    }
+
+    /// ONE evaluation of a `combinational` module (SPEC I.11.1): the body run once
+    /// with the Rust meaning I.2 gives it, from a fresh environment — every local
+    /// a wire of this evaluation, none surviving it (I.7.2(e)) — over the settled
+    /// values of its reads. Every write sets its `Out` wire; the last write on the
+    /// path is the wire's value, an earlier one admitted and overridden (I.11.2(b),
+    /// (c)); a path that leaves a port unwritten gives it no value and is refused
+    /// (I.11.3). [`Module::observe`] then reads `f(x)`. There is no edge.
+    pub fn evaluate(&mut self, inputs: &[(&str, Value)]) -> Result<(), RefError> {
+        if !self.is_combinational() {
+            return Err(RefError::Runtime("`evaluate` of a clocked module: it is resumed (I.0.2)".into()));
+        }
+        let map = self.input_map(inputs)?;
+        let mut env = Env::default();
+        let mut written: HashMap<String, Value> = HashMap::new();
+        let flow = {
+            let mut ex = Exec::new(&self.prog, &mut env, &map, &mut written);
+            ex.exec_block(&self.item.block.stmts, 0, None, Vec::new())?
+        };
+        if flow != Flow::Done {
+            return Err(RefError::Unsupported(format!(
+                "a `combinational` body that ends in {flow:?}: the tick-free fragment has no suspension or loop exit (I.2.7)"
+            )));
+        }
+        let mut out = Vec::new();
+        for (n, _) in &self.prog.outputs {
+            let v = written.remove(n).ok_or_else(|| {
+                RefError::Unsupported(format!(
+                    "`Out` port `{n}` left unwritten on the path this evaluation took: it has no value \
+                     (SPEC I.11.3 — refused by both front-ends' definite assignment)"
+                ))
+            })?;
+            out.push((n.clone(), v));
+        }
+        self.committed = out;
+        self.resumptions += 1;
+        Ok(())
+    }
+
+    /// `evaluate` with the inputs as bit vectors, the harness's layout.
+    pub fn evaluate_bits(&mut self, inputs: &[(&str, &[Logic])]) -> Result<(), RefError> {
+        let vals = self.input_values(inputs)?;
+        self.evaluate(&vals)
+    }
+
+    fn input_values<'n>(&self, inputs: &[(&'n str, &[Logic])]) -> Result<Vec<(&'n str, Value)>, RefError> {
+        let mut vals = Vec::new();
+        for (name, bits) in inputs {
+            let Some(ty) = self.prog.inputs.get(*name) else {
+                return Err(RefError::Runtime(format!("`{name}` is not an input port")));
+            };
+            vals.push((*name, Value::from_bits(ty, bits)?));
+        }
+        Ok(vals)
+    }
+
+    fn input_map(&self, inputs: &[(&str, Value)]) -> Result<HashMap<String, Value>, RefError> {
+        let mut map = HashMap::new();
+        for (name, ty) in &self.prog.inputs {
+            let v = inputs
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| RefError::Runtime(format!("no value for input `{name}` this resumption")))?;
+            map.insert(name.clone(), v.coerce_to(ty)?);
+        }
+        Ok(map)
     }
 
     /// Every `tick` site of the kernel, statically (the states of H(M), I.0.4).
@@ -351,15 +491,10 @@ impl Module {
     /// from the parked site, to the next `tick`. Every `In::read()` yields the
     /// value given here — `x_{N+1}`. Returns the site parked at.
     pub fn resume(&mut self, inputs: &[(&str, Value)]) -> Result<TickSite, RefError> {
-        let mut map = HashMap::new();
-        for (name, ty) in &self.prog.inputs {
-            let v = inputs
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, v)| v.clone())
-                .ok_or_else(|| RefError::Runtime(format!("no value for input `{name}` this resumption")))?;
-            map.insert(name.clone(), v.coerce_to(ty)?);
+        if self.is_combinational() {
+            return Err(RefError::Runtime("`resume` of a `combinational` module: it is evaluated (I.11.1)".into()));
         }
+        let map = self.input_map(inputs)?;
         let resume_path: Option<Vec<usize>> = match &self.state {
             State::Entry => None,
             State::Parked(s) => Some(s.0.clone()),
@@ -392,13 +527,7 @@ impl Module {
     /// `resume` with the inputs as bit vectors (LSB first, element-major), the
     /// harness's layout.
     pub fn resume_bits(&mut self, inputs: &[(&str, &[Logic])]) -> Result<TickSite, RefError> {
-        let mut vals = Vec::new();
-        for (name, bits) in inputs {
-            let Some(ty) = self.prog.inputs.get(*name) else {
-                return Err(RefError::Runtime(format!("`{name}` is not an input port")));
-            };
-            vals.push((*name, Value::from_bits(ty, bits)?));
-        }
+        let vals = self.input_values(inputs)?;
         self.resume(&vals)
     }
 
@@ -510,6 +639,9 @@ impl<'a> Scan<'a> {
 impl<'ast, 'a> Visit<'ast> for Scan<'a> {
     fn visit_expr(&mut self, e: &'ast Expr) {
         match e {
+            // `const { … }`: elaboration, not a statement of the kernel — erased at
+            // run time, its assertions checked by `check_const_asserts` (I.2.4).
+            Expr::Const(_) => return,
             Expr::Await(a) => {
                 let is_tick = matches!(&*a.base, Expr::MethodCall(mc)
                     if mc.method == "tick" && matches!(&*mc.receiver, Expr::Path(p)
@@ -744,4 +876,96 @@ impl ConstScope {
     pub fn enum_index(&self, enum_name: &str, variant: &str) -> Option<usize> {
         self.prog.enums.get(enum_name)?.iter().position(|v| v == variant)
     }
+}
+
+/// Does the body write `port` anywhere (`port.write(…)`)? For the never-written
+/// port of I.11.3.
+struct WritesPort<'p> {
+    port: &'p str,
+    found: bool,
+}
+
+impl<'ast, 'p> Visit<'ast> for WritesPort<'p> {
+    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+        if mc.method == "write" {
+            if let Expr::Path(p) = &*mc.receiver {
+                if p.path.segments.len() == 1 && p.path.segments[0].ident == self.port {
+                    self.found = true;
+                }
+            }
+        }
+        syn::visit::visit_expr_method_call(self, mc);
+    }
+}
+
+/// The tick-free fragment of I.2.7 a `combinational` body is: no `loop`, `while`,
+/// `break` or `continue` (a counted `for` is admitted — it is unrolled, I.2.4).
+struct CombFragment {
+    err: Option<RefError>,
+}
+
+impl<'ast> Visit<'ast> for CombFragment {
+    fn visit_expr(&mut self, e: &'ast Expr) {
+        let bad = match e {
+            Expr::Loop(_) => Some("`loop`"),
+            Expr::While(_) => Some("`while`"),
+            Expr::Break(_) => Some("`break`"),
+            Expr::Continue(_) => Some("`continue`"),
+            _ => None,
+        };
+        if let Some(b) = bad {
+            if self.err.is_none() {
+                self.err = Some(RefError::Unsupported(format!(
+                    "{b} in a `combinational` body (I.2.7: the tick-free fragment has none)"
+                )));
+            }
+        }
+        syn::visit::visit_expr(self, e);
+    }
+}
+
+/// `const { assert!(c, …) }` blocks in the body: rustc evaluates each at
+/// monomorphization and refuses the instance when one fails, so the interpreter
+/// evaluates them with its own constant evaluator against the bound const generics
+/// (I.14.4, D-21 B2) — a failing one is a `Parse` error, as rustc's is a compile
+/// error — and erases them at run time.
+fn check_const_asserts(item: &ItemFn, prog: &Program) -> Result<(), RefError> {
+    struct Collect<'c>(Vec<&'c syn::Block>);
+    impl<'ast> Visit<'ast> for Collect<'ast> {
+        fn visit_expr_const(&mut self, c: &'ast syn::ExprConst) {
+            self.0.push(&c.block);
+        }
+    }
+    let mut c = Collect(Vec::new());
+    c.visit_block(&item.block);
+    for b in c.0 {
+        for s in &b.stmts {
+            let mac = match s {
+                Stmt::Macro(m) => &m.mac,
+                Stmt::Expr(Expr::Macro(m), _) => &m.mac,
+                _ => {
+                    return Err(RefError::Unsupported(
+                        "a `const { … }` block that is not a list of `assert!`s (I.2.4)".into(),
+                    ))
+                }
+            };
+            if !mac.path.is_ident("assert") {
+                return Err(RefError::Unsupported(format!(
+                    "`{}!` in a `const {{ … }}` block (I.2.4: only `assert!`)",
+                    quote::ToTokens::to_token_stream(&mac.path)
+                )));
+            }
+            let args = mac
+                .parse_body_with(syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated)
+                .map_err(|e| RefError::Parse(format!("assert!: {e}")))?;
+            let cond = args.first().ok_or_else(|| RefError::Parse("an empty `assert!`".into()))?;
+            if !Exec::eval_const(prog, cond)?.as_bool()? {
+                return Err(RefError::Parse(format!(
+                    "`const {{ assert!({}) }}` fails at these parameters: rustc refuses the instance at monomorphization",
+                    quote::ToTokens::to_token_stream(cond)
+                )));
+            }
+        }
+    }
+    Ok(())
 }

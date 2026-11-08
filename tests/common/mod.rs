@@ -1803,8 +1803,16 @@ impl ReferenceLeg {
                     ins.push((p.name.as_str(), &bits[..]));
                 }
                 let resumption = pos - start + 1;
-                match m.resume_bits(&ins) {
-                    Ok(_) => {}
+                // A `combinational` module is a function evaluated at every settle
+                // (SPEC §I.11.1); the harness's vector is one settle. A clocked one
+                // is resumed (I.0.2).
+                let step = if m.is_combinational() {
+                    m.evaluate_bits(&ins)
+                } else {
+                    m.resume_bits(&ins).map(|_| ())
+                };
+                match step {
+                    Ok(()) => {}
                     Err(RefError::Runtime(e)) if ref_runtime_failure_kind(&e).is_some() => {
                         ref_failed = Some((pos, e));
                         break;

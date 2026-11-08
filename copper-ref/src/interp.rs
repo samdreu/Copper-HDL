@@ -140,6 +140,8 @@ pub struct Exec<'a> {
     pub mems: Option<&'a mut BTreeMap<String, MemState>>,
     /// Helper-function call stack, for the recursion refusal (R6).
     call_stack: Vec<String>,
+    /// The `impl` type of each associated fn being called: what `Self` names.
+    self_ty: Vec<String>,
 }
 
 fn unsup(s: impl Into<String>) -> RefError {
@@ -178,7 +180,7 @@ impl<'a> ConstEval for Exec<'a> {
         env.enter(0);
         let mut pending = HashMap::new();
         let inputs = HashMap::new();
-        let mut ex = Exec { prog: self.prog, env: &mut env, inputs: &inputs, pending: &mut pending, mems: None, call_stack: Vec::new() };
+        let mut ex = Exec { prog: self.prog, env: &mut env, inputs: &inputs, pending: &mut pending, mems: None, call_stack: Vec::new(), self_ty: Vec::new() };
         let v = ex.eval_expr(e)?;
         v.as_index()
     }
@@ -191,7 +193,7 @@ impl<'a> Exec<'a> {
         inputs: &'a HashMap<String, Value>,
         pending: &'a mut HashMap<String, Value>,
     ) -> Self {
-        Exec { prog, env, inputs, pending, mems: None, call_stack: Vec::new() }
+        Exec { prog, env, inputs, pending, mems: None, call_stack: Vec::new(), self_ty: Vec::new() }
     }
 
     /// Give the resumption the module's memories (I.10.1(a)).
@@ -686,6 +688,26 @@ impl<'a> Exec<'a> {
                         els[i] = sized;
                         Value::Array(els)
                     }
+                    // A `Bits::zero()` whose width rustc infers from a later use
+                    // (`let mut b = Bits::zero(); b[7] = …; o.write(b)`) is still an
+                    // unsized literal here; it is sized at first contact (I.14.4),
+                    // and a bit set before that is the same bit of the sized value.
+                    // An index past the width it is later given is caught when it is
+                    // sized (the literal no longer fits, I.14.1).
+                    Value::Lit(n) => {
+                        if i >= 128 {
+                            return Err(rt(format!("bit index {i} out of bounds for an unsized Bits literal")));
+                        }
+                        match v.as_logic()? {
+                            Logic::One => Value::Lit(n | (1u128 << i)),
+                            Logic::Zero => Value::Lit(n & !(1u128 << i)),
+                            Logic::X => {
+                                return Err(unsup(
+                                    "an X bit set in a Bits value whose width is not yet known (I.14.4: size it first)",
+                                ))
+                            }
+                        }
+                    }
                     other => return Err(rt(format!("index assignment into {other}"))),
                 };
                 self.assign_place(&ix.expr, updated)
@@ -992,7 +1014,11 @@ impl<'a> Exec<'a> {
                 if s.rest.is_some() {
                     return Err(unsup("`..rest` in a struct literal (I.2.4: OUTSIDE)"));
                 }
-                let name = s.path.segments.last().map(|x| x.ident.to_string()).unwrap_or_default();
+                let mut name = s.path.segments.last().map(|x| x.ident.to_string()).unwrap_or_default();
+                // `Self { .. }` inside an associated fn names the impl's type.
+                if name == "Self" {
+                    name = self.self_ty.last().cloned().ok_or_else(|| rt("`Self { .. }` outside an `impl`"))?;
+                }
                 let decl = self
                     .prog
                     .structs
@@ -1673,12 +1699,23 @@ impl<'a> Exec<'a> {
         }
         let saved = std::mem::replace(self.env, callee);
         self.call_stack.push(name.to_string());
+        let impl_ty = name.split_once("::").map(|(t, _)| t.to_string());
+        if let Some(t) = &impl_ty {
+            self.self_ty.push(t.clone());
+        }
         let result = self.eval_fn_body(block);
+        if impl_ty.is_some() {
+            self.self_ty.pop();
+        }
         self.call_stack.pop();
         let callee = std::mem::replace(self.env, saved);
         let mut v = result?;
         if let syn::ReturnType::Type(_, t) = &sig.output {
-            v = v.coerce_to(&self.parse_ty(t)?)?;
+            // `-> Self` names the impl's struct, whose value is already shaped.
+            let is_self = matches!(&**t, syn::Type::Path(tp) if tp.path.is_ident("Self"));
+            if !is_self {
+                v = v.coerce_to(&self.parse_ty(t)?)?;
+            }
         }
         let new_self = callee.get("self").cloned().unwrap_or(self_slot);
         Ok((v, new_self))

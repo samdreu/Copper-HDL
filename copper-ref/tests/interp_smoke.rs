@@ -281,11 +281,14 @@ async fn dv(clk: Clock<C>, x: In<Bits<8>, C>, q: RegOut<Bits<8>, C>) { loop { q.
     m.edge();
     assert_eq!(m.observe()[0].1, Value::Bits(copper_ref::RefBits::from_uint(8, 4)), "8 / 2");
 
+    // A `combinational` module is evaluated (I.11.1, Phase C step 9), not resumed.
     let comb = "
 #[hardware(combinational)]
 fn cb(x: In<Logic, C>, o: Out<Logic, C>) { o.write(x.read()); }";
-    let e = Module::new(&format!("{PRELUDE}{comb}"), "cb", &[]).unwrap_err();
-    assert!(matches!(e, RefError::Deferred(ref s) if s.contains("I.11")), "{e}");
+    let mut m = Module::new(&format!("{PRELUDE}{comb}"), "cb", &[]).unwrap();
+    assert!(matches!(m.resume(&[("x", Value::logic(Logic::One))]), Err(RefError::Runtime(_))));
+    m.evaluate(&[("x", Value::logic(Logic::One))]).unwrap();
+    assert_eq!(m.observe()[0].1, Value::logic(Logic::One));
 }
 
 /// The static tick-site set contains every reached site (the path conventions of

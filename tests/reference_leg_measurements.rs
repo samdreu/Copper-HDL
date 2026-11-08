@@ -469,6 +469,11 @@ fn poison_run_for_the_register_proposition() {
             let name = f.sig.ident.to_string();
             let ps = params_for(&name);
             let m = match Module::new(&src, &name, &ps) {
+                // A `combinational` module has no suspension to poison at (I.11.1).
+                Ok(m) if m.is_combinational() => {
+                    skipped += 1;
+                    continue;
+                }
                 Ok(m) => m,
                 Err(_) => {
                     skipped += 1;

@@ -197,39 +197,9 @@ const RESET: &[(&str, &str, bool)] = &[
 /// whose BODY the interpreter cannot give a meaning to yet. Validated at build
 /// time like `SKIP`: a row naming no covered module is dead and fails the build.
 ///
-/// Every row is a sentence with the SPEC clause that owes it. Under D-8 a module
-/// with a plain `Out` port "awaits the Phase C rewrite" and is skipped by class.
+/// Every row is a sentence with the SPEC clause that owes it. Empty since Phase C
+/// step 9 (MEASUREMENTS §O): the memory, combinational and body-gap rows all ran.
 const REF_SKIP: &[(&str, &str)] = &[
-    (
-        "struct_latch",
-        "a struct literal spelled `Self { .. }` inside an associated fn (`Latch::bubble()`): the \
-         interpreter stops with \"unknown struct Self\" at the first call. Measured 2026-11-06 \
-         when Phase C step 3 made the module `RegOut`-only and the reference leg reached it for \
-         the first time; an interpreter front-end gap (I.14's struct values), not a meaning",
-    ),
-    (
-        "struct_latch_cond",
-        "a struct literal spelled `Self { .. }` inside an associated fn (`Latch::bubble()`): the \
-         interpreter stops with \"unknown struct Self\" at the first call. Measured 2026-11-06 \
-         when Phase C step 3 made the module `RegOut`-only and the reference leg reached it for \
-         the first time; an interpreter front-end gap (I.14's struct values), not a meaning",
-    ),
-    (
-        "tuple_destructure",
-        "a struct literal spelled `Self { .. }` inside an associated fn (`Latch::bubble()`): the \
-         interpreter stops with \"unknown struct Self\" at the first call. Measured 2026-11-06 \
-         when Phase C step 3 made the module `RegOut`-only and the reference leg reached it for \
-         the first time; an interpreter front-end gap (I.14's struct values), not a meaning",
-    ),
-    (
-        "shift_register",
-        "a `const { assert!(N - 1 == N_1, …) }` block in the body: a compile-time check of the \
-         generic widths that the interpreter's front-end refuses as a statement macro (II.1 \
-         R13/R14). Measured 2026-11-06 when Phase C step 3 made the module `RegOut`-only and the \
-         reference leg reached it for the first time; the macro and the transpiler evaluate \
-         the assertion at monomorphization, the interpreter has no const evaluator for it yet \
-         (I.14.4's shared evaluator)",
-    ),
 ];
 
 /// The PATTERN (SPEC §III.2.8) of every `REF_SKIP` row that excuses a MEASURED
@@ -320,8 +290,6 @@ fn main() {
                     Some(why) => {
                         let class = if why.starts_with("MEASURED DISAGREEMENT") {
                             "measured disagreement (REF_SKIP row)"
-                        } else if why.starts_with("plain `Out`") {
-                            "plain Out (D-8, awaits Phase C)"
                         } else if why.contains("I.10") {
                             "Memory (I.10)"
                         } else if why.contains("I.11") {
@@ -728,15 +696,9 @@ impl Module {
             return Some((*why).to_string());
         }
         match self.mode.as_str() {
-            "sequential" | "synchronizer" => {}
-            "combinational" => {
-                return Some(
-                    "a `combinational` module: one evaluation per settle, SPEC §I.11 (written, D-14) \
-                     — the interpreter runs the clocked kernel only; its combinational leg is a \
-                     later Phase C step"
-                        .to_string(),
-                )
-            }
+            // A `combinational` module is evaluated once per settle (SPEC §I.11.1;
+            // Phase C step 9): the harness's vector is the settle.
+            "sequential" | "synchronizer" | "combinational" => {}
             "structural" => {
                 return Some(
                     "a `structural` module: a wiring language, SPEC §I.13 (written, D-18); the \
@@ -746,20 +708,9 @@ impl Module {
             }
             other => return Some(format!("unknown #[hardware] mode `{other}`")),
         }
-        let plain_outs: Vec<&str> = self
-            .ports
-            .iter()
-            .filter(|p| p.kind == Kind::Out)
-            .map(|p| p.name.as_str())
-            .collect();
-        if !plain_outs.is_empty() {
-            return Some(format!(
-                "plain `Out` port(s) {} on a clocked module: under the one-job body a sequential \
-                 module has no plain `Out` (D-8, SPEC I.2.2) — the module awaits the Phase C \
-                 rewrite to `RegOut`, and until then the interpreter has no meaning for it",
-                plain_outs.join(", ")
-            ));
-        }
+        // A plain `Out` on a clocked module is refused by R8 in both front-ends since
+        // Phase C step 3, so no swept module has one; its class here was deleted at
+        // step 9 when it measured 0 (MEASUREMENTS §O).
         if self.ports.iter().any(|p| p.kind == Kind::Memory) {
             return Some(
                 "a `Memory` parameter: a received memory is the instantiating context's (SPEC \
