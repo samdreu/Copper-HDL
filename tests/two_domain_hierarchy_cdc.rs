@@ -261,3 +261,33 @@ fn independent_reference_matches_sim_under_verilator() {
     run_dual_clock_verilator(REFERENCE_SV, "two_domain_ref", &tb)
         .expect("independent reference SV must match the sim trace under Verilator");
 }
+
+/// The design leg (Phase C step 9, SPEC §I.13; D-20 item 9): the structural parent
+/// run by the reference interpreter as the design it names (I.13.4(a)) — its
+/// three children composed over its nets, each domain cycled in I.13.2(b)'s order
+/// (settle, resume the domain's coroutines, edge, settle), the settle evaluating the
+/// one function in topological order — against the simulator's hand wiring of the
+/// same instances, at three interleavings. Needs no Verilator. The interpreter reads
+/// the EXAMPLE file (the parent and its children), not this file's copies.
+#[test]
+fn reference_interpreter_design_matches_sim() {
+    let src = std::fs::read_to_string(DESIGN_FILE).expect("read example source");
+    for (k, n) in [(2usize, 10usize), (3, 10), (1, 16)] {
+        let mut d = copper_ref::Design::new(&src, "two_domain_top").expect("the design leg builds two_domain_top");
+        let mut trace = Vec::new();
+        for _ in 0..n {
+            for _ in 0..k {
+                d.tick("wr_clk").expect("fast-domain cycle");
+            }
+            d.tick("rd_clk").expect("slow-domain cycle");
+            let obs = d.observe();
+            let get = |p: &str| {
+                let v = &obs.iter().find(|(x, _)| x == p).unwrap().1;
+                v.to_bits().unwrap().iter().enumerate().fold(0u8, |a, (i, l)| a | ((*l == Logic::One) as u8) << i)
+            };
+            trace.push((get("count_out"), get("flag_sync_out")));
+        }
+        assert_eq!(trace, sim_trace(k, n), "design leg vs hand-wired simulation at {k}:1");
+        println!("design leg: two_domain_top {k}:1, {n} slow cycles agreed with the hand-wired simulation");
+    }
+}

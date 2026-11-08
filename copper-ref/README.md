@@ -33,6 +33,23 @@ and `write_port::<j>().write(a, e)` are stagings of the resumption, last wins
 (I.10.1(d)), `data()` unready a `Runtime` failure; an out-of-range address likewise.
 Pinned by hand-derived traces in `tests/interp_memory.rs`.
 
+**Combinational modules (SPEC §I.11).** `Module::evaluate(inputs)` runs a
+`combinational` body once from a fresh environment (every local a wire of that
+evaluation): last write wins, a dead write admitted, a never-written port refused at
+construction and an unwritten path at the evaluation (I.11.3), no `loop`/`while`/
+`break`/`continue` (I.2.7). The reference leg evaluates once per vector — the settle.
+Pinned in `tests/interp_comb.rs`.
+
+**Designs (SPEC §I.13).** `Design::new(src, top)` builds the design a `structural`
+module names: its nets (`net`/`wire`/`registered_wire`, whose `init` is no value of the
+net) and its instantiations, each child a `Module` of the same file; one driver per wire,
+every net driven, payload types checked, a combinational cycle refused (I.11.4).
+`settle()` evaluates every function once in a topological order from the sources;
+`pre_edge(clk)` / `post_edge(clk)` are I.13.2(b)'s cycle for the domain of parent clock
+`clk` (settle, resume that domain's coroutines, edge, settle) — so a two-clock parent
+runs by cycling each clock. Run against the hand-wired simulation of `two_domain_top`
+in `tests/two_domain_hierarchy_cdc.rs`; pinned in `tests/interp_design.rs`.
+
 **How it is wired.** `build.rs` emits a `<name>_reference_leg` case per corpus module
 (the simulator's trace under the sweep's stimulus policy, replayed through the
 interpreter: `resume` with cycle N's inputs, `edge`, `observe` against `obs_{N+1}`;
@@ -46,8 +63,8 @@ Verilator, so it also runs under `--quick`.
 - `Deferred` — a class the interpreter does not cover yet, skipped by `build.rs`'s
   `REF_SKIP` with the clause that owes it: a plain `Out` on a clocked module (R8 refuses
   it in both front-ends since Phase C step 3), a `Memory` **parameter** (I.10.5: its
-  depth and contents are the owner's), a second clock in one kernel (I.12),
-  `combinational` (I.11), `structural` (I.13).
+  depth and contents are the owner's), a second clock in one kernel (I.12), and a
+  `structural` module given to `Module::new` (it is a `Design`, I.13.4(a)).
 - `Unsupported` — outside the kernel or in a dated row: a read inside macro tokens or a
   statement macro (II.1 R13/R14), `/` (R15), a labelled or valued `break` (R12),
   `return` (I.2.5(d)), a non-`tick` `await` (R1), a `tick` before the loop (R21), recursion

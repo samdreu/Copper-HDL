@@ -701,8 +701,10 @@ impl Module {
             "sequential" | "synchronizer" | "combinational" => {}
             "structural" => {
                 return Some(
-                    "a `structural` module: a wiring language, SPEC §I.13 (written, D-18); the \
-                     interpreter's design leg is a later Phase C step"
+                    "a `structural` module is the design it names (SPEC §I.13.4(a)): the \
+                     interpreter runs it as `copper_ref::Design` against the hand-wired \
+                     simulation in its own test (tests/two_domain_hierarchy_cdc.rs), because this \
+                     harness drives one module, not a design"
                         .to_string(),
                 )
             }

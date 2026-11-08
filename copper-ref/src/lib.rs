@@ -41,6 +41,7 @@
 //! spec gap or an interpreter bug. See `README.md`.
 
 pub mod bits;
+pub mod design;
 pub mod interp;
 pub mod memory;
 pub mod module;
@@ -48,6 +49,7 @@ pub mod types;
 pub mod value;
 
 pub use bits::RefBits;
+pub use design::Design;
 pub use interp::{Flow, TickSite};
 
 /// The static `tick` sites of any `#[hardware]` fn's body — the states of H(M)
