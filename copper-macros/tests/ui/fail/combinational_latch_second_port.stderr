@@ -1,4 +1,4 @@
-error: would infer a latch: combinational output `p` is assigned on some control paths but not all. Assign `p` on every path (add the missing branch / `_` arm)
+error: would infer a latch: combinational output `p` is assigned on some control paths but not all. Assign `p` on every path (add the missing branch / `_` arm) (SPEC I.11.3, II.2 D2)
  --> tests/ui/fail/combinational_latch_second_port.rs:8:4
   |
 8 | fn half_defaulted(c: In<Logic, ()>, x: In<Bits<8>, ()>, o: Out<Bits<8>, ()>, p: Out<Bits<8>, ()>) {

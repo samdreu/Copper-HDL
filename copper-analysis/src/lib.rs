@@ -236,6 +236,16 @@ pub fn check_memory_staging(f: &ItemFn) -> Result<(), syn::Error> {
 /// `sim ≡ BaseJump` on `bsg_dff_en`), so imposing "assign on all paths" there would
 /// reject valid hardware.
 pub fn check_definite_assignment(f: &ItemFn) -> Result<(), syn::Error> {
+    // D2 is the combinational module's rule (I.11.3). The mode decides when the
+    // attribute is still on the fn (the transpiler, the audits): a `structural`
+    // body has no loop either, and its `Out`s are driven by its children (Phase C
+    // step 10, found when the never-written clause landed). The macro, whose fn no
+    // longer carries the attribute, calls this from its combinational arm only.
+    if let Some(Ok(mode)) = crate::hardware_mode(f) {
+        if mode != HardwareMode::Combinational {
+            return Ok(());
+        }
+    }
     // A top-level loop ⇒ sequential ⇒ the enabled-register idiom is valid; skip.
     if Cfg::build(f).is_some() {
         return Ok(());

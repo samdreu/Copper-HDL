@@ -1,0 +1,19 @@
+error: would infer a latch: combinational output `o` is assigned on some control paths but not all. Assign `o` on every path (add the missing branch / `_` arm) (SPEC I.11.3, II.2 D2)
+  --> tests/ui/fail/combinational_latch_in_for.rs:12:4
+   |
+12 | fn any_set(a: In<Bits<4>, A>, o: Out<Logic, A>) {
+   |    ^^^^^^^
+
+warning: unused imports: `Bits` and `Logic`
+ --> tests/ui/fail/combinational_latch_in_for.rs:1:19
+  |
+1 | use copper_core::{Bits, ClockDomain, Logic};
+  |                   ^^^^               ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `Out`
+ --> tests/ui/fail/combinational_latch_in_for.rs:2:25
+  |
+2 | use copper_core::port::{In, Out};
+  |                         ^^  ^^^

@@ -1,0 +1,19 @@
+error: this loop's only clock boundary is a nested loop that can be left before it ticks, so the enclosing loop can return to its top in zero time — a livelock in simulation, and a loop the transpiler cannot give the same meaning in hardware. Give the enclosing loop a `clk.tick().await` of its own, or make the nested loop one that always ticks (a `for` over a constant range, whose body runs before any exit test)
+  --> tests/ui/fail/literal_empty_for_boundary.rs:17:9
+   |
+17 |         for _i in 0..0 {
+   |         ^^^
+
+warning: unused imports: `Bits` and `Clock`
+ --> tests/ui/fail/literal_empty_for_boundary.rs:1:19
+  |
+1 | use copper_core::{Bits, Clock, ClockDomain};
+  |                   ^^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `copper_core::port::RegOut`
+ --> tests/ui/fail/literal_empty_for_boundary.rs:2:5
+  |
+2 | use copper_core::port::RegOut;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^

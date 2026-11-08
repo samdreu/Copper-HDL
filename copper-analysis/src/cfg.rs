@@ -316,6 +316,13 @@ impl Cfg {
     pub fn build_combinational(f: &ItemFn) -> Cfg {
         let comb_outputs = combinational_outputs(f);
         let mut b = Builder::new(comb_outputs.clone(), registered_outputs(f), in_param_names(f), memory_locals(f));
+        // A combinational body's counted `for` is real control flow here (SPEC
+        // II.2.2, Phase C step 10): its body is one iteration, entered from the
+        // range test and returning to it, so a write under an `if` inside it is a
+        // may-write, not the "drives every output" of a folded opaque node — which
+        // admitted `for i in 0..4 { if t[i] { o.write(1) } }`, a latch the
+        // transpiler's own `check_no_latches` then refused (a parity break).
+        b.expand_loops = true;
         let span = f.sig.ident.span();
         let exit = b.new_node(Node::empty(span));
         let head = b.build_block(&f.block.stmts, exit);
@@ -924,7 +931,22 @@ impl Cfg {
                     format!(
                         "would infer a latch: combinational output `{o}` is assigned on some \
                          control paths but not all. Assign `{o}` on every path (add the missing \
-                         branch / `_` arm)"
+                         branch / `_` arm) (SPEC I.11.3, II.2 D2)"
+                    ),
+                ));
+            }
+        }
+        // D-14 (I.11.3, Phase C step 10): a port no path writes has no value at all —
+        // an output that is not a function of the reads. The other half of the
+        // under-direction II.2.2 recorded (`TODO:1366`).
+        for o in &self.comb_outputs {
+            if !may[exit].contains(o) {
+                return Err((
+                    self.nodes[exit].span,
+                    format!(
+                        "combinational output `{o}` is never written: an evaluation is a function \
+                         of its reads that writes every `Out` on every path, and `{o}` is written on \
+                         none (SPEC I.11.3, D-14; II.2 D2). Write it, or remove the port"
                     ),
                 ));
             }
@@ -2164,75 +2186,126 @@ fn loop_body_stmts(expr: &Expr) -> &[Stmt] {
 ///   2026-09-02 this arm was a flat `false` ("a `for` runs its body"), and a
 ///   detector written that way with nothing after the `for` passed the check and
 ///   hung the simulator; `tests/ui/fail/for_break_before_tick.rs` in copper-macros
-///   pins the rejection. What is still not seen: an **empty** range, which needs
-///   const evaluation and which this crate (syntax-level, `syn`-only) cannot do.
+///   pins the rejection. Since Phase C step 10 a **literal** empty range (`0..0`)
+///   is seen as an exit too; one empty only through a constant (`0..N`, `N = 0`)
+///   is not — the direction stays *under* there (SPEC II.2.2).
 fn may_exit_without_tick(expr: &Expr) -> bool {
     match expr {
-        Expr::ForLoop(f) => !ticks_before_any_break(&f.body.stmts),
+        // A `loop` is left only by a `break`: it can be left without a tick iff some
+        // path reaches one of its `break`s before ticking. A path that falls back to
+        // the head without ticking is not an exit — it is a zero-time cycle of the
+        // nested loop itself, which `check_reachability` refuses on the loop's own
+        // sub-CFG.
+        Expr::Loop(l) => untick_paths(&l.body.stmts).brk,
+        // A `for` is also left when its range runs out at the end of an iteration:
+        // so a path that falls through untick'd is an exit too, and so is a literal
+        // range that is empty (it runs no iteration at all).
+        Expr::ForLoop(f) => {
+            let p = untick_paths(&f.body.stmts);
+            p.brk || p.fall || literal_range_is_empty(&f.expr)
+        }
         Expr::While(_) => true,
-        Expr::Loop(l) => !ticks_before_any_break(&l.body.stmts),
         _ => false,
     }
 }
 
-/// Does every top-level path through this loop body reach a tick before it can
-/// `break` out of the loop?
-///
-/// Deliberately conservative: a tick that sits inside a branch (`if c { tick; }`)
-/// answers "no", because the other branch reaches the body's end — and thus the
-/// loop head — without ticking. Only a tick in *statement* position counts, or a
-/// nested loop that is itself a guaranteed boundary (mutually recursive with
-/// [`may_exit_without_tick`]; both descend structurally, so this terminates).
-fn ticks_before_any_break(body: &[Stmt]) -> bool {
-    for stmt in body {
-        let Stmt::Expr(e, _) = stmt else {
-            // A `let` whose initializer breaks or ticks is not a shape this walk
-            // models; treat it as neither, and keep looking.
-            continue;
+/// The paths through a loop body that have not ticked (SPEC II.2.2, the
+/// all-paths walk of Phase C step 10): `brk` — some path reaches a `break` of
+/// this loop before any tick; `fall` — some path reaches the body's end (or a
+/// `continue`) before any tick. A statement that ticks on every path ends every
+/// path through it; one that ticks on some path only (an `if` with a tick in one
+/// arm) lets the others through — the walk descends `if`, `match` and blocks arm
+/// by arm. Until step 10 the walk stopped at the first statement that contained a
+/// tick without being one and answered "exitable" (`livelock_a`, `livelock_b`, D-12
+/// §0 (iii): refused though every path ticks), and read a `loop` falling through
+/// as an exit, as a `for`'s is.
+#[derive(Clone, Copy, Default)]
+struct UntickPaths {
+    brk: bool,
+    fall: bool,
+}
+
+fn untick_paths(stmts: &[Stmt]) -> UntickPaths {
+    let (brk, fall, cont) = untick_seq(stmts);
+    UntickPaths { brk, fall: fall || cont }
+}
+
+/// A statement sequence's untick'd paths: (reaches a `break` of the enclosing loop
+/// untick'd, falls out of the sequence untick'd, reaches a `continue` untick'd).
+fn untick_seq(stmts: &[Stmt]) -> (bool, bool, bool) {
+    let (mut brk, mut cont, mut live) = (false, false, true);
+    for s in stmts {
+        if !live {
+            break;
+        }
+        let (b, f, c) = match s {
+            Stmt::Expr(e, _) => untick_through(e),
+            // A `let` whose initializer ticks or breaks is not a shape the kernel
+            // writes (the transpiler refuses a tick in a `let` initializer); it is
+            // a path that passes.
+            _ => (false, true, false),
         };
-        if tick_clock(e).is_some() {
-            return true; // an unconditional clock boundary, reached first
+        brk |= b;
+        cont |= c;
+        live = f;
+    }
+    (brk, live, cont)
+}
+
+/// One expression statement's untick'd paths, as [`untick_seq`]'s triple.
+fn untick_through(e: &Expr) -> (bool, bool, bool) {
+    if tick_clock(e).is_some() {
+        return (false, false, false);
+    }
+    let or = |a: (bool, bool, bool), b: (bool, bool, bool)| (a.0 || b.0, a.1 || b.1, a.2 || b.2);
+    match e {
+        Expr::Break(_) => (true, false, false),
+        Expr::Continue(_) => (false, false, true),
+        Expr::If(i) => {
+            let els = match &i.else_branch {
+                Some((_, eb)) => untick_through(eb),
+                None => (false, true, false),
+            };
+            or(untick_seq(&i.then_branch.stmts), els)
         }
-        if matches!(e, Expr::Loop(_) | Expr::While(_) | Expr::ForLoop(_)) {
-            // A nested loop that always ticks is itself a boundary: reaching it
-            // guarantees a clock edge. Without this clause `loop { <work>; for _ in
-            // 0..N { tick; } }` — the shape cause K exists to support — would read
-            // as tickless and be false-rejected.
+        Expr::Match(m) => m.arms.iter().fold((false, false, false), |r, a| or(r, untick_through(&a.body))),
+        Expr::Block(b) => untick_seq(&b.block.stmts),
+        Expr::Paren(p) => untick_through(&p.expr),
+        // A nested loop's own `break`s leave it, not the enclosing loop. If it is a
+        // guaranteed boundary (it ticks and cannot be left without ticking), every
+        // path through it has ticked; otherwise a path may come out untick'd.
+        Expr::Loop(_) | Expr::While(_) | Expr::ForLoop(_) => {
             if first_tick_clock(e).is_some() && !may_exit_without_tick(e) {
-                return true;
+                (false, false, false)
+            } else {
+                (false, true, false)
             }
-            return false;
         }
-        if breaks_enclosing_loop(e) {
-            return false; // an exit is reachable with no tick behind it
-        }
-        if first_tick_clock(e).is_some() {
-            return false; // ticks only on *some* path through this statement
-        }
-    }
-    false // fell out of the body without ticking
-}
-
-/// Does `expr` contain a `break` belonging to the loop that encloses it? A `break`
-/// under a nested loop of its own belongs to *that* loop and does not count.
-fn breaks_enclosing_loop(expr: &Expr) -> bool {
-    match expr {
-        Expr::Break(_) => true,
-        Expr::If(f) => {
-            f.then_branch.stmts.iter().any(stmt_breaks_enclosing_loop)
-                || f.else_branch.as_ref().is_some_and(|(_, e)| breaks_enclosing_loop(e))
-        }
-        Expr::Block(b) => b.block.stmts.iter().any(stmt_breaks_enclosing_loop),
-        Expr::Match(m) => m.arms.iter().any(|a| breaks_enclosing_loop(&a.body)),
-        Expr::Loop(_) | Expr::While(_) | Expr::ForLoop(_) => false,
-        _ => false,
+        _ => (false, true, false),
     }
 }
 
-fn stmt_breaks_enclosing_loop(s: &Stmt) -> bool {
-    match s {
-        Stmt::Expr(e, _) => breaks_enclosing_loop(e),
-        _ => false,
+/// A range written with integer literals that holds no value (`0..0`, `5..3`,
+/// `4..=3`): a `for` over it runs no iteration (I.8.4(b)). Only literals are read
+/// — a constant or a const generic needs the constant evaluator, which this
+/// syntactic walk does not run, so `0..N` with `N = 0` is still taken as
+/// non-empty (the direction stays **under** there, SPEC II.2.2).
+fn literal_range_is_empty(e: &Expr) -> bool {
+    let Expr::Range(r) = e else { return false };
+    let lit = |x: Option<&Expr>| -> Option<i128> {
+        match x? {
+            Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) => i.base10_parse::<i128>().ok(),
+            Expr::Paren(p) => match &*p.expr {
+                Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) => i.base10_parse::<i128>().ok(),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    let (Some(a), Some(b)) = (lit(r.start.as_deref()), lit(r.end.as_deref())) else { return false };
+    match r.limits {
+        syn::RangeLimits::HalfOpen(_) => a >= b,
+        syn::RangeLimits::Closed(_) => a > b,
     }
 }
 
@@ -3097,17 +3170,52 @@ mod tests {
         assert!(da(src).is_err());
     }
 
-    /// An output never written is not a latch here (it may be driven by a
-    /// submodule instantiation) — only a *partial* write is flagged.
+    /// An output never written is refused (D-14, SPEC I.11.3; Phase C step 10).
+    /// Until step 10 it was admitted on the ground that a submodule instantiation
+    /// might drive it; I.13.5 (D-18 A2) removed instantiation from behavioural
+    /// bodies, so "the never-written port rule of I.11.3 has no exemption".
     #[test]
-    fn comb_output_never_written_not_flagged() {
+    fn comb_output_never_written_is_refused() {
         let src = r#"
             #[hardware(combinational)]
             fn m(a: In<Logic, ()>, o: Out<Logic, ()>) {
                 let _ = a.read();
             }
         "#;
-        assert!(da(src).is_ok());
+        let e = da(src).unwrap_err();
+        assert!(e.contains("never written"), "{e}");
+    }
+
+    /// The folded-loop direction of II.2.2, narrowed in Phase C step 10: a port
+    /// written only under an `if` inside a counted `for` is a may-write, so the body
+    /// infers a latch; written on every iteration's every path, it is written.
+    #[test]
+    fn comb_write_under_an_if_in_a_for_is_partial() {
+        let partial = r#"
+            #[hardware(combinational)]
+            fn m(a: In<Bits<4>, ()>, o: Out<Logic, ()>) {
+                let t = a.read();
+                for i in 0..4 { if t[i] == Logic::One { o.write(Logic::One); } }
+            }
+        "#;
+        assert!(da(partial).is_err());
+        let total = r#"
+            #[hardware(combinational)]
+            fn m(a: In<Bits<4>, ()>, o: Out<Logic, ()>) {
+                let t = a.read();
+                for i in 0..4 { if t[i] == Logic::One { o.write(Logic::One); } else { o.write(Logic::Zero); } }
+            }
+        "#;
+        assert!(da(total).is_ok());
+        let default_first = r#"
+            #[hardware(combinational)]
+            fn m(a: In<Bits<4>, ()>, o: Out<Logic, ()>) {
+                let t = a.read();
+                o.write(Logic::Zero);
+                for i in 0..4 { if t[i] == Logic::One { o.write(Logic::One); } }
+            }
+        "#;
+        assert!(da(default_first).is_ok());
     }
 
     /// A sequential `Out` written conditionally is an enabled register (holds),
