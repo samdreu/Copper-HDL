@@ -100,6 +100,7 @@ impl Module {
             structs: HashMap::new(),
             fns: HashMap::new(),
             methods: HashMap::new(),
+            tuple_structs: HashMap::new(),
             generics: HashMap::new(),
             clocks: Vec::new(),
             inputs: HashMap::new(),
@@ -584,7 +585,15 @@ fn collect_item(it: &Item, prog: &mut Program) -> Result<(), RefError> {
             }
             prog.enums.insert(e.ident.to_string(), vs);
         }
+        // An immutable `static` reads as a const in a constant (rustc 1.83+);
+        // 2026-11-08, MEASUREMENTS §V.4.
+        Item::Static(st) if matches!(st.mutability, syn::StaticMutability::None) => {
+            prog.consts.insert(st.ident.to_string(), (Some((*st.ty).clone()), (*st.expr).clone()));
+        }
         Item::Struct(s) => {
+            if let syn::Fields::Unnamed(u) = &s.fields {
+                prog.tuple_structs.insert(s.ident.to_string(), u.unnamed.iter().map(|f| f.ty.clone()).collect());
+            }
             let fields = match &s.fields {
                 syn::Fields::Named(n) => n.named.iter().filter_map(|f| f.ident.as_ref().map(|i| i.to_string())).collect(),
                 _ => Vec::new(),
@@ -832,6 +841,7 @@ impl ConstScope {
             structs: HashMap::new(),
             fns: HashMap::new(),
             methods: HashMap::new(),
+            tuple_structs: HashMap::new(),
             generics: generics.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             clocks: Vec::new(),
             inputs: HashMap::new(),

@@ -96,6 +96,10 @@ fn const_source(items: &[Item]) -> Vec<String> {
         .iter()
         .filter(|it| match it {
             Item::Const(_) => true,
+            // As `copper-codegen`'s `capture_file_scope` (2026-11-08, MEASUREMENTS §V.4):
+            // an immutable `static` and a tuple struct are constants of I.14.4 too.
+            Item::Static(st) => matches!(st.mutability, syn::StaticMutability::None),
+            Item::Struct(st) => matches!(st.fields, syn::Fields::Unnamed(_)),
             Item::Fn(f) => f.sig.constness.is_some(),
             Item::Impl(imp) => imp.trait_.is_none(),
             _ => false,
@@ -536,4 +540,52 @@ fn the_two_constant_evaluators_agree_on_every_corpus_constant() {
     if let Ok(p) = std::env::var("COPPER_CONST_EVAL_REPORT") {
         fs::write(&p, format!("{summary}\n")).expect("write the constant-evaluator report");
     }
+}
+
+/// The grammar widened on 2026-11-08 (line `II.3 found const-call`, MEASUREMENTS §V.4),
+/// against rustc: each item below was compiled by rustc 1.92 as a `const` (or `static`)
+/// and its value printed; both evaluators must give rustc's value. `min`/`max` are not
+/// here — rustc refuses them in a constant (E0658, `Ord` is not a const trait), and both
+/// evaluators leave them outside.
+#[test]
+fn the_widened_constant_grammar_agrees_with_rustc() {
+    let src = "struct P(u8, u8);
+        const A: u8 = 250u8.wrapping_add(10);
+        const B: u8 = 250u8.wrapping_sub(10);
+        const C: u8 = 250u8.wrapping_mul(3);
+        const D: i8 = (-128i8).wrapping_neg();
+        const E: u16 = 250u16.wrapping_shl(9);
+        const F: i16 = (-4i16).wrapping_shr(1);
+        const G: u8 = 250u8.saturating_add(10);
+        const H: u8 = 5u8.saturating_sub(10);
+        const I: u8 = 3u8.pow(4);
+        const J: u32 = 250u8.count_ones();
+        const K: u32 = 250u8.count_zeros();
+        const L: u32 = 1u8.leading_zeros();
+        const M: u32 = 8u8.trailing_zeros();
+        const N: bool = 8u8.is_power_of_two();
+        const O: u8 = 5u8.next_power_of_two();
+        const Q: i8 = (-5i8).abs();
+        const R: u8 = P(3, 4).1;
+        static SS: u8 = 7;
+        const T: u8 = SS;
+        const PK: P = P(9, 2);
+        const U: u8 = PK.0.wrapping_add(PK.1);
+        const MN: u8 = 3u8.min(4);";
+    // rustc 1.92's values (`println!` of each), recorded.
+    let rustc: &[(&str, i128)] = &[
+        ("A", 4), ("B", 240), ("C", 238), ("D", -128), ("E", 62464), ("F", -2), ("G", 255), ("H", 0),
+        ("I", 81), ("J", 6), ("K", 2), ("L", 7), ("M", 3), ("N", 1), ("O", 8), ("Q", 5), ("R", 4),
+        ("T", 7), ("U", 11),
+    ];
+    let file: syn::File = syn::parse_str(src).unwrap();
+    let env = copper_analysis::consts::ConstEnv::from_items(const_source(&file.items).iter().map(String::as_str));
+    let scope = ConstScope::new(&file, None, &[]).unwrap();
+    for (name, v) in rustc {
+        assert_eq!(env.get(name), Some(*v), "ConstEnv, {name}");
+        let r = scope.eval_const_named(name).ok().and_then(|x| ref_int(&x));
+        assert_eq!(r, Some(*v), "the interpreter, {name}");
+    }
+    assert_eq!(env.get("MN"), None, "ConstEnv admits `min`, which rustc refuses in a constant");
+    assert!(scope.eval_const_named("MN").is_err(), "the interpreter admits `min`, which rustc refuses in a constant");
 }

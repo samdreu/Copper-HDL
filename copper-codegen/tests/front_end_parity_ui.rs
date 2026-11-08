@@ -86,7 +86,15 @@ const RUSTC_JUDGED: &[&str] = &[
     "register_init_non_const_ctor.rs",
     "register_init_not_constant.rs",
     "structural_plain_fn_call.rs",
+    // I.13.4(d): a child port left unconnected is rustc's E0061 (the call's arity);
+    // the transpiler's registry counts the ports. Both messages are pinned by
+    // `an_unconnected_child_port_is_refused_by_both` (MEASUREMENTS §V.5).
+    "structural_unconnected_port.rs",
 ];
+
+/// The prefix rustc gives a panic in a `const` the macro emits with its own message
+/// (I.8.4(b)'s range assertions, MEASUREMENTS §V.3): what follows it is the macro's text.
+const CONST_EVAL_PREFIX: &str = "error[E0080]: evaluation panicked: ";
 
 /// ui/fail cases rustc refuses through a lint the macro denies, with the macro's text
 /// as the lint's reason: rustc's first line is the lint's own ("unused return value of
@@ -126,7 +134,7 @@ fn the_transpiler_refuses_every_shape_the_macro_refuses_with_the_same_message() 
         }
         let stderr = std::fs::read_to_string(p.with_extension("stderr")).unwrap();
         let first = stderr.lines().next().unwrap_or("");
-        let Some(macro_msg) = first.strip_prefix("error: ") else {
+        let Some(macro_msg) = first.strip_prefix("error: ").or_else(|| first.strip_prefix(CONST_EVAL_PREFIX)) else {
             other_message.push(format!("{name}: macro's first line is not a macro error: {first}"));
             continue;
         };
@@ -165,4 +173,23 @@ fn the_transpiler_admits_every_shape_the_macro_admits() {
         }
     }
     assert!(refused.is_empty(), "{refused:#?}");
+}
+
+/// SPEC I.13.4(d): every port of a child is connected (MEASUREMENTS §V.5). Both
+/// front-ends refuse an instantiation that leaves one out — the macro through rustc
+/// (E0061, the generated fn's arity), the transpiler from its registry — each with its
+/// message pinned here.
+#[test]
+fn an_unconnected_child_port_is_refused_by_both() {
+    let p = ui_dir().join("fail/structural_unconnected_port.rs");
+    let stderr = std::fs::read_to_string(p.with_extension("stderr")).unwrap();
+    assert!(
+        stderr.starts_with("error[E0061]: this function takes 3 arguments but 2 arguments were supplied"),
+        "the macro's refusal is no longer rustc's arity error:\n{stderr}"
+    );
+    let err = transpile(&p).expect_err("the transpiler admits a child with an unconnected port");
+    assert!(
+        err.contains("structural instantiation of `hold` passes 2 args but the module has 3 ports"),
+        "the transpiler refuses, but not by counting the ports: {err}"
+    );
 }

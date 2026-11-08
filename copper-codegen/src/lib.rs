@@ -404,6 +404,27 @@ pub fn lower_source_module(src: &str, module: &str) -> Result<LoweredModule, Str
     Ok(LoweredModule { fir, chir, shir, sv })
 }
 
+/// R3's refusal of a ticking `for` whose emptiness its verdict depends on and which
+/// `ConstEnv` cannot fold (SPEC I.8.4(b), MEASUREMENTS §V.3).
+pub const UNFOLDED_BOUNDARY_RANGE_MESSAGE: &str = "this `for` may be the enclosing loop's only clock \
+    boundary, and whether its range is empty is a constant the transpiler's evaluator cannot fold \
+    (SPEC I.8.4(b), II.2.2 R3; I.14.4): an empty range runs no iteration and the enclosing loop \
+    would return to its top in zero time. Spell the bounds with literals, `const` items or \
+    `const fn` calls the evaluator reads, or give the enclosing loop a tick of its own";
+
+/// The `const` items declared inside `f`'s body (any depth), as source text.
+fn body_const_items(f: &syn::ItemFn) -> Vec<String> {
+    struct V(Vec<String>);
+    impl<'a> syn::visit::Visit<'a> for V {
+        fn visit_item_const(&mut self, c: &'a syn::ItemConst) {
+            self.0.push(quote::ToTokens::to_token_stream(c).to_string());
+        }
+    }
+    let mut v = V(Vec::new());
+    syn::visit::Visit::visit_block(&mut v, &f.block);
+    v.0
+}
+
 /// Every front-end rule on `target`, then its FIR with the file scope injected.
 fn checked_fir_for_target(
     target: &syn::ItemFn,
@@ -422,7 +443,44 @@ fn checked_fir_for_target(
     // — a tickless loop path is rejected here too (one authoritative check, both
     // front-ends). In practice a module reaching the transpiler already compiled
     // through the macro's check; this keeps the standalone CLI honest.
-    copper_analysis::check_reachability(target).map_err(|e| e.to_string())?;
+    //
+    // SPEC I.8.4(b), II.2.2 R3 (2026-11-08, MEASUREMENTS §V.3): a ticking `for` over
+    // a range empty only through a constant (`0..EMPTY`) is no boundary. The ranges
+    // both front-ends decide (`constant_ticking_for_ranges`) are folded through
+    // `ConstEnv` — the file's consts and the body's own — and R3 runs with what the
+    // fold says; the macro has rustc check the same ranges. A range R3's verdict
+    // depends on that the fold cannot evaluate is refused (the fold is narrower than
+    // rustc there, as for R5 and R11), never assumed non-empty.
+    {
+        let mut items: Vec<String> = prepared.file_scope.const_source.clone();
+        items.extend(body_const_items(target));
+        let env = copper_analysis::consts::ConstEnv::from_items(items.iter().map(String::as_str));
+        let ranges = copper_analysis::constant_ticking_for_ranges(target);
+        let mut known = std::collections::HashMap::new();
+        for r in &ranges {
+            let none = std::collections::HashMap::new();
+            let bound = |e: &Option<Box<syn::Expr>>| e.as_deref().and_then(|e| env.eval_expr(e, &none));
+            if let (Some(a), Some(b)) = (bound(&r.start), bound(&r.end)) {
+                let empty = match r.limits {
+                    syn::RangeLimits::HalfOpen(_) => a >= b,
+                    syn::RangeLimits::Closed(_) => a > b,
+                };
+                known.insert(copper_analysis::range_key(r), empty);
+            }
+        }
+        if ranges.iter().any(|r| !known.contains_key(&copper_analysis::range_key(r))) {
+            for set in copper_analysis::empty_range_dependencies(target) {
+                if let Some(r) = set.iter().find(|r| !known.contains_key(&copper_analysis::range_key(r))) {
+                    return Err(syn::Error::new_spanned(r, UNFOLDED_BOUNDARY_RANGE_MESSAGE).to_string());
+                }
+            }
+        }
+        copper_analysis::with_empty_range_oracle(
+            Box::new(move |r| known.get(&copper_analysis::range_key(r)).copied()),
+            || copper_analysis::check_reachability(target),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     // Front-end parity (2026-10-23): the two shape rules the macro now enforces
     // too, from the shared crate, AFTER reachability so a module that never ticks
     // at all gets the reachability message (the better of the two) rather than a
@@ -454,7 +512,10 @@ fn checked_fir_for_target(
         let env = copper_analysis::consts::ConstEnv::from_items(
             prepared.file_scope.const_source.iter().map(String::as_str),
         );
-        copper_analysis::check_register_initializer_calls_in(target, &|p| env.is_const_fn(p))
+        // A tuple-struct constructor is a `const` call too (rustc's E0015 note: "calls
+        // in constants are limited to constant functions, tuple structs and tuple
+        // variants"; 2026-11-08, MEASUREMENTS §V.4).
+        copper_analysis::check_register_initializer_calls_in(target, &|p| env.is_const_fn(p) || env.is_tuple_struct(p))
             .map_err(|e| e.to_string())?;
         // R5, the transpiler's half (the macro has rustc judge each bound in a
         // `const { }` block): a tick-free `for` bound that names no const generic

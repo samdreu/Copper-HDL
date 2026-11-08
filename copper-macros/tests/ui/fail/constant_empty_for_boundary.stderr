@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: this loop's only clock boundary is a nested loop that can be left before it ticks, so the enclosing loop can return to its top in zero time — a livelock in simulation, and a loop the transpiler cannot give the same meaning in hardware. Give the enclosing loop a `clk.tick().await` of its own, or make the nested loop one that always ticks (a `for` over a constant range, whose body runs before any exit test)
+  --> tests/ui/fail/constant_empty_for_boundary.rs:20:19
+   |
+20 |         for _i in 0..EMPTY {
+   |                   ^ evaluation of `m::{closure#0}::_` failed here

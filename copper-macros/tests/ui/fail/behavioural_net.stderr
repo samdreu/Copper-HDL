@@ -1,0 +1,19 @@
+error: a net is declared only in a `#[hardware(structural)]` body: a sequential, synchronizer or combinational body contains no net and no instantiation (SPEC I.13.5, D-18 A2). A value inside the body is a `let`; a wire between two modules is a `net::<T, D>()` of a structural parent. `wire` and `registered_wire` are the testbench's spellings for hand wiring
+  --> tests/ui/fail/behavioural_net.rs:14:20
+   |
+14 |     let (_d, _r) = wire::<Logic, A>(Logic::Zero);
+   |                    ^^^^
+
+warning: unused imports: `Clock` and `Logic`
+ --> tests/ui/fail/behavioural_net.rs:1:19
+  |
+1 | use copper_core::{Clock, ClockDomain, Logic};
+  |                   ^^^^^               ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `RegOut` and `wire`
+ --> tests/ui/fail/behavioural_net.rs:2:25
+  |
+2 | use copper_core::port::{wire, RegOut};
+  |                         ^^^^  ^^^^^^

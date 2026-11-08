@@ -1,0 +1,19 @@
+error: `Bits<200>` is not a hardware type: a `Bits<N>` has 1 ≤ N ≤ 128 bits (SPEC I.14.1(c), II.1.2 R16). `Bits<0>` has no value to observe, and a wider vector's arithmetic does not monomorphize. Use a width in 1..=128, or an array of `Bits` for a wider value.
+  --> tests/ui/fail/bits_width_over_128.rs:14:20
+   |
+14 |         let _wide: Bits<200> = Bits::zero();
+   |                    ^^^^
+
+warning: unused imports: `Bits` and `Clock`
+ --> tests/ui/fail/bits_width_over_128.rs:1:19
+  |
+1 | use copper_core::{Bits, Clock, ClockDomain};
+  |                   ^^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `copper_core::port::RegOut`
+ --> tests/ui/fail/bits_width_over_128.rs:2:5
+  |
+2 | use copper_core::port::RegOut;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^

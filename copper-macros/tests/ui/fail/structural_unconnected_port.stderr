@@ -1,0 +1,15 @@
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+  --> tests/ui/fail/structural_unconnected_port.rs:28:5
+   |
+28 |     hold(clk, n.1);
+   |     ^^^^---------- argument #3 of type `RegOut<copper_core::Logic, A>` is missing
+   |
+note: function defined here
+  --> tests/ui/fail/structural_unconnected_port.rs:9:10
+   |
+ 9 | async fn hold(clk: Clock<A>, d: In<Logic, A>, q: RegOut<Logic, A>) {
+   |          ^^^^                                 -------------------
+help: provide the argument
+   |
+28 |     hold(clk, n.1, /* RegOut<copper_core::Logic, A> */);
+   |                  +++++++++++++++++++++++++++++++++++++

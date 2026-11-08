@@ -1058,6 +1058,44 @@ pub fn check_no_behavioural_instance(f: &ItemFn, is_hardware: &dyn Fn(&str) -> b
     }
 }
 
+/// The message for a net constructor in a behavioural body (SPEC I.13.5, D-18 A2;
+/// MEASUREMENTS §V.1, line `II.3 found body-wire`).
+pub const BODY_NET_MESSAGE: &str = "a net is declared only in a `#[hardware(structural)]` body: a \
+    sequential, synchronizer or combinational body contains no net and no instantiation (SPEC \
+    I.13.5, D-18 A2). A value inside the body is a `let`; a wire between two modules is a \
+    `net::<T, D>()` of a structural parent. `wire` and `registered_wire` are the testbench's \
+    spellings for hand wiring";
+
+/// SPEC I.13.5 (D-18 A2): no net in a behavioural body — a call whose callee path
+/// ends in `wire`, `registered_wire` or `net` (the constructors of
+/// `copper_core::port`) is refused, in both front-ends, before any lowering. Run for
+/// every mode but `structural`, whose body rule (`check_structural_body`) reads
+/// `net` and refuses the other two with `RETIRED_NET_MESSAGE`.
+pub fn check_no_body_nets(f: &ItemFn) -> Result<(), Error> {
+    struct V(Option<proc_macro2::Span>);
+    impl<'ast> Visit<'ast> for V {
+        fn visit_expr_call(&mut self, n: &'ast syn::ExprCall) {
+            if self.0.is_none() {
+                if let syn::Expr::Path(p) = &*n.func {
+                    if p.path.segments.last().is_some_and(|s| {
+                        matches!(s.ident.to_string().as_str(), "wire" | "registered_wire" | "net")
+                    }) {
+                        self.0 = Some(syn::spanned::Spanned::span(n));
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, n);
+        }
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let mut v = V(None);
+    v.visit_block(&f.block);
+    match v.0 {
+        Some(span) => Err(Error::new(span, BODY_NET_MESSAGE)),
+        None => Ok(()),
+    }
+}
+
 /// R12's one message.
 pub fn break_form_message(what: &str) -> String {
     format!(
@@ -1700,6 +1738,7 @@ pub fn check_front_end_rules(f: &ItemFn, mode: HardwareMode) -> Result<(), Error
     if mode == HardwareMode::Structural {
         return check_structural_body(f);
     }
+    check_no_body_nets(f)?;
     check_module_loop_exit(f)?;
     check_break_forms(f)?;
     check_ticking_for_continue(f)?;

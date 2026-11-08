@@ -163,6 +163,86 @@ mod tests {
 pub struct ConstEnv {
     values: HashMap<String, i128>,
     fns: HashMap<String, syn::ItemFn>,
+    /// The declared integer type of a const, a `static`, or a tuple-struct const's
+    /// field (`K.0`) — what a `const` method (`K.wrapping_add(1)`) wraps at
+    /// (2026-11-08, MEASUREMENTS §V.4).
+    types: HashMap<String, IntTy>,
+    /// Tuple structs of the file: name → each field's integer type (`None` for a
+    /// non-integer field). A call `W(a, b)` is their constructor (rustc admits it in
+    /// `const { }`: "tuple structs and tuple variants").
+    tuple_structs: HashMap<String, Vec<Option<IntTy>>>,
+    /// The integer types of the locals of the `const fn` frames being run
+    /// (parameters and annotated `let`s), innermost last.
+    frame_types: std::cell::RefCell<Vec<HashMap<String, IntTy>>>,
+}
+
+/// A Rust integer type: its width and signedness (`usize`/`isize` are 64 bits,
+/// SPEC I.14.1(b)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntTy {
+    pub bits: u32,
+    pub signed: bool,
+}
+
+impl IntTy {
+    /// The integer type a type names (`u8`, `i32`, `usize`, …), or `None`.
+    pub fn of_type(ty: &syn::Type) -> Option<IntTy> {
+        match ty {
+            syn::Type::Path(tp) if tp.qself.is_none() => Self::of_name(&tp.path.get_ident()?.to_string()),
+            syn::Type::Paren(p) => Self::of_type(&p.elem),
+            syn::Type::Group(g) => Self::of_type(&g.elem),
+            _ => None,
+        }
+    }
+
+    pub fn of_name(n: &str) -> Option<IntTy> {
+        let (signed, rest) = match n.as_bytes().first()? {
+            b'u' => (false, &n[1..]),
+            b'i' => (true, &n[1..]),
+            _ => return None,
+        };
+        let bits = match rest {
+            "8" => 8,
+            "16" => 16,
+            "32" => 32,
+            "64" | "size" => 64,
+            "128" => 128,
+            _ => return None,
+        };
+        Some(IntTy { bits, signed })
+    }
+
+    fn min(self) -> i128 {
+        if self.signed { -(1i128 << (self.bits - 1).min(127)) } else { 0 }
+    }
+
+    fn max(self) -> Option<i128> {
+        match (self.signed, self.bits) {
+            (true, b) => Some(((1u128 << (b - 1)) - 1) as i128),
+            (false, 128) => None, // u128::MAX is outside i128: the evaluator has no value for it
+            (false, b) => Some(((1u128 << b) - 1) as i128),
+        }
+    }
+
+    /// Whether `v` is a value of this type.
+    pub fn holds(self, v: i128) -> bool {
+        v >= self.min() && self.max().is_none_or(|m| v <= m)
+    }
+
+    /// `v` reduced to this type's width, two's complement (Rust's `wrapping_*`).
+    pub fn wrap(self, v: i128) -> Option<i128> {
+        if self.bits == 128 {
+            return (self.signed || v >= 0).then_some(v);
+        }
+        let m = (v as u128) & ((1u128 << self.bits) - 1);
+        let r = if self.signed && m >> (self.bits - 1) == 1 { m as i128 - (1i128 << self.bits) } else { m as i128 };
+        Some(r)
+    }
+
+    /// The bit pattern of `v` at this width, as an unsigned value.
+    fn pattern(self, v: i128) -> u128 {
+        if self.bits == 128 { v as u128 } else { (v as u128) & ((1u128 << self.bits) - 1) }
+    }
 }
 
 /// Statement-level control flow of a `const fn` body.
@@ -179,11 +259,37 @@ impl ConstEnv {
     /// `const fn f(..) -> T { … }`); any other item is ignored.
     pub fn from_items<'a>(items: impl IntoIterator<Item = &'a str>) -> Self {
         let mut consts: Vec<(String, syn::Expr, Option<String>)> = Vec::new();
+        let mut pending_struct_consts: Vec<(String, String, syn::Expr)> = Vec::new();
         let mut env = ConstEnv::default();
         for text in items {
             let Ok(item) = syn::parse_str::<syn::Item>(text) else { continue };
             match item {
-                syn::Item::Const(c) => consts.push((c.ident.to_string(), *c.expr, None)),
+                syn::Item::Const(c) => {
+                    if let Some(t) = IntTy::of_type(&c.ty) {
+                        env.types.insert(c.ident.to_string(), t);
+                    }
+                    if let Some(name) = type_ident(&c.ty) {
+                        pending_struct_consts.push((c.ident.to_string(), name, (*c.expr).clone()));
+                    }
+                    consts.push((c.ident.to_string(), *c.expr, None))
+                }
+                // An immutable `static` is read in `const { }` as a const is (rustc
+                // 1.83+); a `static mut` is not (2026-11-08, MEASUREMENTS §V.4).
+                syn::Item::Static(st) if matches!(st.mutability, syn::StaticMutability::None) => {
+                    if let Some(t) = IntTy::of_type(&st.ty) {
+                        env.types.insert(st.ident.to_string(), t);
+                    }
+                    if let Some(name) = type_ident(&st.ty) {
+                        pending_struct_consts.push((st.ident.to_string(), name, (*st.expr).clone()));
+                    }
+                    consts.push((st.ident.to_string(), *st.expr, None))
+                }
+                syn::Item::Struct(st) => {
+                    if let syn::Fields::Unnamed(u) = &st.fields {
+                        env.tuple_structs
+                            .insert(st.ident.to_string(), u.unnamed.iter().map(|f| IntTy::of_type(&f.ty)).collect());
+                    }
+                }
                 syn::Item::Fn(f) if f.sig.constness.is_some() => {
                     env.fns.insert(f.sig.ident.to_string(), f);
                 }
@@ -194,6 +300,9 @@ impl ConstEnv {
                     for it in imp.items {
                         match it {
                             syn::ImplItem::Const(c) => {
+                                if let Some(t) = IntTy::of_type(&c.ty) {
+                                    env.types.insert(format!("{ty}::{}", c.ident), t);
+                                }
                                 consts.push((format!("{ty}::{}", c.ident), c.expr, Some(ty.clone())))
                             }
                             syn::ImplItem::Fn(f) if f.sig.constness.is_some() => {
@@ -210,6 +319,22 @@ impl ConstEnv {
                     }
                 }
                 _ => {}
+            }
+        }
+        // A const of a tuple-struct type (`const K: W = W(3);`) is its fields, `K.0`, …
+        // — each a const of its own, evaluated with the others in the fixpoint.
+        for (name, ty, e) in pending_struct_consts {
+            let Some(fields) = env.tuple_structs.get(&ty).cloned() else { continue };
+            let syn::Expr::Call(call) = &e else { continue };
+            let syn::Expr::Path(p) = &*call.func else { continue };
+            if p.path.get_ident().is_none_or(|i| *i != ty) || call.args.len() != fields.len() {
+                continue;
+            }
+            for (i, (a, t)) in call.args.iter().zip(&fields).enumerate() {
+                if let Some(t) = t {
+                    env.types.insert(format!("{name}.{i}"), *t);
+                }
+                consts.push((format!("{name}.{i}"), a.clone(), None));
             }
         }
         // Consts may refer to each other in any order: a fixpoint.
@@ -269,13 +394,23 @@ impl ConstEnv {
             return None;
         }
         let mut locals = HashMap::new();
+        let mut types = HashMap::new();
         for (p, a) in f.sig.inputs.iter().zip(args) {
             let syn::FnArg::Typed(pt) = p else { return None };
             let syn::Pat::Ident(id) = &*pt.pat else { return None };
+            if let Some(t) = IntTy::of_type(&pt.ty) {
+                if !t.holds(*a) {
+                    return None;
+                }
+                types.insert(id.ident.to_string(), t);
+            }
             locals.insert(id.ident.to_string(), *a);
         }
         let self_ty = name.rsplit_once("::").map(|(t, _)| t.to_string());
-        match self.exec_block(&f.block.stmts, &mut locals, self_ty.as_deref(), fuel)? {
+        self.frame_types.borrow_mut().push(types);
+        let r = self.exec_block(&f.block.stmts, &mut locals, self_ty.as_deref(), fuel);
+        self.frame_types.borrow_mut().pop();
+        match r? {
             Flow::Value(v) | Flow::Return(v) => Some(v),
             Flow::Next => None,
         }
@@ -297,7 +432,14 @@ impl ConstEnv {
                     let name = match &l.pat {
                         syn::Pat::Ident(id) => id.ident.to_string(),
                         syn::Pat::Type(pt) => match &*pt.pat {
-                            syn::Pat::Ident(id) => id.ident.to_string(),
+                            syn::Pat::Ident(id) => {
+                                if let (Some(t), Some(frame)) =
+                                    (IntTy::of_type(&pt.ty), self.frame_types.borrow_mut().last_mut())
+                                {
+                                    frame.insert(id.ident.to_string(), t);
+                                }
+                                id.ident.to_string()
+                            }
                             _ => return None,
                         },
                         _ => return None,
@@ -407,6 +549,81 @@ impl ConstEnv {
         }
     }
 
+    /// The integer type an expression has on its own (no inference from context): a
+    /// suffixed literal, a typed const / `static` / field / `const fn` local, a cast,
+    /// a `const fn`'s return type, and operators and `Self`-returning methods over
+    /// them. `None` where Rust would infer the type from context.
+    pub fn ty_of(&self, e: &syn::Expr) -> Option<IntTy> {
+        use syn::Expr;
+        match e {
+            Expr::Lit(l) => match &l.lit {
+                syn::Lit::Int(i) => IntTy::of_name(i.suffix()),
+                _ => None,
+            },
+            Expr::Path(p) => {
+                let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                if segs.len() == 1 {
+                    if let Some(t) = self.frame_types.borrow().last().and_then(|f| f.get(&segs[0]).copied()) {
+                        return Some(t);
+                    }
+                }
+                self.types.get(&segs.join("::")).copied()
+            }
+            Expr::Field(fe) => {
+                let syn::Member::Unnamed(idx) = &fe.member else { return None };
+                match strip_parens(&fe.base) {
+                    Expr::Path(p) => {
+                        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                        self.types.get(&format!("{}.{}", segs.join("::"), idx.index)).copied()
+                    }
+                    Expr::Call(c) => match &*c.func {
+                        Expr::Path(p) => {
+                            *self.tuple_structs.get(&p.path.get_ident()?.to_string())?.get(idx.index as usize)?
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            Expr::Cast(c) => IntTy::of_type(&c.ty),
+            Expr::Paren(p) => self.ty_of(&p.expr),
+            Expr::Group(g) => self.ty_of(&g.expr),
+            Expr::Unary(u) => self.ty_of(&u.expr),
+            Expr::Binary(b) => match b.op {
+                syn::BinOp::Shl(_) | syn::BinOp::Shr(_) => self.ty_of(&b.left),
+                syn::BinOp::Add(_) | syn::BinOp::Sub(_) | syn::BinOp::Mul(_) | syn::BinOp::Div(_)
+                | syn::BinOp::Rem(_) | syn::BinOp::BitAnd(_) | syn::BinOp::BitOr(_) | syn::BinOp::BitXor(_) => {
+                    self.ty_of(&b.left).or_else(|| self.ty_of(&b.right))
+                }
+                _ => None,
+            },
+            Expr::MethodCall(mc) => match mc.method.to_string().as_str() {
+                "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" => IntTy::of_name("u32"),
+                "is_power_of_two" => None,
+                _ => self.ty_of(&mc.receiver).or_else(|| mc.args.iter().find_map(|a| self.ty_of(a))),
+            },
+            Expr::Call(c) => {
+                let Expr::Path(p) = &*c.func else { return None };
+                let name = p.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
+                match &self.fns.get(&name)?.sig.output {
+                    syn::ReturnType::Type(_, t) => IntTy::of_type(t),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The declared integer type of a const, `static` or tuple-struct const field.
+    pub fn type_of(&self, name: &str) -> Option<IntTy> {
+        self.types.get(name).copied()
+    }
+
+    /// Whether `name` is a tuple struct of the file (its call is a constructor).
+    pub fn is_tuple_struct(&self, name: &str) -> bool {
+        self.tuple_structs.contains_key(name)
+    }
+
     fn eval(
         &self,
         e: &syn::Expr,
@@ -496,6 +713,39 @@ impl ConstEnv {
                 let v = self.eval(&c.expr, locals, self_ty, fuel)?;
                 (0..=u32::MAX as i128).contains(&v).then_some(v)
             }
+            // A tuple-struct field: `K.0` (a tuple-struct const's field) or `W(a, b).1`
+            // (the constructor's argument) — 2026-11-08, MEASUREMENTS §V.4.
+            Expr::Field(fe) => {
+                let syn::Member::Unnamed(idx) = &fe.member else { return None };
+                let i = idx.index as usize;
+                match strip_parens(&fe.base) {
+                    Expr::Path(p) => {
+                        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                        self.values.get(&format!("{}.{i}", segs.join("::"))).copied()
+                    }
+                    Expr::Call(c) => {
+                        let Expr::Path(p) = &*c.func else { return None };
+                        let name = p.path.get_ident()?.to_string();
+                        let fields = self.tuple_structs.get(&name)?;
+                        if fields.len() != c.args.len() {
+                            return None;
+                        }
+                        let v = self.eval(&c.args[i], locals, self_ty, fuel)?;
+                        fields[i].is_none_or(|t| t.holds(v)).then_some(v)
+                    }
+                    _ => None,
+                }
+            }
+            // A `const` method of a Rust integer (I.14.4; 2026-11-08, MEASUREMENTS
+            // §V.4): its receiver's type, from the expression itself (a suffixed
+            // literal, a typed const or local, a cast) or an argument's; unknown → `None`.
+            Expr::MethodCall(mc) => {
+                let recv = self.eval(&mc.receiver, locals, self_ty, fuel)?;
+                let args: Vec<i128> =
+                    mc.args.iter().map(|a| self.eval(a, locals, self_ty, fuel)).collect::<Option<_>>()?;
+                let ty = self.ty_of(&mc.receiver).or_else(|| mc.args.iter().find_map(|a| self.ty_of(a)));
+                int_method(&mc.method.to_string(), recv, &args, ty)
+            }
             Expr::Call(c) => {
                 let Expr::Path(p) = &*c.func else { return None };
                 let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
@@ -516,6 +766,96 @@ impl ConstEnv {
             }
             _ => None,
         }
+    }
+}
+
+fn strip_parens(e: &syn::Expr) -> &syn::Expr {
+    match e {
+        syn::Expr::Paren(p) => strip_parens(&p.expr),
+        syn::Expr::Group(g) => strip_parens(&g.expr),
+        other => other,
+    }
+}
+
+/// The last identifier of a type path (`W` for `W`), for a const of a struct type.
+fn type_ident(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Path(tp) => tp.path.get_ident().map(|i| i.to_string()),
+        _ => None,
+    }
+}
+
+/// The `const` integer methods the evaluator runs (2026-11-08, MEASUREMENTS §V.4),
+/// with Rust's meaning at the receiver's type `ty`: the `wrapping_*` and
+/// `saturating_*` families, `pow`, the bit counts, `is_power_of_two`,
+/// `next_power_of_two`, `abs` — the inherent `const fn`s of the integer types (each
+/// checked against rustc 1.92 in `const` items, MEASUREMENTS §V.4). `min`/`max` are
+/// not among them: they are `Ord`'s, which is not a const trait (rustc E0658), so
+/// they are outside the grammar. A method that needs the type and has none, a value
+/// outside the type, and an overflow rustc would refuse in a constant are `None`.
+pub fn int_method(m: &str, v: i128, args: &[i128], ty: Option<IntTy>) -> Option<i128> {
+    let one = |args: &[i128]| -> Option<i128> {
+        match args {
+            [a] => Some(*a),
+            _ => None,
+        }
+    };
+    let none = |args: &[i128]| args.is_empty();
+    if let Some(t) = ty {
+        if !t.holds(v) {
+            return None;
+        }
+    }
+    let checked = |r: Option<i128>| -> Option<i128> { r.filter(|r| ty.is_some_and(|t| t.holds(*r))) };
+    match m {
+        "wrapping_add" => ty?.wrap(v.checked_add(one(args)?)?),
+        "wrapping_sub" => ty?.wrap(v.checked_sub(one(args)?)?),
+        "wrapping_mul" => {
+            let t = ty?;
+            let (a, b) = (t.pattern(v), t.pattern(one(args)?));
+            t.wrap(a.wrapping_mul(b) as i128)
+        }
+        "wrapping_neg" if none(args) => ty?.wrap(v.checked_neg()?),
+        "wrapping_shl" => {
+            let t = ty?;
+            let s = u32::try_from(one(args)?).ok()? % t.bits;
+            t.wrap((t.pattern(v) << s) as i128)
+        }
+        "wrapping_shr" => {
+            let t = ty?;
+            let s = u32::try_from(one(args)?).ok()? % t.bits;
+            if t.signed { t.wrap(v >> s) } else { t.wrap((t.pattern(v) >> s) as i128) }
+        }
+        "saturating_add" | "saturating_sub" => {
+            let t = ty?;
+            let a = one(args)?;
+            let r = if m == "saturating_add" { v.checked_add(a)? } else { v.checked_sub(a)? };
+            Some(r.clamp(t.min(), t.max()?))
+        }
+        "pow" => {
+            let e = u32::try_from(one(args)?).ok()?;
+            checked(v.checked_pow(e))
+        }
+        "count_ones" if none(args) => Some(ty?.pattern(v).count_ones() as i128),
+        "count_zeros" if none(args) => {
+            let t = ty?;
+            Some((t.bits - t.pattern(v).count_ones()) as i128)
+        }
+        "leading_zeros" if none(args) => {
+            let t = ty?;
+            Some((t.pattern(v).leading_zeros() - (128 - t.bits)) as i128)
+        }
+        "trailing_zeros" if none(args) => {
+            let t = ty?;
+            Some(t.pattern(v).trailing_zeros().min(t.bits) as i128)
+        }
+        "is_power_of_two" if none(args) && !ty?.signed => Some((v > 0 && v & (v - 1) == 0) as i128),
+        "next_power_of_two" if none(args) && !ty?.signed => {
+            let p = if v <= 1 { 1 } else { 1i128.checked_shl(128 - ((v - 1) as u128).leading_zeros())? };
+            checked(Some(p))
+        }
+        "abs" if none(args) && ty?.signed => checked(v.checked_abs()),
+        _ => None,
     }
 }
 
@@ -565,5 +905,65 @@ mod env_tests {
         assert_eq!(env.call("pick", &[0, 5, 7]), Some(7));
         assert!(!env.is_const_fn("not_const"));
         assert_eq!(env.call("not_const", &[1]), None);
+    }
+}
+
+#[cfg(test)]
+mod widened_tests {
+    use super::*;
+
+    /// 2026-11-08 (MEASUREMENTS §V.4, line `II.3 found const-call`): the three spellings
+    /// rustc admits in `const { }` and the fold refused — a `const` integer method, a
+    /// tuple-struct constructor and its field, an immutable `static` — each with Rust's
+    /// value (checked against rustc by hand: `250u8.wrapping_add(10) == 4`, …).
+    #[test]
+    fn const_methods_tuple_structs_and_statics() {
+        let env = ConstEnv::from_items([
+            "const BASE: u8 = 250;",
+            "const WRAP: u8 = BASE.wrapping_add(10);",
+            "static SEED: u8 = 0x21;",
+            "static mut MUT: u8 = 1;",
+            "struct Pair(u8, u8);",
+            "const PAIR: Pair = Pair(3, 5);",
+            "const SUM: u8 = PAIR.0 + PAIR.1;",
+            "const ONES: u32 = BASE.count_ones();",
+            "const MIN: u8 = SUM.min(WRAP);",
+            "const POW: u8 = 3u8.pow(4);",
+            "const NEG: i8 = (-128i8).wrapping_neg();",
+            "const SHL: u16 = (BASE as u16).wrapping_shl(9);",
+            "const SAT: u8 = BASE.saturating_add(10);",
+            "const LZ: u32 = 1u8.leading_zeros();",
+            "const NPOT: u8 = 5u8.next_power_of_two();",
+            "const fn tri(x: u8) -> u8 { let y: u8 = x.wrapping_mul(3); y.wrapping_add(1) }",
+            "const TRI: u8 = tri(100);",
+        ]);
+        for (name, v) in [
+            ("WRAP", 4),
+            ("SEED", 0x21),
+            ("PAIR.0", 3),
+            ("PAIR.1", 5),
+            ("SUM", 8),
+            ("ONES", 6),
+            ("POW", 81),
+            ("NEG", -128),
+            ("SHL", 0xF400),
+            ("SAT", 255),
+            ("LZ", 7),
+            ("NPOT", 8),
+            ("TRI", 45),
+        ] {
+            assert_eq!(env.get(name), Some(v), "{name}");
+        }
+        assert_eq!(env.get("MUT"), None, "a `static mut` is not a constant");
+        assert_eq!(env.get("MIN"), None, "`Ord::min` is not a `const fn` (rustc E0658)");
+        let none = HashMap::new();
+        let e = |s: &str| env.eval_expr(&syn::parse_str(s).unwrap(), &none);
+        assert_eq!(e("Pair(9, 1).0"), Some(9));
+        assert_eq!(e("BASE.wrapping_add(7)"), Some(1));
+        assert_eq!(e("255u8.pow(2)"), None, "an overflow rustc refuses in a constant");
+        assert_eq!(e("3.wrapping_add(1)"), None, "no type the expression itself shows");
+        assert_eq!(e("3u8.wrapping_add(1)"), Some(4));
+        assert!(env.is_tuple_struct("Pair"));
+        assert_eq!(env.type_of("PAIR.0"), Some(IntTy { bits: 8, signed: false }));
     }
 }

@@ -42,7 +42,11 @@ pub use data::{
 mod init;
 mod shape;
 
-pub use cfg::{stmt_contains_tick, Cfg, DerivationFacts, EdgeKind, PhaseFacts};
+pub use cfg::{
+    constant_empty_range_assertions, constant_ticking_for_ranges, empty_range_dependencies, range_key,
+    stmt_contains_tick,
+    with_empty_range_oracle, Cfg, DerivationFacts, EdgeKind, PhaseFacts, NESTED_EXIT_MESSAGE,
+};
 pub use init::{
     call_path_text, check_held_preloop_values, check_register_initializer_calls, held_preloop_message,
     held_preloop_values,
@@ -798,6 +802,16 @@ fn port_payload(ty: &syn::Type) -> Option<&syn::Type> {
 pub fn check_admissible(f: &ItemFn) -> Result<(), syn::Error> {
     use syn::spanned::Spanned;
 
+    // Rule 1c — `Bits<N>`'s width bound (SPEC I.14.1(c), II.1.2 R16; 2026-11-08,
+    // MEASUREMENTS §V.2): a width written as a constant (a literal, arithmetic over
+    // literals, a `{ … }` block of one) must be 1 ≤ N ≤ 128, wherever a `Bits` path is
+    // named — a port, an annotated `let`, a turbofish (`Bits::<0>::zero()`). A width
+    // naming a const generic or a `const` item is outside what the source shows; a
+    // generic module's width is chosen where it is instantiated.
+    if let Some((span, n)) = bits_width_outside_bound(f) {
+        return Err(syn::Error::new(span, bits_width_message(n)));
+    }
+
     // Rule 1a — port payloads.
     for arg in &f.sig.inputs {
         let syn::FnArg::Typed(pt) = arg else { continue };
@@ -848,6 +862,52 @@ pub fn check_admissible(f: &ItemFn) -> Result<(), syn::Error> {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// R16's width message (SPEC I.14.1(c)).
+pub fn bits_width_message(n: i128) -> String {
+    format!(
+        "`Bits<{n}>` is not a hardware type: a `Bits<N>` has 1 ≤ N ≤ 128 bits (SPEC I.14.1(c), \
+         II.1.2 R16). `Bits<0>` has no value to observe, and a wider vector's arithmetic does not \
+         monomorphize. Use a width in 1..=128, or an array of `Bits` for a wider value."
+    )
+}
+
+/// The first `Bits<N>` in `f` (signature or body) whose width is written as a
+/// constant outside 1..=128, with its span and value.
+fn bits_width_outside_bound(f: &ItemFn) -> Option<(proc_macro2::Span, i128)> {
+    use syn::spanned::Spanned;
+    fn width(e: &syn::Expr) -> Option<i128> {
+        match e {
+            syn::Expr::Block(b) if b.block.stmts.len() == 1 => match &b.block.stmts[0] {
+                syn::Stmt::Expr(inner, None) => width(inner),
+                _ => None,
+            },
+            other => consts::eval_syn(other, &|_| None),
+        }
+    }
+    struct V(Option<(proc_macro2::Span, i128)>);
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_path_segment(&mut self, s: &'ast syn::PathSegment) {
+            if self.0.is_none() && s.ident == "Bits" {
+                if let syn::PathArguments::AngleBracketed(ab) = &s.arguments {
+                    if ab.args.len() == 1 {
+                        let n = match &ab.args[0] {
+                            syn::GenericArgument::Const(e) => width(e),
+                            _ => None,
+                        };
+                        if let Some(n) = n.filter(|n| !(1..=128).contains(n)) {
+                            self.0 = Some((s.span(), n));
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_path_segment(self, s);
+        }
+    }
+    let mut v = V(None);
+    syn::visit::Visit::visit_item_fn(&mut v, f);
+    v.0
 }
 
 /// Render a type for a diagnostic. Deliberately does NOT pull in `quote` — this

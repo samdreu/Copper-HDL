@@ -792,14 +792,7 @@ impl Cfg {
                         if let Some(&(m, _)) = culprit {
                             return Err((
                                 self.nodes[m].span,
-                                "this loop's only clock boundary is a nested loop that can be \
-                                 left before it ticks, so the enclosing loop can return to its \
-                                 top in zero time — a livelock in simulation, and a loop the \
-                                 transpiler cannot give the same meaning in hardware. Give the \
-                                 enclosing loop a `clk.tick().await` of its own, or make the \
-                                 nested loop one that always ticks (a `for` over a constant \
-                                 range, whose body runs before any exit test)"
-                                    .to_string(),
+                                NESTED_EXIT_MESSAGE.to_string(),
                             ));
                         }
                         return Err((
@@ -2285,6 +2278,202 @@ fn untick_through(e: &Expr) -> (bool, bool, bool) {
     }
 }
 
+/// R3's message for an enclosing loop whose only boundary is a nested loop that can
+/// be left before it ticks (II.2.2; a literal- or constant-empty `for`, I.8.4(b)).
+pub const NESTED_EXIT_MESSAGE: &str = "this loop's only clock boundary is a nested loop that can be \
+    left before it ticks, so the enclosing loop can return to its top in zero time — a livelock in \
+    simulation, and a loop the transpiler cannot give the same meaning in hardware. Give the \
+    enclosing loop a `clk.tick().await` of its own, or make the nested loop one that always ticks \
+    (a `for` over a constant range, whose body runs before any exit test)";
+
+type RangeOracle = Box<dyn Fn(&syn::ExprRange) -> Option<bool>>;
+
+thread_local! {
+    /// The emptiness of a tick-bearing `for`'s constant range (SPEC I.8.4(b), II.2.2,
+    /// MEASUREMENTS §V.3), as the front-end that builds the CFG knows it: `Some(true)`
+    /// empty, `Some(false)` non-empty, `None` not known (the range is taken as
+    /// non-empty, the direction II.2.2 records). The transpiler answers from
+    /// `consts::ConstEnv`; the macro answers by hypothesis and has rustc check the
+    /// hypotheses that matter ([`constant_empty_range_assertions`]).
+    static EMPTY_RANGE_ORACLE: std::cell::RefCell<Option<RangeOracle>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `oracle` deciding the emptiness of the ranges of
+/// [`constant_ticking_for_ranges`] (the previous oracle restored after).
+pub fn with_empty_range_oracle<R>(oracle: RangeOracle, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<RangeOracle>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            EMPTY_RANGE_ORACLE.with(|o| *o.borrow_mut() = prev);
+        }
+    }
+    let _restore = Restore(EMPTY_RANGE_ORACLE.with(|o| o.borrow_mut().replace(oracle)));
+    f()
+}
+
+/// A range's identity for the oracle: its token text (two ranges spelled alike
+/// name the same constants and are empty together).
+pub fn range_key(r: &syn::ExprRange) -> String {
+    syn::__private::ToTokens::to_token_stream(r).to_string()
+}
+
+/// The ranges of `f`'s tick-bearing counted `for`s whose emptiness is a Rust
+/// constant the source does not spell with literals alone (SPEC I.8.4(b),
+/// MEASUREMENTS §V.3): both bounds present, built from literals, paths that name no
+/// binding of `f` (no parameter, local, pattern binder or const generic — so a
+/// `const` item, `T::K` or a body-local `const`), unary and binary operators,
+/// parentheses and casts, with at least one path. Distinct by [`range_key`], in
+/// source order. Both front-ends decide exactly these: the transpiler through
+/// `ConstEnv`, the macro through rustc.
+pub fn constant_ticking_for_ranges(f: &ItemFn) -> Vec<syn::ExprRange> {
+    struct Binders(BTreeSet<String>);
+    impl<'a> Visit<'a> for Binders {
+        fn visit_pat_ident(&mut self, p: &'a syn::PatIdent) {
+            self.0.insert(p.ident.to_string());
+            syn::visit::visit_pat_ident(self, p);
+        }
+    }
+    let mut b = Binders(BTreeSet::new());
+    b.visit_signature(&f.sig);
+    b.visit_block(&f.block);
+    for g in &f.sig.generics.params {
+        if let syn::GenericParam::Const(c) = g {
+            b.0.insert(c.ident.to_string());
+        }
+    }
+    fn shape(e: &Expr, binders: &BTreeSet<String>, named: &mut bool) -> bool {
+        match e {
+            Expr::Lit(l) => matches!(l.lit, syn::Lit::Int(_)),
+            Expr::Path(p) => {
+                if p.qself.is_some() || p.path.segments.iter().any(|s| !s.arguments.is_none()) {
+                    return false;
+                }
+                if p.path.segments.len() == 1 && binders.contains(&p.path.segments[0].ident.to_string()) {
+                    return false;
+                }
+                *named = true;
+                true
+            }
+            Expr::Paren(p) => shape(&p.expr, binders, named),
+            Expr::Group(g) => shape(&g.expr, binders, named),
+            Expr::Cast(c) => shape(&c.expr, binders, named),
+            Expr::Unary(u) => matches!(u.op, syn::UnOp::Neg(_)) && shape(&u.expr, binders, named),
+            Expr::Binary(x) => shape(&x.left, binders, named) && shape(&x.right, binders, named),
+            _ => false,
+        }
+    }
+    struct V<'b> {
+        binders: &'b BTreeSet<String>,
+        out: Vec<syn::ExprRange>,
+    }
+    impl<'a> Visit<'a> for V<'_> {
+        fn visit_expr_for_loop(&mut self, fl: &'a syn::ExprForLoop) {
+            if fl.body.stmts.iter().any(stmt_contains_tick) {
+                if let Expr::Range(r) = &*fl.expr {
+                    if let (Some(a), Some(b)) = (&r.start, &r.end) {
+                        let mut named = false;
+                        if shape(a, self.binders, &mut named)
+                            && shape(b, self.binders, &mut named)
+                            && named
+                            && !self.out.iter().any(|o| range_key(o) == range_key(r))
+                        {
+                            self.out.push(r.clone());
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_expr_for_loop(self, fl);
+        }
+        fn visit_item(&mut self, _: &'a syn::Item) {}
+    }
+    let mut v = V { binders: &b.0, out: Vec::new() };
+    v.visit_block(&f.block);
+    v.out
+}
+
+/// The macro's half of I.8.4(b) for constant ranges (MEASUREMENTS §V.3): the macro
+/// cannot evaluate a file `const`, so it asks which hypotheses about emptiness R3's
+/// verdict depends on and has rustc check them. With every range of
+/// [`constant_ticking_for_ranges`] assumed empty, R3 is re-run; if it still holds,
+/// emptiness does not matter and nothing is asserted. Otherwise each **minimal** set
+/// of ranges whose joint emptiness makes R3 fail becomes one condition "not all of
+/// these are empty" — returned as `(span of the set's first `for` range, condition
+/// tokens)`; the macro emits each as `const _: () = assert!(cond, NESTED_EXIT_MESSAGE);`
+/// at the top of the body, so rustc refuses the module (E0080) exactly when the
+/// transpiler, folding the same ranges through `ConstEnv`, refuses it with R3. More
+/// than 10 ranges: only the singletons and the full set are asked (an under-approximation,
+/// recorded; the corpus maximum is far below).
+pub fn constant_empty_range_assertions(f: &ItemFn) -> Vec<(Span, TokenStream)> {
+    empty_range_dependencies(f)
+        .into_iter()
+        .map(|set| {
+            let span = set[0].span();
+            let conds: Vec<String> = set
+                .iter()
+                .map(|r| {
+                    let (a, b) = (r.start.as_deref().unwrap(), r.end.as_deref().unwrap());
+                    let a = syn::__private::ToTokens::to_token_stream(a);
+                    let b = syn::__private::ToTokens::to_token_stream(b);
+                    let op = match r.limits {
+                        syn::RangeLimits::HalfOpen(_) => ">=",
+                        syn::RangeLimits::Closed(_) => ">",
+                    };
+                    format!("(({a}) {op} ({b}))")
+                })
+                .collect();
+            (span, format!("!({})", conds.join(" && ")).parse().unwrap())
+        })
+        .collect()
+}
+
+/// The minimal sets of [`constant_ticking_for_ranges`] whose joint emptiness makes
+/// R3 fail (see [`constant_empty_range_assertions`]); empty when no assumption about
+/// emptiness changes R3's verdict.
+pub fn empty_range_dependencies(f: &ItemFn) -> Vec<Vec<syn::ExprRange>> {
+    let ranges = constant_ticking_for_ranges(f);
+    if ranges.is_empty() {
+        return Vec::new();
+    }
+    let keys: Vec<String> = ranges.iter().map(range_key).collect();
+    let fails = |set: &BTreeSet<usize>| -> bool {
+        let empty: BTreeSet<String> = set.iter().map(|&i| keys[i].clone()).collect();
+        let known: BTreeSet<String> = keys.iter().cloned().collect();
+        with_empty_range_oracle(
+            Box::new(move |r| {
+                let k = range_key(r);
+                known.contains(&k).then(|| empty.contains(&k))
+            }),
+            || {
+            Cfg::build(f).is_some_and(|c| c.check_reachability().is_err())
+            },
+        )
+    };
+    let all: BTreeSet<usize> = (0..ranges.len()).collect();
+    if !fails(&all) {
+        return Vec::new();
+    }
+    let candidates: Vec<BTreeSet<usize>> = if ranges.len() <= 10 {
+        let mut v: Vec<BTreeSet<usize>> = (1u32..(1 << ranges.len()))
+            .map(|m| (0..ranges.len()).filter(|i| m & (1 << i) != 0).collect())
+            .collect();
+        v.sort_by_key(|s| s.len());
+        v
+    } else {
+        (0..ranges.len()).map(|i| BTreeSet::from([i])).chain(std::iter::once(all.clone())).collect()
+    };
+    let mut minimal: Vec<BTreeSet<usize>> = Vec::new();
+    for s in candidates {
+        if minimal.iter().any(|m| m.is_subset(&s)) {
+            continue;
+        }
+        if fails(&s) {
+            minimal.push(s);
+        }
+    }
+    minimal.into_iter().map(|set| set.into_iter().map(|i| ranges[i].clone()).collect()).collect()
+}
+
 /// A range written with integer literals that holds no value (`0..0`, `5..3`,
 /// `4..=3`): a `for` over it runs no iteration (I.8.4(b)). Only literals are read
 /// — a constant or a const generic needs the constant evaluator, which this
@@ -2292,6 +2481,9 @@ fn untick_through(e: &Expr) -> (bool, bool, bool) {
 /// non-empty (the direction stays **under** there, SPEC II.2.2).
 fn literal_range_is_empty(e: &Expr) -> bool {
     let Expr::Range(r) = e else { return false };
+    if let Some(empty) = EMPTY_RANGE_ORACLE.with(|o| o.borrow().as_ref().and_then(|f| f(r))) {
+        return empty;
+    }
     let lit = |x: Option<&Expr>| -> Option<i128> {
         match x? {
             Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) => i.base10_parse::<i128>().ok(),

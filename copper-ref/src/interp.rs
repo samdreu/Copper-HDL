@@ -64,6 +64,9 @@ pub struct Program {
     pub enums: HashMap<String, Vec<String>>,
     /// Struct name → field names (declaration order).
     pub structs: HashMap<String, Vec<String>>,
+    /// Tuple structs, by name: each field's declared type. A call of the name is the
+    /// constructor (I.14.4: rustc admits it in a constant; 2026-11-08, MEASUREMENTS §V.4).
+    pub tuple_structs: HashMap<String, Vec<syn::Type>>,
     /// Helper free functions, by name.
     pub fns: HashMap<String, syn::ItemFn>,
     /// `impl` methods, by (type name, method name).
@@ -996,6 +999,15 @@ impl<'a> Exec<'a> {
                         .get(ix.index as usize)
                         .cloned()
                         .ok_or_else(|| rt("tuple index out of bounds")),
+                    // A tuple struct's field (2026-11-08, MEASUREMENTS §V.4).
+                    (Value::Struct(n, fields), syn::Member::Unnamed(ix)) => {
+                        let key = ix.index.to_string();
+                        fields
+                            .into_iter()
+                            .find(|(k, _)| *k == key)
+                            .map(|(_, v)| v)
+                            .ok_or_else(|| rt(format!("no field `{key}` on `{n}`")))
+                    }
                     (other, _) => Err(rt(format!("field access on {other}"))),
                 }
             }
@@ -1153,7 +1165,9 @@ impl<'a> Exec<'a> {
         let v = Exec::eval_const(self.prog, init);
         self.call_stack.pop();
         let mut v = v?;
-        if let Some(ty) = ty {
+        let tuple_struct_ty = matches!(ty, Some(syn::Type::Path(tp))
+            if tp.path.get_ident().is_some_and(|i| self.prog.tuple_structs.contains_key(&i.to_string())));
+        if let (Some(ty), false) = (ty, tuple_struct_ty) {
             v = v.coerce_to(&self.parse_ty(ty)?)?;
         }
         self.prog.const_vals.borrow_mut().insert(name.to_string(), v.clone());
@@ -1250,6 +1264,20 @@ impl<'a> Exec<'a> {
             let name = &segs[0];
             if let Some(f) = self.prog.fns.get(name).cloned() {
                 return self.call_fn(name, &f.sig, &f.block, args);
+            }
+            if let Some(tys) = self.prog.tuple_structs.get(name).cloned() {
+                if tys.len() != args.len() {
+                    return Err(rt(format!("`{name}` has {} fields, {} given", tys.len(), args.len())));
+                }
+                let mut fields = Vec::with_capacity(args.len());
+                for (i, (a, t)) in args.into_iter().zip(&tys).enumerate() {
+                    let v = match self.parse_ty(t) {
+                        Ok(ty) => a.coerce_to(&ty)?,
+                        Err(_) => a,
+                    };
+                    fields.push((i.to_string(), v));
+                }
+                return Ok(Value::Struct(name.clone(), fields));
             }
             return Err(unsup(format!("call of unknown function `{name}`")));
         }
@@ -1645,6 +1673,38 @@ impl<'a> Exec<'a> {
                         r
                     }
                 };
+                Ok(Value::Int(r, t))
+            }
+            // The rest of the `const` integer methods the shared evaluator runs
+            // (2026-11-08, MEASUREMENTS §V.4), each with Rust's meaning at `t`
+            // (`min`/`max` are `Ord`'s, not `const fn`s: outside, as in rustc).
+            "wrapping_neg" => Ok(Value::Int(wrap_int(-v, t), t)),
+            "wrapping_shl" | "wrapping_shr" => {
+                let s = (arg1(args)?.as_int()? as u32) % int_bits(t);
+                let bits = int_bits(t);
+                let pat = if bits >= 128 { v as u128 } else { (v as u128) & ((1u128 << bits) - 1) };
+                let r = match (m, signed_int(t)) {
+                    ("wrapping_shl", _) => wrap_int((pat << s) as i128, t),
+                    (_, true) => v >> s,
+                    _ => (pat >> s) as i128,
+                };
+                Ok(Value::Int(r, t))
+            }
+            "count_zeros" | "leading_zeros" => {
+                let bits = int_bits(t);
+                let pat = if bits >= 128 { v as u128 } else { (v as u128) & ((1u128 << bits) - 1) };
+                let r = if m == "count_zeros" { bits - pat.count_ones() } else { pat.leading_zeros() - (128 - bits) };
+                Ok(Value::Int(r as i128, IntTy::U32))
+            }
+            "next_power_of_two" if !signed_int(t) => {
+                let p = if v <= 1 { 1 } else { 1i128.checked_shl(128 - ((v - 1) as u128).leading_zeros()).ok_or_else(|| rt("integer overflow in `next_power_of_two`"))? };
+                if p > t.range().1 {
+                    return Err(rt("integer overflow in `next_power_of_two`"));
+                }
+                Ok(Value::Int(p, t))
+            }
+            "abs" if signed_int(t) => {
+                let r = v.checked_abs().filter(|r| *r <= t.range().1).ok_or_else(|| rt("integer overflow in `abs`"))?;
                 Ok(Value::Int(r, t))
             }
             "is_power_of_two" => Ok(Value::Bool(v > 0 && (v & (v - 1)) == 0)),
@@ -2046,6 +2106,10 @@ fn as_int_ty(m: &str) -> IntTy {
         "as_u128" => IntTy::U128,
         _ => IntTy::Usize,
     }
+}
+
+fn signed_int(t: IntTy) -> bool {
+    matches!(t, IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize)
 }
 
 fn int_bits(t: IntTy) -> u32 {

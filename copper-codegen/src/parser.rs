@@ -368,6 +368,10 @@ pub fn capture_file_scope(
     for item in &file.items {
         let defines_constants = match item {
             syn::Item::Const(_) => true,
+            // An immutable `static` and a tuple struct (its constructor) are
+            // constants of I.14.4 too (2026-11-08, MEASUREMENTS §V.4).
+            syn::Item::Static(st) => matches!(st.mutability, syn::StaticMutability::None),
+            syn::Item::Struct(st) => matches!(st.fields, syn::Fields::Unnamed(_)),
             syn::Item::Fn(f) => f.sig.constness.is_some(),
             syn::Item::Impl(imp) => imp.trait_.is_none(),
             _ => false,

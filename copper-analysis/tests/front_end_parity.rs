@@ -592,3 +592,100 @@ fn the_named_parity_exceptions_are_r6_and_the_let_instance() {
     assert_eq!(probe(&format!("fn f(x: u8) -> u8 {{ g(x) }} fn g(x: u8) -> u8 {{ if x == 0 {{ 0 }} else {{ f(x - 1) }} }} {m}")), vec!["m"]);
     assert!(probe(&format!("fn f(x: u8) -> u8 {{ g(x) }} fn g(x: u8) -> u8 {{ x }} {m}")).is_empty());
 }
+
+/// The three rules of 2026-11-08 (MEASUREMENTS §V), each run by both front-ends from
+/// `check_front_end_rules` / the shared CFG: a net in a behavioural body (I.13.5,
+/// `check_no_body_nets`), `Bits<N>`'s width bound (R16, `check_admissible`), and a
+/// ticking `for` over a constant-empty range as a boundary (R3 / I.8.4(b),
+/// `empty_range_dependencies` — the macro has rustc check what the transpiler folds).
+/// Witnesses refused, twins admitted; the ui/fail cases `behavioural_net`,
+/// `bits_width_zero`, `bits_width_over_128`, `constant_empty_for_boundary` are the
+/// macro's side, and `front_end_parity_ui.rs` transpiles each.
+#[test]
+fn the_2026_11_08_rules_refuse_their_witnesses_and_admit_their_twins() {
+    let parse = |s: &str| syn::parse_str::<ItemFn>(s).unwrap();
+    for (what, src) in [
+        ("wire", "async fn m(clk: Clock<A>, q: RegOut<Logic, A>) { let (_d, _r) = wire::<Logic, A>(Logic::Zero); loop { q.write(Logic::One); clk.tick().await; } }"),
+        ("registered_wire", "async fn m(clk: Clock<A>, q: RegOut<Logic, A>) { loop { let w = copper_sim::registered_wire::<Logic, A>(Logic::Zero); q.write(Logic::One); clk.tick().await; } }"),
+        ("net", "fn m(a: In<Logic, A>, o: Out<Logic, A>) { let n = net::<Logic, A>(); o.write(a.read()); }"),
+    ] {
+        let e = copper_analysis::front_end::check_no_body_nets(&parse(src)).expect_err(what);
+        assert_eq!(e.to_string(), copper_analysis::front_end::BODY_NET_MESSAGE, "{what}");
+    }
+    copper_analysis::front_end::check_no_body_nets(&parse(
+        "async fn m(clk: Clock<A>, q: RegOut<Logic, A>) { let w = wire_count(3); loop { q.write(Logic::One); clk.tick().await; } }",
+    ))
+    .expect("a helper whose name only starts with `wire` is not a net");
+
+    for (src, n) in [
+        ("fn m(a: In<Bits<0>, A>, o: Out<Bits<0>, A>) { o.write(a.read()); }", 0),
+        ("fn m(a: In<Bits<8>, A>, o: Out<Bits<8>, A>) { let w: Bits<129> = Bits::zero(); o.write(a.read()); }", 129),
+        ("fn m(a: In<Bits<8>, A>, o: Out<Bits<8>, A>) { let w = Bits::<{ 2 * 128 }>::zero(); o.write(a.read()); }", 256),
+    ] {
+        let e = copper_analysis::check_admissible(&parse(src)).expect_err(src);
+        assert_eq!(e.to_string(), copper_analysis::bits_width_message(n), "{src}");
+    }
+    for src in [
+        "fn m(a: In<Bits<1>, A>, o: Out<Bits<128>, A>) { o.write(Bits::zero()); }",
+        "fn m<const N: usize>(a: In<Bits<N>, A>, o: Out<Bits<N>, A>) { o.write(a.read()); }",
+        "fn m(a: In<Bits<W>, A>, o: Out<Bits<W>, A>) { o.write(a.read()); }",
+    ] {
+        copper_analysis::check_admissible(&parse(src)).expect(src);
+    }
+
+    // R3 over a constant range: the dependencies name the range whose emptiness the
+    // verdict needs, none when the loop has a boundary of its own, and a binder is
+    // never taken for a constant (a run-time bound stays the I.8.4 snapshot).
+    let only = "async fn m(clk: Clock<A>, q: RegOut<u8, A>) { loop { q.write(1); for _ in 0..EMPTY { clk.tick().await; } } }";
+    let deps = copper_analysis::empty_range_dependencies(&parse(only));
+    assert_eq!(deps.iter().map(|s| s.iter().map(copper_analysis::range_key).collect::<Vec<_>>()).collect::<Vec<_>>(), vec![vec!["0 .. EMPTY".to_string()]]);
+    let own = "async fn m(clk: Clock<A>, q: RegOut<u8, A>) { loop { q.write(1); for _ in 0..EMPTY { clk.tick().await; } clk.tick().await; } }";
+    assert!(copper_analysis::empty_range_dependencies(&parse(own)).is_empty());
+    let two = "async fn m(clk: Clock<A>, q: RegOut<u8, A>) { loop { for _ in 0..P { clk.tick().await; } for _ in 0..Q { clk.tick().await; } } }";
+    let deps = copper_analysis::empty_range_dependencies(&parse(two));
+    assert_eq!(deps.len(), 1, "one minimal set: both empty");
+    assert_eq!(deps[0].len(), 2);
+    let runtime = "async fn m(clk: Clock<A>, a: In<u8, A>, q: RegOut<u8, A>) { loop { let n = a.read(); for _ in 0..n { clk.tick().await; } } }";
+    assert!(copper_analysis::constant_ticking_for_ranges(&parse(runtime)).is_empty());
+    let generic = "async fn m<const N: usize>(clk: Clock<A>, q: RegOut<u8, A>) { loop { for _ in 0..N { clk.tick().await; } } }";
+    assert!(copper_analysis::constant_ticking_for_ranges(&parse(generic)).is_empty());
+    // The oracle: told the range is empty, R3 refuses with its message; non-empty, admits.
+    let f = parse(only);
+    let r = |empty: bool| {
+        copper_analysis::with_empty_range_oracle(Box::new(move |_| Some(empty)), || copper_analysis::check_reachability(&f))
+    };
+    assert_eq!(r(true).unwrap_err().to_string(), copper_analysis::NESTED_EXIT_MESSAGE);
+    r(false).expect("a non-empty constant range is a boundary");
+}
+
+/// The corpus side of the 2026-11-08 rules (MEASUREMENTS §V): no behavioural body
+/// calls a net constructor, no `Bits` width is written outside 1..=128 (both
+/// through `every_corpus_module_passes_every_shared_rule_in_its_mode`, which runs
+/// `check_front_end_rules`), and here: how many clocked modules have a constant
+/// ticking-`for` range, and how many depend on one being non-empty (each of those gets
+/// the macro's rustc-checked assertion; each must hold, or the corpus would not compile).
+#[test]
+fn constant_range_boundaries_in_the_corpus() {
+    let mods = every_hardware_fn_including_fn_bodies();
+    let (mut with_ranges, mut ranges, mut dependent, mut sets, mut multi) = (0, 0, 0, 0, 0);
+    let mut names = Vec::new();
+    for (name, f) in &mods {
+        let r = copper_analysis::constant_ticking_for_ranges(f);
+        if r.is_empty() {
+            continue;
+        }
+        with_ranges += 1;
+        ranges += r.len();
+        let d = copper_analysis::empty_range_dependencies(f);
+        if !d.is_empty() {
+            dependent += 1;
+            sets += d.len();
+            multi += d.iter().filter(|s| s.len() > 1).count();
+            names.push(name.clone());
+        }
+    }
+    println!(
+        "constant ticking-for ranges: {ranges} in {with_ranges} modules; {dependent} modules depend on one \
+         being non-empty ({sets} minimal sets, {multi} of more than one range): {names:?}"
+    );
+}

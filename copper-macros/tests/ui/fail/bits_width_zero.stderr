@@ -1,0 +1,19 @@
+error: `Bits<0>` is not a hardware type: a `Bits<N>` has 1 ≤ N ≤ 128 bits (SPEC I.14.1(c), II.1.2 R16). `Bits<0>` has no value to observe, and a wider vector's arithmetic does not monomorphize. Use a width in 1..=128, or an array of `Bits` for a wider value.
+  --> tests/ui/fail/bits_width_zero.rs:11:12
+   |
+11 | fn m(a: In<Bits<0>, A>, o: Out<Bits<0>, A>) {
+   |            ^^^^
+
+warning: unused import: `Bits`
+ --> tests/ui/fail/bits_width_zero.rs:1:19
+  |
+1 | use copper_core::{Bits, ClockDomain};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `Out`
+ --> tests/ui/fail/bits_width_zero.rs:2:25
+  |
+2 | use copper_core::port::{In, Out};
+  |                         ^^  ^^^

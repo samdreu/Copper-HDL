@@ -134,6 +134,72 @@ fn const_wrap_for_bounds(f: &mut ItemFn) {
     W.visit_block_mut(&mut f.block);
 }
 
+/// SPEC I.8.4(b), II.2.2 R3 (MEASUREMENTS §V.3): emit each of
+/// `copper_analysis::empty_range_dependencies` as a body item
+/// `const _: () = assert!(<not all of these ranges empty>, NESTED_EXIT_MESSAGE);`,
+/// which rustc evaluates under `cargo check` (an inline `const { }` in a fn body is
+/// evaluated only at monomorphization, measured). A set of one range goes right
+/// before its `for` statement, so a `const` declared in that block is in scope; a set
+/// of several goes at the top of the body.
+fn place_empty_range_assertions(f: &mut ItemFn) {
+    use syn::visit_mut::VisitMut;
+    let msg = copper_analysis::NESTED_EXIT_MESSAGE;
+    let cond = |set: &[syn::ExprRange]| -> proc_macro2::TokenStream {
+        let parts: Vec<proc_macro2::TokenStream> = set
+            .iter()
+            .map(|r| {
+                let (a, b) = (r.start.as_deref().unwrap(), r.end.as_deref().unwrap());
+                match r.limits {
+                    syn::RangeLimits::HalfOpen(_) => quote! { ((#a) >= (#b)) },
+                    syn::RangeLimits::Closed(_) => quote! { ((#a) > (#b)) },
+                }
+            })
+            .collect();
+        quote! { !(#(#parts)&&*) }
+    };
+    let item = |set: &[syn::ExprRange]| -> syn::Stmt {
+        let c = cond(set);
+        let span = syn::spanned::Spanned::span(&set[0]);
+        syn::parse_quote_spanned!(span=> const _: () = ::core::assert!(#c, #msg);)
+    };
+    let sets = copper_analysis::empty_range_dependencies(f);
+    let mut singles: Vec<syn::ExprRange> = Vec::new();
+    let mut top: Vec<syn::Stmt> = Vec::new();
+    for set in &sets {
+        if set.len() == 1 {
+            singles.push(set[0].clone());
+        } else {
+            top.push(item(set));
+        }
+    }
+    struct Place<'a> {
+        singles: &'a [syn::ExprRange],
+        item: &'a dyn Fn(&[syn::ExprRange]) -> syn::Stmt,
+    }
+    impl VisitMut for Place<'_> {
+        fn visit_block_mut(&mut self, b: &mut syn::Block) {
+            syn::visit_mut::visit_block_mut(self, b);
+            let mut out = Vec::with_capacity(b.stmts.len());
+            for st in std::mem::take(&mut b.stmts) {
+                if let syn::Stmt::Expr(syn::Expr::ForLoop(fl), _) = &st {
+                    if let syn::Expr::Range(r) = &*fl.expr {
+                        let k = copper_analysis::range_key(r);
+                        if let Some(s) = self.singles.iter().find(|s| copper_analysis::range_key(s) == k) {
+                            out.push((self.item)(std::slice::from_ref(s)));
+                        }
+                    }
+                }
+                out.push(st);
+            }
+            b.stmts = out;
+        }
+    }
+    Place { singles: &singles, item: &item }.visit_block_mut(&mut f.block);
+    for (i, st) in top.into_iter().enumerate() {
+        f.block.stmts.insert(i, st);
+    }
+}
+
 /// The structural arm's two rewrites (see the arm).
 fn structural_rewrite(f: &mut ItemFn) {
     use syn::spanned::Spanned;
@@ -332,6 +398,13 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             // non-`const` fn is rustc's E0015. A wire's initializer is untouched.
             const_wrap_register_initializers(&mut f, &inferred_registers);
             const_wrap_for_bounds(&mut f);
+            // SPEC I.8.4(b), II.2.2 R3 (2026-11-08, MEASUREMENTS §V.3): a ticking `for`
+            // over a range empty only through a constant (`0..EMPTY`). The macro
+            // cannot fold a file `const`; the shared analysis names the hypotheses R3's
+            // verdict depends on and rustc checks each, as a body item (evaluated
+            // under `cargo check`, unlike an inline `const { }`), with R3's message.
+            // The transpiler folds the same ranges through `ConstEnv`.
+            place_empty_range_assertions(&mut f);
             wrap_in_module(&mut f);
             quote! { #f }.into()
         }
