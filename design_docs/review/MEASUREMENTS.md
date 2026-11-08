@@ -4351,3 +4351,220 @@ run checks`, the 3 example fixtures PASS. An earlier run on `0bd4007` was stoppe
 arm was approved; it is not a result. Not run remotely (nothing pushed).
 
 After the run, docs only: III.3.6's counts, this section, CLAUDE.md.
+
+## W. The memory OPEN lines of III.3 — I.10.1, I.10.4, I.10.5, I.10.6: measurements and decision packets (2026-11-08)
+
+Session open-lines-memory, branch `claude/open-lines-memory-71b72a` (cut from `paper` at `e4a9aae`;
+nothing pushed). Phase 1 of the batch: measure, sort what D-16 already decided from what it left open,
+and write one packet per open choice. **No code changed.** Probes live in the session scratchpad (a
+crate `wprobes` over this tree's crates — one module per file, the macro leg by `cargo check
+--features m_<probe>`, the transpiler leg by `transpile_source`, the simulator leg by small bins) and
+are copied to the shared notes folder (`open-lines-memory-W-probes/`). The three-leg measurements ran
+the sweep's own generated cases on a **temporary** fixture file `tests/fixtures/zz_w_probes.rs` under
+a **temporary** patch to `cfg.rs` (rule 6 (a) and (b) disabled; (c) counting `s_pre`'s stagings);
+both were reverted before this section was written (`git status` clean), and the patch is kept with the
+probes (`temp_rule6_patch.diff`). §U and §V are other sessions'.
+
+### W.1 Predictions and measurements
+
+Every verdict was predicted before it was measured (`predictions.md` beside the probes).
+
+| # | Probe | Prediction | Measured |
+|---|---|---|---|
+| 1 | `l0_tb`: a testbench builds `Memory::<u8, 1, 0, C, 0, 1>` | compiles (check and build); `is_ready()` panics on a subtraction overflow; the first edge panics on an index out of bounds | **as predicted**: builds; `read(0)` stages; `is_ready()` panics `attempt to subtract with overflow` (`memory.rs:304`); `clk.advance()` panics `index out of bounds: the len is 0` (`memory.rs:156`, `advance_read_pipelines`) |
+| 2 | `w0_tb`: `Memory::<u8, 1, 1, C, 1, 0>` | `write()` panics, index out of bounds | **as predicted** (`memory.rs:360`, `write`) |
+| 3 | `l0_mod`, `w0_mod`: a module declaring latency 0 | macro admits; transpiler refuses "must be at least 1" | **as predicted** (`chir_lower.rs:6655`) — REFUSED-one |
+| 4 | `recv_l0`: a `Memory` **parameter** with `READ_LAT = 0` | (not predicted separately — assumed the declared-memory refusal) | **not as predicted**: macro admits; the **transpiler panics** — `attempt to subtract with overflow` at `vlir_lower.rs:2092` — instead of refusing. `received_memory_decls` checks `WRITE_LAT` only |
+| 5 | `ReadMode` uses outside `copper-core` | 0 | **0** (`memory.rs:13`, `:38`, `:215`, `:268` and the re-export `copper-core/src/lib.rs:29`, nothing else) |
+| 6 | `p_a` (tick-free `for` staging twice), `p_a_one` (one iteration, one staging), `p_a_two` (one iteration, two distinct ports), `p_b`, `p_dom` (D-16's), `p_bw` (two unconditional stagings of write port 0 — the `two_accesses_*` shape), on the current tree | refused by both, (a)'s or (b)'s message | **as predicted**, both front-ends, identical messages; `p_a_one` and `p_a_two` are I.10.4's two "over" witnesses of (a) |
+| 7 | `p_pre_only` (D-16's), `p_pre_head` (staged only in `s_pre`, observed at the loop head before the first tick) | refused by both via (c) | **as predicted** |
+| 8 | the same eight under the temporary patch | admitted by both; sweep sim = ref = SV on all | **as predicted**: rule 6 `Ok`, transpiler `Ok` on all eight; the generated `_differential` and `_reference_leg` cases **16/16 pass**: `p_a`, `p_a_one`, `p_a_two`, `p_pre_only`, `p_pre_head` 20 sequences each, 20 PASS; `p_b`, `p_bw` 8/8 PASS; `p_dom` 12/12 PASS; 0 OUTSIDE, 0 TRUNCATED, 0 EXCUSED, 0 DISAGREE; the reference leg agreed on every cycle and every `obs_0`. The emitted text realizes last-wins as I.10.1(b) says: the later blocking assignment to `rom_rd0_addr` / `ram_wr0_{en,addr,data}` in one `always_comb` (`p_bw`: two assignment groups, the second wins; `p_a`: the SV `for` over the address net) |
+| 9 | the pins the patch breaks | the two `two_accesses_*` cases and `cfg.rs`'s `two_stagings_of_one_bus_in_one_cycle_are_rejected` | **four**, one more than predicted: those three and `cfg::tests::a_received_memory_is_checked_like_a_declared_one`, whose refused shape is a double staging. Clause (a) has **no** pin (no test names its message). Every other test of `copper-analysis`, `copper-codegen/tests/unsupported_constructs.rs`, `copper-macros` (trybuild included) and `copper-ref` passed under the patch |
+| 10 | corpus modules whose verdict the patch changes | 0 | **0** (rule 6 refuses no corpus module today, D-16 (v); the patch only admits; `front_end_parity.rs` passed under it) |
+| 11 | `c_obs`, `c_stage` (`combinational`, a `Memory` parameter) | macro admits both; transpiler refuses both by registry accident; interpreter refuses | **as predicted**: macro admits; transpiler "method `data` is not supported in hardware expressions" / "one-argument `.read()` on something that is not a memory read port"; `copper-ref` refuses at `module.rs:197` ("I.10.6: OUTSIDE") — but **no test pins that refusal**: the I.10.6 line's fixture `memory_binding_outside_s_pre_and_memory_parameter_are_refused` asserts I.10.1(a) and I.10.5, and `interp_comb.rs::the_fragment_is_tick_free` tests only the `loop`. Corpus 0 |
+| 12 | `recv_wl2`: a `Memory` parameter with `WRITE_LAT = 2` | macro admits; transpiler refuses | **as predicted** ("the bus ABI currently supports WRITE_LAT = 1 only", `chir_lower.rs:1605`) — REFUSED-one |
+| 13 | `recv_short`: `Memory<Bits<8>, 1, 0, MainClk>` (latencies defaulted) | macro admits; transpiler refuses "must spell all six generics" — a parity break the line does not name | **as predicted** (`chir_lower.rs:1574`). No module in the tree spells a `Memory` parameter short (`tests/verilog_fifo_memory_new.rs:28` is a struct field, not a parameter) |
+| 14 | `two_recv`: a testbench moves one `Memory` into two spawned modules | rustc E0382 | **as predicted** (`Memory` is not `Clone`; no public API yields a second handle — `read_port`/`write_port` borrow) |
+| 15 | `struct_one`: a `structural` parent with a `Memory` parameter passed to one child | macro admits; transpiler refuses | **as predicted**; the transpiler's message is "connects to unknown signal `m` (declare it as a parent port or `let m = wire::<..>(..)`)" — it names `wire`, which D-22 retired from the structural grammar (a stale message, not this batch's) |
+| 16 | `struct_two`: the same, to two children | macro E0382; transpiler refuses | **as predicted** (I.13.4's table row `s7`) |
+| 17 | the emitted child of a received memory carries the mode | no | **as predicted**: `recv_child.sv` has the bus (`m_rd0_addr` out, `m_rd0_data` in, `m_wr0_{en,addr,data}` out, `M_ADDR_W`) and **no** forwarding net; `received_memory_decls` fixes `write_mode` at ReadFirst and never consults it (`chir_lower.rs:1556-1562`). The mode is the owner's on both legs: the simulator's owner object, the hand-written owner SV |
+
+### W.2 What each line owes, and what is mechanical
+
+**Mechanical (D-16 decided it; no design choice left):**
+
+- **I.10.1(a), `ReadMode`** — delete the enum, the field, `read_mode()` and the re-export; cost 0
+  outside `copper-core` (W.1 #5).
+- **I.10.4 (a) and (b)** (= **I.10.1(b)** in the front-ends) — delete both clauses of
+  `check_memory_staging` (`cfg.rs:499-575`). Measured safe on three legs (#8), corpus 0 (#10). Pins:
+  delete `two_stagings_of_one_bus_in_one_cycle_are_rejected` and the two `two_accesses_*` cases, or
+  invert them into "admitted"; rewrite `a_received_memory_is_checked_like_a_declared_one` onto a
+  clause that stays ((c) or (d)) (#9). The probes `p_a`, `p_a_one`, `p_a_two`, `p_b`, `p_bw`, `p_dom`
+  become swept fixtures (`p_a` with an in-range address, as measured) — the CLOSED tokens of both
+  lines.
+- **I.10.4 (c) on `s_pre`** — count the pre-loop stagings in (c)'s existence test (the patch's form:
+  the stagings among the statements before the top-level loop, through `mem_accesses`). Measured
+  safe (#8): `p_pre_only` agrees three ways and becomes a fixture. Whether (d) counts them is W.3 (4).
+- **I.10.6** — a header rule in both front-ends, one message, a ui/fail case per shape (`c_obs`,
+  `c_stage`), and a `copper-ref` test pinning `module.rs:197`. A `combinational` module has no clock
+  (R10) and may not construct one, so a parameter rule is the whole rule: no `Memory` reaches a
+  `combinational` body any other way. Corpus 0. **Where it goes:** the parameter walk is
+  `copper-analysis/src/front_end.rs::check_header` (`:760`, the `Some("Memory") => {}` arm), which the
+  open-lines-frontend session is editing. To keep that file's diff to one line, this batch proposes a
+  new `copper-analysis/src/memory_rules.rs` holding every memory shape rule of this batch (the header
+  placement, the latency, the received `WRITE_LAT`, and whatever W.3 (3) and (5) decide), called once
+  from `check_front_end_rules` — a single added line in `front_end.rs`.
+- **I.10.5, `WRITE_LAT ≠ 1` on a received memory** — D-16's obligation is "a II.3 row with the
+  macro's refusal": the shared rule above refuses it in both, one message (the transpiler's own check
+  at `chir_lower.rs:1601` stays as a backstop the shared rule pre-empts); the II.3.3 row is REFUSED-both
+  with the fix direction "expose the committing stage on the bus". **Not yet written:** D-16's two
+  received-memory rows were never added to II.3.3 (II.3.7 still says "owed"); each new II.3.3 row needs
+  its own III.3 line (G-K). How many rows there are depends on W.3 (2).
+
+**Found, not on any line:** (#4) a received memory with `READ_LAT = 0` **crashes** the transpiler
+(`vlir_lower.rs:2092`) instead of refusing it — the shared latency rule of W.3 (3) closes it whichever
+option is taken; (#13) the six-generic spelling is a parity break (W.3 (5)); (#15) the structural
+transpiler's message names the retired `wire`.
+
+**I.13.4's line** (another batch's) waits on W.3 (1): its "(d)'s/(e)'s one owner per memory needs
+the port set in the parameter type" is the same question.
+
+### W.3 Decision packets
+
+**(1) I.10.5 — how one owner per port is realized, and whether a `structural` parent receives a memory.**
+
+*Question.* D-16 A7 partitions a memory's ports among the modules that receive it and says the port
+set and the mode are "eventually" carried in the parameter type; D-18 I.13.4(e) says a structural
+parent's `Memory` parameter "is owned by the one child it reaches". What form does Phase C give this?
+
+*What the docs say.* I.10.5: "It is a parameter of a `sequential` or `synchronizer` module only
+(I.10.6)", and I.2.2 says the same (`SPEC.md:309`). I.13.4(e) and its table row ("a `Memory` parameter
+reaches one child") assume a structural parent may hold one. These two disagree on the structural
+parent. `RECEIVED_MEMORY_ABI.md`: the bus is the ABI of a child, with the owner hand-written.
+
+*What the code does.* One receiver per **memory** is already enforced by rustc: `Memory` is not
+`Clone` and nothing yields a second handle, so a testbench cannot hand one memory to two modules
+(#14, E0382), and a structural parent cannot pass one to two children (#16). The partition of ports
+among several receivers is therefore **not expressible today** — the only partition is the trivial
+one. A structural parent with a `Memory` parameter and one child is admitted by the macro and refused
+by the transpiler (#15): REFUSED-one. The port set a child uses is computed by the transpiler (used
+ports only, on the bus); nothing needs it in the type while one module holds the whole memory.
+
+*Options.*
+- **A. One receiver per memory; `Memory` a parameter of `sequential`/`synchronizer` only.** The
+  partition is realized as its trivial case, enforced by rustc's move in the simulator and by
+  construction in the SV (no emitted module connects two children to one port; the owner is
+  hand-written). The shared header rule refuses a `Memory` parameter on a `structural` module too
+  (together with I.10.6's combinational case), so `struct_one` becomes REFUSED-both. I.13.4(e)'s
+  sentence and table row are restated ("a `structural` module receives no memory; I.10.5"). The port
+  set needs no type. Changes: the header rule (one message per mode), a `coreui:fail` case for
+  `two_recv` (E0382) as I.10.5's evidence, ui/fail for `struct_one`; I.13.4 wording. Corpus 0, SV 0,
+  anchors 0 (`rv32i_pipelined_verilator`, `received_memory_abi` untouched).
+- **B. As A, but a structural parent may forward its memory to exactly one child.** The transpiler
+  forwards the child's bus through the parent (parent ports = the child's bus, `M_ADDR_W` threaded).
+  Partition still trivial. Changes: a structural lowering in `chir_lower` (outside this batch's lane),
+  ui/pass and a test; corpus 0; SV new only for such parents (none exist); anchors 0.
+- **C. Port-owned handles.** `mem.split()` (or a per-port constructor) yields
+  `ReadPortOf<T, D, L, k>` / `WritePortOf<T, D, M, k>` values, each a parameter kind of its own;
+  rustc's move then enforces one owner **per port**, and the port set is in the types. Changes: new
+  `copper-core` types, the header allowlist, `memory_locals`, the transpiler's received declarations
+  and bus (per handle), `RECEIVED_MEMORY_ABI.md`, the CPU (`rv32i_cpu_pipelined`, 1 corpus module) and
+  its lane, `received_memory_abi.rs`, two ui cases; the bus text would change per handle;
+  `rv32i_pipelined_verilator`'s owner re-wired. No corpus design needs a split memory today.
+
+*Recommendation:* **A** — it is what the code already enforces for the simulator, it makes the
+structural case REFUSED-both at cost 0, and it is the restrict-don't-grow direction; B and C build a
+form no design uses. A narrows D-16 A7's "partitioned among the modules that receive it" to the trivial
+partition, and that narrowing is the user's call.
+
+**(2) I.10.5 / I.10.2 — the mode of a received memory.**
+
+*Question.* D-16 A7 and I.13.7 (6) owe "the mode in the parameter type", and II.3.7 lists "the mode
+absent from the type" as a limit. Is that still owed?
+
+*What the code does.* The child's emitted text has no mode (#17); the simulator takes the mode from
+the owner's object and the SV from the owner's hand-written array. Both legs agree whenever the two
+owners agree, which is the harness author's statement (the CPU lane builds both as WriteFirst). What
+the type would add is a **rustc check** that the owner a testbench builds matches what the child was
+written for — a design-intent check, not an agreement property.
+
+*Options.*
+- **M1. The mode stays the instance's** (I.10.2 as decided), the owner's on both legs; the "mode absent
+  from the type" limit is retired as no limit of the lowering (the child's text is mode-free) and
+  restated as a harness obligation: an owner on the simulator side and on the SV side is one mode.
+  Changes: SPEC text (I.10.2, I.10.5, I.13.4(e), I.13.7 (6), II.3.7); no code. Corpus 0, SV 0.
+- **M2. The mode a type parameter.** `Memory<T, R, W, D, L, M, P = ReadFirst>` with marker types,
+  `.write_first()` a type-changing builder; a child declares the mode it needs and a mismatched owner is
+  E0308. Changes: `copper-core`, the front-end domain helper (`front_end.rs:217-224` reads `D` as the
+  last type argument — no longer true), `memory_locals`, `parse_memory_decl` and
+  `received_memory_decls` (lowering files, outside this lane), the builder call sites (13 files; in the
+  corpus `rv32i_cpu_transpilable`, `rv32i_cpu_pipelined`'s owner, `ram_write_first`, `ram_wf_priority`,
+  `ram_r1w2_wf`, `ram_read_first_mem`), the CPU's parameter type. SV: none (the declared memory's mode
+  is already read off the builder). Anchors: none in meaning; `rv32i_pipelined_verilator` re-built.
+
+*Recommendation:* **M1** — nothing the three legs compare depends on it; M2 is a type-system feature
+for the author, with a cost across six corpus modules and two lowering files.
+
+**(3) I.10.1(a) — how `L ≥ 1` and `M ≥ 1` are checked.**
+
+*Question.* D-16 2A: "`L ≥ 1` checked where the simulator's type is built (parity with the
+transpiler's refusal)"; I.10.1(a) calls the gap "a parity item of II.1.3". Which form?
+
+*What the code does.* Today a latency-0 memory compiles and panics deep inside the simulator (#1, #2);
+the transpiler refuses a declared one (#3) and crashes on a received one (#4); the macro admits both.
+
+*Options.*
+- **a1. A run-time `assert!` in `Memory::from_data`** with a message naming I.10.1(a). A testbench or
+  a module panics at construction. Fixture: a `#[should_panic]` test. Front-ends unchanged:
+  still REFUSED-one.
+- **a2. An inline `const { assert!(..) }`.** Measured on rustc 1.92: invisible to `cargo check`, an
+  E0080 at `cargo build`. The macro leg fails at build with rustc's text, the transpiler with its own,
+  so two messages; trybuild (check-style) cannot pin it, so the fixture is a build-and-fail test.
+- **a3. a1 plus a shared front-end rule** (`memory_rules.rs`): a literal `0` in a `Memory`'s
+  latency positions, in a declaration or a parameter type, refused by both with one message and
+  ui/fail cases (`l0_mod`, `w0_mod`, `recv_l0`). Closes the II.1.3 parity break and the transpiler
+  crash (#4). A non-literal latency stays the transpiler's refusal (it requires literals).
+
+*Recommendation:* **a3** — the SPEC names it a parity item, and a1 alone leaves both REFUSED-one rows
+and the crash.
+
+**(4) I.10.4 (d) — does a pre-loop staging count as a staging (d) orders against?**
+
+*Question.* D-16 extends (c) to `s_pre` and says nothing of (d). `p_pre_head` stages only in `s_pre`
+and observes at the loop head, before the first tick: in the first resumption the observe is in the
+staging's own resumption (valid false), and from the second on it reads what edge 1 delivered (I.9.3,
+I.10.1(d)).
+
+*Measured.* With (c) extended and (d) unchanged, `p_pre_head` is admitted by both and agrees three
+ways, 20/20 sequences (#8). If (d) counted the pre-loop staging as a site reaching the head tick-free,
+(d) would refuse it (its only staging reaches the observe without an edge).
+
+*Options.* **(i)** (d) ignores `s_pre` (the patch as measured): `p_pre_head` admitted, a fixture.
+**(ii)** (d) counts `s_pre`: `p_pre_head` refused by both, `p_pre_only` (observe after the tick)
+the one spelling. Corpus 0 either way.
+
+*Recommendation:* **(i)** — the shape has a meaning every leg computes alike, and it is `p_guarded`'s
+rotation (observe at the head, the edge before it), which (d) already admits for an in-loop staging.
+
+**(5) The received memory's spelling.**
+
+*Question.* A `Memory` parameter spelled with the defaulted latencies (`Memory<T, R, W, D>`) is
+admitted by the macro and refused by the transpiler (#13). Which way does parity go?
+
+*Options.* **(i)** Refuse in both (the shared rule, the transpiler's message): cost 0 (no parameter in
+the tree is spelled short). **(ii)** The transpiler resolves the defaults (`L = M = 1`), as rustc does:
+a change in `received_memory_decls` (a lowering file, outside this lane); cost 0.
+
+*Recommendation:* **(ii)** if the lowering session takes it — the defaults are the type's meaning and
+a declaration spelled `Memory::<T, R, W, D>::new` already gets them (`parse_memory_decl`, `chir_lower.rs:6642-6650`, read off the code; no corpus module spells one short); otherwise **(i)** as the
+REFUSED-both row until it does.
+
+### W.4 Phase 2, once decided
+
+The mechanical parts of W.2, then the decided options; the probes of W.1 as fixtures (`p_*` swept;
+`c_obs`, `c_stage`, `l0_mod`, `w0_mod`, `recv_l0`, `recv_wl2`, the structural one as ui/fail cases
+under W.3 (1) A; `two_recv` as a `coreui:fail` case); the four pins of W.1 #9; II.3.3's received-memory
+rows with their III.3 lines; I.10.1, I.10.4, I.10.5, I.10.6 closed in III.3 with G-K checking them;
+III.3.6's counts; bare `tools/regression.sh` to REGRESSION OK. Ledger forecast if every recommendation
+is taken: the four lines CLOSED; plus one REFUSED-both II.3.3 row (`WRITE_LAT ≠ 1`) with its line, and
+the mode row not written (M1).
