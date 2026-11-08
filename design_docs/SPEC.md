@@ -4225,17 +4225,19 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | retired 14 | `multi_phase_out_write` | `gone:multi_phase_out_write`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8 |
 | retired 15 | `out_first_driven_late` | `gone:out_first_driven_late`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; I.11's class vacuous (D-14) |
 
-**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §R
-(2026-11-07, on `dca622d`, REGRESSION OK, 485 s; the `preload-ok` line added after it, docs only,
-re-checked by the ledger test): **182 lines — 160 CLOSED, 22 OPEN**; 167 required by the SPEC (91
-numbered clauses, 22 II.1.2 rules, 4 II.2.1 rules, 11 II.3.3 rows, 28 row-(e) methods, 9 retired
-rules) and 15 beyond it (the 7 methods row (e) owes, 8 II.3 rows found in Phase C). By part: Part I
-82 lines, 70 CLOSED, 12 OPEN; II.1–II.2 31 lines, 29 CLOSED, 2 OPEN (R16, II.1.3); II.3 60 lines, 52
-CLOSED, 8 OPEN (`saturating_add`, `saturating_sub`, and six found rows); the 9 retired rules CLOSED.
-Fixture tokens on CLOSED lines: 134 `sweep`, 102 `test`, 81 `ui`, 5 `coreui`, 3 `example`, 11 `gone`;
-G-K's run check found all 144 swept/test fixtures `ok` and the 3 examples PASS. Of the 22 OPEN
-lines, 3 wait on a decision (I.13.5, I.8.5 with II.3 found continue-for, I.14.3; §R.6) and the rest
-name the component that owes them; none is a divergence the sweep reaches (G-G 0 DISAGREE).
+**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §S.6
+(2026-11-08, on `272159e`, Phase C step 11b, REGRESSION OK, 544 s): **186 lines — 164 CLOSED, 22
+OPEN**; 168 required by the SPEC (91 numbered clauses, 22 II.1.2 rules, 4 II.2.1 rules, 12 II.3.3
+rows — (h) added by D-23 —, 28 row-(e) methods, 9 retired rules) and 18 beyond it (the 7 methods row
+(e) owes, 11 II.3 rows found in Phase C). By part: Part I 82 lines, 73 CLOSED, 9 OPEN; II.1–II.2 31
+lines, 29 CLOSED, 2 OPEN (R16, II.1.3); II.3 64 lines, 53 CLOSED, 11 OPEN (`saturating_add`,
+`saturating_sub`, and nine found rows); the 9 retired rules CLOSED. Fixture tokens on CLOSED lines:
+137 `sweep`, 108 `test`, 86 `ui`, 5 `coreui`, 3 `example`, 11 `gone`; G-K's run check found all 151
+run checks satisfied and the 3 examples PASS. Of the 22 OPEN lines, 2 wait on a decision (`II.3 found
+let-instance`, `II.3 found x-pattern`; `review/MEASUREMENTS.md` §S.5) and the rest name the component
+that owes them; none is a divergence the sweep reaches (G-G 0 DISAGREE). (Step 11's counts, on
+`dca622d`: 182 lines — 160 CLOSED, 22 OPEN; the three §R.6 decisions closed four lines, D-23, and four
+found lines opened, §S.4.)
 
 **III.3.7 Implementation map.** `tests/conformance_ledger.rs` (the parser, the completeness and
 token checks, `COPPER_LEDGER_REPORT`); `tools/regression.sh` G-K (the `REQUIRE` lines against the

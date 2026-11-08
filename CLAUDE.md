@@ -232,7 +232,7 @@ entries in `Cargo.toml`.
   interpreter (`copper-ref`) keeps its own, so the reference leg shares no constant code with
   the transpiler, and `tests/const_evaluators_agree.rs` (G-J) pins the two against each other;
   R11 is rustc's (see front-end parity below), and `data` — the I.14 shape rules both front-ends run
-  (`check_outside_methods`: `checked_*`/`is_valid()` OUTSIDE; `check_memory_port_index`;
+  (`check_outside_methods`: `checked_*`/`is_valid()` and `==`/`!=` with an X literal OUTSIDE, D-23; `check_memory_port_index`;
   Phase C step 8). `usize`/`isize` are 64 bits in the transpiler since step 8 (SPEC
   I.14.1(b)), and `eq_logic`/`ne_logic` are IEEE 1800 `==`/`!=`, pinned with every other
   operator by the recorded table `tests/ieee1800_table.rs` (P6). It is also where
@@ -253,7 +253,12 @@ entries in `Cargo.toml`.
   wraps combinational bodies in the `loop { …; delta_yield().await; }` shape, and
   makes the module a `HardwareModule` (so a bare `async fn` won't simulate). A
   `structural` parent is transpile-only: it is not spawned in the simulator, which
-  wires the hierarchy by hand.
+  wires the hierarchy by hand (`spawn_wired`; `spawn_child` is gone). **Instantiation is
+  structural-only** (SPEC I.13.5, D-23, Phase C step 11b): every generated behavioural fn is
+  `#[must_use]` with I.13.5's message and denies `unused_must_use`, so `child(a, b);` in a
+  `sequential`/`synchronizer`/`combinational` body is a rustc error; the transpiler refuses the
+  same call from its registry (`front_end::check_no_behavioural_instance`), and its old
+  expression form (`lower_hardware_call`, the behavioural `submodules` fields) is deleted.
 - **`copper-codegen`** — the transpiler and the `copper-transpile` CLI
   (`bin/`, `main.rs`). Owns the lowering pipeline and Verilog emission.
 - **`copper-sim`** — the async simulation executor and the Verilator
@@ -398,7 +403,8 @@ the emitted SV is the concrete module's, with no parameter for `D`.
 - **Both front-ends enforce the same rules (front-end parity, 2026-10-23; one list since Phase C
   step 10).** The syntactic rules — the header (R20, R9, R10), R17, D3, R16, R18, R7, R12, R13/R14,
   R5, the CDC rules (the port rule, the two-flop rule, the combinational one-domain rule), R19 and the
-  structural body rules — are `copper_analysis::front_end::check_front_end_rules`, which both call
+  structural body rules, and (D-23) the `continue` of a tick-bearing `for` (a dated REFUSED-both
+  II.3.3 row (h), fix direction the lowering) — are `copper_analysis::front_end::check_front_end_rules`, which both call
   first; `copper-codegen/tests/front_end_parity_ui.rs` transpiles every macro ui case and requires the
   macro's message. A combinational cycle is refused at spawn (`refuse_comb_cycle`) and over a
   structural parent. A structural net is `net::<T, D>()` (MEASUREMENTS §P). The
@@ -427,7 +433,11 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   body) and the transpiler refuses it when it inlines (`RECURSIVE_HELPER_MESSAGE`), so no wrong
   text is emitted. It cannot widen silently: `front_end_parity.rs::the_one_named_parity_exception_is_r6`
   reads the tree's helper call graph and requires `tests/recursive_helper_r6.rs` to be the only
-  module reaching a recursive helper, and `front_end_parity_ui.rs` pins its ui/pass row. The standing audit is
+  module reaching a recursive helper, and `front_end_parity_ui.rs` pins its ui/pass row. R6 is the
+  only *named* exception, not the only break: re-verified 2026-11-08 (MEASUREMENTS §S.4), shapes the
+  macro admits and the transpiler refuses remain, each an OPEN `II.3 found` line of SPEC §III.3.4
+  (array-for, const-call, let-instance — `let _ = child(..)`, which rustc's own help suggests —
+  body-wire, x-pattern, tickfree-continue). The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one

@@ -3746,3 +3746,153 @@ all landed, §E, §O, §P.6). Also: the H2 branch is unmerged and decided agains
 
 `1ebf010`, `5b22062`, `924793e` (D-22's work, §Q) say "Phase C step 11"; that work is step 10b. This
 section is step 11.
+
+## S. Phase C step 11b — D-23: the three decisions of §R.6 implemented (2026-11-08)
+
+Session phase-c-r6-decisions, branch `claude/phase-c-r6-decisions-5895af` (cut from `paper` at
+`c0f2a3c`; nothing pushed). The user took §R.6's three decisions as recommended — (1) I.13.5 = (a),
+(2) continue-for = (b), (3) `== X` = (a) — recorded as D-23. Probes in the session scratchpad (a
+crate `p11b` over this tree's `copper-core`/`copper-macros`/`copper-sim`, one bin per shape), not
+in the tree.
+
+### S.1 Predictions (written before any probe or code change)
+
+| # | Prediction | Measured |
+|---|---|---|
+| P1 | `#[deny(unused_must_use)]` on every generated behavioural fn costs 0 compile errors across the workspace (every crate, test, example) | **0 errors, 0 `unused return value` warnings** — as predicted |
+| P2 | `b2`'s sequential half (a child called pre-loop) refused by the macro (rustc, the note the message) and the transpiler, one message | as predicted (`ui/fail/behavioural_instantiation`) |
+| P3 | `b2`'s combinational half (`one(o)`): the macro E0382 plus the must-use error; the transpiler refuses with I.13.5's message | **not as predicted**: both refuse it first with I.11.3's never-written message (`o` is passed, never written — D-14's rule, step 10); refused by both with one message, so not a break |
+| P4 | `let _ = child(..)` / `let m = child(..)` in a sequential body: the macro admits (the child never runs), the transpiler refuses | as predicted — a REFUSED-one shape (§S.4) |
+| P5 | Deleting `lower_hardware_call` and the behavioural `submodules`: every corpus module's SV byte-identical | **217 / 217 byte-identical** (`copper-transpile` on every module `--list` reports under `examples/`, `tests/fixtures/`, `src/`, before on `c0f2a3c` and after; every one exit 0) |
+| P6 | continue-for: the ui case refused by both with one message; corpus 0; `control_extract`'s arm unreachable, kept as a backstop | as predicted; a `continue` of a loop nested in the `for` is admitted by both (it is row (a)'s) |
+| P7 | `== Logic::X` / `Bits::<8>::x() != v` refused by both; corpus 0. A `Logic::X` *pattern*: the macro admits, the transpiler refuses | as predicted — the pattern a REFUSED-one shape (§S.4) |
+| P8 | a `wire()` call in a behavioural body (D-18 `b1b`): the macro admits, the transpiler refuses | as predicted ("cannot infer bit width") — REFUSED-one (§S.4) |
+| P9 | every guard count of §R.5 unchanged; G-K 182 → ~185 lines, 163 CLOSED, ~22 OPEN | G-K **186 lines — 164 CLOSED, 22 OPEN; 168 required** (one more CLOSED than predicted: the `continue-for` found line became II.3.3 row (h) and closed with it; one more found line than predicted, §S.4's fourth); guard counts §S.6 |
+
+### S.2 (1) I.13.5 — rustc decides
+
+**The mechanism.** Two were allowed: a type with no use but `__instance`, or a denied `#[must_use]`.
+A type with no other use makes no statement an error by itself — a value of any type may be dropped —
+so both routes end in `unused_must_use`. Put on the generated **fn** (not the `HardwareModule` struct),
+rustc names the callee and carries the clause as the note:
+
+```
+error: unused return value of `child` that must be used
+   = note: a `#[hardware]` module is instantiated only in a `#[hardware(structural)]` body: …
+           (SPEC I.13.5, D-18 A2, D-23). Write a structural parent that wires this child …
+```
+
+The lint is denied by `#[deny(unused_must_use)]` on each behavioural fn, so it is an error in the body
+and a warning in a testbench (where `exec.spawn_wired(child(..), ..)` consumes the value — no
+testbench in the tree discards one: P1). The transpiler's refusal, `check_no_behavioural_instance`,
+walks the body for a call whose last path segment the registry knows, and runs after the memory
+rules (the macro's refusal is rustc's, after every macro rule). `front_end_parity_ui.rs`'s first line
+rule cannot apply (rustc's first line is the lint's), so a `LINT_JUDGED` row requires the transpiler's
+message to equal the `.stderr`'s `= note:` line — exact, not excused.
+
+**Deleted.** `lower_hardware_call`; `LowerCtx`'s `submodules`, `inst_counters`, `next_inst_name`; the
+`submodules` field of the combinational and sequential bodies at CHIR, SHIR and VLIR, with their
+lowering, legalization and validation loops; the instance's expression-form fields (`inputs`,
+`output_wire`, `output_ty` / `output_width`, `output_port`) and `emit::submodules`' legacy branch
+(an instance is always emitted in the connection form now); `PreparedSource::direct_deps` reads a
+structural body only; four `chir_lower` unit tests of the deleted form, replaced by one test of the
+backstop refusal. In the simulator: `spawn_child`, `spawn_child!`, `ModuleInfo`, `module_info`,
+`module_infos`, `ensure_module` and the `modules` map. **`spawn_child` is deleted, not kept:** its one
+use was `tests/module_composition_hybrid.rs`, a testbench that recorded a "pipeline" parent which was
+never a module; the test (`sequential_modules_compose_in_a_testbench`) wires the same two stages with
+`spawn_wired` and passes on the same expected stream `[0, 8, 16, 24]`. Nothing else in the tree named
+any of them.
+
+### S.3 (2) and (3)
+
+**continue-for.** `front_end::check_ticking_for_continue`, in `check_front_end_rules` after R12: a
+`for` whose body holds a tick (`cfg::stmt_contains_tick`, any depth) and an unlabelled `continue`
+that targets it (the walk does not enter nested loops, closures or items). `control_extract`'s arm
+uses the shared message; it is unreachable from either front-end. Row (h) of II.3.3, REFUSED-both,
+fix direction the lowering (increment, then test; row (a)'s entry copy, §J.4). Pinned by
+`ui/fail/ticking_for_continue` and
+`unsupported_constructs.rs::a_continue_of_a_tick_bearing_for_is_refused_with_the_shared_message`
+(which also requires a nested loop's `continue` inside such a `for` to transpile).
+
+**`== X`.** `check_outside_methods` refuses `==`/`!=` with an operand `Logic::X`, `Bits::x()` or
+`Bits::<N>::x()` (through parentheses and `&`), the span on the X operand. `Bits` and `Logic` have no
+`PartialOrd`, so no other comparison can take an X literal. `eq_logic(Logic::X)` is untouched (an
+IEEE value). The test that pinned the transpiler's own message now pins the shared one.
+
+### S.4 Found — four macro-admits / transpiler-refuses shapes (II.1.3 re-verified)
+
+Re-verifying II.1.3's "R6 the only named exception" by probe: R6 is still the only *named* exception
+and no probed shape is admitted by the transpiler and refused by the macro, but four shapes are
+admitted by the macro and refused by the transpiler. None emits text. Each is an OPEN line of III.3.4;
+none is fixed here.
+
+| Line | Probe | Macro | Transpiler | Owner |
+|---|---|---|---|---|
+| `II.3 found let-instance` | `let _ = child(clk.clone(), o);` / `let _m = …` pre-loop in a `sequential` body | admits; the child never runs | I.13.5's message | decision (§S.5 (1)) |
+| `II.3 found body-wire` | `let (_d, _r) = wire::<Logic, A>(Logic::Zero);` in a `sequential` body | admits | "cannot infer bit width" | the front-ends (I.13.5 already says a net is outside a behavioural body) |
+| `II.3 found x-pattern` | `match a.read() { Logic::X => …, _ => … }` | admits | "unsupported pattern: Logic :: X" | decision (§S.5 (2)) |
+| `II.3 found tickfree-continue` | `for i in 0..4u8 { if i == 2 { continue; } s = s.wrapping_add(i); }` in a ticking body | admits | "`continue` is not supported in hardware; the module's top-level `loop` runs forever" — a message about the wrong loop | copper-codegen (the unroller) |
+
+**Surprises.** (i) rustc's own `help:` line under the I.13.5 refusal reads "use `let _ = ...` to
+ignore the resulting value" — it steers the author to the one spelling the macro admits. (ii) The
+tick-free `continue` was not predicted: I.2.4 makes a tick-free constant `for` an unrolling, and Rust's
+`continue` in it is IN, but the transpiler's unroller refuses it and blames the module loop. (iii)
+`b2`'s combinational half needs no I.13.5 rule at all: since step 10 the never-written rule of I.11.3
+sees the port passed and not written (P3).
+
+### S.5 Decision packets (not implemented; each line OPEN with owner "decision")
+
+**(1) A bound instance in a behavioural body (`II.3 found let-instance`).**
+*Question:* should `let _ = child(..)` / `let m = child(..)` in a `sequential`, `synchronizer` or
+`combinational` body be refused by the macro, and how?
+*Docs say:* I.13.5 (D-18 A2): a behavioural body contains no instantiation; D-23 (1) chose "rustc
+decides"; II.1.3: a shape one front-end admits and the other refuses is a break.
+*Code does (272159e):* the denied `unused_must_use` fires on an unused *statement* only; a `let`
+binding is a use. The macro admits both spellings and the child's coroutine is dropped unstarted; the
+transpiler refuses with I.13.5's message. rustc's help for the statement form suggests `let _ =`.
+Corpus 0 (the deny costs nothing: §S.1 P1).
+*Options:* **(a)** a run-time refusal in the simulator: `HardwareModule` gains a drop guard that panics
+("a `#[hardware]` module was made and never started — SPEC I.13.5") when it is dropped unconsumed by a
+spawn or `__instance`. Changes: copper-sim; every swept module still runs (a spawned module is consumed);
+the shape becomes a loud simulator failure at the first resumption, not a compile error — still a
+REFUSED-one break by II.1.3's letter (compile vs transpile), but no longer a silent non-execution.
+**(b)** the macro refuses, syntactically, a `let` whose initializer is a bare call of a path that is
+not a known non-module (`Bits::…`, `Memory::…`, a const fn): a `let` bound to a helper `fn`'s call is
+an ordinary body form (I.2.4 inlines helpers), which the macro cannot tell from a module's, so (b)
+over-refuses or needs a list of exempt callees — §R.6 (1) (b)'s exemption-by-name problem. How many
+corpus bodies it would refuse is not measured here (a grep of `let x = f(..)` lines cannot separate
+bodies from testbenches).
+**(c)** record it as a second named parity exception beside R6 (the macro cannot see that a `let`'s
+callee is a module; rustc can only see unused values). Changes: II.1.3 gains an exception; pinned by a
+ui/pass row as R6 is.
+*Recommendation:* **(c) with (a)** — (a) removes the silent non-execution, which is the harm §R.6 (1)
+named; (c) states honestly that a compile-time refusal of the bound form is not available to a
+`syn`-level macro without a whole-file view (D-21's A4), as R6 already does.
+
+**(2) A `Logic::X` pattern (`II.3 found x-pattern`).**
+*Question:* is `match v { Logic::X => … }` the OUTSIDE question D-23 (3) refused for `==`, or a value?
+*Docs say:* I.14.3(e): a `Logic` scrutinee holding X matches `Logic::X` or `_` only — structurally, as
+the derived `==`; I.14.3(d) and D-23 (3): `==`/`!=` with an X literal is OUTSIDE.
+*Code does:* the macro admits (a structural match); the transpiler refuses ("unsupported pattern").
+Corpus 0.
+*Options:* **(a)** OUTSIDE: `check_outside_methods` also refuses a `Logic::X` (or `Bits::x()`-valued
+const) pattern, one message citing I.14.3(d); I.14.3(e)'s sentence becomes "matches `_` only". **(b)** a
+value: lower the arm as never taken in the 2-state SV — right only where the simulator holds no X.
+**(c)** leave the break.
+*Recommendation:* **(a)** — it is the same question as `== Logic::X` in a pattern's spelling, and D-23
+(3)'s reason applies unchanged.
+
+### S.6 The bare regression — measured
+
+**Bare `tools/regression.sh` on `272159e` (the code commit; laptop): REGRESSION OK (544 s).** 1417
+passed, 0 failed, 16 ignored, 155 test binaries (G-C: 128 test files); examples **32/32**; G-D **213**
+differential cases (3 ignored-with-reason); **G-F 213**; **G-G differential 1622 PASS / 12 OUTSIDE / 0
+TRUNCATED / 0 EXCUSED / 0 DISAGREE**; **G-G reference 1634 PASS / 0 DISAGREE**; **G-I** 162 clocked
+related, 0 uncovered; **G-J** 0 DISAGREE; G-E 5 anchored; **G-K** `186 lines — 164 CLOSED, 22 OPEN; 168
+required by the SPEC; fixtures: 5 coreui, 3 example, 11 gone, 137 sweep, 108 test, 86 ui; 151 run
+checks`, the 3 example fixtures PASS. **Predicted vs measured:** every guard count equal to §R.5's, as
+predicted; tests 1419 → 1417 (−4 `chir_lower` unit tests of the deleted expression form, +1 test of
+its refusal, +1 `unsupported_constructs` test of row (h)); the three new ui/fail cases run inside the
+one trybuild test. Not run remotely (nothing pushed).
+
+After the run, docs only: D-23 (`SPEC_DECISIONS.md`), III.3.6's counts, this section, CLAUDE.md.

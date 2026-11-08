@@ -3614,3 +3614,66 @@ Coroutine terms: a combinational module is a function, evaluated wherever it is 
 the domain of the wires it reads and drives, so it is a parameter of the module, bound at each
 instance. A helper `fn` is a function the coroutine calls; the macro sees the coroutine, the inliner
 sees the call graph, and only the inliner can refuse a cycle in it.
+
+### D-23 — Instantiation refused in behavioural bodies by rustc; `continue` of a ticking `for` and `== X` refused in both   (2026-11-08)
+Clause: SPEC §I.13.5 (a D-23 note: the realization), I.13.7 (3) (discharged), I.8.5 (the `continue`
+note), I.14.3(d) (a new `==`/`!=` row) and (e) (the `Logic::X` pattern, recorded open), II.1.3 (the
+re-verification), II.3.3 (row (h)), and III.3.4's lines. Nothing else normative changed.
+Question: (1) by what test does each front-end refuse a child instantiated in a `sequential`,
+`synchronizer` or `combinational` body, given that the macro sees one `ItemFn` and cannot tell a
+`#[hardware]` callee from a helper `fn`? (2) Is a `continue` of a tick-bearing counted `for` realized,
+or refused in both as a dated II.3 limitation? (3) Is `v == Logic::X` a value of the kernel, or the
+`is_valid()` question — OUTSIDE?
+Docs say: (1) I.13.5 (D-18 A2: instantiation and nets are structural-only; `lower_hardware_call`, the
+`submodules` fields, `spawn_child`, `spawn_child!` deleted; a ui case from `b2`); D-18 (iv) (`b2`
+admitted by both, the child dropped in the simulator). (2) I.8.3, I.8.5 (D-10 A2-i: increment, then
+test — IN); II.1.3. (3) I.14.2 (the derived `==` is structural, X equals X), I.14.3(d) (`is_valid()`
+OUTSIDE), III.2.2. The packets: `review/MEASUREMENTS.md` §R.6 (1)–(3).
+Code does (c0f2a3c): (1) neither front-end refuses; `lower_hardware_call` instantiates; `spawn_child`
+stands. (2) the macro admits, the transpiler refuses (`control_extract.rs` ~:1990). (3) the macro
+admits, the transpiler refuses (`chir_lower.rs` the `XLit` comparison arm). Corpus 0 for all three.
+Anchor: none — decided.
+Prior work: (1) as I.13.5 (Prost's call-is-inlining declined; Spade's `inst`, Chisel's instances
+admitted where the body is elaboration). (2) Prost's `for` (a counter-and-state form). (3) IEEE 1800's
+`===` is the 4-state question a 2-state realization cannot ask — not covered further by the notes.
+Options: (1) (a) rustc decides — a denied `#[must_use]` or a type with no use but `__instance`; the
+transpiler refuses from its registry; (b) a syntactic port-argument rule (misses a child taking only a
+clock, exempts `&clk` by name); (c) a second named exception. (2) (a) realize the lowering; (b) refuse
+in both now, dated row, (a) its fix direction; (c) leave the break. (3) (a) OUTSIDE in
+`check_outside_methods`; (b) lower to constant false; (c) leave the break.
+Recommendation: (1) (a); (2) (b), (a) its dated fix; (3) (a) (§R.6).
+Decision: **(1) (a), (2) (b), (3) (a)** — the user, all three as recommended (relayed by the
+coordinator, 2026-11-08).
+Changes (branch `claude/phase-c-r6-decisions-5895af`, `review/MEASUREMENTS.md` §S): (1) the macro's
+`wrap_in_module` puts `#[must_use = BEHAVIOURAL_INSTANCE_MESSAGE]` and `#[deny(unused_must_use)]` on
+every behavioural fn — the denied `#[must_use]` rather than a type, because it names the callee
+("unused return value of `child`") and carries the clause as its note, and a statement-position call
+is the shape `b2` measured; the transpiler runs `front_end::check_no_behavioural_instance` (its
+registry) after the memory rules, and `lower_expr` refuses with the same message as a backstop;
+`front_end_parity_ui.rs` gains `LINT_JUDGED`, whose transpiler message must equal the `.stderr`'s
+note. Deleted: `lower_hardware_call`, `LowerCtx::{submodules, inst_counters, next_inst_name}`,
+`CHIRCombBody`/`CHIRSeqBody`/`SHIRCombBody`/`SHIRSeqBody`/`VLIRCombBody`/`VLIRSeqBody::submodules`,
+`{CHIR,SHIR,VLIR}SubmoduleInst::{inputs, output_wire, output_ty/output_width, output_port}`, emit's
+legacy instance branch, four `chir_lower` unit tests of the deleted form (one test of the refusal in
+their place), `HardwareExecutor::{spawn_child, module_info, module_infos, ensure_module}`, the
+`modules` map, `ModuleInfo`, `spawn_child!`. `spawn_child` and `spawn_child!` are deleted rather than
+kept: their only use was `tests/module_composition_hybrid.rs`, a testbench, which wires the same
+children with `spawn_wired` (same expected stream). (2) `front_end::check_ticking_for_continue` in
+`check_front_end_rules` (after R12), `TICKING_FOR_CONTINUE_MESSAGE`; `control_extract`'s arm keeps the
+refusal as a backstop with the shared message; II.3.3 row (h). (3) `check_outside_methods` refuses
+`==`/`!=` when an operand is `Logic::X`, `Bits::x()` or `Bits::<N>::x()` (`X_COMPARISON_MESSAGE`, the
+span on the X operand); the transpiler's `XLit` arm uses the same message. ui/fail
+`behavioural_instantiation`, `ticking_for_continue`, `outside_x_comparison`.
+Measured basis: predicted and measured (§S.1–§S.3) — corpus 0 for all three (the workspace, every
+example and test target, builds with the deny on; `front_end_parity.rs` passes every corpus module);
+the SV of all 217 CLI-listed modules byte-identical before and after; the three ui cases refused by
+both with one message. Found, not settled by D-23 (§S.4, §S.5): a bound instance (`let _ = child(..)`
+— rustc's own help line for the refusal suggests it — or `let m = child(..)`) compiles, its child never
+running; a `wire`/`registered_wire` call in a behavioural body; a `Logic::X` pattern; a `continue` of a
+tick-free `for` — each admitted by the macro and refused by the transpiler, each an OPEN III.3.4 line.
+Coroutine terms: a `#[hardware]` fn's value is a coroutine *not yet started*; only a testbench spawn
+or a structural instance starts one, so a behavioural body that makes one and drops it has made a
+coroutine that never runs. A `continue` of a ticking `for` is a zero-time jump to the counter's
+increment and test, which the coroutine takes and the emitted state machine has no state for yet. An
+`== X` asks the coroutine's third value, which the emitted machine does not hold.
+Obligations: the four found lines (two decisions — §S.5); the lowering of row (h); III.3.6's counts.
