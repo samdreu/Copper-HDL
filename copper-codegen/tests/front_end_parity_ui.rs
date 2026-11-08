@@ -60,7 +60,7 @@ fn transpile(path: &Path) -> Result<String, String> {
 /// wildcard arm and a `[Logic; 4]` register's element writes — transpiles.
 const PASS_NOT_TRANSPILED: &[(&str, &str)] = &[];
 
-/// SPEC II.1.3's two named exceptions: ui/pass cases the macro admits and the
+/// SPEC II.1.3's three named exceptions: ui/pass cases the macro admits and the
 /// transpiler refuses, each with its message. R6 (D-22): the macro cannot see a
 /// helper's body; the transpiler inlines it. The let-bound instance (D-24 (1)): a
 /// `let` binding is a use, so the denied `#[must_use]` of D-23 (1) does not fire, and
@@ -68,9 +68,13 @@ const PASS_NOT_TRANSPILED: &[(&str, &str)] = &[];
 /// simulator's drop guard refuses it at run time). Exactly these rows, each required
 /// to fail with exactly its message — a third macro-admits/transpiler-refuses shape is
 /// a parity break, not another exception.
+///
+/// The file-level X const in a pattern (D-26 (2)): the macro cannot see a file const's
+/// value; the transpiler folds it and refuses the X pattern with D-24's message.
 const NAMED_PARITY_EXCEPTIONS: &[(&str, &str)] = &[
     ("recursive_helper_r6.rs", copper_analysis::front_end::RECURSIVE_HELPER_MESSAGE),
     ("let_instance_d24.rs", copper_analysis::front_end::BEHAVIOURAL_INSTANCE_MESSAGE),
+    ("file_x_const_pattern_d26.rs", copper_analysis::X_PATTERN_MESSAGE),
 ];
 
 /// ui/fail cases whose transpiler message is not the macro's, with the reason.

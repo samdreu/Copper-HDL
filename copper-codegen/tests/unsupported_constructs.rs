@@ -1046,8 +1046,9 @@ async fn cfn(clk: Clock<MainClk>, a: In<Logic, MainClk>, o: RegOut<Logic, MainCl
 /// transpiler only (line `II.3 found array-for`). Since 2026-11-08 (MEASUREMENTS §U.4) the
 /// `for` is unrolled when its bounds fold to constants, each iteration's write its own port
 /// (II.3 (c)'s form; swept by `tests/fixtures/array_for_write_dut.rs`). A bound the fold cannot
-/// see — a const generic, whose value is the instance's — keeps the refusal: the emitted SV is
-/// one parametric module, and an unrolling needs the trip count.
+/// see — a const generic, whose value is the instance's — is refused: the emitted SV is one
+/// parametric module, and an unrolling needs the trip count. Since D-26 (1) both front-ends
+/// refuse it with `ARRAY_WRITE_GENERIC_FOR_MESSAGE`.
 #[test]
 fn an_array_register_element_write_inside_a_combinational_for_is_unrolled_unless_the_bound_is_generic() {
     let src = r#"
@@ -1078,8 +1079,13 @@ async fn arr_for_generic<const N: usize>(clk: Clock<MainClk>, a: In<Bits<8>, Mai
     }
 }
 "#;
+    // D-26 (1): refused in both front-ends by the shared rule, with one message
+    // (`ui/fail/array_write_generic_for` is the macro's witness).
     let err = transpile(generic).expect_err("a generic bound has no trip count to unroll");
-    assert!(err.contains("inside a combinational `for`"), "a different error: {err}");
+    assert!(
+        err.contains(copper_analysis::front_end::ARRAY_WRITE_GENERIC_FOR_MESSAGE),
+        "a different error: {err}"
+    );
 }
 
 /// SPEC II.1.2 R21 (Phase C step 5, 2026-11-07): a `tick` before the module's `loop`

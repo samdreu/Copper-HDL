@@ -1,0 +1,19 @@
+error: an element write to an array register inside a tick-free `for` whose bound names a const generic: the `for` is unrolled so that each iteration's write is a write port of its own, which needs the trip count, and the emitted module is parametric in the generic (SPEC II.3.3 (c), I.2.4; D-26). Bound the `for` by a literal or a file `const`, or compute the new words into a local array first
+  --> tests/ui/fail/array_write_generic_for.rs:19:13
+   |
+19 |             arr[j] = a.read() + arr[j];
+   |             ^^^
+
+warning: unused imports: `Bits` and `Clock`
+ --> tests/ui/fail/array_write_generic_for.rs:1:19
+  |
+1 | use copper_core::{Bits, Clock, ClockDomain};
+  |                   ^^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/array_write_generic_for.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^

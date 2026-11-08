@@ -531,8 +531,71 @@ fn modules_binding_a_hardware_call(items: &[Item]) -> Vec<String> {
         .collect()
 }
 
-/// SPEC II.1.3's two named exceptions, each found by a scan that sees what the macro
-/// cannot, and each required to have exactly its witnesses, so neither can widen unseen.
+/// The `#[hardware]` modules whose body has a pattern naming a FILE-level `const` whose value
+/// is X (`Logic::X`, `Bits::x()`, `Bits::<N>::x()`): an identifier pattern (rustc reads a const's
+/// name in a pattern as the const) anywhere in a `match`, `if let`, `let` or closure parameter.
+fn modules_matching_a_file_x_const(items: &[syn::Item]) -> Vec<String> {
+    use syn::visit::Visit;
+    fn is_x(e: &syn::Expr) -> bool {
+        match e {
+            syn::Expr::Path(p) => {
+                let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                segs == ["Logic", "X"]
+            }
+            syn::Expr::Call(c) if c.args.is_empty() => match &*c.func {
+                syn::Expr::Path(p) => {
+                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    segs.len() == 2 && segs[0] == "Bits" && segs[1] == "x"
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    let xconsts: BTreeSet<String> = items
+        .iter()
+        .filter_map(|it| match it {
+            syn::Item::Const(c) if is_x(&c.expr) => Some(c.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    if xconsts.is_empty() {
+        return Vec::new();
+    }
+    struct P<'a>(&'a BTreeSet<String>, bool);
+    impl<'ast> Visit<'ast> for P<'_> {
+        fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+            if p.subpat.is_none() && self.0.contains(&p.ident.to_string()) {
+                self.1 = true;
+            }
+            syn::visit::visit_pat_ident(self, p);
+        }
+        fn visit_pat(&mut self, p: &'ast syn::Pat) {
+            if let syn::Pat::Path(pp) = p {
+                if pp.path.get_ident().is_some_and(|i| self.0.contains(&i.to_string())) {
+                    self.1 = true;
+                }
+            }
+            syn::visit::visit_pat(self, p);
+        }
+    }
+    items
+        .iter()
+        .filter_map(|it| match it {
+            syn::Item::Fn(f) if hardware_attr(f).is_some() => Some(f),
+            _ => None,
+        })
+        .filter(|f| {
+            let mut v = P(&xconsts, false);
+            v.visit_block(&f.block);
+            v.1
+        })
+        .map(|f| f.sig.ident.to_string())
+        .collect()
+}
+
+/// SPEC II.1.3's three named exceptions, each found by a scan that sees what the macro
+/// cannot, and each required to have exactly its witnesses, so none can widen unseen.
 ///
 /// **R6** (D-22; MEASUREMENTS §Q): recursion through a helper `fn` compiles — the macro
 /// holds the module's `ItemFn` only, never a helper's body (I.2.1), and rustc admits a
@@ -545,10 +608,16 @@ fn modules_binding_a_hardware_call(items: &[Item]) -> Vec<String> {
 /// message; the simulator's drop guard panics when the child is dropped unstarted. The
 /// scan reads each behavioural body's `let`s against the file's `#[hardware]` names.
 ///
-/// Any other module either scan finds simulates (or panics) and does not transpile — a
-/// parity break to fix, not a third exception.
+/// **The file-level X const in a pattern** (D-26 (2); MEASUREMENTS §U.11): `const UX: Logic =
+/// Logic::X; … match v { UX => … }` compiles — the macro holds the `ItemFn` and cannot see a
+/// file const's value — and the transpiler folds the value and refuses it with D-24's
+/// `X_PATTERN_MESSAGE`; the simulator matches X structurally. The scan reads each file's X-valued
+/// consts against the patterns of its `#[hardware]` bodies.
+///
+/// Any other module a scan finds simulates (or panics) and does not transpile — a parity break
+/// to fix, not a fourth exception.
 #[test]
-fn the_named_parity_exceptions_are_r6_and_the_let_instance() {
+fn the_three_named_parity_exceptions_have_exactly_their_witnesses() {
     let root = repo_root();
     let mut files = Vec::new();
     for dir in ["examples", "src", "tests"] {
@@ -557,6 +626,7 @@ fn the_named_parity_exceptions_are_r6_and_the_let_instance() {
     files.sort();
     let mut found = BTreeSet::new();
     let mut bound = BTreeSet::new();
+    let mut xmatch = BTreeSet::new();
     for path in &files {
         let Ok(src) = fs::read_to_string(path) else { continue };
         let Ok(file) = syn::parse_file(&src) else { continue };
@@ -567,7 +637,23 @@ fn the_named_parity_exceptions_are_r6_and_the_let_instance() {
         for m in modules_binding_a_hardware_call(&file.items) {
             bound.insert(format!("{rel}::{m}"));
         }
+        for m in modules_matching_a_file_x_const(&file.items) {
+            xmatch.insert(format!("{rel}::{m}"));
+        }
     }
+    let expected: BTreeSet<String> = [
+        "tests/file_x_const_pattern_d26.rs::fx_bits".to_string(),
+        "tests/file_x_const_pattern_d26.rs::fx_logic".to_string(),
+    ]
+    .into();
+    assert_eq!(xmatch, expected, "the file-X-const witnesses are the only modules matching an X-valued file const");
+    let ui = fs::read_to_string(root.join("copper-macros/tests/ui/pass/file_x_const_pattern_d26.rs")).unwrap();
+    assert_eq!(modules_matching_a_file_x_const(&syn::parse_file(&ui).unwrap().items), vec!["m"]);
+    let xp = |src: &str| modules_matching_a_file_x_const(&syn::parse_file(src).unwrap().items);
+    let body = "#[hardware(combinational)] fn m<D: ClockDomain>(a: In<Logic, D>, o: Out<Logic, D>) { match a.read() { K => o.write(Logic::One), _ => o.write(Logic::Zero) } }";
+    assert_eq!(xp(&format!("const K: Logic = Logic::X; {body}")), vec!["m"]);
+    assert_eq!(xp(&format!("const K: Bits<2> = Bits::<2>::x(); {body}")), vec!["m"]);
+    assert!(xp(&format!("const K: Logic = Logic::One; {body}")).is_empty(), "a 2-state const is lowered");
     let expected: BTreeSet<String> = ["tests/recursive_helper_r6.rs::parity8".to_string()].into();
     assert_eq!(found, expected, "R6's witness is the one module reaching a recursive helper");
     let expected: BTreeSet<String> = [
@@ -616,6 +702,26 @@ fn the_2026_11_08_rules_refuse_their_witnesses_and_admit_their_twins() {
         "async fn m(clk: Clock<A>, q: RegOut<Logic, A>) { let w = wire_count(3); loop { q.write(Logic::One); clk.tick().await; } }",
     ))
     .expect("a helper whose name only starts with `wire` is not a net");
+
+    // D-26 (1): an array-register element write in a tick-free `for` bounded by a const
+    // generic; its twins — a literal bound, a packed `[Logic; 4]` vector, a ticking `for`.
+    let afg = |bound: &str, init: &str, ty: &str, tick: &str| {
+        format!(
+            "async fn m<const N: usize>(clk: Clock<A>, a: In<{ty}, A>, q: RegOut<{ty}, A>) {{ \
+             let mut arr = [{init}; 4]; loop {{ q.write(arr[0]); \
+             for j in 0..{bound} {{ arr[j] = a.read(); {tick} }} clk.tick().await; }} }}"
+        )
+    };
+    let e = copper_analysis::front_end::check_array_write_in_generic_for(&parse(&afg("N", "Bits::<8>::zero()", "Bits<8>", "")))
+        .expect_err("the generic-bound array write");
+    assert_eq!(e.to_string(), copper_analysis::front_end::ARRAY_WRITE_GENERIC_FOR_MESSAGE);
+    for (what, src) in [
+        ("a literal bound", afg("4", "Bits::<8>::zero()", "Bits<8>", "")),
+        ("a packed vector", afg("N", "Logic::Zero", "Logic", "")),
+        ("a ticking for", afg("N", "Bits::<8>::zero()", "Bits<8>", "clk.tick().await;")),
+    ] {
+        copper_analysis::front_end::check_array_write_in_generic_for(&parse(&src)).expect(what);
+    }
 
     for (src, n) in [
         ("fn m(a: In<Bits<0>, A>, o: Out<Bits<0>, A>) { o.write(a.read()); }", 0),

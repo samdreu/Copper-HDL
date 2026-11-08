@@ -1256,6 +1256,152 @@ pub fn check_tick_free_for_bounds(f: &ItemFn) -> Result<(), Error> {
     Ok(())
 }
 
+/// D-26 (1) (2026-11-08, line `II.3 found array-for-generic`, MEASUREMENTS §U.11): an element
+/// write to an array register inside a tick-free `for` whose bound names a const generic of the
+/// module is REFUSED in both front-ends with this message. The transpiler unrolls such a `for`
+/// so that each iteration's write takes its own write port (II.3.3 (c)'s form, §U.4), which needs
+/// the trip count; the emitted module is parametric, so a bound that names a const generic has
+/// none. A literal or file-constant bound is lowered.
+pub const ARRAY_WRITE_GENERIC_FOR_MESSAGE: &str = "an element write to an array register inside \
+    a tick-free `for` whose bound names a const generic: the `for` is unrolled so that each \
+    iteration's write is a write port of its own, which needs the trip count, and the emitted \
+    module is parametric in the generic (SPEC II.3.3 (c), I.2.4; D-26). Bound the `for` by a \
+    literal or a file `const`, or compute the new words into a local array first";
+
+/// D-26 (1): see [`ARRAY_WRITE_GENERIC_FOR_MESSAGE`]. An array register is a pre-loop
+/// `let mut x = [e; n]` (or an array literal) whose element is not one bit wide — a `[Logic; N]`
+/// / `[bool; N]` is a packed vector, not an array register — and that register inference
+/// (`infer_registers`, I.7.1) calls a register: the transpiler's own classification.
+pub fn check_array_write_in_generic_for(f: &ItemFn) -> Result<(), Error> {
+    let generics: HashSet<String> = f
+        .sig
+        .generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            syn::GenericParam::Const(c) => Some(c.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    if generics.is_empty() {
+        return Ok(());
+    }
+    /// `Logic::…`, `true`/`false`, or a `Bits::<1>` constructor: a one-bit element.
+    fn one_bit(e: &syn::Expr) -> bool {
+        let path = match e {
+            syn::Expr::Path(p) => Some(&p.path),
+            syn::Expr::Call(c) => match &*c.func {
+                syn::Expr::Path(p) => Some(&p.path),
+                _ => None,
+            },
+            syn::Expr::Lit(l) => return matches!(l.lit, syn::Lit::Bool(_)),
+            _ => None,
+        };
+        let Some(path) = path else { return false };
+        let first = path.segments.first();
+        first.is_some_and(|s| s.ident == "Logic")
+            || first.is_some_and(|s| {
+                s.ident == "Bits"
+                    && matches!(&s.arguments, syn::PathArguments::AngleBracketed(a)
+                        if matches!(a.args.first(), Some(syn::GenericArgument::Const(syn::Expr::Lit(l)))
+                            if matches!(&l.lit, syn::Lit::Int(i) if i.base10_digits() == "1")))
+            })
+    }
+    let regs: HashSet<String> = crate::infer_registers(f).into_iter().collect();
+    let mut arrays: HashSet<String> = HashSet::new();
+    for st in &f.block.stmts {
+        if let syn::Stmt::Local(l) = st {
+            let Pat::Ident(pi) = (match &l.pat {
+                Pat::Type(pt) => &*pt.pat,
+                other => other,
+            }) else {
+                continue;
+            };
+            let Some(init) = &l.init else { continue };
+            let elem = match &*init.expr {
+                syn::Expr::Repeat(r) => Some(&*r.expr),
+                syn::Expr::Array(a) => a.elems.first(),
+                _ => None,
+            };
+            let name = pi.ident.to_string();
+            if pi.mutability.is_some() && elem.is_some_and(|e| !one_bit(e)) && regs.contains(&name) {
+                arrays.insert(name);
+            }
+        }
+    }
+    if arrays.is_empty() {
+        return Ok(());
+    }
+    fn names_generic(e: &syn::Expr, g: &HashSet<String>) -> bool {
+        struct P<'g>(&'g HashSet<String>, bool);
+        impl<'ast> Visit<'ast> for P<'_> {
+            fn visit_path(&mut self, p: &'ast syn::Path) {
+                if p.get_ident().is_some_and(|i| self.0.contains(&i.to_string())) {
+                    self.1 = true;
+                }
+                syn::visit::visit_path(self, p);
+            }
+        }
+        let mut v = P(g, false);
+        v.visit_expr(e);
+        v.1
+    }
+    /// The first element write to one of `arrays` (plain or compound assignment).
+    struct W<'a>(&'a HashSet<String>, Option<proc_macro2::Span>);
+    impl<'ast> Visit<'ast> for W<'_> {
+        fn visit_expr(&mut self, e: &'ast syn::Expr) {
+            let left = match e {
+                syn::Expr::Assign(a) => Some(&*a.left),
+                syn::Expr::Binary(b)
+                    if matches!(
+                        b.op,
+                        syn::BinOp::AddAssign(_) | syn::BinOp::SubAssign(_) | syn::BinOp::MulAssign(_)
+                            | syn::BinOp::DivAssign(_) | syn::BinOp::RemAssign(_) | syn::BinOp::BitXorAssign(_)
+                            | syn::BinOp::BitAndAssign(_) | syn::BinOp::BitOrAssign(_) | syn::BinOp::ShlAssign(_)
+                            | syn::BinOp::ShrAssign(_)
+                    ) =>
+                {
+                    Some(&*b.left)
+                }
+                _ => None,
+            };
+            if let Some(syn::Expr::Index(ix)) = left {
+                if let syn::Expr::Path(p) = &*ix.expr {
+                    if self.1.is_none() && p.path.get_ident().is_some_and(|i| self.0.contains(&i.to_string())) {
+                        self.1 = Some(syn::spanned::Spanned::span(e));
+                    }
+                }
+            }
+            syn::visit::visit_expr(self, e);
+        }
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    struct V<'a> {
+        g: &'a HashSet<String>,
+        arrays: &'a HashSet<String>,
+        found: Option<proc_macro2::Span>,
+    }
+    impl<'ast> Visit<'ast> for V<'_> {
+        fn visit_expr_for_loop(&mut self, fl: &'ast syn::ExprForLoop) {
+            if self.found.is_none() && !fl.body.stmts.iter().any(crate::cfg::stmt_contains_tick) && names_generic(&fl.expr, self.g) {
+                let mut w = W(self.arrays, None);
+                w.visit_block(&fl.body);
+                self.found = w.1;
+            }
+            syn::visit::visit_expr_for_loop(self, fl);
+        }
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let mut v = V { g: &generics, arrays: &arrays, found: None };
+    v.visit_block(&f.block);
+    match v.found {
+        Some(span) => Err(Error::new(span, ARRAY_WRITE_GENERIC_FOR_MESSAGE)),
+        None => Ok(()),
+    }
+}
+
 /// R5's one message.
 pub const RUNTIME_FOR_BOUND_MESSAGE: &str = "this bound of a tick-free `for` is not a constant: \
     a `for` with no `clk.tick().await` in its body runs inside one cycle, so it is unrolled, and \
@@ -1744,6 +1890,7 @@ pub fn check_front_end_rules(f: &ItemFn, mode: HardwareMode) -> Result<(), Error
     check_break_forms(f)?;
     check_ticking_for_continue(f)?;
     check_tick_free_for_bounds(f)?;
+    check_array_write_in_generic_for(f)?;
     check_no_body_macros(f)?;
     match mode {
         HardwareMode::Sequential => check_cdc(f)?,
