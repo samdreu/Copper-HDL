@@ -38,7 +38,7 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (211 of 214 since Phase C step 9: 159
+`_reference_leg` cases as build.rs generated to run (213 of 216 since Phase C step 10: 161
 clocked, 18 of them binding a `Memory` (I.10), 52 combinational (I.11); `REF_SKIP` empty), each
 leg non-empty, and the design leg (I.13, `copper_ref::Design` on `two_domain_top` vs the hand-wired
 simulation, `tests/two_domain_hierarchy_cdc.rs`) — and
@@ -379,7 +379,13 @@ receive/clone one.
   on `(top, pid)` and two tests transpiling `trailing_update` raced on a 96-core host
   (2026-09-03), one deleting the file the other's Verilator was about to read. Every
   test temp dir now carries a `TMP_NONCE`.
-- **Both front-ends enforce the same rules (front-end parity, 2026-10-23).** The
+- **Both front-ends enforce the same rules (front-end parity, 2026-10-23; one list since Phase C
+  step 10).** The syntactic rules — the header (R20, R9, R10), R17, D3, R16, R18, R7, R12, R13/R14,
+  R5, the CDC rules (the port rule, the two-flop rule, the combinational one-domain rule), R19 and the
+  structural body rules — are `copper_analysis::front_end::check_front_end_rules`, which both call
+  first; `copper-codegen/tests/front_end_parity_ui.rs` transpiles every macro ui case and requires the
+  macro's message. A combinational cycle is refused at spawn (`refuse_comb_cycle`) and over a
+  structural parent. A structural net is `net::<T, D>()` (MEASUREMENTS §P). The
   macro's sequential arm and `transpile_target` run the same list from
   `copper-analysis`: the two source-shape rules (`check_nested_loop_shape` — a nested
   loop must end at a clock boundary; `check_awaits` — only `clk.tick().await` may be

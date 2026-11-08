@@ -3180,3 +3180,272 @@ sequences, the 75 newly-run modules); pins 0; **G-I** 160 clocked related, 0 unc
 7. **III.1 P5 / I.13.2(c):** order independence now has a third witness — the interpreter's settle
    evaluates each function once in a topological order and agrees with the levelized simulator on
    every combinational module and on `two_domain_top`.
+
+## P. Phase C step 10 — the rules (2026-11-07)
+
+Session phase-c-rules, branch `claude/phase-c-rules-bab023` (cut from `paper` at `853ae75`; nothing
+pushed). D-20 item (10): the II.1.3 parity fixes and the audit's extension (P10); the CDC two-flop rule,
+the unit domain removed, R10 (I.12.6 (2)–(5)); the static combinational-cycle refusal at spawn (I.11.6,
+I.13.7 (4); P5); the structural shape rules and `net::<T, D>()` (D-18); the II.2.2 directions narrowed
+or pinned (P22); and step 9's two-clock leftovers (§O.3). One commit per part: `c38a7cb` (parity),
+`6ae104e` (CDC), `286eb03` (combinational cycles), `b0b61c5` (structural), `1bab280` (directions),
+`dfaef28` (two clocks). Every probe verdict was predicted before it was run (scratchpad
+`probes/predictions.md`); the emitted-SV effect of each part was measured against a baseline
+transpiler built from `853ae75` over every `#[hardware]` module the CLI lists (271–273).
+
+### P.1 Part 1 — front-end parity (SPEC II.1.3, P10)
+
+**Baseline (853ae75), the transpiler over the macro's ui battery:** it **admitted 10 of 30** `ui/fail`
+cases — `cdc_crossing`, `cdc_memory_parameter`, `function_typed_mut_input`,
+`function_typed_mutable_ref_input`, `function_typed_unit_return`, `multiple_top_level_loops`,
+`param_shadowing`, `retired_pretick_opt_out`, `sequential_unprotectable_read` (R19), and refused
+`clock_construction` only by "cannot infer bit width" and `unsupported_idiom_panic` by "macro invocation
+is not supported". The two `cdc_*` admissions are a parity break II.1.3 never listed (`check_cdc` was the
+macro's alone). `ui/pass`: 7 of 8 admitted (`register_init_constants_ok`, known, §N).
+
+**Probes for the rows the battery did not cover** (14 predictions, 14 hits): R5 (tick-free `for` to a
+run-time bound) M admit / T admit (an `always_comb` `for (… _i < k …)`); R6 (recursion through a helper)
+M admit / T "cannot inline recursive function"; R7 `break` of the module loop and `return` M admit / T
+refuse; R10 both admit; R12 labelled `break` M admit / T refuse, valued `break` M admit / T refuse **by
+accident** ("a tick inside a `let` initializer"); R13 `assert!` and R14 `println!("{:?}", a.read())`
+M admit / T "macro invocation"; R15 `/` both admit (D-19 gave it a meaning, step 8 its emission — closed,
+no rule); R16 tuple local both refuse, T "cannot resolve type"; D3 `Some(t)` both refuse, T "cannot
+infer bit width"; `c_mixed` and `sync_1ff_oj` both admit (Part 2).
+
+**The change.** The macro's syntactic rules move to `copper_analysis::front_end` and both front-ends
+run them first, in one order, through `check_front_end_rules(f, mode)`: the header R20 (with R9's flag,
+parsed by one `parse_hardware_args` both use), **R10** (new), R17, I.14.3's OUTSIDE methods, the memory
+port index, D3, R16, R18, **R7**, **R12**, **R5**, **R13/R14** (new), then the mode's rule (the CDC port
+rule; Part 2's two) and R19. R19's message no longer cites the retired read injection. Every moved and
+new message names its clause (II.1.1's obligation; 13 `.stderr` files changed by exactly that line).
+R13/R14 admit `matches!`, anything in `const { }`, and `vec![…]` as `from_contents`' argument (I.2.4's
+DESUGARED preload). R5 is D-21's pattern: a shared syntactic half (each bound constant-shaped: a
+literal, a const item's name, a const generic, arithmetic over them), rustc's verdict in the macro (each
+tick-free `for` bound evaluated in `const { }`), `ConstEnv` in the transpiler.
+
+**After:** the 14 probes are refused by both front-ends with one message, except R6 (macro admits —
+**stopped**, P.8), R15 (admitted, correct) and the two Part 2 shapes. The battery
+(`copper-codegen/tests/front_end_parity_ui.rs`, new): **every `ui/fail` case refused by the transpiler
+with the macro's first line**, 3 named rustc-judged cases excepted (E0015 ×2, Part 4's E0308); every
+`ui/pass` case admitted, `register_init_constants_ok` the one named row. New ui/fail: `module_loop_break`,
+`module_return`, `two_clocks_sequential`, `labelled_break`, `valued_break`, `body_macro`,
+`input_read_in_macro`, `runtime_for_bound`.
+
+**Corpus:** every new rule refuses **0** modules (predicted 0). The 24 tick-free `for`s of the corpus all
+have constant bounds (`0..N` 6, `0..4` 5, `0..WIDTH` 4, `1..N` 2, `0..N_1` 2, `0..8` 2, `1..WIDTH`,
+`1..8`, `0..ELS`), and the whole tree compiles with them under `const { }`. `front_end_parity.rs` gains
+`every_corpus_module_passes_every_shared_rule_in_its_mode`: 272 fns (71 combinational, 193 sequential,
+7 synchronizer, 1 structural) pass the shared rules, R2/R3 on a clocked body and D2. **SV: 272 modules,
+0 verdict changes, 0 byte changes.** Two `unsupported_constructs.rs` tests had encoded the transpiler's
+old order (a probe without an output port; the no-tick case owned by reachability); each now gets the
+header's message first, as the macro always gave.
+
+### P.2 Part 2 — CDC (SPEC I.12.6 (2)–(5), D-17)
+
+**Already closed by steps 2–3 (checked, not changed):** (1) the never-ticked startup —
+`tests/two_clock_pins.rs::never_ticked_startup_one_resumption_agrees_on_all_three_legs` asserts B's
+trace `[0, 2, 3, 4]` (`q = 2` after B's edge 1) with sim ≡ SV ≡ ref; P11's "false today" is stale;
+(6) `sync_2ff`, `flag_sync` and the fixture in the tick-last spelling; (8) `cycle::<D>()` per domain
+(the same test asserts 3 and 3).
+
+**(2) The two-flop rule** — `front_end::check_two_flop`, run on every `synchronizer` by both front-ends:
+a taint of the resumption's locals from foreign reads (an `In` whose domain is not the clock's), cleared
+at a `tick`, the module loop walked twice (a resumption crosses the back edge), arms joined by union;
+refused: a `RegOut` write whose value or guard is tainted. **Predicted:** the corpus's synchronizers
+admitted, and the anchor test's deliberate `sync_1ff` refused (I.12.3 makes it a refusal pin).
+**Measured:** exactly that — `tests/cdc_synchronizer_anchor.rs:258` was the one refusal; it is now
+`a_one_flop_synchronizer_is_refused_by_both_front_ends` (both messages equal; the library spelling
+admitted). `sync_2ff`, `flag_sync` (×2), `sync_2ff_concrete`, the `structural_hierarchy` copy,
+`sync_2ff_tick_last` and the `sync_3ff` doc test pass. ui: `sync_one_flop` (D-17's `sync_1ff_oj`),
+`sync_one_flop_guard` (`sync_guard` — refused through its value, the guarded assignment tainting `ff1`).
+`src/sync.rs`'s header corrected (the single-bit sentence is `sync_2ff`'s signature; the requirement is
+this rule).
+
+**(3) The combinational one-domain rule** — `front_end::check_combinational_one_domain`: predicted 0
+corpus, measured 0; ui `combinational_two_domains` (`c_mixed`).
+
+**(5) R10** landed in Part 1.
+
+**(4) The unit domain — STOPPED.** Removing `D = ()` from `In`/`Out` and bounding `D: ClockDomain` on
+the port types refuses **32 corpus `combinational` modules (100 ports)** that write `In<T>` / `Out<T>`:
+10 in `examples/` — `bsg_adder_one_hot`, `bsg_encode_one_hot`, `bsg_gray_to_binary`, `bsg_mux_one_hot`
+(four of the five BaseJump combinational anchors), `full_adder`, `mux`, `one_bit_comparator`,
+`priority_encode`, `ripple_carry_adder`, `rotate_right` — 16 in `tests/fixtures/`, 6 in `tests/*.rs`.
+D-17 (iii) measured 0 because it counted the explicit `()` only. The spec does not owe these rewrites
+(it believed there were none), and making them needs a choice (P.8). The struct change is reverted; the
+scaffolding the spec named (the copper-core port tests, `copper-core/tests/port_and_type_edge_cases.rs`,
+the executor's unit tests) is given explicit domains, which is right under either option.
+
+**SV:** 271 modules, 0 changes.
+
+### P.3 Part 3 — combinational cycles refused statically (SPEC I.11.4, I.11.6, I.13.7 (4); P5)
+
+**The change.** `HardwareExecutor::refuse_comb_cycle` runs at every spawn under **both** schedulers: it
+computes the SCC plan the levelized settle uses and panics at the spawn that closes a multi-task
+component, naming its modules (`HardwareModule::__named`, which the macro now sets). D-14 reversed item 6
+phase 5's "detection is not rejection", so `iterate_scc` is deleted and the levelized settle's
+multi-task branch is `unreachable!`. The transpiler refuses the same cycle over a structural parent's
+nets (`chir_lower::refuse_structural_comb_cycle`: combinational children only; a `RegOut` drive adds no
+edge).
+
+**Predicted:** corpus 0 cycles (D-14: no example wires two combinational modules into each other); the
+cycle tests flip to refusal pins. **Measured:** exactly those — the executor's oscillating pair,
+three-module cycle and convergent OR-latch (now `*_is_refused_at_spawn`, the three-module one asserting
+the message names all three tasks), a new fixpoint-mode refusal test, `simulator_corner_cases`' inverter
+pair (`` `invert_a` (task 0), `buffer_a` (task 1) form a combinational cycle ``), and
+`levelized_differential`'s convergent latch (refused by both schedulers). `golden_traces`,
+`poll_order_fuzz`, `two_domain_hierarchy_cdc`, `two_clock_pins`, `two_domain_counter_behavioral`,
+`received_memory_abi`, `module_composition_hybrid`, `executor_guardrails` pass unchanged. The
+transpiler: `structural_hierarchy.rs::combinational_cycle_through_a_structural_parent_is_refused` (a
+ring of `inv` and `pass` refused naming `inv_0`, `pass_0`; a chain and a loop broken by a sequential
+child's `RegOut` admitted). **SV:** 271 modules, 0 changes.
+
+**Direction:** exact on the graph the testbench declares (`reads`, `dirties`); **under** for a cycle
+through reads it does not declare — `executor.rs::fixpoint_oscillating_loop_trips_threshold` keeps the
+fixpoint oracle's run-time oscillation guard for exactly that, and says so.
+
+**Relation to the design leg.** Step 9's `copper_ref::Design` refuses the same cycle when it builds a
+design from a structural body, naming the instances (§O.3). There are now three independent
+implementations of one refusal, one per realization of I.13.4(a): the hand wiring (the executor, from
+the declared graph, at spawn), the emitted hierarchy (the transpiler, over the parent's nets, while
+lowering), and the interpreter's design (over the parsed body, at construction). None shares code with
+another. P5's open item closes: the settle is refused, not iterated, wherever the network is not a DAG.
+
+### P.4 Part 4 — structural shape rules and `net::<T, D>()` (SPEC I.13.4, D-18)
+
+**`net::<T, D>()`** (`copper_core::port::net`): a net with no initial value whose driver end is a sealed
+`NetDriver<T, D>` — `Out<T, D>` or `RegOut<T, D>` — inferred from the child port it reaches. The macro
+writes the inferred argument (`net::<T, D>()` → `net::<T, D, _>()`), so the source spelling is the
+spec's, and wraps each instantiation in `copper_sim::__instance`, so a plain `fn` call is a type error.
+A structural body is never executed; `net` panics if called, saying so.
+
+**`front_end::check_structural_body`**, both front-ends, one message each (the S0 rows of I.13.4(d)):
+the body is `let n = net::<T, D>()` and `child(arg, …)` only, each argument a parent port, `n.0`, `n.1`,
+or a `.clone()` of a clock, a parent `In` or a reader end; `wire`/`registered_wire` refused with their
+own message (retired from the structural grammar; they stay the testbench's); no instance of the module
+itself; every net driven by exactly one instance; every `Clock` threaded to a child. The transpiler's
+`parse_wire_net` reads `net::<T, D>()` only — the substring match that admitted `registered_wire` by
+accident (D-18 `s6b`) is gone.
+
+**Predicted against D-18's table** (M / T, today → after): `s1` statements in the body M admit → refuse;
+`s4` two drivers T admit → refuse (one message; rustc's E0382 behind it); `s6a` port kind — **vacuous**
+with `net` (no ui case); `s8b` no clock T admit → refuse (the header is shared since Part 1); `s9`
+undriven net both admit → refuse; `s12` plain `fn` call M admit → refuse **by rustc** (E0308 at
+`__instance`; the transpiler's registry message differs — a named rustc-judged row); `s13`
+self-instantiation both admit → refuse. **All measured as predicted.** ui/fail: `structural_body_statement`,
+`structural_two_drivers`, `structural_undriven_net`, `structural_self_instance`,
+`structural_plain_fn_call`, `structural_no_clock`, `structural_retired_wire`; ui/pass `structural_net_ok`
+(an `Out` net and a `RegOut` net in one spelling, a reader end to two readers).
+
+**Corpus:** the one structural module, `two_domain_top`, is rewritten to `net` (the spec owes it:
+"the one structural module", I.13.7 (2)); its `--hierarchy` SV is **byte-identical** to the baseline's
+on the old spelling, `two_domain_hierarchy_cdc` 3/3 (the 2:1 anchor), `two_clock_pins` 4/4, the example
+passes. Test sources rewritten: `structural_hierarchy.rs` (its `bad_top` lost an unthreaded `rd_clk` —
+the new clock rule fired before the CDC check the test is about) and `interp_design.rs` (text for
+`Design`, which already read `net`).
+
+**Found:** I.13.4(b)'s argument list does not name a cloned reader end or parent `In`, which a net with
+two readers needs in Rust (an `In` moves); the rule admits `.clone()` of those (P.9).
+**Not done:** I.13.7 (3), instantiation refused in behavioural bodies (`b2`) with `lower_hardware_call`
+and `spawn_child` deleted — not in step 10's list. A syntactic "port used as a call argument" refusal
+would hit **22 corpus modules** (`&clk` passed to `Memory::new`/`from_fn`, and to a helper
+`preloaded(&clk)` in `tests/mem_latency_probe.rs`), so it needs a stated exemption first.
+
+### P.5 Part 5 — the II.2.2 directions (P22)
+
+| Predicate | Before step 10 | After | Evidence |
+|---|---|---|---|
+| R3 `may_exit_without_tick` | over (`livelock_a`, `livelock_b` refused by both) and under (literal-empty `for` counted as a boundary) | **narrowed both ways**: an all-paths walk (`cfg.rs::untick_seq`) — a `loop` is left untick'd only through a `break` reached before any tick, a `for` also through an untick'd fall-through or a literal-empty range. Still **over** by path-insensitivity (complementary `if`s), **under** at a range empty only through a constant (`0..EMPTY`) | ui/pass `livelock_a`, `livelock_b`; ui/fail `literal_empty_for_boundary`; swept fixture `tests/fixtures/all_paths_boundary_dut.rs` (2 modules, differential + reference leg PASS); `static_predicate_directions.rs` (4 tests) |
+| D2 `check_definite_assignment` | under: a folded `for` counted as writing every port; a never-written port not flagged | **narrowed**: the combinational CFG expands its loops; the never-written clause (D-14). Still **over** by path-insensitivity | ui/fail `combinational_latch_in_for`, `combinational_never_written`; `static_predicate_directions.rs` (2); cfg tests `comb_output_never_written_is_refused`, `comb_write_under_an_if_in_a_for_is_partial` |
+| two-flop (new) | — | over by path-insensitivity (arms joined by union) | `static_predicate_directions.rs` |
+| comb-cycle refusal at spawn (new) | — | exact on the declared graph; under for undeclared reads | `fixpoint_oscillating_loop_trips_threshold` |
+| R5 (new) | — | exact in the macro (rustc); in the transpiler over where `ConstEnv` is narrower than rustc (as R11) | corpus 24/24 bounds fold |
+| `check_admissible` | under by design | unchanged | `admissible_calibration.rs` |
+| R11 in the transpiler | over where the fold is narrower | unchanged | `register_init_parity.rs` |
+| `infer_registers` | (step 6) over by path-insensitivity, never under | unchanged | `register_reconciliation.rs`, the poison run |
+
+**Predicted:** `livelock_a/b` admitted by both; the literal-empty `for` refused by both; corpus 0
+verdict changes. **Measured:** as predicted, with one miss — the baseline *transpiler* already refused
+the literal-empty `for`, by the accident "sequential module loop body has no clk.tick().await" (I
+predicted it admitted); both now refuse it with R3's message. **Found:** `d2_fold` was a **live parity
+break** — the macro admitted the latch the transpiler's `check_no_latches` refused; now both refuse it
+with D2's message. **Found while landing the never-written clause:** `check_definite_assignment` chose
+"combinational" by the absence of a loop, so the transpiler refused `two_domain_top` (its `Out` is a
+child's); it now reads the mode from the attribute when one is present. One cfg unit test
+(`comb_output_never_written_not_flagged`) pinned the pre-D-14 position ("a submodule may drive it") and
+is flipped — I.13.5 removed that exemption. D2's message gains its clause (3 `.stderr` files). **SV:**
+273 modules, 270 unchanged, 0 byte changes, 3 verdicts (`two_domain_top`'s spelling and the two new
+fixtures the baseline refused).
+
+### P.6 Part 6 — step 9's two-clock leftovers (SPEC I.12.5, III.2.6)
+
+The spec settles both and nothing was stopped. **A module with two clocks in one body** is refused by
+decision (I.12.5; R10, Part 1, ui `two_clocks_sequential`). **A two-clock harness in the sweep:** III.2.6
+(D-20) decided that the sweep stays one-clock — a generated case would have to invent the domains'
+interleaving — and that the relation's multi-domain coverage is two dedicated pins, both of which exist
+(`tests/two_clock_pins.rs`: the never-ticked startup on three legs; the interleavings P = [2;10] and
+Q = [1,3,1,3,2,2,3,1,2,2] of `two_domain_top`, sim against the transpiled hierarchy per domain).
+`two_domain_top`'s `SKIP` row now says that, and where the design is covered (its three children swept
+one by one; `two_domain_hierarchy_cdc.rs` — hand-wired sim = transpiled hierarchy = the independent
+reference at 2:1, `copper_ref::Design` = sim at 2:1, 3:1, 1:1; the two pins). The generator's and the
+reference leg's second-clock sentences, and the interpreter's `Deferred` ("SPEC I.12 (TBD, Round 3)"),
+cite R10 and III.2.6.
+
+### P.7 The bare regression
+
+**Bare `tools/regression.sh` on `dfaef28` (the final code commit; laptop): REGRESSION OK (609 s).**
+1413 passed, 0 failed, 16 ignored, 153 test binaries (G-C: 126 test files); examples **32/32**; G-D
+**213** differential cases (3 ignored-with-reason, unchanged rows); **G-F 213 modules** (`run=213
+clocked=161 memory=18 combinational=52 skipped=0`, design leg ran) — +2, the new fixture; **G-G
+differential 1622 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE** (+14 sequences, the fixture);
+**G-G reference 1634 PASS / 0 DISAGREE**; **G-I** 162 clocked related, 0 uncovered; **G-J** 0 DISAGREE;
+G-E 5 anchored. Not run remotely (nothing pushed).
+
+### P.8 Stopped — decisions the spec does not settle
+
+1. **R6's macro side (recursion through a helper `fn`).** The macro sees only the module's `ItemFn`
+   (I.2.1), never the helper, so it cannot refuse `fn dec(x) { … dec(…) … }` called from a body; the
+   transpiler refuses it when it inlines. A terminating recursion simulates correctly, and the
+   transpiler never emits a wrong text for it, so the break is a refusal-only asymmetry, not a
+   divergence. Options: **(a)** record it as the one named exception to II.1.3's "iff" — a shape the
+   kernel lacks that only the inliner can see (cost: none; II.1.3's sentence gains an exception);
+   **(b)** an attribute required on every helper a body calls (`#[hardware_fn]`), which refuses direct
+   self-recursion syntactically, plus a marker trait the body's calls are checked against — mutual
+   recursion still invisible (cost: every helper in the corpus annotated); **(c)** give the macro the
+   file (D-21's A4: read the source through the span/manifest — unstable or fragile). Recommendation:
+   (a).
+2. **The unit domain (I.12.6 (4)).** D-17 A1 retired `()`, believing no corpus port used it; 32
+   combinational modules do (P.2). Options: **(A1)** rewrite each with a generic `D: ClockDomain`
+   parameter — the module "lies in the domain of its ports" (I.12.4(c)) and stays usable in any domain;
+   the domain is phantom, so the emitted SV is predicted byte-identical (cost: 32 signatures and their
+   testbenches' `wire::<T, ()>` calls; the sweep's wrapper must name a domain for a generic one);
+   **(A2)** rewrite each with a concrete domain (simpler, but a combinational module then lives in one
+   domain only); **(B)** amend D-17 A1 to keep `()` on combinational modules as "domain-polymorphic"
+   (no rewrite; the type can no longer refuse `In<T>` on a clocked module, which the macro would then
+   refuse syntactically). Recommendation: (A1).
+
+Not stopped, not done (outside step 10's list): I.13.7 (3) — instantiation refused in behavioural
+bodies, `lower_hardware_call` and `spawn_child` deleted (P.4: a syntactic refusal costs 22 corpus
+modules without a stated `&clk` exemption).
+
+### P.9 For the coordinator — SPEC items (SPEC files untouched)
+
+1. **II.1.2's table and II.1.3's open-break list** are stale: R5, R7, R10, R12, R13/R14 hold in both
+   front-ends; R16, R17, R18, R19, R20 and D3 are one function each (`copper_analysis::front_end`);
+   R15 is closed (`/` has I.14.3(b)'s meaning; both admit); the `cdc_*` rule was a T-admits break the
+   list never named, now closed; R6's macro side is P.8 item 1. II.1.4's line numbers predate the move.
+2. **II.1.3's audit description** — `front_end_parity.rs` now runs every shared rule, R2/R3 and D2 over
+   all 272 fns in every mode, and `copper-codegen/tests/front_end_parity_ui.rs` is the
+   transpiler-admits battery (every ui case, messages compared). P10's blind spots are closed.
+3. **II.2.2's rows for R3 and D2** — the directions changed (P.5); four new rows (the two-flop rule,
+   the combinational-cycle refusal, R5, the structural body rule — exact, syntactic).
+4. **I.12.1 / I.12.6 (4):** "no port in `examples/` … uses the unit domain (measured 0)" is wrong — 32
+   modules, 100 ports (P.2).
+5. **P11** is no longer "false today": the never-ticked pin agrees on three legs (steps 2–3). **P5**'s
+   open obligation and **P20**'s are discharged; **P22**'s pins exist (`static_predicate_directions.rs`).
+6. **I.13.4(b):** the argument list should name a `.clone()` of a reader end or a parent `In` (a net
+   with several readers needs one in Rust); the rule admits it.
+7. **I.11.6 / I.13.7 (1), (2), (4):** discharged (this section); `LEVELIZED_SCHEDULING_SCOPE.md`'s
+   "detection is not rejection" is reversed in the code (I.13.7 (8), the coordinator's edit).
+8. **II.2 D2's implementation note:** `check_definite_assignment` reads the mode from the attribute when
+   present; a structural body is not combinational though it has no loop.
