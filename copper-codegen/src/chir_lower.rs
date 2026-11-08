@@ -5695,18 +5695,63 @@ fn lower_saturating(
         span: mc.span,
         suggested_rewrite: None,
     };
+    let lit = |w: usize, v: u128| CHIRExpr::Lit(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(w) }, value: v });
+    let bx = |e: &CHIRExpr| Box::new(e.clone());
     if signed(&a) || signed(&b) {
-        return Err(refuse("on a signed integer is not lowered yet"));
+        // The signed clamp (II.3.3 (e), MEASUREMENTS §U.7): on the raw two's-complement bits,
+        // `s = a ± b` wraps; it overflowed iff the operands' signs make an overflow possible
+        // (equal for `+`, different for `-`) and `s`'s sign differs from `a`'s; then the
+        // result is MIN when `a` is negative and MAX otherwise. `saturating_mul` stays refused.
+        if mc.method == "saturating_mul" {
+            return Err(refuse("on a signed integer is not lowered yet"));
+        }
+        let raw = |e: &CHIRExpr| match e {
+            CHIRExpr::SignCast { signed: true, expr } => (**expr).clone(),
+            other => other.clone(),
+        };
+        let (ra, rb) = (raw(&a), raw(&b));
+        let Some(n) = width_ignoring_default_lits(&ra, ctx).or_else(|| width_ignoring_default_lits(&rb, ctx)) else {
+            return Err(refuse("needs operands of a known width"));
+        };
+        if !(2..=128).contains(&n) {
+            return Err(refuse("is lowered for signed integers of 2 to 128 bits"));
+        }
+        let sign = |e: &CHIRExpr| CHIRExpr::Resize {
+            expr: Box::new(CHIRExpr::BinOp { left: bx(e), op: CHIRBinOp::Shr, right: Box::new(lit(n, (n - 1) as u128)) }),
+            width: Width::Concrete(1),
+        };
+        let eq = |l: CHIRExpr, r: CHIRExpr, op: CHIRBinOp| CHIRExpr::BinOp { left: Box::new(l), op, right: Box::new(r) };
+        let add = mc.method == "saturating_add";
+        let s = CHIRExpr::BinOp {
+            left: bx(&ra),
+            op: if add { CHIRBinOp::Add { wrapping: true } } else { CHIRBinOp::Sub { wrapping: true } },
+            right: bx(&rb),
+        };
+        let operands = eq(sign(&ra), sign(&rb), if add { CHIRBinOp::Eq } else { CHIRBinOp::Neq });
+        let flipped = eq(sign(&s), sign(&ra), CHIRBinOp::Neq);
+        let min = 1u128 << (n - 1);
+        let clamp = CHIRExpr::Mux {
+            cond: Box::new(eq(sign(&ra), lit(1, 1), CHIRBinOp::Eq)),
+            then_val: Box::new(lit(n, min)),
+            else_val: Box::new(lit(n, min - 1)),
+        };
+        return Ok(CHIRExpr::SignCast {
+            signed: true,
+            expr: Box::new(CHIRExpr::Mux {
+                cond: Box::new(eq(operands, flipped, CHIRBinOp::LogicalAnd)),
+                then_val: Box::new(clamp),
+                else_val: Box::new(s),
+            }),
+        });
     }
     let Some(n) = width_ignoring_default_lits(&a, ctx).or_else(|| width_ignoring_default_lits(&b, ctx)) else {
         return Err(refuse("needs operands of a known width"));
     };
-    if n > 64 {
-        return Err(refuse("is lowered for integers of at most 64 bits"));
+    // `+`/`-` clamp at any width up to 128 (MEASUREMENTS §U.7); the product needs `2n` bits.
+    if n > 128 || (n > 64 && mc.method == "saturating_mul") {
+        return Err(refuse("is lowered for integers of at most 64 bits (`saturating_mul`) or 128 bits"));
     }
-    let lit = |w: usize, v: u128| CHIRExpr::Lit(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(w) }, value: v });
     let max = if n >= 128 { u128::MAX } else { (1u128 << n) - 1 };
-    let bx = |e: &CHIRExpr| Box::new(e.clone());
     Ok(match mc.method.as_str() {
         "saturating_add" => {
             let sum = CHIRExpr::BinOp { left: bx(&a), op: CHIRBinOp::Add { wrapping: true }, right: bx(&b) };
