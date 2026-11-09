@@ -18,6 +18,52 @@ thread_local! {
     /// The declared width of every scalar wire the forwarding walk has seen, by name — what
     /// the whole-value form of a forwarded wire's bit write needs (`extract_updates_from_stmts`).
     static WIRE_WIDTHS: std::cell::RefCell<HashMap<String, Width>> = std::cell::RefCell::new(HashMap::new());
+    /// The concrete width of every register, wire and promoted wire carrier of the
+    /// sequential body being lowered (a name declared at two widths is left out) — what
+    /// [`subst_vars`] needs to keep a substituted value at its own width under a widening
+    /// cast. Set at the start of [`lower_seq_body`].
+    static VAR_WIDTHS: std::cell::RefCell<HashMap<String, usize>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// Every concrete-width register, wire (at any depth) and promoted wire carrier (`<w>_r`)
+/// of `seq`, by name; a name seen at two widths is dropped.
+fn seq_var_widths(seq: &CHIRSeqBody) -> HashMap<String, usize> {
+    fn w(t: &CHIRType) -> Option<usize> {
+        match t {
+            CHIRType::UInt { width: Width::Concrete(w) } | CHIRType::SInt { width: Width::Concrete(w) } => Some(*w),
+            CHIRType::Bool => Some(1),
+            _ => None,
+        }
+    }
+    let mut out: HashMap<String, Option<usize>> = HashMap::new();
+    let mut add = |n: String, t: &CHIRType| {
+        let v = w(t);
+        out.entry(n).and_modify(|e| if *e != v { *e = None }).or_insert(v);
+    };
+    for r in &seq.registers {
+        add(r.name.clone(), &r.ty);
+    }
+    fn walk(stmts: &[CHIRStmt], add: &mut dyn FnMut(String, &CHIRType)) {
+        for s in stmts {
+            match s {
+                CHIRStmt::Wire { name, ty, .. } => {
+                    add(name.clone(), ty);
+                    add(format!("{name}_r"), ty);
+                }
+                CHIRStmt::If { then_body, else_body, .. } => {
+                    walk(then_body, add);
+                    if let Some(e) = else_body {
+                        walk(e, add);
+                    }
+                }
+                CHIRStmt::Match { arms, .. } => arms.iter().for_each(|a| walk(&a.body, add)),
+                CHIRStmt::ForLoop { body, .. } => walk(body, add),
+                _ => {}
+            }
+        }
+    }
+    walk(&seq.loop_body, &mut add);
+    out.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -521,6 +567,7 @@ fn lower_seq_body(
 ) -> Result<SHIRSeqBody, SHIRLowerError> {
     // Step 1: Validate CHIR preconditions
     validate_seq_chir(seq, module_span)?;
+    VAR_WIDTHS.with(|v| *v.borrow_mut() = seq_var_widths(seq));
 
     // Step 2: Split loop_body into segments at AwaitTick boundaries
     let segments = split_at_ticks(&seq.loop_body);
@@ -1109,13 +1156,23 @@ fn extract_updates_from_stmts(
             CHIRStmt::Match { scrutinee, arms, span: s } => {
                 let scrutinee_expr = resolve(lower_expr(scrutinee)?, forwarding);
 
-                // Process each arm independently from the current forwarding state.
+                // Process each arm independently from the current forwarding state; keep each
+                // arm's forwarding map for the wire merge below.
+                let mut arm_fwds: Vec<HashMap<String, SHIRExpr>> = Vec::new();
                 let arm_updates: Vec<Vec<SHIRRegUpdate>> = arms.iter()
                     .map(|arm| {
                         let mut arm_fwd = forwarding.clone();
-                        extract_updates_from_stmts(&arm.body, &[], reg_names, *s, renames, &mut arm_fwd)
+                        let u = extract_updates_from_stmts(&arm.body, &[], reg_names, *s, renames, &mut arm_fwd);
+                        arm_fwds.push(arm_fwd);
+                        u
                     })
                     .collect::<Result<_, _>>()?;
+                // Each arm's guard, resolved against the forwarding state before the `match`.
+                let arm_guards: Vec<Option<SHIRExpr>> = arms.iter()
+                    .map(|arm| arm.guard.as_ref()
+                        .map(|g| Ok(resolve(lower_expr(g)?, forwarding)))
+                        .transpose())
+                    .collect::<Result<_, SHIRLowerError>>()?;
 
                 let mut touched: Vec<String> = Vec::new();
                 for arm_upds in &arm_updates {
@@ -1124,24 +1181,18 @@ fn extract_updates_from_stmts(
                     }
                 }
 
-                for target in touched {
-                    let hold = || forwarding.get(&target).cloned()
-                        .unwrap_or_else(|| SHIRExpr::Var(target.clone()));
-
+                // One `Case` over the arms, from each arm's value (`value_of(arm index)`) and the
+                // fall-through value `hold` for a scrutinee no arm matches.
+                let build_case = |value_of: &dyn Fn(usize) -> SHIRExpr, hold: SHIRExpr|
+                    -> Result<SHIRExpr, SHIRLowerError>
+                {
                     let mut case_arms: Vec<SHIRCaseArm> = Vec::new();
                     let mut default_val: Option<SHIRExpr> = None;
-
-                    for (arm, upds) in arms.iter().zip(arm_updates.iter()) {
-                        // Last assignment wins — see the note in the `If` arm.
-                        let next_val = last_update_for(upds, &target).unwrap_or_else(hold);
-
-                        let guard = arm.guard.as_ref()
-                            .map(|g| Ok(resolve(lower_expr(g)?, forwarding)))
-                            .transpose()?;
-
+                    for (ai, arm) in arms.iter().enumerate() {
+                        let next_val = value_of(ai);
+                        let guard = arm_guards[ai].clone();
                         let is_default = arm.patterns.iter().any(|p| matches!(p, CHIRPattern::Wildcard))
                             && guard.is_none();
-
                         if is_default {
                             default_val = Some(next_val);
                         } else {
@@ -1154,15 +1205,55 @@ fn extract_updates_from_stmts(
                             }
                         }
                     }
-
-                    let default = default_val.unwrap_or_else(hold);
-                    let case_val = SHIRExpr::Case {
+                    Ok(SHIRExpr::Case {
                         scrutinee: Box::new(scrutinee_expr.clone()),
                         arms: case_arms,
-                        default: Box::new(default),
-                    };
+                        default: Box::new(default_val.unwrap_or(hold)),
+                    })
+                };
+
+                let reg_touched: HashSet<String> = touched.iter().cloned().collect();
+                for target in touched {
+                    let hold = forwarding.get(&target).cloned()
+                        .unwrap_or_else(|| SHIRExpr::Var(target.clone()));
+                    // Last assignment wins — see the note in the `If` arm.
+                    let case_val = build_case(
+                        &|ai| last_update_for(&arm_updates[ai], &target).unwrap_or_else(|| hold.clone()),
+                        hold.clone(),
+                    )?;
                     forwarding.insert(target.clone(), case_val.clone());
                     updates.push(SHIRRegUpdate { target, next_value: case_val });
+                }
+
+                // The same per-arm merge for WIRE forwarding, as the `If` arm does: a wire an
+                // arm assigns carries the `Case` of its arm values forward, so an edge consumer
+                // after the `match` reads the value the taken arm left. Until 2026-11-09 the arms'
+                // maps were dropped and such a consumer read the wire's value from before the
+                // `match` (`q <= 8'd0` for `s = 0; match .. { 1 => s = 5, _ => {} } q.write(s)`;
+                // line `II.3 found stmt-match-wire`, MEASUREMENTS §AC.6, §AD.1).
+                let mut wire_keys: Vec<String> = arm_fwds.iter()
+                    .flat_map(|m| m.keys())
+                    .filter(|k| !reg_touched.contains(*k))
+                    .cloned()
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                wire_keys.sort();
+                for k in wire_keys {
+                    let outer = forwarding.get(&k).cloned();
+                    if arm_fwds.iter().all(|m| m.get(&k) == outer.as_ref()) {
+                        continue;
+                    }
+                    let fallthrough = outer.clone().unwrap_or_else(|| SHIRExpr::Var(k.clone()));
+                    let vals: Vec<SHIRExpr> = arm_fwds.iter()
+                        .map(|m| m.get(&k).cloned().unwrap_or_else(|| fallthrough.clone()))
+                        .collect();
+                    let merged = if vals.iter().all(|v| *v == fallthrough) {
+                        fallthrough
+                    } else {
+                        build_case(&|ai| vals[ai].clone(), fallthrough.clone())?
+                    };
+                    forwarding.insert(k, merged);
                 }
             }
 
@@ -1467,10 +1558,49 @@ fn subst_vars(expr: SHIRExpr, subst: &HashMap<String, SHIRExpr>) -> SHIRExpr {
             base: Box::new(subst_vars(*base, subst)),
             index: Box::new(subst_vars(*index, subst)),
         },
-        SHIRExpr::Resize { expr, width } => SHIRExpr::Resize {
-            expr: Box::new(subst_vars(*expr, subst)),
-            width,
-        },
+        // A name directly under a WIDENING cast (`32'(r)`, `32'($signed(r))`) whose substitute
+        // is a compound value keeps the name's width: `chir_lower::widening_resize` gave the
+        // name no inner cast because a name is self-sized, and IEEE 1800 sizes the operand of
+        // a cast by the cast's width, so `32'(8'(a) + 8'd250)` adds at 32 bits — 256 where the
+        // name held 0 (line `II.3 found forwarded-narrow-widening`, MEASUREMENTS §AD.4).
+        SHIRExpr::Resize { expr, width } => {
+            let inner = match *expr {
+                SHIRExpr::Var(n) => match subst.get(&n) {
+                    Some(v) => at_own_width(&n, v.clone(), &width),
+                    None => SHIRExpr::Var(n),
+                },
+                SHIRExpr::SignCast { signed, expr: e } => match *e {
+                    SHIRExpr::Var(n) => match subst.get(&n) {
+                        Some(v) => SHIRExpr::SignCast { signed, expr: Box::new(at_own_width(&n, v.clone(), &width)) },
+                        None => SHIRExpr::SignCast { signed, expr: Box::new(SHIRExpr::Var(n)) },
+                    },
+                    other => SHIRExpr::SignCast { signed, expr: Box::new(subst_vars(other, subst)) },
+                },
+                other => subst_vars(other, subst),
+            };
+            SHIRExpr::Resize { expr: Box::new(inner), width }
+        }
+    }
+}
+
+/// `v`, the value substituted for the name `n` under a cast to `width`: wrapped in a cast to
+/// `n`'s own width when that is narrower than `width` and `v` is not self-sized.
+fn at_own_width(n: &str, v: SHIRExpr, width: &Width) -> SHIRExpr {
+    fn self_sized(e: &SHIRExpr) -> bool {
+        match e {
+            SHIRExpr::Var(_) | SHIRExpr::Lit(_) | SHIRExpr::XLit { .. } | SHIRExpr::Slice { .. }
+            | SHIRExpr::Resize { .. } | SHIRExpr::DynBit { .. } | SHIRExpr::MemData { .. }
+            | SHIRExpr::MemIndex { .. } | SHIRExpr::MemValid { .. } | SHIRExpr::PhaseEq(_) => true,
+            SHIRExpr::SignCast { expr, .. } => self_sized(expr),
+            _ => false,
+        }
+    }
+    let own = VAR_WIDTHS.with(|m| m.borrow().get(n).copied());
+    match (own, width) {
+        (Some(w), Width::Concrete(t)) if w < *t && !self_sized(&v) => {
+            SHIRExpr::Resize { expr: Box::new(v), width: Width::Concrete(w) }
+        }
+        _ => v,
     }
 }
 

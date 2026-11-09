@@ -206,6 +206,7 @@ pub fn desugar_counted_loops_in(fir: &mut FrontendModuleIR) {
         values: const_values(fir),
         generics: fir.signature.generics.iter().map(|g| g.name.clone()).collect(),
         typing: crate::chir_lower::ForTyping::of(fir),
+        enclosing: std::cell::RefCell::new(Vec::new()),
     };
     let RawStmtKind::Expr(es) = &mut fir.raw_statements[idx].kind else {
         return;
@@ -214,7 +215,7 @@ pub fn desugar_counted_loops_in(fir: &mut FrontendModuleIR) {
         return;
     };
     let mut next_counter = 0usize;
-    desugar_counted_loops(&mut l.body, &mut next_counter, &consts);
+    desugar_counted_loops(&mut l.body, &mut next_counter, &consts, false);
 }
 
 /// Rewrite `for <var> in <start>..<end> { <B>; clk.tick().await; }` into the
@@ -272,17 +273,45 @@ pub fn desugar_counted_loops_in(fir: &mut FrontendModuleIR) {
 /// cycle. `copper_analysis::may_exit_without_tick` has the same hole for the same
 /// reason (it treats a `for` as a guaranteed clock boundary, which an empty range
 /// is not) and both need const evaluation to close.
-fn desugar_counted_loops(stmts: &mut Vec<RawStmt>, next_counter: &mut usize, consts: &Consts) {
+///
+/// `nested_body`: `stmts` is the body of a NESTED loop (a `loop`, `while` or `for` inside
+/// the module loop), which ends at its boundary (a bare tick, or a loop that ends at one —
+/// the shape rule, I.8.2(b)). A tick-bearing `for` there that is NOT the body's last
+/// statement takes I.8.5's form without the hoisting (see [`expand_counted_for`]'s
+/// `unhoisted`): its continuation runs on to that boundary, so the empty continuation the
+/// hoisting exists for cannot arise, and a hoisted bare tick in the middle of the body would
+/// read as `W; tick; C; tick`, which the flattener refuses (line `II.3 found
+/// nested-ticking-for`, MEASUREMENTS §AC.7, §AD.2).
+fn desugar_counted_loops(stmts: &mut Vec<RawStmt>, next_counter: &mut usize, consts: &Consts, nested_body: bool) {
     let mut out: Vec<RawStmt> = Vec::with_capacity(stmts.len());
-    for mut s in std::mem::take(stmts) {
+    let taken = std::mem::take(stmts);
+    // For each statement: does anything follow it in this list (and so the list's boundary)?
+    let n_taken = taken.len();
+    for (si, mut s) in taken.into_iter().enumerate() {
+        // A tick-bearing `for` whose variable's type is determined is in scope, typed, for
+        // the `for`s nested in its body (their bounds may name it).
+        let scoped = match &s.kind {
+            RawStmtKind::Expr(es) => match &es.expr {
+                ExprType::ForLoop(f) if stmts_contain_tick(&f.body) => for_var_scope(f, consts),
+                _ => None,
+            },
+            _ => None,
+        };
+        let pushed = scoped.is_some();
+        if let Some(v) = scoped {
+            consts.enclosing.borrow_mut().push(v);
+        }
         // Descend first: an inner `for` must already be a `loop` with its tick
         // hoisted before the outer one looks at where its own body ends.
         descend_counted(&mut s, next_counter, consts);
+        if pushed {
+            consts.enclosing.borrow_mut().pop();
+        }
 
         let expanded = match &s.kind {
             RawStmtKind::Expr(es) => match &es.expr {
                 ExprType::ForLoop(f) if stmts_contain_tick(&f.body) => {
-                    expand_counted_for(f, s.order, next_counter, consts)
+                    expand_counted_for(f, s.order, next_counter, consts, nested_body && si + 1 < n_taken)
                 }
                 _ => None,
             },
@@ -294,6 +323,23 @@ fn desugar_counted_loops(stmts: &mut Vec<RawStmt>, next_counter: &mut usize, con
         }
     }
     *stmts = out;
+}
+
+/// A tick-bearing `for`'s variable and its type, when the variable is named and its type is
+/// determined (a typed bound or a use, `chir_lower::for_var_type`).
+fn for_var_scope(f: &copper_core::frontend_ir::ExprForLoop, consts: &Consts) -> Option<(String, copper_core::chir::CHIRType)> {
+    let pat = f.pat_text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    if pat == "_" || pat.is_empty() {
+        return None;
+    }
+    let ExprType::Range(r) = &*f.iter else { return None };
+    let end = r.end.as_deref()?;
+    let body = match f.body.last() {
+        Some(last) if is_tick_stmt(last) => &f.body[..f.body.len() - 1],
+        _ => &f.body[..],
+    };
+    let ty = consts.typing.var_type(r.start.as_deref(), end, &pat, body, &consts.enclosing.borrow())?;
+    Some((pat, ty))
 }
 
 /// Recurse into every statement form that can contain a `for`.
@@ -311,12 +357,12 @@ fn descend_counted(s: &mut RawStmt, next_counter: &mut usize, consts: &Consts) {
 
 fn descend_counted_expr(e: &mut ExprType, next_counter: &mut usize, consts: &Consts) {
     match e {
-        ExprType::Loop(l) => desugar_counted_loops(&mut l.body, next_counter, consts),
-        ExprType::While(w) => desugar_counted_loops(&mut w.body, next_counter, consts),
-        ExprType::ForLoop(f) => desugar_counted_loops(&mut f.body, next_counter, consts),
-        ExprType::Block(b) => desugar_counted_loops(&mut b.stmts, next_counter, consts),
+        ExprType::Loop(l) => desugar_counted_loops(&mut l.body, next_counter, consts, true),
+        ExprType::While(w) => desugar_counted_loops(&mut w.body, next_counter, consts, true),
+        ExprType::ForLoop(f) => desugar_counted_loops(&mut f.body, next_counter, consts, true),
+        ExprType::Block(b) => desugar_counted_loops(&mut b.stmts, next_counter, consts, false),
         ExprType::If(f) => {
-            desugar_counted_loops(&mut f.then_block, next_counter, consts);
+            desugar_counted_loops(&mut f.then_block, next_counter, consts, false);
             if let Some(eb) = f.else_branch.as_mut() {
                 descend_counted_expr(eb, next_counter, consts);
             }
@@ -347,6 +393,7 @@ fn expand_counted_for(
     order: usize,
     next_counter: &mut usize,
     consts: &Consts,
+    followed_in_nested_body: bool,
 ) -> Option<Vec<RawStmt>> {
     let span = f.span;
     // An inclusive range (`a..=b`, D-27, SPEC I.8.5) exits on `c > e` where the
@@ -411,7 +458,7 @@ fn expand_counted_for(
         ExprType::Range(r) => r.start.as_deref(),
         _ => None,
     };
-    let var_ty = consts.typing.var_type(r_start, &end, &pat, work);
+    let var_ty = consts.typing.var_type(r_start, &end, &pat, work, &consts.enclosing.borrow());
     let negative = |e: &ExprType| {
         const_value(e, consts).is_some_and(|v| v < 0) || matches!(e, ExprType::Unary(u) if u.op.trim() == "-")
     };
@@ -601,10 +648,38 @@ fn expand_counted_for(
         ),
     };
 
+    // The last tick kept in the loop: `loop { <exit test>; B; c = c + 1; if <passed> { tick;
+    // break } tick }` — I.8.5's `D` with the last iteration's exit decided before its tick. Taken
+    // where the hoisted tick would be BARE (a range non-empty by its constants, no author
+    // `break`) and the `for` is followed in a nested loop's body: the loop's exit continues
+    // into statements that reach that body's boundary, so the empty continuation the hoisting
+    // exists for (above) cannot arise, while the hoisted bare tick would put a second
+    // boundary in the middle of the enclosing body, which the flattener refuses (line
+    // `II.3 found nested-ticking-for`, MEASUREMENTS §AD.2). A guarded hoisted tick is an `if`,
+    // not a bare tick, and was always lowered; it keeps its form.
+    let unhoisted = followed_in_nested_body && statically_nonempty && !stmts_break_enclosing_loop(work);
+
     let mut loop_body = vec![exit_test()];
     loop_body.extend(work.iter().cloned());
     loop_body.push(incr);
-    loop_body.push(exit_test());
+    if unhoisted {
+        // The last iteration's tick, then the exit: the "last iteration?" decision is taken
+        // before the tick, where the source's `for` takes it (P1 relates the paths by it).
+        loop_body.push(expr_stmt(
+            ExprType::If(ExprIf {
+                condition: Box::new(passed()),
+                then_block: vec![
+                    boundary.clone(),
+                    expr_stmt(ExprType::Break(ExprBreak { label: None, expr: None, span }), span),
+                ],
+                else_branch: None,
+                span,
+            }),
+            span,
+        ));
+    } else {
+        loop_body.push(exit_test());
+    }
     loop_body.push(boundary.clone());
 
     // The hoisted tick stands in for the LAST iteration's tick, which the second
@@ -723,7 +798,8 @@ fn expand_counted_for(
         text: String::new(),
         span,
     });
-    Some(snapshots.into_iter().chain([decl]).chain(done_decl).chain([loop_stmt, hoisted]).collect())
+    let hoisted = (!unhoisted).then_some(hoisted);
+    Some(snapshots.into_iter().chain([decl]).chain(done_decl).chain([loop_stmt]).chain(hoisted).collect())
 }
 
 /// What this pass knows is constant: the file's integer consts by value
@@ -734,6 +810,11 @@ struct Consts {
     generics: std::collections::HashSet<String>,
     /// The module's types, for the loop variable's (`chir_lower::for_var_type`).
     typing: crate::chir_lower::ForTyping,
+    /// The enclosing tick-bearing `for`s' variables whose type is determined, innermost
+    /// last, while [`desugar_counted_loops`] descends into their bodies: a bound naming one
+    /// (`for j in 0..i`) has that variable's type, as rustc infers it (line `II.3 found
+    /// for-bound-loop-var`, MEASUREMENTS §AD.3).
+    enclosing: std::cell::RefCell<Vec<(String, copper_core::chir::CHIRType)>>,
 }
 
 /// A bound that cannot change while the loop runs: a constant of [`const_value`],

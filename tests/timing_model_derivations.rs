@@ -80,6 +80,16 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     // Added 2026-11-09 with line `II.3 found scoped-shadow` (MEASUREMENTS §AC): a ticking
     // counted `for` and a tick after it in one module loop, as `lvt_shadow`'s.
     "ssh_for_shadows_local",
+    // Added 2026-11-09 with lines `II.3 found forwarded-narrow-widening` and
+    // `nested-ticking-for` (MEASUREMENTS §AD): ticking counted `for`s over a run-time end
+    // (`fnw_for_bound_*`, as `for_empty`'s) and nested ticking loops (`ntf_*`, as `det_for`'s)
+    // — the extraction route.
+    "fnw_for_bound_header",
+    "fnw_for_bound_narrow",
+    "fnw_for_bound_port",
+    "fnw_for_bound_wrap",
+    "ntf_in_loop_while",
+    "ntf_then_for_then_wait",
     // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
     // counted `for` over the data bits, each with its tick inside) and the one-tick
     // handshake (two `while` waits). Every tick sits inside a loop, so both extract

@@ -470,8 +470,20 @@ impl ForTyping {
     }
 
     /// [`for_var_type`] against this module's types.
-    pub(crate) fn var_type(&self, start: Option<&ExprType>, end: &ExprType, var: &str, body: &[RawStmt]) -> Option<CHIRType> {
+    /// `enclosing`: the variables of the tick-bearing `for`s this one is nested in, with
+    /// their types — in scope for its bound and body (MEASUREMENTS §AD.3).
+    pub(crate) fn var_type(
+        &self,
+        start: Option<&ExprType>,
+        end: &ExprType,
+        var: &str,
+        body: &[RawStmt],
+        enclosing: &[(String, CHIRType)],
+    ) -> Option<CHIRType> {
         let mut symbols = self.symbols.clone();
+        for (n, t) in enclosing {
+            symbols.insert(n.clone(), t.clone());
+        }
         symbols.remove(var);
         for_var_type(start, end, var, body, &symbols, &self.enums, &self.file_consts)
     }
