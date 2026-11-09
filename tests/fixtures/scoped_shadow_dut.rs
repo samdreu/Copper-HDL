@@ -386,3 +386,22 @@ async fn ssh_across_tick(clk: Clock<MainClk>, a: In<Bits<4>, MainClk>, q: RegOut
         clk.tick().await;
     }
 }
+
+/// A tick-free `for`'s `continue` whose rest names a local shadowed inside the branch: the rest,
+/// copied into the branch by the `continue` rewrite, reads the OUTER `t` (until §AC the rewrite
+/// declined it, since the copy would have captured the shadow).
+#[hardware(combinational)]
+fn ssh_continue_rest<D: ClockDomain>(a: In<Bits<4>, D>, o: Out<Bits<4>, D>) {
+    let av = a.read();
+    let t: Bits<4> = Bits::from_lit::<1>();
+    let mut acc: Bits<4> = Bits::zero();
+    for i in 0..4 {
+        if av[i] == Logic::One {
+            let t: Bits<4> = Bits::from_lit::<2>();
+            acc = acc ^ t;
+            if acc[0] == Logic::One { continue; }
+        }
+        acc = acc + t;
+    }
+    o.write(acc);
+}

@@ -1247,9 +1247,13 @@ async fn m(clk: Clock<C>, a: In<Logic, C>, q: RegOut<Logic, C>) {
 /// condition (`copper_codegen::for_continue`; swept by `tests/fixtures/tickfree_continue_dut.rs`).
 /// The rewrite copies the rest of the iteration into each branch, so it declines when that rest
 /// names a binding made inside the branch (the copy would capture it); the transpiler then
-/// refuses with a message about the `for`, not the module loop (the message before §U.1).
+/// refuses with a message about the `for`, not the module loop (the message before §U.1). Since
+/// MEASUREMENTS §AC (2026-11-09) a branch binding the rest could name is a shadow of an outer one,
+/// and `desugar::rename_scoped_shadows` gives it its own name before the rewrite runs: the
+/// shadowing twin lowers, its rest reading the outer `t` (swept as
+/// `tests/fixtures/scoped_shadow_dut.rs::ssh_continue_rest`); the decline is a backstop.
 #[test]
-fn a_tickfree_for_continue_whose_rest_names_a_branch_binding_is_refused_with_its_own_message() {
+fn a_tickfree_for_continue_whose_rest_names_a_shadowed_binding_lowers() {
     let lowered = r#"
 #[hardware(combinational)]
 fn tfc_ok<D: ClockDomain>(a: In<Bits<4>, D>, o: Out<Bits<4>, D>) {
@@ -1281,8 +1285,9 @@ fn tfc_shadow<D: ClockDomain>(a: In<Bits<4>, D>, o: Out<Bits<4>, D>) {
 "#;
     let sv = transpile(lowered).expect("a tick-free `for`'s `continue` lowers");
     assert!(!sv.contains("continue"), "no `continue` reaches the SV:\n{sv}");
-    let err = transpile(shadowed).expect_err("the shadowing rest is not rewritten");
-    assert!(err.contains("this `continue` of a tick-free `for` is not lowered"), "a different error: {err}");
+    let sv = transpile(shadowed).expect("the shadow is renamed, so the rest is rewritten");
+    assert!(sv.contains("acc = (acc ^ t__shadow);") && sv.contains("acc = (acc + t);"),
+        "the branch reads the shadow, the rest the outer `t`:\n{sv}");
 }
 
 /// Line `II.3 found const-pattern` (MEASUREMENTS §T.3, §U.2, 2026-11-08): a pattern naming a
