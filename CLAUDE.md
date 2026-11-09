@@ -410,7 +410,7 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   R5, the CDC rules (the port rule, the two-flop rule, the combinational one-domain rule), R19 and the
   structural body rules, the memory shape rules of D-25 (`memory_rules.rs`: no `Memory` parameter on a
   `combinational` or `structural` module, no literal latency 0, a received `WRITE_LAT` of 1), no net (`wire`/`registered_wire`/`net`) in a behavioural body (I.13.5,
-  `check_no_body_nets`, 2026-11-08), R16's `Bits<N>` width bound 1 ≤ N ≤ 128 (`check_admissible`), and (D-23) the `continue` of a tick-bearing `for` (a dated REFUSED-both
+  `check_no_body_nets`, 2026-11-08), R16's `Bits<N>` width bound 1 ≤ N ≤ 128 (`check_admissible`), (D-26) an array-register element write in a tick-free `for` whose bound names a const generic (`check_array_write_in_generic_for`), and (D-23) the `continue` of a tick-bearing `for` (a dated REFUSED-both
   II.3.3 row (h), fix direction the lowering) — are `copper_analysis::front_end::check_front_end_rules`, which both call
   first; `copper-codegen/tests/front_end_parity_ui.rs` transpiles every macro ui case and requires the
   macro's message. A combinational cycle is refused at spawn (`refuse_comb_cycle`) and over a
@@ -441,24 +441,27 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   to measure what is left unstated), R8 (no
   plain `Out` on a clocked module, one shared message) and the memory rules. A module
   that compiles therefore
-  transpiles, or is refused by both — with **two named exceptions**. **R6** (D-22): recursion
+  transpiles, or is refused by both — with **three named exceptions**. **R6** (D-22): recursion
   through a helper `fn` compiles (the macro sees the module's `ItemFn`, never the helper's
   body) and the transpiler refuses it when it inlines (`RECURSIVE_HELPER_MESSAGE`). **The
   let-bound instance** (D-24): `let _ = child(..)` / `let m = child(..)` in a behavioural body
   compiles (a binding is a use, so D-23's denied `#[must_use]` does not fire) and the transpiler
   refuses it with I.13.5's message; the simulator's `HardwareModule` drop guard panics when the
-  child is dropped unstarted. In neither is wrong text emitted. Neither can widen silently:
-  `front_end_parity.rs::the_named_parity_exceptions_are_r6_and_the_let_instance` reads the tree's
-  helper call graph and every behavioural body's `let`s, and requires `tests/recursive_helper_r6.rs`
-  and `tests/let_instance_d24.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins one
-  ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). These are the only *named* exceptions, not the only
-  breaks: re-verified 2026-11-08 (MEASUREMENTS §S.4, §T), shapes the macro admits and the transpiler
-  refuses remain, each an OPEN `II.3 found` line of SPEC §III.3.4 (const-call-body and
-  runtime-empty-boundary, §V; array-for-generic — an array-register write in a `for` over a
-  const-generic bound — and file-x-const-pattern — an X-valued file `const` in a pattern, refused by
-  the transpiler with D-24's message, §U; 2026-11-08 §V closed body-wire and const-call, §U closed
-  array-for, tickfree-continue, const-pattern, preload-ok, u8-const, comb-double-write and
-  signed/`u128` `saturating_*`). The standing audit is
+  child is dropped unstarted. **The file-level X-const pattern** (D-26): a pattern naming a file
+  `const` whose value is X compiles (the macro cannot see the item's value) and the transpiler
+  refuses it with D-24's `X_PATTERN_MESSAGE`; the simulator matches the X structurally. In none
+  is wrong text emitted. None can widen silently:
+  `front_end_parity.rs::the_three_named_parity_exceptions_have_exactly_their_witnesses` reads the
+  tree's helper call graph, every behavioural body's `let`s and every pattern naming an X-valued
+  file const, and requires `tests/recursive_helper_r6.rs`, `tests/let_instance_d24.rs` and
+  `tests/file_x_const_pattern_d26.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins
+  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). These are the only *named* exceptions, not the
+  only breaks: re-verified 2026-11-08 (MEASUREMENTS §S.4, §T), shapes the macro admits and the
+  transpiler refuses remain, each an OPEN `II.3 found` line of SPEC §III.3.4 (const-call-body and
+  runtime-empty-boundary, §V; 2026-11-08 §V closed body-wire and const-call, §U closed array-for,
+  tickfree-continue, const-pattern, preload-ok, u8-const, comb-double-write and signed/`u128`
+  `saturating_*`, and §U.11 (D-26) closed array-for-generic, now refused by both, and
+  file-x-const-pattern, now the third named exception). The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one
