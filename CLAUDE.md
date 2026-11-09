@@ -38,7 +38,7 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (239, 3 of them skipped with a reason, since 2026-11-08 §X — the three `cc_body_*` fixtures; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
+`_reference_leg` cases as build.rs generated to run (249, 3 of them skipped with a reason, since 2026-11-08 §Y — the ten `tfr_*` fixtures; 239 after §X's three `cc_body_*`; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
 clocked, 18 of them binding a `Memory` (I.10), 52 combinational (I.11); `REF_SKIP` empty), each
 leg non-empty, and the design leg (I.13, `copper_ref::Design` on `two_domain_top` vs the hand-wired
 simulation, `tests/two_domain_hierarchy_cdc.rs`) — and

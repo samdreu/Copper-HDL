@@ -4845,3 +4845,130 @@ uncovered; G-J 74 const items compared / 25 outside both, 0 DISAGREE; G-E 5 anch
 192 CLOSED, 8 OPEN; 170 required by the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 174 sweep, 153
 test, 123 ui; 206 run checks`**, the 3 example fixtures PASS (as predicted in X.5). Not run remotely
 (nothing pushed). After this run, docs only: III.3.6's counts, this section, CLAUDE.md.
+
+## Y. `II.3 found register-in-tickfree-for` closed, and what the forwarding walk showed on the way (2026-11-08)
+
+Branch `claude/reg-in-tickfree-for`, cut from `claude/open-lines-last-4e2ae7` at `b159abb` (ledger 200
+lines — 192 CLOSED, 8 OPEN). Code commits `b149a32` (the fix, the fixture, the ledger lines) and `3e9db32` (one more OPEN line, §Y.6);
+`b149a32`'s message says the fixture has 11 modules and 10 fail on `b159abb` — it has 10, and 9 fail. Probes are in the session notes folder
+`reg-in-tickfree-for-Y-probes/` (outside the repo), not in the tree.
+
+### Y.0 Predictions (written before reading the lowering)
+
+The `for` survives to CHIR as `CHIRStmt::ForLoop` and the clocked segment's forwarding walk
+(`shir_lower::extract_updates_from_stmts`, SPEC I.3.4) handles only straight-line statements, so a
+`ForLoop` whose body assigns a register contributes no update and, its body lowering to nothing, is
+dropped. **Measured:** as predicted — the walk's catch-all `_ => {}` skipped `ForLoop`, and
+`lower_stmt_list` dropped the empty body. Not predicted: the same walk loses a wire accumulator whose
+initializer reads a register assigned earlier in the segment (`f = f ^ a; let mut g = f; for … { g = g + 1 }`
+emits `q <= (f ^ a)`), and a const-generic bound loses a register's writes the same way. The fixture's
+first run predicted 7/7 agreeing; `tfr_const_bound_branch` did not (Y.2).
+
+### Y.1 The fix — a combinational temp per assigned name
+
+A first draft unrolled every tick-free `for` of a clocked body in `chir_lower` (I.2.4's desugaring, the
+array-register path of §U.4 generalized). It fixed the probe and was **rejected on measurement**: the
+forwarding walk substitutes expressions, so an unrolled body with branches grows exponentially —
+`tfc_sum_set_bits` (8 iterations, two `if`s each) emitted a 44 k-token line Verilator refused ("Too many
+preprocessor tokens") — and it turned wire accumulators that the SV `for` already lowered correctly into
+the shape of Y.2.
+
+What landed keeps the SV `for` (Verilator unrolls it; I.2.4's meaning is the program's) and makes every
+name it assigns one it can carry:
+
+- `chir_lower`: in a clocked body, each name a tick-free `for` assigns (`n = e`, `n[i] = e`, at any depth)
+  and does not bind gets a fresh combinational temp — `let mut n__forK = n; for … { n__forK … }; n = n__forK;`.
+  A struct local takes one wire per field (`p__for0_x = p_x`), the write-back a whole-struct copy. The
+  register write is then one straight-line assignment after the loop, which the walk forwards like any
+  other. `subst_in_place` gained a `ForLoop` arm (it skipped nested `for` bodies), with the loop variable
+  shadowing a key of its name.
+- `shir_lower`: an SV `for` body is lowered against a **frozen** copy of the forwarding with the body's own
+  assigned and declared names removed — read by name, their current blocking value in the `always_comb`;
+  after the loop the walk maps each to itself (`Var(n)`, its final comb value; for a temp, the value the
+  loop leaves). A register still assigned in a body (a name the body also binds, which the rewrite leaves
+  out) is refused with `FOR_REGISTER_WRITE_MESSAGE` rather than emitted without the loop's writes; no
+  probe or corpus module reaches it.
+
+The probe now emits `f__for0 = f; for (…) f__for0 = (f__for0 + 8'd1);` and `f <= (f__for0 ^ a)`; the
+const-generic bound (`0..N`) the same with `_ < N`. Fixture `tests/fixtures/tickfree_for_register_dut.rs`,
+10 modules, swept on three legs: the ledger's probe (`tfr_reg_accumulate`), a const-generic bound
+(`tfr_generic_bound`, `PARAMS` N = 5), a file-const bound with a body `let` and a branch on the loop
+variable, nested `for`s, the extraction route (a tick in each arm, a `for` in each), the forwarded wire
+accumulator, a struct register, a bit-written wire, and Y.2's two. **On `b159abb` 9 of the 10
+`_differential` cases fail, every `_reference_leg` passes (`sim=ref≠SV`); after, all 20 pass.** The
+tenth, `tfr_bit_write`, agrees on `b159abb` too: it pins this change's first draft of Y.2, which
+recorded `s` in the forwarding and so lost `s[0] = d` before the temp read it.
+
+### Y.2 Found and closed — a wire reassigned from itself (`II.3 found wire-self-reassign`)
+
+`let mut g = a.read(); g = g + 1; g = g + 3;` in a clocked segment emitted `g = (g + 8'd1); g = ((g + 8'd1)
++ 8'd3);` in `always_comb` and `q <= ((g + 8'd1) + 8'd3)` — the earlier increments counted twice, on every
+consumer, in the segment and through a promoted wire after the tick (measured on `b159abb`:
+`tfr_wire_self_reassign`, `tfr_wire_promoted` DISAGREE). The walk records a `let` wire only when
+substitution changes its value; unrecorded, a later `g = g + 1` entered `g → g + 1` with the name `g`
+standing for the wire's FINAL comb value. Fix: a declaration is also recorded when a later statement of
+the same list (or, under `advance`, of the rest of the enclosing list) reassigns or redeclares the name
+— a shadowing `let`, or the next copy of an unrolled body's `let`, is one SV signal. Not when the list also
+bit-writes it: the walk does not track an `IndexAssign` (Y.4), and recording such a wire lost the bit
+(`shift_register` first, then `tfr_bit_write`). Corpus 0: every corpus wire accumulator reassigned itself
+only inside a `for`, which the walk did not see.
+
+### Y.3 sv-baseline
+
+Snapshot of `b159abb`'s transpiler with the fixture present, diff after: **20 of 315 modules differ** —
+the fixture's 9 (2 NEW) and **11 corpus modules**: `sipo_block` (example), `shift_register` (example and
+fixture), `f5_sipo`, `f5_wire`, `cc_body_for`, `pb_shift_and_phase`, `q1_b_sipo_block`,
+`regout_multiphase`, `tfc_sum_set_bits` — each a wire accumulator now renamed to its temp (`s` →
+`s__for0`, its hoisted default with it) — and `f5_branch_wire`, whose wire `t` (declared, then assigned in
+a branch) is now forwarded (`q <= (… ? 8'd5 : 8'd0)` for `… ? 8'd5 : t`). All 11 agree on three legs in the
+sweep and the two examples PASS. The draft of Y.1 had changed 12, including the three `stage_*` memory
+fixtures; the temp form leaves those byte-identical.
+
+### Y.4 Found — a forwarded wire's bit write (`II.3 found forwarded-wire-bit-write`, OPEN)
+
+`f = f ^ a; let mut s = f; s[0] = d; q.write(s)` emits `q <= (f ^ a)`: `s` is forwarded (its
+initializer reads the assigned `f`) and the walk has no `IndexAssign` arm, so the bit write never reaches
+the edge consumer. Same text on `b159abb`. Every in-segment read of `s` is substituted, so `s` is left
+unread and Verilator rejects the module (`UNUSEDSIGNAL` under `-Wall`): the failure is loud. A promoted
+`s` (read after the tick) agrees. Both front-ends admit it; corpus 0. Fix direction: a whole-value form
+of the bit write in the walk, as §U.3 gave a register's — it needs the wire's width there, which
+`extract_updates_from_stmts` does not have. Not fixed here.
+
+### Y.5 Found — a struct literal reading its own earlier field (`II.3 found struct-literal-self-read`, OPEN)
+
+`p = Pr { x: p.y + a, y: p.x }` is lowered field by field, so `y` reads the new `x`: `p_y <= (p_y + a)`.
+Swept as a temporary fixture (`zz_struct_swap`): **6 of 6 sequences DISAGREE, `sim=ref≠SV`**; same text on
+`b159abb`. Rust evaluates every field from the old value. Both front-ends admit it; corpus 0 (no corpus
+literal reads a field of the struct it is assigned to after that field is written). Found because a
+struct register in a `for` takes the same per-field write-back (`tfr_struct` avoids the cross-field read).
+Fix direction: evaluate the literal's fields into temporaries before the per-field assignments. Not fixed
+here.
+
+### Y.6 Found — a `RegOut` write in a tick-free `for` (`II.3 found port-write-in-for`, OPEN)
+
+`for _ in 0..3 { q.write(a.read()) }` in a clocked body, with a literal or a const-generic bound, is
+refused by the transpiler with the latch rule's message ("would infer a latch: q assigned on some
+control paths but not all"), measured on this branch (probes `v_cport`, `v_genport`; the latch rule is untouched by §Y.1); the macro admits
+it (`cargo check` of a throwaway crate, clean). REFUSED-one, never wrong text; I.2.4 DESUGARED (the
+last iteration's write is the drive); corpus 0. §X.4's battery had no port write inside a `for`.
+
+### Y.7 Ledger and counts
+
+Before: **200 lines — 192 CLOSED, 8 OPEN**. After (G-K on `3e9db32`): **204 lines — 194 CLOSED, 10 OPEN**
+— `II.3 found register-in-tickfree-for` CLOSED (8 sweep tokens); `wire-self-reassign` added CLOSED (3);
+`forwarded-wire-bit-write`, `struct-literal-self-read` and `port-write-in-for` added OPEN, owner
+copper-codegen; I.2.4's line gained `tfr_reg_accumulate`; II.1.3 OPEN with the seventh break named.
+Sweep tokens 174 → 186, run checks 206 → 216.
+
+### Y.8 The bare regression — measured
+
+**Bare `tools/regression.sh` on `3e9db32` (the final code commit; laptop; `paper` at `b159abb`):
+REGRESSION OK (210 s wall, warm caches).** 1521 passed, 0 failed, 16 ignored, 158 test binaries (G-C 131
+test files); examples **32/32**; G-D 249 differential cases (3 ignored-with-reason), G-F 249 (3 skipped
+with a reason) — the ten `tfr_*` fixtures added; **G-G differential 1939 PASS / 12 OUTSIDE / 0 TRUNCATED /
+0 EXCUSED / 0 DISAGREE**, **reference 1951 PASS / 0 DISAGREE**; G-I 192 clocked related, 0 uncovered; G-J
+75 const items compared / 25 outside both, 0 DISAGREE; G-E 5 anchored; **G-K `204 lines — 194 CLOSED, 10
+OPEN; 170 required by the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 186 sweep, 153 test, 123 ui; 216
+run checks`**, the 3 example fixtures PASS. The same tree without §Y.6's ledger line (`b149a32`) also ran
+bare to REGRESSION OK (549 s). Not run remotely (nothing pushed). After this run, docs only: III.3.6's
+counts, two wordings of III.3.4, this section, CLAUDE.md.
