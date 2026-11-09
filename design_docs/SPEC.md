@@ -4359,19 +4359,18 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | retired 14 | `multi_phase_out_write` | `gone:multi_phase_out_write`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8 |
 | retired 15 | `out_first_driven_late` | `gone:out_first_driven_late`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; I.11's class vacuous (D-14) |
 
-**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §Z.12
-(2026-11-08, on `89b3ef4`, REGRESSION OK): **219 lines — 215 CLOSED, 4 OPEN**; 170 required by the SPEC
-(91 numbered clauses, 22 II.1.2 rules, 4 II.2.1 rules, 14 II.3.3 rows, 28 row-(e) methods, 9 retired
-rules) and 49 beyond it (the 7 methods row (e) owes, 42 II.3 rows found in Phase C and after). By part:
-Part I 82 lines, 82 CLOSED; II.1–II.2 31 lines, 30 CLOSED, 1 OPEN (II.1.3, on one shape); II.3 97 lines,
-94 CLOSED, 3 OPEN (`II.3 found inclusive-for` — owner a **decision**, packet §Z.10 —, and
-`array-register-trailing-write`, `signed-local`, two divergences both front-ends admit, pre-existing,
-corpus 0, owner copper-codegen); the 9 retired rules CLOSED. Fixture tokens on CLOSED lines: 234 `sweep`,
-153 `test`, 123 `ui`, 8 `coreui`, 3 `example`, 11 `gone`; G-K's run check found all 249 run checks
-satisfied and the 3 examples PASS. §Z closed the six parity breaks of §X.4, `port-write-in-for` and the two
-divergences `forwarded-wire-bit-write` and `struct-literal-self-read`, and found and closed twelve more;
-G-G 0 DISAGREE.
-(Before §Z, on `3e9db32`: 204 lines — 194 CLOSED, 10 OPEN, §Y.7. Before §Y, on `6df6270`: 200 lines — 192 CLOSED, 8 OPEN, §X.5. On `02cfaae`: 193 lines — 190 CLOSED, 3
+**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §AA.7
+(2026-11-09, on `f09dfb6`, REGRESSION OK): **223 lines — 221 CLOSED, 2 OPEN**; 171 required by the SPEC
+(91 numbered clauses, 23 II.1.2 rules, 4 II.2.1 rules, 14 II.3.3 rows, 28 row-(e) methods, 9 retired
+rules) and 52 beyond it (the 7 methods row (e) owes, 45 II.3 rows found in Phase C and after). The two
+OPEN lines are `II.3 found loop-var-type` (owner copper-codegen and copper-ref: a narrow loop variable
+read without a cast, wrong text / an interpreter refusal, pre-existing, corpus 0) and `II.3 found
+inclusive-for-runtime-max` (owner a **decision**, packet §AA.5). Part I and II.1–II.2 are all CLOSED
+(II.1.3 since §AA.4; R23 new). Fixture tokens on CLOSED lines: 256 `sweep`, 156 `test`, 128 `ui`, 8
+`coreui`, 3 `example`, 11 `gone`; G-K's run check found all 269 run checks satisfied and the 3 examples
+PASS. §AA closed the last four OPEN lines of §Z (`array-register-trailing-write`, `signed-local`,
+`inclusive-for` by D-27, II.1.3), found and closed `signed-widening-cast`; G-G 0 DISAGREE.
+(Before §AA, on `89b3ef4`: 219 lines — 215 CLOSED, 4 OPEN, §Z.11. Before §Z, on `3e9db32`: 204 lines — 194 CLOSED, 10 OPEN, §Y.7. Before §Y, on `6df6270`: 200 lines — 192 CLOSED, 8 OPEN, §X.5. On `02cfaae`: 193 lines — 190 CLOSED, 3
 OPEN, §U.12. The memory batch's counts, on `14739d6`: 193 lines — 187 CLOSED, 6 OPEN, §W.6. The codegen
 batch's, on `f29fe46`: 191 lines — 180 CLOSED, 11 OPEN, §U.10. The front-end batch's, on `c518b77`: 189
 lines — 171 CLOSED, 18 OPEN, §V.8. Step 11c's, on `7589204`: 187 lines — 166 CLOSED, 21 OPEN.)

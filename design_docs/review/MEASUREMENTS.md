@@ -5185,3 +5185,181 @@ compared / 25 outside both, 8 asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; *
 CLOSED, 4 OPEN; 170 required by the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 234 sweep, 153 test, 123
 ui; 249 run checks`**, the 3 example fixtures PASS. Not run remotely (nothing pushed). After this run, docs
 only: III.3.6's counts, this section, CLAUDE.md.
+
+## AA. The last four OPEN lines of III.3: two miscompiles fixed, the inclusive `for` (D-27) lowered, II.1.3 closed (2026-11-09)
+
+Branch `claude/open-lines-f-2e105a`, cut from `paper` at `f790444` (ledger 219 lines — 215 CLOSED, 4 OPEN).
+Code commits `57450d5` (the two miscompiles), `d382025` (D-27), the ledger and decision `2cc6022`, and
+`f09dfb6` (a test pin AA.7's first run found), the final code commit — the bare regression of AA.7 ran on
+it; after it, docs only. "Before" is measured: a
+fixture's verdict with the change switched off (a temporary environment switch, removed before the
+commit), and every module's emission against `sv-baseline snapshot` taken on `f790444`. Probes and the
+predictions file are in the session's scratch; the probes of §Z are in the notes folder
+`open-lines-e-Z-probes/`.
+
+### AA.0 Predictions (written before each change)
+
+| change | predicted corpus SV changes | measured |
+|---|---|---|
+| AA.1 trailing array write | 0 (only a body whose trailing region writes an array register; §Z.9 says corpus 0) | **0** |
+| AA.2 signed local | "the signedness fixtures and possibly the RV32I CPUs" (a guess, named before measuring) | **1**, `c_signed` (`data_i14_dut.rs`): `q <= s` → `q <= $unsigned(s)`, the same bits at the same width — **not** the modules guessed; the CPUs cast at the use and changed nothing |
+| AA.3 D-27 | 0 (no corpus `for` header is inclusive) | **0** |
+| AA.4 battery | 47/47 admitted by both | **47/47** |
+
+Final sv-baseline against `f790444`: **21 of 370 modules differ — 20 NEW (the three new fixture files) and
+1 CHANGED, `c_signed`, which sweep-agrees on three legs.** No example's or `src/` module's SV changed.
+
+### AA.1 `II.3 found array-register-trailing-write` — CLOSED (the miscompile)
+
+The trailing region (after the last tick) is the head of the next resumption (I.0.2) and `shir_lower`
+lowers it into phase 0 ahead of segment 0. `chir_lower` lowers in source order, head first, so a head read
+of an array register saw only the committed array and — through `forward_*_mem_index` — the previous
+resumption's staged write (`r_wr0_s1_*`), never the trailing write of its own resumption. **Fix**
+(`chir_lower::lower_seq_body`): a body whose trailing region writes an array register is lowered twice;
+the second pass seeds the head's write-through count (`array_written`) with the trailing region's port
+count `t`, so a head read muxes over ports `0..t` (the trailing writes' comb staging nets) inside the
+`s1` forwarding, and the head's own writes take ports from `t`. A pre-loop element write shares the low
+ports (`!__copper_started` vs `__copper_started`: never one resumption). The emitted read of the probe:
+`q <= ((r_wr0_en && (a == r_wr0_addr)) ? r_wr0_data : ((r_wr0_s1_v && …) ? r_wr0_s1_data : r[a]))`.
+
+Fixture `tests/fixtures/array_trailing_write_dut.rs`, 6 modules: the probe; a head write and a trailing
+write to one array (the head's at port 1); two trailing writes, one conditional; two phases; a pre-loop
+write and a trailing write; a branch-nested tick (the extraction route). **With the seed off: 4 of 6
+`_differential` cases fail (`atw_probe`, `atw_head_and_trailing`, `atw_two_trailing`, `atw_two_phases`);
+`atw_preloop_and_trailing` passes — its pre-loop write already took port 0, and the old code never
+cleared that count before the head, so the head muxed over port 0 by accident; `atw_extraction` passes
+— on the extraction route the post-tick write and the head are arms of one `match pc`, a path this
+change does not touch. With it: 12/12 cases pass.** `phase_sensitive_checks.rs`: the tick refusal moved
+to `lower_seq_body_seeded` (its entry renamed; `lower_seq_body` now carries a `debug_assert_eq!`, which the
+scan skips).
+
+### AA.2 `II.3 found signed-local` — CLOSED; `signed-widening-cast` found and CLOSED
+
+`let v = a.as_u8() as i8` declares `v` as a plain `logic [7:0]` and a read of it was a plain `Var`, so
+`signed_binop` saw no `SignCast` and `v < 3` compared unsigned. **Fix** (`chir_lower::signed_read`): an
+operand of a binary or unary operator, or of a cast, that is a `Var` whose symbol type is `SInt` (a
+signed local, register or const) is wrapped in `SignCast { signed: true }`, exactly as `as i8` at the use
+is. **Found with it:** a widening cast of a signed value. `let x = v as i16` emitted `x = $signed(v)` for
+a 16-bit `x` (Verilator's WIDTHEXPAND — the fixture's first run failed there) and `v as u16` emitted
+`$unsigned(v)` in a 16-bit context, zero-extending where Rust sign-extends. Now `$signed(16'($signed(v)))`
+and `$unsigned(16'($signed(v)))`; a plain operand widened `as i*` is zero-extended first
+(`widening_resize`). Fixture `tests/fixtures/signed_local_dut.rs`, 6 modules (the probe; compares between
+locals, against a negative literal, an annotated local; `>>`, `/`, `%`, a wrapping sum and difference;
+widening casts; a signed register; a combinational body). **With the change off: 6 of 6 `_differential`
+cases fail; with it 12/12 pass.** (`wrapping_neg` is not a lowered method — the fixture uses
+`wrapping_sub`; unchanged, row (e)'s list.)
+
+### AA.3 `II.3 found inclusive-for` — CLOSED (D-27); `loop-var-type` found, OPEN
+
+D-27 (decided by the user 2026-11-08, packet §Z.10 option (a); recorded in `SPEC_DECISIONS.md`):
+- **Tick-free** — `CHIRStmt`/`SHIRStmt`/`VLIRStmt::ForLoop` carry `inclusive`; the emitter writes
+  `for (int i = a; i <= b; i++)`, no `b + 1`; the array-register unroll runs `b − a + 1` copies. The
+  interpreter does not increment past `e` (a frame flag), so `250u8..=255u8` runs six iterations.
+- **Tick-bearing** — `control_extract::expand_counted_for` takes `a..=b`, its two exit tests and the
+  hoisted tick's guard `c > e`, the statically-empty test `a > b`. The interpreter runs I.8.5's form with
+  `c > e`, its increment checked.
+- **II.1.2 R23** — `copper_analysis::constant_ticking_inclusive_ranges` (constant-shaped bounds, as R3's,
+  and *typed*: a path, a suffixed literal or a cast among the leaves) and `INCLUSIVE_MAX_MESSAGE`. The
+  macro places `const _: () = ::core::assert!({ let r = (a)..=(b); (*r.end()).checked_add(1).is_some() },
+  MSG);` right before the `for` (rustc types `r` as the `for` does; E0080 under `cargo check`, so trybuild
+  sees it). The transpiler folds the end at `ty_of(end).or(ty_of(start))` through `ConstEnv`; an end or
+  type it cannot fold is refused (`UNFOLDED_INCLUSIVE_END_MESSAGE`). Measured on the CLI: `0u8..=255u8`,
+  `0..=255u8`, `0..=TOPI` (`i16` 32767), `-3i8..=127` refused; `0..=(TOP - 1)` and the untyped `0..=255`
+  admitted.
+- ui/pass `inclusive_for` (both forms, an end at `u8::MAX` tick-free, a typed const end 254 ticking),
+  ui/fail `inclusive_ticking_for_at_max` (`250..=TOP`, `TOP: u8 = 255`); `front_end_parity_ui.rs`
+  passes (the transpiler's message equals rustc's panic text).
+- Fixture `tests/fixtures/inclusive_for_dut.rs`, 8 modules (the battery's two probes; a const end and a
+  nested pair; the end at `u8::MAX`; an array-register unroll; a const end and a typed end below its
+  maximum, ticking; a run-time end, empty when `n < 2`; an author's `break`). **On `f790444` the
+  transpiler refused all 8; now 16/16 cases pass.** The tests that walk `for` headers learned the
+  form: `projection_relation.rs` (G-I) reads `c > e` as "the counter passed its range" and an inclusive
+  range as empty when `a > b`; `copper_analysis::reference_sv_registers` no longer takes `i <= 3` in a
+  `for (` header for a nonblocking target (`register_reconciliation` saw `i`, `j`, `k` as surplus flops).
+
+**Found — `II.3 found loop-var-type` (OPEN, pre-existing).** The fixture's first run failed on two
+modules; both reproduce with **exclusive** ranges (a temporary fixture, deleted): a loop variable whose
+Rust type is narrower than the transpiler's 32-bit counter / the interpreter's `usize`, read as an
+operand without a cast — `zz_excl_typed_var` (`for i in 250u8..255u8 { s.wrapping_add(i ^ a) }`):
+Verilator's WIDTHEXPAND on the transpiled SV; `zz_excl_break` (`if a.as_u8() == i` with `i` inferred
+`u8`): the interpreter stops, "mixed integer types u8 and usize", and the SV lint-fails too. Corpus 0 (the
+corpus casts at the use). The fixture casts (`i as u8`).
+
+### AA.4 II.1.3 — CLOSED
+
+§Z.8's 47 probes (notes folder `open-lines-e-Z-probes/battery`), copied as `ui/pass/zzbat_*` and removed
+after: **trybuild admits all 47; `front_end_parity_ui.rs::the_transpiler_admits_every_shape_the_macro_admits`
+passes with them — 47/47 admitted by both.** `front_end_parity.rs`'s three-named-exceptions test passes.
+The line closes: no shape outside R6, the bound instance and the file-level X-const pattern is known to
+one front-end only. The two lines this section found are not parity breaks (both front-ends admit).
+
+### AA.5 Decision packet — `II.3 found inclusive-for-runtime-max`
+
+**Question.** A tick-bearing `for v in a..=b` whose end equals its type's maximum **at run time** (`for i
+in 0..=n` with `n: u8` read from an input and 255), or whose constant end is untyped and the body infers a
+type it is the maximum of (`for i in 0..=255 { …from_u8(i)… }`): what is its meaning?
+
+**What the docs say.** D-27: "IN, with Rust's meaning"; "a ticking bound at its type's maximum is refused in
+both front-ends, R3-style, because the counter would overflow". I.8.5's `D` (as written for D-27):
+`… c = c + 1 ; s` with exit `c > e` — at `e = MAX` the increment overflows, which I.14.3 makes a run-time
+failure. The two sentences agree for a constant typed end (refused) and disagree at run time: Rust's
+`RangeInclusive` runs the last iteration and stops; `D` fails.
+
+**What the code does.** The simulator runs Rust (no failure). The interpreter realizes `D`: its checked
+increment fails. **Measured** (a temporary fixture, deleted: `for i in 0xfeu8..=n` with `n = a | 0xfc`
+from an 8-bit input): **6/6 sequences DISAGREE, pattern `sim≠ref`** on both the `_reference_leg` and the
+`_differential` case — "the interpreter failed at resumption 3 (integer overflow: 256 is outside u8) and
+the simulator did not" (III.2.4 requires both to fail at the same resumption). The transpiler's counter
+is `u32` (`COUNTER_TY`): for an 8- or 16-bit type it does not wrap; by its construction, for a 32-bit or
+wider type at its maximum it wraps to 0 and the loop does not exit (not measured: no stimulus reaches a
+32-bit maximum). R23 cannot see a run-time end; for an untyped constant end neither front-end names the
+type (the interpreter's unsuffixed integer is unbounded, so it agrees with Rust there). Corpus 0; no
+sweep stimulus reaches it in the fixture (its run-time end is a 2-bit input).
+
+**Options.**
+- **(a) Rust's meaning everywhere.** `D` tests before it increments past the end: `loop { if c > e {
+  break } ; let v = c ; s' }` with the step `if c == e { break-after-s } else { c = c + 1 }` (or a done
+  flag). Changes: I.8.5's form, the interpreter (the tick-free code path already does this), the
+  transpiler's counter (a done bit, or a counter one bit wider than the range's type), R23 retired or kept
+  as a realization limit only. Nothing refuses; the simulator is already right.
+- **(b) `D` as written: a run-time failure.** The macro realizes the failure in the simulator (a rewritten
+  header that panics when the end is the maximum, or a checked counter), so the three legs end at the same
+  resumption; the transpiler emits nothing for it (outside the trace). Changes: the macro's `for`
+  rewriting (the simulator would panic where plain Rust does not), the transpiler's `u32` counter for
+  wide types still wraps — unobservable only because the trace ends.
+- **(c) Refuse what cannot be decided.** Both front-ends refuse a ticking inclusive `for` whose end is not
+  a constant typed range of R23 (a run-time end, an untyped literal). Changes: one shared rule; it
+  over-refuses every run-time end below the maximum, including the fixture's `2..=n`.
+
+**Recommendation: (a)** — it is what D-27's headline ("Rust's meaning") says, the simulator already
+does it, the interpreter's tick-free path already does it, and it removes the only place where `D`
+fails where Rust does not; R23 would then remain only if the transpiler keeps a range-typed counter.
+(b) preserves the letter of the refusal's reason but makes the simulator diverge from plain Rust; (c) is
+the smallest change and the largest over-refusal.
+
+### AA.6 Ledger and counts
+
+Before: **219 lines — 215 CLOSED, 4 OPEN**. After (`cargo test --test conformance_ledger` on `2cc6022`):
+**223 lines — 221 CLOSED, 2 OPEN; 171 required by the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 256
+sweep, 156 test, 128 ui; 269 run checks** (and the same from G-K in AA.7's run). Closed: all four (`II.3 found array-register-trailing-write`,
+`signed-local`, `inclusive-for`, II.1.3). Added: `II.1.2 R23` (a new rule row, CLOSED — required, so 170 →
+171), `II.3 found signed-widening-cast` (found and CLOSED), `II.3 found loop-var-type` (OPEN, copper-codegen
+and copper-ref) and `II.3 found inclusive-for-runtime-max` (OPEN, a **decision**, AA.5).
+
+### AA.7 The bare regression — measured
+
+The first bare run (on `2cc6022`) failed in `tests/timing_model_derivations.rs`: the set of modules the
+extraction route hides gained `ifr_ticking_break` and `ifr_ticking_runtime` — the inclusive twins of
+`det_for` and `for_empty`, whose guarded hoisted tick (an author's `break`; a run-time end) takes the
+extraction route as theirs does. `f09dfb6` adds them to the expected set with that reason.
+
+**The second: bare `tools/regression.sh` on `f09dfb6` (the final code commit; laptop; `paper` at `f790444`):
+REGRESSION OK (253 s).** 1629 passed, 0 failed, 16 ignored, 158 test binaries (G-C 131 test files);
+examples **32/32**; G-D 303 differential cases (3 ignored-with-reason), G-F 303 (3 skipped with a reason) —
+the 20 new fixture modules added; **G-G differential 2285 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0
+DISAGREE**, **reference 2297 PASS / 0 DISAGREE**; G-I 234 clocked related (55 extracted, 19 linear, 160
+single-tick), 0 uncovered; G-J 84 const items compared / 25 outside both, 180 counted-`for` bounds compared,
+8 asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; **G-K `223 lines — 221 CLOSED, 2 OPEN; 171 required by
+the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 256 sweep, 156 test, 128 ui; 269 run checks`**, the 3
+example fixtures PASS. Not run remotely (nothing pushed). After this run, docs only: III.3.6's counts,
+this section, CLAUDE.md; the AA.5 probe was swept as a temporary fixture after the run and deleted.

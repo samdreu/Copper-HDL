@@ -38,7 +38,7 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (283, 3 of them skipped with a reason, since 2026-11-08 §Z — 34 modules in five fixture files; 249 after §Y's ten `tfr_*` fixtures; 239 after §X's three `cc_body_*`; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
+`_reference_leg` cases as build.rs generated to run (303, 3 of them skipped with a reason, since 2026-11-09 §AA — 20 modules in three fixture files; 283 after §Z's 34 modules in five fixture files; 249 after §Y's ten `tfr_*` fixtures; 239 after §X's three `cc_body_*`; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
 clocked, 18 of them binding a `Memory` (I.10), 52 combinational (I.11); `REF_SKIP` empty), each
 leg non-empty, and the design leg (I.13, `copper_ref::Design` on `two_domain_top` vs the hand-wired
 simulation, `tests/two_domain_hierarchy_cdc.rs`) — and
@@ -421,7 +421,8 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   loop must end at a clock boundary; `check_awaits` — only `clk.tick().await` may be
   awaited), reachability (a ticking `for` over a range empty only through a constant is no boundary — the
   transpiler folds it through `ConstEnv`, the macro emits a `const _: () = assert!(..)` body item per
-  hypothesis R3 depends on, `cfg.rs::empty_range_dependencies`, since 2026-11-08; one whose bound is
+  hypothesis R3 depends on, `cfg.rs::empty_range_dependencies`, since 2026-11-08 — and, the same way, R23's
+  assertion that a ticking inclusive `for`'s constant, typed end is below its type's maximum, D-27; one whose bound is
   not constant-shaped may be empty at run time and is an exit, as a `while` is, §X.2, with
   `check_counted_for_nesting` run first so a bounded enclosing `for` keeps its own message), the register power-on rule R11 (2026-10-29; D-21 A3,
   2026-11-07 — a pre-loop register's initializer must be a Rust constant, which reaches the
@@ -458,20 +459,24 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   tree's helper call graph, every behavioural body's `let`s and every pattern naming an X-valued
   file const, and requires `tests/recursive_helper_r6.rs`, `tests/let_instance_d24.rs` and
   `tests/file_x_const_pattern_d26.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins
-  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). These are the only *named* exceptions, not the
-  only breaks: re-verified 2026-11-08 on a 47-probe battery (MEASUREMENTS §Z.8, extending §X.4's 23),
-  one shape the macro admits and the transpiler refuses remains — an inclusive `for` (`0..=3`, an
-  OPEN `II.3 found inclusive-for` line of SPEC §III.3.4 owned by a **decision**, packet §Z.10: I.2.4
-  admits exclusive ranges only and states no meaning for it). §Z lowered the rest, each a swept
+  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). Since 2026-11-09 they are the only breaks known:
+  the inclusive `for` (`0..=3`), the last shape the macro admitted and the transpiler refused, is IN
+  with Rust's meaning (D-27: tick-free unrolled `b − a + 1` times as an SV `i <= b`; tick-bearing
+  I.8.5's counter exiting on `c > e`; a ticking constant, typed end at its type's maximum refused in
+  both, **II.1.2 R23** — rustc's `const` assertion in the macro, `ConstEnv` in the transpiler), and
+  §Z.8's 47-probe battery re-run is admitted by both (MEASUREMENTS §AA.4; SPEC II.1.3 CLOSED). §Z
+  lowered the earlier breaks, each a swept
   fixture: body-local and associated consts (hoisted into the file-const machinery by
   `copper-codegen/src/desugar.rs`, which also turns `v op= e` into `v = v op e` and a range pattern
   into a guard), `s.x = e`, `[c, …]`, a `RegOut` write in a tick-free `for` (a temp and a written
   flag), a guarded or binding statement `match` (an `if` chain), `Bits`/`Logic` consts (sized
   `localparam`s), a body `struct`, an `impl` method on a struct local, an array-literal register.
-  Two OPEN lines are not parity breaks but worse, both admitted by both and measured `sim=ref≠SV`,
-  corpus 0 so the sweep does not reach them: an array register written after its tick and read
-  before it in the next iteration (`II.3 found array-register-trailing-write`) and a signed local
-  compared unsigned (`II.3 found signed-local`), §Z.9. The standing audit is
+  §AA fixed the two `sim=ref≠SV` miscompiles §Z.9 found (an array register written after its tick
+  and read before it — the head is seeded with the trailing region's write ports; a signed local read
+  unsigned — `chir_lower::signed_read`, plus a widening cast of a signed value). Two OPEN lines remain,
+  neither a parity break: `II.3 found loop-var-type` (a `for` variable narrower than the 32-bit
+  counter read without a cast: wrong text / an interpreter refusal, pre-existing, corpus 0) and
+  `II.3 found inclusive-for-runtime-max` (a **decision**, packet MEASUREMENTS §AA.5). The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one
