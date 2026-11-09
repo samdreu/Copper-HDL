@@ -4340,21 +4340,19 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | retired 14 | `multi_phase_out_write` | `gone:multi_phase_out_write`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8 |
 | retired 15 | `out_first_driven_late` | `gone:out_first_driven_late`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; I.11's class vacuous (D-14) |
 
-**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §Y.8
-(2026-11-08, on `3e9db32`, REGRESSION OK): **204 lines — 194 CLOSED, 10 OPEN**; 170 required by the SPEC
+**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §Z.12
+(2026-11-08, on `89b3ef4`, REGRESSION OK): **219 lines — 215 CLOSED, 4 OPEN**; 170 required by the SPEC
 (91 numbered clauses, 22 II.1.2 rules, 4 II.2.1 rules, 14 II.3.3 rows, 28 row-(e) methods, 9 retired
-rules) and 34 beyond it (the 7 methods row (e) owes, 27 II.3 rows found in Phase C and after). By part:
-Part I 82 lines, 82 CLOSED; II.1–II.2 31 lines, 30 CLOSED, 1 OPEN (II.1.3); II.3 82 lines, 73 CLOSED, 9
-OPEN (`II.3 found body-const`, `compound-assign`, `field-assign`, `array-literal`, `range-pattern`,
-`assoc-const-body` — the six parity breaks of §X.4 — `port-write-in-for`, a seventh found by §Y.6, and
-`forwarded-wire-bit-write`, `struct-literal-self-read`); the 9 retired rules CLOSED. Fixture tokens on
-CLOSED lines: 186 `sweep`, 153 `test`, 123 `ui`, 8 `coreui`, 3 `example`, 11 `gone`; G-K's run check found
-all 216 run checks satisfied and the 3 examples PASS. No OPEN line waits on a decision; each names
-copper-codegen and a lowering I.2.4 owes. Two are divergences the sweep does not reach, both pre-existing
-and corpus 0: `struct-literal-self-read` (§Y.5, ADMITTED-AND-DIVERGENT, 6/6 sequences `sim=ref≠SV` as a
-temporary fixture) and `forwarded-wire-bit-write` (§Y.4, wrong text that Verilator's lint rejects); G-G 0
-DISAGREE. `register-in-tickfree-for` closed (§Y.1), with `wire-self-reassign` found and closed (§Y.2).
-(Before §Y, on `6df6270`: 200 lines — 192 CLOSED, 8 OPEN, §X.5. On `02cfaae`: 193 lines — 190 CLOSED, 3
+rules) and 49 beyond it (the 7 methods row (e) owes, 42 II.3 rows found in Phase C and after). By part:
+Part I 82 lines, 82 CLOSED; II.1–II.2 31 lines, 30 CLOSED, 1 OPEN (II.1.3, on one shape); II.3 97 lines,
+94 CLOSED, 3 OPEN (`II.3 found inclusive-for` — owner a **decision**, packet §Z.10 —, and
+`array-register-trailing-write`, `signed-local`, two divergences both front-ends admit, pre-existing,
+corpus 0, owner copper-codegen); the 9 retired rules CLOSED. Fixture tokens on CLOSED lines: 234 `sweep`,
+153 `test`, 123 `ui`, 8 `coreui`, 3 `example`, 11 `gone`; G-K's run check found all 249 run checks
+satisfied and the 3 examples PASS. §Z closed the six parity breaks of §X.4, `port-write-in-for` and the two
+divergences `forwarded-wire-bit-write` and `struct-literal-self-read`, and found and closed twelve more;
+G-G 0 DISAGREE.
+(Before §Z, on `3e9db32`: 204 lines — 194 CLOSED, 10 OPEN, §Y.7. Before §Y, on `6df6270`: 200 lines — 192 CLOSED, 8 OPEN, §X.5. On `02cfaae`: 193 lines — 190 CLOSED, 3
 OPEN, §U.12. The memory batch's counts, on `14739d6`: 193 lines — 187 CLOSED, 6 OPEN, §W.6. The codegen
 batch's, on `f29fe46`: 191 lines — 180 CLOSED, 11 OPEN, §U.10. The front-end batch's, on `c518b77`: 189
 lines — 171 CLOSED, 18 OPEN, §V.8. Step 11c's, on `7589204`: 187 lines — 166 CLOSED, 21 OPEN.)

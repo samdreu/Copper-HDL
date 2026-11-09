@@ -4972,3 +4972,216 @@ OPEN; 170 required by the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 186 swee
 run checks`**, the 3 example fixtures PASS. The same tree without §Y.6's ledger line (`b149a32`) also ran
 bare to REGRESSION OK (549 s). Not run remotely (nothing pushed). After this run, docs only: III.3.6's
 counts, two wordings of III.3.4, this section, CLAUDE.md.
+
+## Z. The last codegen-owned OPEN lines of III.3 closed; II.1.3 re-verified on a 47-probe battery (2026-11-08)
+
+Branch `claude/open-lines-e-60b2b2`, cut from `paper` at `fac8930` (ledger 204 lines — 194 CLOSED, 10
+OPEN). Code commits `9806eff`, `08fcb2f`, `afb3b6b`, `869a6f5`, the ledger `89596a6`, then three test-side
+fixes the bare regression found (Z.12) — `da7d655`, `4fb46eb`, `89b3ef4`, the final code commit. Probes are in the
+session notes folder `open-lines-e-Z-probes/` (outside the repo): `battery/` (the 47 ui/pass probes),
+`zz_found_dut.rs` (the two divergences of Z.9) and the CLI probes. "Before" is measured, never assumed: a
+module's emission on `fac8930` comes from a transpiler built at that commit in a scratch worktree, and a
+fixture's verdict with the change switched off (Z.1, Z.2) or on `fac8930`'s SV.
+
+### Z.0 Predictions (written before each change)
+
+Every change was predicted to change **0 corpus modules** (`sv-baseline` against `fac8930`). Measured:
+the struct-literal temp changed 1 (`tfr_struct`, a field reading its OWN field — the check is "the
+right-hand side reads the target", not "reads a field assigned earlier", so it is conservative; the
+output is the same program through a temp); the six shapes, the port write, the bit-write walk, the
+statement-match chain, the nested `_` and the binders changed 0, as predicted; the battery's `Bits`-const
+`localparam`s changed 2 (`cp_statement`, `cp_tuple_expr` — not predicted: a pattern naming a `Bits`
+const now emits the `localparam`'s name where it emitted the folded value) and the self-width cast of the
+bit-write form changed 2 (`pb_dynamic_bit`, `pb_shift_and_phase` — predicted as "register bit writes",
+without naming them). **Final sv-baseline (snapshot of `fac8930`'s transpiler, 316 modules; 350 now):
+39 differ — 34 NEW (the five new fixture files) and 5 CHANGED, `tfr_struct`, `cp_statement`,
+`cp_tuple_expr`, `pb_dynamic_bit`, `pb_shift_and_phase`, every one a swept fixture that agrees on three
+legs.** No example's or `src/` module's SV changed.
+
+### Z.1 `II.3 found struct-literal-self-read` — CLOSED (the miscompile)
+
+A whole-struct assignment whose right-hand side reads the target (`expr_reads_ident`: a path, a field
+base, a call argument, a nested block, a macro's tokens) is bound to a fresh struct temp first —
+`let p__litK = <rhs>; p = p__litK;` — through the ordinary struct `let` (literal, conditional, ctor) and
+the hazard-free copy from a struct local. Fixture `tests/fixtures/struct_literal_self_read_dut.rs`, 5
+modules: the probe (`ssr_swap`), under a condition, through a `const fn` ctor, a struct wire swapped
+twice, inside a tick-free `for` on the extraction route. **With the temp switched off: `ssr_swap` 6/6,
+`ssr_conditional` 8/8, `ssr_for_and_phases` 8/8 sequences DISAGREE `sim=ref≠SV`; `ssr_ctor` (`p_x`
+unread) and `ssr_wire` (`a` unread) lint-rejected (UNUSEDSIGNAL) — the wrong value left an input or a
+field unread. After: 10 of 10 cases pass.**
+
+### Z.2 `II.3 found forwarded-wire-bit-write` — CLOSED
+
+The forwarding walk (`shir_lower::extract_updates_from_stmts`) gained an `IndexAssign` arm: a bit write to
+a RECORDED wire updates the recorded value with `(v & ~(W'(1) << i)) | (W'(e) << i)`, cast to `W` (Z.8),
+the width read from the wire's `Wire` declaration (a thread-local the walk fills; the walk's signature
+has no symbol table). `vlir_lower::drop_unread_wires` no longer counts a bit write as a read of its own
+base, so a wire every edge consumer reads through its forwarded value is dropped with its bit writes
+(a port base is never dropped). Fixture `forwarded_wire_bit_write_dut.rs`, 4 modules: **with the arm off,
+`fwb_probe`, `fwb_branch_dyn`, `fwb_phases` fail (Verilator lint, the wire unread); `fwb_promoted`
+agrees; after, 8 of 8 cases pass.** Corpus 0.
+
+### Z.3 `body-const`, `assoc-const-body`, `compound-assign` — CLOSED (a FIR desugaring)
+
+`copper-codegen/src/desugar.rs`, run first in `lower_fir_to_chir`: a body-local `const` (any depth) and an
+associated const `T::K` of an inherent `impl` (in an expression, a bound or — Z.8 — a pattern) are
+hoisted into `file_consts` and `file_const_source` (`T::K` as `T__K`, by its `ConstEnv` value at its
+declared type); `v op= e` becomes `v = v op e`. R5's transpiler fold (`lib.rs`) reads the body's consts. The
+interpreter (`copper-ref`) collects a nested block's consts. Fixture `parity_shapes_dut.rs`
+(`ps_body_const[_comb]`, `ps_assoc_const[_comb]`, `ps_compound[_comb]`). On `fac8930` all six refused with
+§X.4's messages; after, all agree.
+
+### Z.4 `II.3 found array-literal` — CLOSED
+
+`[e0, …]` lowers to a `Concat` listing the elements last first (element 0 in the low bits, the layout of
+`[c; n]` and `Bits<N>`). **Found on the way: an array value's bare literal elements were never sized** —
+`retype_default_literals_in_values` did not descend into a `Concat`, so `let t: [u8; 4] = [7; 4]` emitted
+`t = {64'd7, 64'd7, 64'd7, 64'd7}` on `fac8930` (lint-rejected). It now types each element at the element
+width. `ps_array_literal[_comb]` agree.
+
+### Z.5 `II.3 found range-pattern` — CLOSED; `stmt-match-guard` found and CLOSED
+
+A range pattern becomes a guarded arm: `lo..=hi => b` → `_ if s >= lo && s <= hi => b` (or-lists, `n @`,
+open ends, and a range element of a tuple pattern over a tuple scrutinee, the element replaced by `_`;
+with no binder left the arm is a guarded `_`). `u >= 0` on an unsigned operand folds to true (Verilator's
+UNSIGNED), `true && e` to `e`. **Found: a statement `match` with a guarded arm was refused by
+`vlir_lower` ("tuple-pattern match lowering is not yet implemented"), with or without a range** — the
+§X.4 battery had no guarded statement `match`. Such a `match` (and, Z.8, one with a tuple pattern holding a
+wildcard or binder element) now lowers to the `if` chain arm order means
+(`chir_lower::match_arms_as_if_chain`). **Also found: a tuple-pattern literal element was compared at 64
+bits** (`k == 64'd1`, lint-rejected on `fac8930`); it takes its scrutinee element's width. The interpreter
+gained `n @ p` patterns. `ps_range_pattern[_comb]`, `ps_stmt_match_guard` agree.
+
+### Z.6 `II.3 found field-assign` — CLOSED
+
+`s.x = e` (and `s.x[i] = e`) on a struct local assigns the field's net `s_x` (`struct_field_place`).
+**Found: a struct literal binding's bare literal field was never sized** (`S { x: 1, y: 2 }` with `u8`
+fields emitted `s_x = 64'd1`, lint-rejected on `fac8930`); it takes the field's width. **And in the
+interpreter**, an unsuffixed integer field stayed unsuffixed, so `s.y.wrapping_add(1)` became `usize` and
+then "mixed integer types u8 and usize"; it now takes the declared field type. `ps_field_assign[_comb]`
+agree.
+
+### Z.7 `II.3 found port-write-in-for` — CLOSED (no packet)
+
+I.2.4 settles it: a tick-free `for` is unrolled and the resumption's last `write` is the drive (I.6), so a
+write in an iteration that does not run leaves the port as it was. Lowered with §Y.1's temp and a flag:
+`q__forK = 0; q__forK_w = 0; for … { q__forK = e; q__forK_w = 1; } if (q__forK_w) q <= q__forK`. Fixture
+`port_write_in_for_dut.rs`, 5 modules (literal and const-generic bound — `PARAMS` N = 3 —, a conditional
+write, a write before the loop and a second port, nested `for`s on the extraction route): **all 5 refused
+on `fac8930` (the latch rule), all agree after.** **Found: two nested `for _` declared the SV loop variable
+`_` twice (VARHIDDEN)**; a nested `_` takes a name of its depth (`__for_i1`).
+
+### Z.8 II.1.3 re-verified — 47 probes; seven more breaks found and closed
+
+Battery: §X.4's 23 ui/pass probes (rerun) and 24 new ones (`zzq_*`: the shapes above in more positions, and
+their neighbours — a `Bits` const, a body `enum` and `struct`, `matches!`, `else if`, a tuple range with a
+binder, an inclusive `for`, an element and a field compound assignment, a struct field's bit, an `impl`
+method, an associated const pattern, a signed range, an array-literal register…); a 25th (`<<=` on `Bits`)
+is refused by rustc (no `ShlAssign` on `Bits`) and dropped. Run through trybuild (the macro: **all 47
+admitted**) and `front_end_parity_ui.rs::the_transpiler_admits_every_shape_the_macro_admits`.
+**Predicted:** the six of §X.4 and the port write now admitted, nothing else refused. **Measured on the
+first run:** 8 refused by the transpiler — not predicted — each I.2.4 IN or DESUGARED except the last:
+
+| line | shape | `fac8930`'s transpiler | now |
+|---|---|---|---|
+| `stmt-match-binder` | `x if x > 9 => …`, `(0, y) => …` in a statement `match` | "undefined variable" / the tuple-pattern refusal | binder names the scrutinee (element) |
+| `bits-const` | `const K: Bits<8> = …`, file-scope or body | "not an integer constant" | sized `localparam` of the folded value |
+| `body-struct` | `struct P { … }` in the body | "cannot infer bit width" | joins the file structs |
+| `impl-method` | `s.twice()`, `fn twice(self)` | "method `twice` is not supported" | inlined, `self` = the receiver |
+| `assoc-const-pattern` | `T::K => …` | "unsupported pattern" | hoisted `T__K` |
+| `array-literal-register` | `let mut r: [u8; 4] = [1, 2, 3, 4]` | R11's "not a constant" | register file, one stated word each |
+| (`stmt-match-guard`, Z.5) | | | |
+| `inclusive-for` | `for i in 0..=3`, tick-free or ticking | "only exclusive range" | **unchanged — packet Z.10** |
+
+Sweeping the newly lowered shapes as a fixture (`parity_battery_dut.rs`, 6 modules) found four more
+pre-existing wrong-text shapes, each lint-rejected and now fixed and CLOSED: `logic-array-index` (the
+width-1 rule took a `[Logic; N]` local for a scalar and dropped a run-time index — `bit = l` — the repeat
+form too; and an index wider than the select needs, narrower than 32, is cast to 32),
+`negated-literal-width` (`v < -1` compared at 64 bits), `bitwrite-in-wider-context` (the whole-value
+bit-write form, inside an `as_u8` cast, was sized to the cast; it is now cast to its own width — the 2
+`packed_bit_write` fixtures), and an inclusive tick-free `for`, whose desugaring (to `a..(b + 1)`) I wrote
+and then **reverted**: the interpreter refuses it citing I.2.4 ("exclusive ranges only"), so its meaning
+is a decision (Z.10). Final battery run: **46 admitted by both, 1 shape REFUSED-one (the inclusive `for`,
+2 probes)**; II.1.3 stays OPEN on it.
+
+### Z.9 Found — two divergences both front-ends admit (OPEN, not fixed)
+
+Each swept once as a temporary module of `parity_battery_dut.rs` (deleted after; in the notes folder),
+each with byte-identical SV on `fac8930`, corpus 0:
+
+- `II.3 found array-register-trailing-write`: `q.write(r[a]); tick; r[a] = d;` — the trailing write and
+  the next head's read are one resumption (I.0.2), but the head's write-through mux sees only the
+  previous resumption's staged write (`r_wr0_s1_*`). **8/8 sequences DISAGREE `sim=ref≠SV`.** The corpus's
+  register files write before their tick. Not caused by this branch: the same with `[0u8; 4]`.
+- `II.3 found signed-local`: `let v = x as i8; v < 3` — `v` is declared unsigned and read without
+  `$signed`, so the compare is unsigned. **6/6 sequences DISAGREE `sim=ref≠SV`.** The corpus casts at the
+  use.
+
+### Z.10 Decision packet — `II.3 found inclusive-for`
+
+**Question.** Is a `for` over an inclusive range (`for i in a..=b`), tick-free or tick-bearing, IN (with
+Rust's meaning) or OUTSIDE (refused by both front-ends)?
+
+**What the docs say.** I.2.4's table: the tick-bearing `for v in a..b` row says "exclusive ranges only";
+the tick-free row names `a..b` with constant bounds, "unrolled `b − a` times". Part I's carried list:
+"The inclusive counted `for` (`a..=b`): I.2.4 admits exclusive ranges only and the interpreter refuses
+the inclusive one; corpus 0 → Phase C, with II.1's parity list." No decision states a meaning or a
+refusal.
+
+**What the code does.** The macro admits both (trybuild `zzq_16`, `zzq_25`); the simulator runs Rust's
+meaning; the interpreter refuses ("an inclusive range in a `for` (I.2.4: exclusive ranges only)"); the
+transpiler refuses ("only exclusive range `start..end` for-loops are supported"; for a ticking one the
+counted-loop message). Corpus 0 (no corpus module uses `..=` in a `for` header).
+
+**Options.**
+- **(a) IN.** `D` gains `for v in a..=b` ≡ Rust's. Tick-free: unroll `b − a + 1` times (an SV
+  `for (… ; i <= b; …)` needs no `b + 1`, so a bound at its type's maximum does not overflow).
+  Tick-bearing: the counter's exit test `c > e` instead of `c >= e`; at `e` = the type's maximum the
+  counter's increment overflows after the last iteration, so either the counter is one bit wider or that
+  bound is refused (R3-style). Changes: I.2.4's two rows, the interpreter's `for`, the transpiler
+  (`desugar.rs`, ~20 lines, written and reverted in Z.8; the counted-loop flattener for the ticking
+  case), a ui/pass case and a swept fixture.
+- **(b) OUTSIDE.** Both front-ends refuse with one message (a shared `front_end` rule, II.1's list);
+  I.2.4's rows say so. Changes: one shared rule, a ui/fail case, `front_end_parity_ui.rs`; no lowering.
+
+**Recommendation: (a), tick-free and tick-bearing**, refusing (as R3 would) only a ticking bound at its
+type's maximum: the Rust meaning is unambiguous, I.2.4's DESUGARED class is exactly this kind of form, and
+an author writing `0..=N-1` has no reason to expect a refusal. (b) is the smaller change if the user
+prefers to keep `D` minimal.
+
+### Z.11 Ledger and counts
+
+Before: **204 lines — 194 CLOSED, 10 OPEN**. After (G-K, `cargo test --test conformance_ledger` on
+`89596a6`): **219 lines — 215 CLOSED, 4 OPEN** — closed 9 of the 10 (all but II.1.3); added 12 found and
+closed (`stmt-match-guard`, `stmt-match-binder`, `bits-const`, `body-struct`, `impl-method`,
+`assoc-const-pattern`, `array-literal-register`, `logic-array-index`, `negated-literal-width`,
+`bitwrite-in-wider-context`, `nested-for-underscore`, `unsized-aggregate-literal`) and 3 OPEN
+(`inclusive-for` — owner decision, Z.10; `array-register-trailing-write`, `signed-local` — copper-codegen,
+Z.9). II.1.3 OPEN on one shape. Sweep tokens 186 → 234, run checks 216 → 249.
+
+### Z.12 The bare regression — measured
+
+The first bare run (on `da7d655`'s parent, `89596a6`) failed in G-J: the new fixtures' `Bits`/`Logic`
+consts are evaluated by the interpreter only (ConstEnv is integer-valued, the class of the five pinned
+`const_pattern_dut` rows) and `PS_TRIPS`, a const declared in a loop body, was read by neither side of the
+test's analysis half (which took top-level body items only). `da7d655`: the test reads nested body consts,
+as both evaluators now do, and pins the three. The second (on `da7d655`) failed on a full disk ("No space
+left on device"; the other worktrees' `target/` directories were deleted with the user's approval, 62 GiB
+freed). The third (on `da7d655`) failed in G-I: the projection test's source walker could not fold a
+ticking `for` bound naming a nested body const or `T::K`, explored the empty-range path and found no tick
+(`ps_body_const`, `ps_assoc_const`), and `ssr_ctor`'s struct temp carried the constructor body's spans,
+which map to no source statement. `4fb46eb`: the walker reads the module's body consts at any depth and a
+multi-segment path by its full name; the temp takes the statement's span (SV unchanged). The fourth (on
+`4fb46eb`) failed in `register_reconciliation`: `copper_analysis::reference_sv_registers` took the guard
+comparison `(v <= 8'd99)` in `ps_range_pattern`'s `always_ff` for a nonblocking assignment, so `v` and `k`
+looked like surplus flops. `89b3ef4`: an `ident <=` after an open parenthesis is no target.
+
+**The fifth: bare `tools/regression.sh` on `89b3ef4` (the final code commit; laptop; `paper` at `fac8930`): REGRESSION
+OK (224 s wall, warm caches).** 1589 passed, 0 failed, 16 ignored, 158 test binaries (G-C 131 test files);
+examples **32/32**; G-D 283 differential cases (3 ignored-with-reason), G-F 283 (3 skipped with a reason) —
+the 34 new fixture modules added; **G-G differential 2139 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0
+DISAGREE**, **reference 2151 PASS / 0 DISAGREE**; G-I 216 clocked related, 0 uncovered; G-J 82 const items
+compared / 25 outside both, 8 asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; **G-K `219 lines — 215
+CLOSED, 4 OPEN; 170 required by the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 234 sweep, 153 test, 123
+ui; 249 run checks`**, the 3 example fixtures PASS. Not run remotely (nothing pushed). After this run, docs
+only: III.3.6's counts, this section, CLAUDE.md.
