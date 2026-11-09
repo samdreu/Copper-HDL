@@ -126,6 +126,9 @@ const PARAMS: &[(&str, &[(&str, i64)])] = &[
     ("ripple_carry_adder", &[("N", 8)]),
     ("rotate_right", &[("N", 8), ("N_LOG", 3)]),
     ("shift_register", &[("N", 8), ("N_1", 7)]),
+    // A register accumulating in a tick-free `for` over a const-generic range (MEASUREMENTS §Y):
+    // not 1, so a dropped or single iteration shows.
+    ("tfr_generic_bound", &[("N", 5)]),
     ("wide_alu", &[("N", 32)]),
 ];
 

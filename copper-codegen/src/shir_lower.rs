@@ -150,6 +150,10 @@ struct Forwarding {
     map: Option<HashMap<String, SHIRExpr>>,
     reg_names: HashSet<String>,
     span: SourceSpan,
+    /// Inside the body of an SV `for`: the map is the one at the loop, minus the names the
+    /// body assigns or declares, and `advance` records nothing (see the `ForLoop` arm of
+    /// `lower_stmt_list`).
+    frozen: bool,
 }
 
 impl Forwarding {
@@ -159,6 +163,7 @@ impl Forwarding {
             map: None,
             reg_names: HashSet::new(),
             span: SourceSpan::default(),
+            frozen: false,
         }
     }
 
@@ -173,6 +178,7 @@ impl Forwarding {
             map: Some(HashMap::new()),
             reg_names,
             span,
+            frozen: false,
         }
     }
 
@@ -188,14 +194,20 @@ impl Forwarding {
     }
 
     /// Step past one statement, recording what it assigns. A no-op when disabled.
+    /// `rest` is the statements after it in its list (what may reassign a wire it declares).
     fn advance(
         &mut self,
         stmt: &CHIRStmt,
+        rest: &[CHIRStmt],
         renames: &HashMap<String, String>,
     ) -> Result<(), SHIRLowerError> {
+        if self.frozen {
+            return Ok(());
+        }
         if let Some(map) = self.map.as_mut() {
             extract_updates_from_stmts(
                 std::slice::from_ref(stmt),
+                rest,
                 &self.reg_names,
                 self.span,
                 renames,
@@ -232,6 +244,51 @@ fn is_staging_only(stmts: &[SHIRStmt]) -> bool {
     all_staging(stmts, &mut has_mem) && has_mem
 }
 
+/// The transpiler's refusal of a register assigned inside an SV `for` of a clocked body — a
+/// shape `chir_lower`'s temp rewrite leaves out (MEASUREMENTS §Y).
+pub const FOR_REGISTER_WRITE_MESSAGE: &str =
+    "a register of a clocked body is assigned inside a tick-free `for` in a form the transpiler \
+     does not rewrite (a struct register, or a name the loop body also binds); the SystemVerilog \
+     `for` it would emit drops the loop's writes. Accumulate into a fresh `let mut` declared \
+     just before the loop and assign the register after it";
+
+/// Every name a `for` body assigns (`n = e`, `n[i] = e`) or declares, at any depth.
+fn for_body_names(body: &[CHIRStmt]) -> Vec<String> {
+    fn walk(stmts: &[CHIRStmt], out: &mut Vec<String>) {
+        for s in stmts {
+            let name = match s {
+                CHIRStmt::Assign { target, .. } => Some(target),
+                CHIRStmt::Wire { name, .. } => Some(name),
+                CHIRStmt::IndexAssign { base, .. } => Some(base),
+                CHIRStmt::If { then_body, else_body, .. } => {
+                    walk(then_body, out);
+                    if let Some(e) = else_body {
+                        walk(e, out);
+                    }
+                    None
+                }
+                CHIRStmt::Match { arms, .. } => {
+                    arms.iter().for_each(|a| walk(&a.body, out));
+                    None
+                }
+                CHIRStmt::ForLoop { body, .. } => {
+                    walk(body, out);
+                    None
+                }
+                _ => None,
+            };
+            if let Some(n) = name {
+                if !out.contains(n) {
+                    out.push(n.clone());
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(body, &mut out);
+    out
+}
+
 fn lower_stmt_list(
     stmts: &[CHIRStmt],
     promoted_names: &std::collections::HashSet<String>,
@@ -240,7 +297,7 @@ fn lower_stmt_list(
     fwd: &mut Forwarding,
 ) -> Result<Vec<SHIRStmt>, SHIRLowerError> {
     let mut out = Vec::new();
-    for stmt in stmts {
+    for (i, stmt) in stmts.iter().enumerate() {
         match stmt {
             // A reassignment of a known combinational wire → another blocking
             // assign to it (`name = value;`). The single `logic` declaration is
@@ -341,9 +398,36 @@ fn lower_stmt_list(
                     out.push(SHIRStmt::Match { scrutinee, edge_scrutinee, arms: shir_arms });
                 }
             }
-            CHIRStmt::ForLoop { var, start, end, body, .. } => {
+            CHIRStmt::ForLoop { var, start, end, body, span } => {
+                // An SV `for` (Verilator unrolls it; SPEC I.2.4): its body is lowered ONCE, so
+                // it cannot take the forwarding walk's per-statement substitution — an
+                // iteration's assignment would never reach the next, nor the statements after
+                // the loop. Inside it a name the body assigns or declares is read BY NAME (its
+                // current blocking value in the `always_comb`, which every earlier statement
+                // of the segment wrote in forwarded form), and the copy is frozen, recording
+                // nothing; names the body leaves alone keep their forwarded value, which the
+                // loop cannot change. `chir_lower` gives every outer name a clocked body's
+                // `for` assigns a combinational temp, so no register is assigned here; one that
+                // still is (a shape the temp rewrite leaves out) is refused rather than emitted
+                // without the loop's writes (MEASUREMENTS §Y).
+                let names = for_body_names(body);
+                if fwd.map.is_some() {
+                    if let Some(name) = names.iter().find(|n| fwd.reg_names.contains(*n)) {
+                        return Err(SHIRLowerError::UnsupportedConstruct {
+                            description: format!("{FOR_REGISTER_WRITE_MESSAGE} (`{name}`)"),
+                            span: *span,
+                        });
+                    }
+                }
+                let mut body_fwd = fwd.clone();
+                if let Some(m) = body_fwd.map.as_mut() {
+                    for n in &names {
+                        m.remove(n);
+                    }
+                    body_fwd.frozen = true;
+                }
                 let body_stmts =
-                    lower_stmt_list(body, promoted_names, renames, wire_types, &mut fwd.clone())?;
+                    lower_stmt_list(body, promoted_names, renames, wire_types, &mut body_fwd)?;
                 if !body_stmts.is_empty() {
                     out.push(SHIRStmt::ForLoop {
                         var: var.clone(),
@@ -392,7 +476,7 @@ fn lower_stmt_list(
             // this segment see the value it produced.
             _ => {}
         }
-        fwd.advance(stmt, renames)?;
+        fwd.advance(stmt, &stmts[i + 1..], renames)?;
     }
     Ok(out)
 }
@@ -777,7 +861,7 @@ fn extract_reg_updates_shared(
     forwarding: &mut HashMap<String, SHIRExpr>,
 ) -> Result<Vec<SHIRRegUpdate>, SHIRLowerError> {
     let reg_names = reg_name_set(registers, promoted_names);
-    extract_updates_from_stmts(stmts, &reg_names, span, renames, forwarding)
+    extract_updates_from_stmts(stmts, &[], &reg_names, span, renames, forwarding)
 }
 
 /// Recursive helper that processes statements in order, threading a forwarding map
@@ -799,8 +883,42 @@ fn last_update_for(updates: &[SHIRRegUpdate], target: &str) -> Option<SHIRExpr> 
         .map(|u| u.next_value.clone())
 }
 
+/// Whether a statement of `stmts` assigns `name` (`name = e`) or declares it again (a
+/// shadowing `let`, or the next copy of an unrolled body's `let` — one SV signal either way),
+/// in a branch or arm at any depth but not inside a `for`: the body of an SV `for` is lowered
+/// once with a copy of the forwarding and reads the wire by name (see the `ForLoop` arm of
+/// `lower_stmt_list`).
+fn stmts_reassign(stmts: &[CHIRStmt], name: &str) -> bool {
+    stmts.iter().any(|s| match s {
+        CHIRStmt::Assign { target, .. } => target == name,
+        CHIRStmt::Wire { name: n, .. } => n == name,
+        CHIRStmt::If { then_body, else_body, .. } => {
+            stmts_reassign(then_body, name)
+                || else_body.as_ref().is_some_and(|e| stmts_reassign(e, name))
+        }
+        CHIRStmt::Match { arms, .. } => arms.iter().any(|a| stmts_reassign(&a.body, name)),
+        _ => false,
+    })
+}
+
+/// Whether a statement of `stmts` writes one bit of `name` (`name[i] = e`), at any depth,
+/// nested `for` bodies included.
+fn stmts_bit_write(stmts: &[CHIRStmt], name: &str) -> bool {
+    stmts.iter().any(|s| match s {
+        CHIRStmt::IndexAssign { base, .. } => base == name,
+        CHIRStmt::If { then_body, else_body, .. } => {
+            stmts_bit_write(then_body, name)
+                || else_body.as_ref().is_some_and(|e| stmts_bit_write(e, name))
+        }
+        CHIRStmt::Match { arms, .. } => arms.iter().any(|a| stmts_bit_write(&a.body, name)),
+        CHIRStmt::ForLoop { body, .. } => stmts_bit_write(body, name),
+        _ => false,
+    })
+}
+
 fn extract_updates_from_stmts(
     stmts: &[CHIRStmt],
+    after: &[CHIRStmt],
     reg_names: &HashSet<String>,
     _span: SourceSpan,
     renames: &HashMap<String, String>,
@@ -813,7 +931,7 @@ fn extract_updates_from_stmts(
         subst_vars(rename_vars(expr, renames), fwd)
     };
 
-    for stmt in stmts {
+    for (i, stmt) in stmts.iter().enumerate() {
         match stmt {
             CHIRStmt::Assign { target, value, .. } => {
                 let resolved = resolve(lower_expr(value)?, forwarding);
@@ -868,7 +986,28 @@ fn extract_updates_from_stmts(
                 // the simulator that write is already visible. Ports keep
                 // reading the wire's comb form, which post-edge observation
                 // sees AFTER the commit, so they need no mux.
-                if resolved != plain || contains_mem_index(&resolved) {
+                //
+                // And ALSO when a later statement of the same list reassigns the wire
+                // (`let mut g = a; g = g + 1;`, at any depth outside a `for`) or declares
+                // it again (`let s = ..; .. let s = ..;`, as every unrolled copy does): that
+                // assignment's own resolution reads `g`, which must mean THIS value. Left
+                // unrecorded, the walk entered `g → g + 1` with the name `g` standing for
+                // the wire's FINAL `always_comb` value, so both the next blocking assign
+                // (`g = ((g + 1) + 1)`) and every edge consumer counted the earlier
+                // increments twice (MEASUREMENTS §Y.2; corpus 0 — every corpus wire
+                // accumulator reassigned itself only inside a `for`, which this walk did not
+                // see until the unroll of §Y.1 put the copies in the segment).
+                //
+                // Not when the list also writes one of its bits (`s[0] = d`): an `IndexAssign`
+                // to a wire is not tracked here (it has no whole-value form without the
+                // wire's width), so a recorded value would go stale at it; such a wire stays
+                // read by name, as it was before.
+                let rest_reassign = |l: &[CHIRStmt]| stmts_reassign(l, name) && !stmts_bit_write(l, name);
+                if resolved != plain
+                    || contains_mem_index(&resolved)
+                    || (rest_reassign(&stmts[i + 1..]) && !stmts_bit_write(after, name))
+                    || (rest_reassign(after) && !stmts_bit_write(&stmts[i + 1..], name))
+                {
                     forwarding.insert(name.clone(), resolved);
                 }
             }
@@ -878,11 +1017,11 @@ fn extract_updates_from_stmts(
 
                 // Each branch starts from the current forwarding state.
                 let mut then_fwd = forwarding.clone();
-                let then_updates = extract_updates_from_stmts(then_body, reg_names, *s, renames, &mut then_fwd)?;
+                let then_updates = extract_updates_from_stmts(then_body, &[], reg_names, *s, renames, &mut then_fwd)?;
 
                 let mut else_fwd = forwarding.clone();
                 let else_updates = else_body.as_ref()
-                    .map(|eb| extract_updates_from_stmts(eb, reg_names, *s, renames, &mut else_fwd))
+                    .map(|eb| extract_updates_from_stmts(eb, &[], reg_names, *s, renames, &mut else_fwd))
                     .transpose()?
                     .unwrap_or_default();
 
@@ -963,7 +1102,7 @@ fn extract_updates_from_stmts(
                 let arm_updates: Vec<Vec<SHIRRegUpdate>> = arms.iter()
                     .map(|arm| {
                         let mut arm_fwd = forwarding.clone();
-                        extract_updates_from_stmts(&arm.body, reg_names, *s, renames, &mut arm_fwd)
+                        extract_updates_from_stmts(&arm.body, &[], reg_names, *s, renames, &mut arm_fwd)
                     })
                     .collect::<Result<_, _>>()?;
 
@@ -1013,6 +1152,16 @@ fn extract_updates_from_stmts(
                     };
                     forwarding.insert(target.clone(), case_val.clone());
                     updates.push(SHIRRegUpdate { target, next_value: case_val });
+                }
+            }
+
+            // An SV `for` (see the `ForLoop` arm of `lower_stmt_list`): after it, a name its
+            // body assigns or declares stands for its own final `always_comb` value. For the
+            // temp `chir_lower` accumulates into that is the value the loop leaves (the temp is
+            // never assigned again); the loop's write-back assignment follows it.
+            CHIRStmt::ForLoop { body, .. } => {
+                for n in for_body_names(body) {
+                    forwarding.insert(n.clone(), SHIRExpr::Var(n));
                 }
             }
 

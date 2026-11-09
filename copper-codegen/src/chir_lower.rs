@@ -622,6 +622,19 @@ pub(crate) fn subst_in_place(e: &mut ExprType, subst: &std::collections::HashMap
             subst_in_place(&mut a.right, subst);
         }
         ExprType::Loop(l) => subst_in_stmts(&mut l.body, subst),
+        // A nested `for` (a clocked `for`'s temp rename reaches it): its range, and its body
+        // with the loop variable shadowing a key of the same name.
+        ExprType::ForLoop(f) => {
+            subst_in_place(&mut f.iter, subst);
+            let var: String = f.pat_text.chars().filter(|c| !c.is_whitespace()).collect();
+            if subst.contains_key(&var) {
+                let mut inner = subst.clone();
+                inner.remove(&var);
+                subst_in_stmts(&mut f.body, &inner);
+            } else {
+                subst_in_stmts(&mut f.body, subst);
+            }
+        }
         ExprType::While(w) => {
             subst_in_place(&mut w.condition, subst);
             subst_in_stmts(&mut w.body, subst);
@@ -2760,6 +2773,8 @@ pub(crate) struct LowerCtx<'a> {
     /// The pre-loop (scalar) registers of a sequential body, whose bit writes are
     /// whole-value updates (MEASUREMENTS §U.3).
     scalar_regs: std::collections::HashSet<String>,
+    /// The temps a clocked `for` accumulates into (`<name>__for<k>`) so far: `k`.
+    for_temps: usize,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -2790,6 +2805,7 @@ impl<'a> LowerCtx<'a> {
             file_consts: Vec::new(),
             narrow_consts: std::collections::HashMap::new(),
             scalar_regs: std::collections::HashSet::new(),
+            for_temps: 0,
         }
     }
 }
@@ -3732,11 +3748,82 @@ fn lower_expr_stmt(
                     return Ok(());
                 }
             }
+            // A CLOCKED body's `for` that assigns a name declared outside it (a register, or a
+            // wire of the segment) accumulates into a fresh combinational temp instead:
+            //
+            //     for .. { f = f + 1 }   ⇒   let f__forK = f; for .. { f__forK = f__forK + 1 } f = f__forK;
+            //
+            // The same program (the temp is the name's value at every point of the loop). The
+            // SV `for` lowers its body ONCE, against the segment's forwarding as it stands at the
+            // loop (`shir_lower`), and only a combinational wire accumulates there — by name, in
+            // the `always_comb` — so a register assigned in the body lost every iteration's write
+            // (`f <= (f ^ a)` for `for _ in 0..4 { f = f + 1 }; f = f ^ a`; line `II.3 found
+            // register-in-tickfree-for`, MEASUREMENTS §Y). The write-back is one assignment after
+            // the loop, which the forwarding walk handles like any other. A const-generic bound
+            // is served the same way (SV `for` unrolled by the elaborator, I.2.4).
+            let temps = if ctx.clock_name.is_empty() {
+                Vec::new()
+            } else {
+                for_outer_assigned(&f.body, &var, ctx)
+            };
+            let mut body_src = f.body.clone();
+            let mut write_back: Vec<(String, String)> = Vec::new();
+            if !temps.is_empty() {
+                let mut subst = std::collections::HashMap::new();
+                for n in &temps {
+                    let tmp = format!("{n}__for{}", ctx.for_temps);
+                    write_back.push((n.clone(), tmp.clone()));
+                    ctx.for_temps += 1;
+                    let path = |t: &str| ExprType::Path(copper_core::frontend_ir::ExprPath { path_text: t.to_string(), span });
+                    if let Some(sname) = ctx.struct_locals.get(n).cloned() {
+                        // A struct local: one wire per field, `<tmp>_<f> = <n>_<f>`, the form
+                        // every struct `let` takes; the write-back is a whole-struct copy.
+                        for (fname, fty) in struct_fields(&sname, ctx, span)? {
+                            let wire = format!("{tmp}_{fname}");
+                            ctx.symbols.insert(wire.clone(), fty.clone());
+                            out.push(CHIRStmt::Wire {
+                                name: wire,
+                                ty: fty,
+                                value: CHIRExpr::Var(format!("{n}_{fname}")),
+                                span,
+                            });
+                        }
+                        ctx.struct_locals.insert(tmp.clone(), sname);
+                    } else {
+                        // `let mut <tmp> = <n>;`, lowered as the author's would be (its type
+                        // inferred from `n`'s).
+                        let decl = RawStmt {
+                            order: 0,
+                            kind: RawStmtKind::Local(copper_core::frontend_ir::LocalStmt {
+                                is_mut: true,
+                                ty: None,
+                                name: tmp.clone(),
+                                init: Some(path(n)),
+                                attrs: Vec::new(),
+                                span,
+                            }),
+                            text: String::new(),
+                            span,
+                        };
+                        lower_stmt(&decl, ctx, out)?;
+                    }
+                    subst.insert(n.clone(), path(&tmp));
+                }
+                subst_in_stmts(&mut body_src, &subst);
+            }
             ctx.comb_for_depth += 1;
-            let body = lower_stmts(&f.body, ctx);
+            let body = lower_stmts(&body_src, ctx);
             ctx.comb_for_depth -= 1;
             let body = body?;
             out.push(CHIRStmt::ForLoop { var, start, end, body, span });
+            for (n, tmp) in write_back {
+                let back = assign_stmt(
+                    &n,
+                    ExprType::Path(copper_core::frontend_ir::ExprPath { path_text: tmp, span }),
+                    span,
+                );
+                lower_stmt(&back, ctx, out)?;
+            }
         }
 
         ExprType::Await(await_expr) => {
@@ -6699,6 +6786,104 @@ fn stmts_write_array_reg(stmts: &[RawStmt], ctx: &LowerCtx) -> bool {
         RawStmtKind::Expr(es) => expr(&es.expr, ctx),
         _ => false,
     })
+}
+
+/// The names a clocked tick-free `for` body assigns (`n = e`, `n[i] = e`, at any depth, nested
+/// `for`s included) that it does not declare: the ones that get a temp (see the `ForLoop` arm of
+/// `lower_expr_stmt`). In first-assignment order, so the temps are numbered deterministically.
+/// Left out: a name the body (or a nested `for`'s pattern) also binds — a shadowing the rename
+/// would not respect — an array register (unrolled, I.2.4) or memory, a name without a type,
+/// and the loop variable.
+fn for_outer_assigned(body: &[RawStmt], loop_var: &str, ctx: &LowerCtx) -> Vec<String> {
+    fn bound(stmts: &[RawStmt], out: &mut std::collections::HashSet<String>) {
+        for s in stmts {
+            match &s.kind {
+                RawStmtKind::Local(l) => {
+                    out.insert(l.name.clone());
+                    if let Some(e) = &l.init {
+                        bound_expr(e, out);
+                    }
+                }
+                RawStmtKind::Expr(es) => bound_expr(&es.expr, out),
+                RawStmtKind::Item(_) => {}
+            }
+        }
+    }
+    fn bound_expr(e: &ExprType, out: &mut std::collections::HashSet<String>) {
+        match e {
+            ExprType::ForLoop(f) => {
+                out.insert(f.pat_text.chars().filter(|c| !c.is_whitespace()).collect());
+                bound(&f.body, out);
+            }
+            ExprType::Block(b) => bound(&b.stmts, out),
+            ExprType::If(f) => {
+                bound(&f.then_block, out);
+                if let Some(e) = &f.else_branch {
+                    bound_expr(e, out);
+                }
+            }
+            ExprType::Match(m) => {
+                for a in &m.arms {
+                    // A match arm's binders: any identifier in its pattern text.
+                    for w in a.pattern_text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                        if !w.is_empty() {
+                            out.insert(w.to_string());
+                        }
+                    }
+                    bound_expr(&a.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn assigned(stmts: &[RawStmt], out: &mut Vec<String>) {
+        for s in stmts {
+            if let RawStmtKind::Expr(es) = &s.kind {
+                assigned_expr(&es.expr, out);
+            }
+        }
+    }
+    fn assigned_expr(e: &ExprType, out: &mut Vec<String>) {
+        match e {
+            ExprType::Assign(a) => {
+                let mut target = a.left.as_ref();
+                while let ExprType::Index(i) = target {
+                    target = i.base.as_ref();
+                }
+                if let ExprType::Path(p) = target {
+                    if let Some(n) = simple_ident(&p.path_text) {
+                        if !out.contains(&n) {
+                            out.push(n);
+                        }
+                    }
+                }
+            }
+            ExprType::ForLoop(f) => assigned(&f.body, out),
+            ExprType::Block(b) => assigned(&b.stmts, out),
+            ExprType::If(f) => {
+                assigned(&f.then_block, out);
+                if let Some(e) = &f.else_branch {
+                    assigned_expr(e, out);
+                }
+            }
+            ExprType::Match(m) => m.arms.iter().for_each(|a| assigned_expr(&a.body, out)),
+            _ => {}
+        }
+    }
+    let mut binds = std::collections::HashSet::new();
+    bound(body, &mut binds);
+    let mut names = Vec::new();
+    assigned(body, &mut names);
+    names
+        .into_iter()
+        .filter(|n| {
+            n != loop_var
+                && !binds.contains(n)
+                && !ctx.array_regs.contains_key(n)
+                && !ctx.memories.contains_key(n)
+                && (ctx.struct_locals.contains_key(n) || ctx.symbols.get(n).is_some())
+        })
+        .collect()
 }
 
 fn stmts_contain_tick(stmts: &[RawStmt]) -> bool {
