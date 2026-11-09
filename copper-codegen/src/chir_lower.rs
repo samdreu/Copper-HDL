@@ -3357,7 +3357,9 @@ fn lower_struct_binding(
     for field in &s.fields {
         let wire_name = format!("{base}_{}", field.member);
         let ty = resolve_field_type(&struct_name, &field.member, &field.expr, field.span, ctx)?;
-        let value = lower_expr(&field.expr, ctx)?;
+        // A bare literal field (`S { x: 1, .. }` with `x: u8`) takes the field's width; it
+        // stayed at the unsized default (`s_x = 64'd1`) until 2026-11-08 (MEASUREMENTS §Z.6).
+        let value = retype_default_literals_in_values(lower_expr(&field.expr, ctx)?, type_width(&ty));
         ctx.symbols.insert(wire_name.clone(), ty.clone());
         out.push(CHIRStmt::Wire {
             name: wire_name,
@@ -3582,6 +3584,99 @@ fn expr_reads_ident(e: &ExprType, name: &str) -> bool {
         ExprType::Await(a) => r(&a.base),
         ExprType::Macro(m) => m.tokens_text.contains(name),
         _ => false,
+    }
+}
+
+/// A statement `match`'s arms as an `if` chain (`None` when a pattern has no comparison form —
+/// an enum variant with a payload, a tuple pattern over a scrutinee that is no tuple value).
+fn match_arms_as_if_chain(
+    scrutinee: &CHIRExpr,
+    arms: Vec<CHIRMatchArm>,
+    span: SourceSpan,
+    ctx: &LowerCtx,
+) -> Result<Option<Vec<CHIRStmt>>, CHIRLowerError> {
+    fn test(s: &CHIRExpr, p: &CHIRPattern, span: SourceSpan, ctx: &LowerCtx) -> Result<Option<Option<CHIRExpr>>, CHIRLowerError> {
+        Ok(match p {
+            CHIRPattern::Wildcard => Some(None),
+            CHIRPattern::Lit(l) => {
+                let (s, l) = balance_binop_literals(s.clone(), CHIRExpr::Lit(l.clone()), span, false, ctx)?;
+                Some(Some(CHIRExpr::BinOp { left: Box::new(s), op: CHIRBinOp::Eq, right: Box::new(l) }))
+            }
+            CHIRPattern::Const { name } => Some(Some(CHIRExpr::BinOp {
+                left: Box::new(s.clone()),
+                op: CHIRBinOp::Eq,
+                right: Box::new(CHIRExpr::Var(name.clone())),
+            })),
+            CHIRPattern::Tuple(ps) => {
+                let CHIRExpr::Concat(parts) = s else { return Ok(None) };
+                if parts.len() != ps.len() {
+                    return Ok(None);
+                }
+                let mut acc: Option<CHIRExpr> = None;
+                for (e, p) in parts.iter().zip(ps) {
+                    match test(e, p, span, ctx)? {
+                        None => return Ok(None),
+                        Some(None) => {}
+                        Some(Some(c)) => acc = and_cond(acc, c),
+                    }
+                }
+                Some(acc)
+            }
+            CHIRPattern::EnumVariant { .. } => None,
+        })
+    }
+    // Build back to front: each arm's `else` is the rest of the chain.
+    let mut rest: Option<Vec<CHIRStmt>> = None;
+    for arm in arms.into_iter().rev() {
+        let mut alts: Option<CHIRExpr> = None;
+        let mut unconditional = false;
+        for p in &arm.patterns {
+            match test(scrutinee, p, span, ctx)? {
+                None => return Ok(None),
+                Some(None) => unconditional = true,
+                Some(Some(c)) => {
+                    alts = Some(match alts {
+                        None => c,
+                        Some(a) => CHIRExpr::BinOp { left: Box::new(a), op: CHIRBinOp::LogicalOr, right: Box::new(c) },
+                    })
+                }
+            }
+        }
+        let pat_cond = if unconditional { None } else { alts };
+        let cond = match (pat_cond, arm.guard) {
+            (None, None) => None,
+            (Some(c), None) | (None, Some(c)) => Some(c),
+            (Some(c), Some(g)) => Some(CHIRExpr::BinOp { left: Box::new(c), op: CHIRBinOp::LogicalAnd, right: Box::new(g) }),
+        };
+        rest = Some(match cond {
+            None => arm.body,
+            Some(condition) => vec![CHIRStmt::If { condition, then_body: arm.body, else_body: rest, span: arm.span }],
+        });
+    }
+    Ok(Some(rest.unwrap_or_default()))
+}
+
+/// `s.x` (or `s.x[i]`) with `s` a struct local, as the place of its field's net (`s_x`,
+/// `s_x[i]`); `None` for any other place.
+fn struct_field_place(e: &ExprType, ctx: &LowerCtx) -> Option<ExprType> {
+    match e {
+        ExprType::Field(f) => {
+            let ExprType::Path(p) = f.base.as_ref() else { return None };
+            let base = compact_ident(&p.path_text);
+            ctx.struct_locals.contains_key(&base).then(|| {
+                ExprType::Path(copper_core::frontend_ir::ExprPath {
+                    path_text: format!("{base}_{}", f.member),
+                    span: f.span,
+                })
+            })
+        }
+        ExprType::Index(i) => {
+            let base = struct_field_place(&i.base, ctx)?;
+            let mut i2 = i.clone();
+            i2.base = Box::new(base);
+            Some(ExprType::Index(i2))
+        }
+        _ => None,
     }
 }
 
@@ -3963,6 +4058,14 @@ fn lower_expr_stmt(
             a2.left = Box::new(ExprType::Index(ix2));
             return lower_expr_stmt(&ExprType::Assign(a2), span, ctx, out);
         }
+        ExprType::Assign(assign) if struct_field_place(&assign.left, ctx).is_some() => {
+            // `s.x = e` (or `s.x[i] = e`) on a struct local is an assignment to its field's own
+            // net, `s_x` — "one local per field", I.2.4 (line `II.3 found field-assign`,
+            // MEASUREMENTS §Z.6). Until 2026-11-08 refused ("complex assignment targets").
+            let mut a2 = assign.clone();
+            a2.left = Box::new(struct_field_place(&assign.left, ctx).expect("checked"));
+            return lower_expr_stmt(&ExprType::Assign(a2), span, ctx, out);
+        }
         ExprType::Assign(assign) => {
             // Tuple destructuring: `(a, b) = rhs` becomes one assignment per
             // element, each taking the corresponding projection of `rhs`.
@@ -4207,6 +4310,16 @@ fn lower_expr_stmt(
                 };
                 arms.push(CHIRMatchArm { patterns, guard, body: body_stmts, span });
             }
+            // A guarded arm has no `case` label: a statement `match` with one is the `if`
+            // chain Rust's arm order means — each arm's patterns, then its guard (SPEC I.2.4;
+            // until 2026-11-08 refused downstream as a "tuple-pattern match", line `II.3 found
+            // stmt-match-guard`, MEASUREMENTS §Z.5).
+            if arms.iter().any(|a| a.guard.is_some()) {
+                if let Some(chain) = match_arms_as_if_chain(&scrutinee, arms.clone(), span, ctx)? {
+                    out.extend(chain);
+                    return Ok(());
+                }
+            }
             out.push(CHIRStmt::Match { scrutinee, arms, span });
         }
 
@@ -4363,6 +4476,19 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
             let is_shift = matches!(op, CHIRBinOp::Shl | CHIRBinOp::Shr);
             let (left, right) = balance_binop_literals(left, right, bin.span, is_shift, ctx)?;
             let (left, right) = widen_to_usize(&op, left, right, ctx);
+            // `u >= 0` on an unsigned value is true (Verilator's `-Wall` refuses the constant
+            // comparison as UNSIGNED), and `true && e` is `e`: the shapes a range pattern's
+            // guard takes for `0..=k` (line `II.3 found range-pattern`, MEASUREMENTS §Z.5).
+            let is_true = |e: &CHIRExpr| matches!(e, CHIRExpr::Lit(l) if l.ty == CHIRType::Bool && l.value == 1);
+            if op == CHIRBinOp::Gte
+                && matches!(&right, CHIRExpr::Lit(l) if l.value == 0)
+                && !matches!(&left, CHIRExpr::SignCast { signed: true, .. })
+            {
+                return Ok(CHIRExpr::Lit(CHIRLit { ty: CHIRType::Bool, value: 1 }));
+            }
+            if op == CHIRBinOp::LogicalAnd && is_true(&left) {
+                return Ok(right);
+            }
             Ok(signed_binop(op, left, right))
         }
 
@@ -4657,6 +4783,20 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
         // (see the matching arm in `infer_type_from_expr`).
         ExprType::Repeat(rep) => lower_repeat(rep, ctx),
 
+        // `[e0, e1, …]` — the packed vector `[N-1:0][W-1:0]` its declared type describes,
+        // element 0 in the low bits (the layout `lower_repeat` and `Bits<N>` share), so the
+        // concatenation lists the elements last first (line `II.3 found array-literal`,
+        // MEASUREMENTS §Z.4). A binding's declared element width types bare literals.
+        ExprType::Array(a) => {
+            let parts = a
+                .elements
+                .iter()
+                .rev()
+                .map(|e| lower_expr(e, ctx))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(CHIRExpr::Concat(parts))
+        }
+
         // A block used as an expression (e.g. an `if`/`else` branch) evaluates to
         // its tail expression.
         ExprType::Block(b) => extract_block_expr_value(&b.stmts, b.span, ctx),
@@ -4905,13 +5045,14 @@ fn lower_match_as_chain(
                 match e {
                     PatElem::Lit(lit) => {
                         let sc = lower_expr(scrut_elems[i], ctx)?;
+                        // A bare literal element takes its scrutinee element's width, as an
+                        // operand of `==` does (`k == 8'd1`, not `k == 64'd1`, a `-Wall`
+                        // WIDTHEXPAND; MEASUREMENTS §Z.5).
+                        let (sc, lit) =
+                            balance_binop_literals(sc, CHIRExpr::Lit(lit.clone()), span, false, ctx)?;
                         alt_cond = and_cond(
                             alt_cond,
-                            CHIRExpr::BinOp {
-                                left: Box::new(sc),
-                                op: CHIRBinOp::Eq,
-                                right: Box::new(CHIRExpr::Lit(lit.clone())),
-                            },
+                            CHIRExpr::BinOp { left: Box::new(sc), op: CHIRBinOp::Eq, right: Box::new(lit) },
                         );
                     }
                     PatElem::Const(name) => {
@@ -5311,6 +5452,13 @@ fn retype_default_literals_in_values(e: CHIRExpr, width: Width) -> CHIRExpr {
             then_val: recurse(then_val),
             else_val: recurse(else_val),
         },
+        // An array value (`[7; 4]`, `[1, 2, 3, 4]`): its elements, at the element width a
+        // binding's type gives (`type_width` of an array is its element's). Until 2026-11-08 a
+        // bare literal element stayed at the unsized default, so `[7u8-typed; 4]` emitted four
+        // 64-bit words (MEASUREMENTS §Z.4).
+        CHIRExpr::Concat(parts) => CHIRExpr::Concat(
+            parts.into_iter().map(|p| retype_default_literals_in_values(p, width.clone())).collect(),
+        ),
         CHIRExpr::Case { scrutinee, arms, default } => CHIRExpr::Case {
             scrutinee, // a selector, not a value
             arms: arms

@@ -3,6 +3,7 @@ pub mod file_consts;
 pub mod chir_lower;
 pub mod control_extract;
 pub mod for_continue;
+pub mod desugar;
 pub mod shir_lower;
 pub mod vlir_lower;
 pub mod emit;
@@ -82,6 +83,9 @@ pub fn lower_fir_to_chir(
     // the pipeline below already lowers correctly. No-op for linear modules.
     let source = fir;
     let mut fir = fir.clone();
+    // Body-local and associated consts hoisted to file scope, `v op= e` → `v = v op e` (SPEC
+    // I.2.4, MEASUREMENTS §Z.3), before any pass looks at the body.
+    desugar::desugar(&mut fir);
     // A `continue` of a tick-free `for` → the rest of the iteration under the negated
     // condition (SPEC I.2.4, MEASUREMENTS §U.1), before any pass looks at a loop body.
     for_continue::eliminate_tickfree_continue(&mut fir);
@@ -516,8 +520,11 @@ fn checked_fir_for_target(
     // D-21 H1 (decided 2026-11-07): the macro's rule, same function, same message.
     copper_analysis::check_held_preloop_values(target).map_err(|e| e.to_string())?;
     {
+        // The body's own `const` items are constants too (I.2.4, I.14.4; line `II.3 found
+        // body-const`, MEASUREMENTS §Z.3): R5 below folds a bound that names one.
+        let body_consts = body_const_items(target);
         let env = copper_analysis::consts::ConstEnv::from_items(
-            prepared.file_scope.const_source.iter().map(String::as_str),
+            prepared.file_scope.const_source.iter().map(String::as_str).chain(body_consts.iter().map(String::as_str)),
         );
         // A tuple-struct constructor is a `const` call too (rustc's E0015 note: "calls
         // in constants are limited to constant functions, tuple structs and tuple

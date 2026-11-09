@@ -98,6 +98,7 @@ impl Module {
             const_vals: RefCell::new(HashMap::new()),
             enums: HashMap::new(),
             structs: HashMap::new(),
+            struct_tys: HashMap::new(),
             fns: HashMap::new(),
             methods: HashMap::new(),
             tuple_structs: HashMap::new(),
@@ -133,11 +134,16 @@ impl Module {
             }
             other => return Err(RefError::Parse(format!("unknown #[hardware] mode `{other}`"))),
         }
-        // Body-local items (a `const`, an `enum`, a helper `fn`).
+        // Body-local items (a `const`, an `enum`, a helper `fn`), and a `const` declared in a
+        // nested block (a loop body; I.2.4 — visible in its block, which a body that compiles
+        // never names outside it; 2026-11-08, MEASUREMENTS §Z.3).
         for s in &item.block.stmts {
             if let Stmt::Item(it) = s {
                 collect_item(it, &mut prog)?;
             }
+        }
+        for c in nested_body_consts(&item.block) {
+            collect_item(&Item::Const(c), &mut prog)?;
         }
         // Const generics.
         for g in &item.sig.generics.params {
@@ -599,6 +605,9 @@ fn collect_item(it: &Item, prog: &mut Program) -> Result<(), RefError> {
                 _ => Vec::new(),
             };
             prog.structs.insert(s.ident.to_string(), fields);
+            if let syn::Fields::Named(n) = &s.fields {
+                prog.struct_tys.insert(s.ident.to_string(), n.named.iter().map(|f| f.ty.clone()).collect());
+            }
         }
         Item::Fn(f) => {
             if hardware_mode(f).is_none() {
@@ -839,6 +848,7 @@ impl ConstScope {
             const_vals: RefCell::new(HashMap::new()),
             enums: HashMap::new(),
             structs: HashMap::new(),
+            struct_tys: HashMap::new(),
             fns: HashMap::new(),
             methods: HashMap::new(),
             tuple_structs: HashMap::new(),
@@ -855,6 +865,9 @@ impl ConstScope {
                 if let Stmt::Item(it) = s {
                     collect_item(it, &mut prog)?;
                 }
+            }
+            for c in nested_body_consts(&f.block) {
+                collect_item(&Item::Const(c), &mut prog)?;
             }
         }
         Ok(ConstScope { prog })
@@ -991,4 +1004,25 @@ fn check_const_asserts(item: &ItemFn, prog: &Program) -> Result<(), RefError> {
         }
     }
     Ok(())
+}
+
+/// The `const` items of a body's nested blocks (not its top level, which the caller reads).
+fn nested_body_consts(block: &syn::Block) -> Vec<syn::ItemConst> {
+    struct V(Vec<syn::ItemConst>, usize);
+    impl<'a> Visit<'a> for V {
+        fn visit_block(&mut self, b: &'a syn::Block) {
+            self.1 += 1;
+            syn::visit::visit_block(self, b);
+            self.1 -= 1;
+        }
+        fn visit_item_const(&mut self, c: &'a syn::ItemConst) {
+            if self.1 > 1 {
+                self.0.push(c.clone());
+            }
+        }
+        fn visit_item_fn(&mut self, _: &'a syn::ItemFn) {}
+    }
+    let mut v = V(Vec::new(), 0);
+    v.visit_block(block);
+    v.0
 }

@@ -64,6 +64,9 @@ pub struct Program {
     pub enums: HashMap<String, Vec<String>>,
     /// Struct name → field names (declaration order).
     pub structs: HashMap<String, Vec<String>>,
+    /// Struct name → each named field's declared type (declaration order): a bare literal
+    /// field (`S { y: 1 }`) takes it, as rustc types it (2026-11-08, MEASUREMENTS §Z.6).
+    pub struct_tys: HashMap<String, Vec<syn::Type>>,
     /// Tuple structs, by name: each field's declared type. A call of the name is the
     /// constructor (I.14.4: rustc admits it in a constant; 2026-11-08, MEASUREMENTS §V.4).
     pub tuple_structs: HashMap<String, Vec<syn::Type>>,
@@ -805,8 +808,13 @@ impl<'a> Exec<'a> {
         match pat {
             Pat::Wild(_) => Ok(true),
             Pat::Ident(pi) => {
-                if pi.subpat.is_some() {
-                    return Err(unsup("an `@` pattern"));
+                // `n @ p`: matches what `p` matches, and binds the whole value to `n`.
+                if let Some((_, sub)) = &pi.subpat {
+                    if !self.match_pat(sub, v, b)? {
+                        return Ok(false);
+                    }
+                    b.push((pi.ident.to_string(), v.clone()));
+                    return Ok(true);
                 }
                 let name = pi.ident.to_string();
                 // A bare identifier that names a unit variant of a known enum, or
@@ -1042,7 +1050,18 @@ impl<'a> Exec<'a> {
                     let syn::Member::Named(id) = &f.member else {
                         return Err(unsup("a tuple struct literal"));
                     };
-                    fields.push((id.to_string(), self.eval_expr(&f.expr)?));
+                    let mut v = self.eval_expr(&f.expr)?;
+                    // An unsuffixed integer field is the field's declared type (rustc infers it).
+                    if matches!(v, Value::Int(_, IntTy::Unsuffixed)) {
+                        let pos = decl.iter().position(|k| *k == id.to_string());
+                        let ty = pos.and_then(|i| self.prog.struct_tys.get(&name).and_then(|t| t.get(i)).cloned());
+                        if let Some(ty) = ty {
+                            if let Ok(t) = self.parse_ty(&ty) {
+                                v = v.coerce_to(&t)?;
+                            }
+                        }
+                    }
+                    fields.push((id.to_string(), v));
                 }
                 // Declaration order, so two values of one struct compare by field.
                 let mut ordered = Vec::new();
