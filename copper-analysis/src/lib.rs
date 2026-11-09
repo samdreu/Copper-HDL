@@ -44,7 +44,8 @@ pub mod memory_rules;
 mod shape;
 
 pub use cfg::{
-    constant_empty_range_assertions, constant_ticking_for_ranges, empty_range_dependencies, range_key,
+    constant_empty_range_assertions, constant_ticking_for_ranges, constant_ticking_inclusive_ranges,
+    empty_range_dependencies, range_key, INCLUSIVE_MAX_MESSAGE,
     stmt_contains_tick,
     with_empty_range_oracle, Cfg, DerivationFacts, EdgeKind, PhaseFacts, NESTED_EXIT_MESSAGE,
     ZERO_TIME_FOR_ITERATION_MESSAGE,
@@ -484,7 +485,13 @@ fn nonblocking_assign_targets(text: &str) -> BTreeSet<String> {
             k -= 1;
         }
         let after_paren = k > 0 && bytes[k - 1] == b'(';
-        if j < end && !after_paren {
+        // Nor is the test of an inclusive `for` header, `for (int i = 0; i <= 3; i++)`
+        // (D-27, 2026-11-09): a `;` inside an open `for (` parenthesis.
+        let in_for_header = k > 0 && bytes[k - 1] == b';' && {
+            let line_start = text[..k].rfind('\n').map_or(0, |n| n + 1);
+            text[line_start..k].trim_start().starts_with("for (")
+        };
+        if j < end && !after_paren && !in_for_header {
             names.insert(text[j..end].to_string());
         }
         i = pos + 2;

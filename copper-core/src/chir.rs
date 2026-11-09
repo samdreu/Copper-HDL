@@ -338,11 +338,12 @@ pub enum CHIRStmt {
 
     /// A `for <var> in <start>..<end>` loop, emitted as a SystemVerilog `for`
     /// (Verilator unrolls it at elaboration, so `end` may be a parameter). The
-    /// bound is exclusive (`<`).
+    /// bound is exclusive (`<`), or inclusive (`<=`) for `start..=end` (D-27).
     ForLoop {
         var: String,
         start: CHIRExpr,
         end: CHIRExpr,
+        inclusive: bool,
         body: Vec<CHIRStmt>,
         span: SourceSpan,
     },

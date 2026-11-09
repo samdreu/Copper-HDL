@@ -334,7 +334,7 @@ fn descend_counted_expr(e: &mut ExprType, next_counter: &mut usize, consts: &Con
 /// `chir_lower` reports it with its own span and message.
 ///
 /// Declined shapes:
-/// * a header that is not an exclusive `start..end` range;
+/// * a header that is not a `start..end` or `start..=end` range;
 /// * a body whose last statement is not `clk.tick().await`. The tick has to be
 ///   last for the same reason it does in a `loop` (see
 ///   `body_ends_at_a_clock_boundary`), and after the recursive descent above an
@@ -348,16 +348,21 @@ fn expand_counted_for(
     consts: &Consts,
 ) -> Option<Vec<RawStmt>> {
     let span = f.span;
-    let (start, end) = match &*f.iter {
-        ExprType::Range(r) if !r.inclusive => {
+    // An inclusive range (`a..=b`, D-27, SPEC I.8.5) exits on `c > e` where the
+    // exclusive one exits on `c >= e`; everything else is the same form. An end at
+    // its type's maximum is refused before this pass (II.1.2 R23): the counter's
+    // increment past it would overflow.
+    let (start, end, inclusive) = match &*f.iter {
+        ExprType::Range(r) => {
             let start = match &r.start {
                 Some(s) => (**s).clone(),
                 None => ExprType::Lit(ExprLit { text: "0".to_string(), span }),
             };
-            (start, (*r.end.as_ref()?).as_ref().clone())
+            (start, (*r.end.as_ref()?).as_ref().clone(), r.inclusive)
         }
         _ => return None,
     };
+    let exit_op = if inclusive { ">" } else { ">=" };
 
     // The boundary has to be the body's last statement, so that hoisting it out
     // leaves a well-formed loop behind.
@@ -371,7 +376,7 @@ fn expand_counted_for(
     // A statically empty range is zero cycles and zero work: drop it, rather than
     // emit a loop that breaks at once and then takes the hoisted tick anyway.
     let statically_nonempty = match (const_value(&start, consts), const_value(&end, consts)) {
-        (Some(a), Some(b)) if a >= b => return Some(Vec::new()),
+        (Some(a), Some(b)) if a > b || (a == b && !inclusive) => return Some(Vec::new()),
         (Some(_), Some(_)) => true,
         _ => false,
     };
@@ -426,7 +431,7 @@ fn expand_counted_for(
             ExprType::If(ExprIf {
                 condition: Box::new(ExprType::Binary(ExprBinary {
                     left: Box::new(path_expr(&var, span)),
-                    op: ">=".to_string(),
+                    op: exit_op.to_string(),
                     right: Box::new(end.clone()),
                     span,
                 })),
@@ -477,7 +482,7 @@ fn expand_counted_for(
             ExprType::If(ExprIf {
                 condition: Box::new(ExprType::Binary(ExprBinary {
                     left: Box::new(path_expr(&var, span)),
-                    op: ">=".to_string(),
+                    op: exit_op.to_string(),
                     right: Box::new(end.clone()),
                     span,
                 })),
@@ -514,7 +519,7 @@ fn expand_counted_for(
             ExprType::Binary(ExprBinary {
                 left: Box::new(ExprType::Binary(ExprBinary {
                     left: Box::new(path_expr(&var, span)),
-                    op: ">=".to_string(),
+                    op: exit_op.to_string(),
                     right: Box::new(end.clone()),
                     span,
                 })),
@@ -1978,7 +1983,7 @@ fn unflattenable_in_expr(e: &ExprType, in_loop: bool) -> Option<Unflattenable> {
         }
         // A tick under a construct whose repetition is not a state. Both are
         // desugared before this gate runs, so reaching here means the desugar
-        // declined the header — an inclusive or non-range iterator, or a body whose
+        // declined the header — a non-range iterator, or a body whose
         // last statement is not the tick.
         ExprType::While(w) if stmts_contain_tick(&w.body) => Some(Unflattenable::MalformedNestedLoop),
         // The desugar of an inner counted `for` whose range may be empty at run

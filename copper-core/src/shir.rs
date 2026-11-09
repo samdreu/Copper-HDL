@@ -207,11 +207,13 @@ pub enum SHIRStmt {
         edge_scrutinee: SHIRExpr,
         arms: Vec<SHIRMatchArm>,
     },
-    /// `for <var> in <start>..<end>` (exclusive), emitted as an SV `for`.
+    /// `for <var> in <start>..<end>` (exclusive; `..=` when `inclusive`, D-27), emitted
+    /// as an SV `for`.
     ForLoop {
         var: String,
         start: SHIRExpr,
         end: SHIRExpr,
+        inclusive: bool,
         body: Vec<SHIRStmt>,
     },
     /// `base[index] = value;` — single-bit assignment.

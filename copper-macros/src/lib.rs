@@ -134,6 +134,51 @@ fn const_wrap_for_bounds(f: &mut ItemFn) {
     W.visit_block_mut(&mut f.block);
 }
 
+/// SPEC II.1.2 R23 (D-27): before each tick-bearing `for` over a constant, typed
+/// inclusive range (`copper_analysis::constant_ticking_inclusive_ranges`), a body item
+/// `const _: () = assert!({ let r = (a)..=(b); (*r.end()).checked_add(1).is_some() }, MSG);`
+/// — rustc types the range as the `for` does and refuses (E0080) an end at its type's
+/// maximum. The transpiler folds the same ranges through `ConstEnv`.
+fn place_inclusive_max_assertions(f: &mut ItemFn) {
+    use syn::visit_mut::VisitMut;
+    let ranges = copper_analysis::constant_ticking_inclusive_ranges(f);
+    if ranges.is_empty() {
+        return;
+    }
+    let msg = copper_analysis::INCLUSIVE_MAX_MESSAGE;
+    struct Place<'a> {
+        ranges: &'a [syn::ExprRange],
+        msg: &'a str,
+    }
+    impl VisitMut for Place<'_> {
+        fn visit_block_mut(&mut self, b: &mut syn::Block) {
+            syn::visit_mut::visit_block_mut(self, b);
+            let mut out = Vec::with_capacity(b.stmts.len());
+            for st in std::mem::take(&mut b.stmts) {
+                if let syn::Stmt::Expr(syn::Expr::ForLoop(fl), _) = &st {
+                    if let syn::Expr::Range(r) = &*fl.expr {
+                        let k = copper_analysis::range_key(r);
+                        if let Some(s) = self.ranges.iter().find(|s| copper_analysis::range_key(s) == k) {
+                            let (a, e) = (s.start.as_deref().unwrap(), s.end.as_deref().unwrap());
+                            let msg = self.msg;
+                            let span = syn::spanned::Spanned::span(s);
+                            out.push(syn::parse_quote_spanned!(span=>
+                                const _: () = ::core::assert!(
+                                    { let r = (#a)..=(#e); (*r.end()).checked_add(1).is_some() },
+                                    #msg
+                                );
+                            ));
+                        }
+                    }
+                }
+                out.push(st);
+            }
+            b.stmts = out;
+        }
+    }
+    Place { ranges: &ranges, msg }.visit_block_mut(&mut f.block);
+}
+
 /// SPEC I.8.4(b), II.2.2 R3 (MEASUREMENTS §V.3): emit each of
 /// `copper_analysis::empty_range_dependencies` as a body item
 /// `const _: () = assert!(<not all of these ranges empty>, NESTED_EXIT_MESSAGE);`,
@@ -408,6 +453,10 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             // under `cargo check`, unlike an inline `const { }`), with R3's message.
             // The transpiler folds the same ranges through `ConstEnv`.
             place_empty_range_assertions(&mut f);
+            // SPEC II.1.2 R23 (D-27, 2026-11-09): a ticking `for` over `a..=b` whose
+            // constant end is its type's maximum — the counter would overflow. rustc
+            // checks it the same way, a body item right before the `for`.
+            place_inclusive_max_assertions(&mut f);
             wrap_in_module(&mut f);
             quote! { #f }.into()
         }

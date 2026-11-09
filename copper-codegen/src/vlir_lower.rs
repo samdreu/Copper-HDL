@@ -733,10 +733,11 @@ fn lower_comb_stmt(
             }
             Ok(VLIRStmt::Case { selector, edge_selector, arms: case_arms, default })
         }
-        SHIRStmt::ForLoop { var, start, end, body } => Ok(VLIRStmt::ForLoop {
+        SHIRStmt::ForLoop { var, start, end, inclusive, body } => Ok(VLIRStmt::ForLoop {
             var: var.clone(),
             start: lower_expr(start, leg, mb)?,
             end: lower_expr(end, leg, mb)?,
+            inclusive: *inclusive,
             body: lower_comb_stmts(body, leg, mems, mb)?,
         }),
         SHIRStmt::IndexAssign { base, index, value } => Ok(VLIRStmt::IndexAssign {
@@ -783,10 +784,11 @@ fn clone_comb_stmt(s: &VLIRStmt) -> VLIRStmt {
                 .collect(),
             default: default.as_ref().map(|d| d.iter().map(clone_comb_stmt).collect()),
         },
-        VLIRStmt::ForLoop { var, start, end, body } => VLIRStmt::ForLoop {
+        VLIRStmt::ForLoop { var, start, end, inclusive, body } => VLIRStmt::ForLoop {
             var: var.clone(),
             start: start.clone(),
             end: end.clone(),
+            inclusive: *inclusive,
             body: body.iter().map(clone_comb_stmt).collect(),
         },
         VLIRStmt::IndexAssign { base, index, value } => VLIRStmt::IndexAssign {

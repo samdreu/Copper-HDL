@@ -619,11 +619,12 @@ impl Emitter<'_> {
                 }
                 self.out.push_str(&format!("{}endcase\n", self.indent(level)));
             }
-            VLIRStmt::ForLoop { var, start, end, body } => {
+            VLIRStmt::ForLoop { var, start, end, inclusive, body } => {
                 self.out.push_str(&format!(
-                    "{}for (int {v} = {}; {v} < {}; {v}++) begin\n",
+                    "{}for (int {v} = {}; {v} {} {}; {v}++) begin\n",
                     self.indent(level),
                     loop_bound_str(start),
+                    if *inclusive { "<=" } else { "<" },
                     loop_bound_str(end),
                     v = var,
                 ));
@@ -925,6 +926,7 @@ mod tests {
                     var: "i".to_string(),
                     start: VLIRExpr::Lit { width: Width::Concrete(32), value: 0 },
                     end: VLIRExpr::Var("N".to_string()),
+                    inclusive: false,
                     body: vec![VLIRStmt::WireAssign {
                         name: "acc".to_string(),
                         width: Width::Concrete(8),

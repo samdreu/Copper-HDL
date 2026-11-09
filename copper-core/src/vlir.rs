@@ -285,11 +285,14 @@ pub enum VLIRStmt {
         arms: Vec<VLIRCaseArm>,
         default: Option<Vec<VLIRStmt>>,
     },
-    /// `for (int <var> = <start>; <var> < <end>; <var>++) begin … end`.
+    /// `for (int <var> = <start>; <var> < <end>; <var>++) begin … end` (`<=` when
+    /// `inclusive`: a `start..=end` range, D-27 — no `end + 1`, so an end at its type's
+    /// maximum does not overflow).
     ForLoop {
         var: String,
         start: VLIRExpr,
         end: VLIRExpr,
+        inclusive: bool,
         body: Vec<VLIRStmt>,
     },
     /// `base[index] = value;` — single-bit assignment.

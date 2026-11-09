@@ -4037,8 +4037,13 @@ fn lower_expr_stmt(
                     suggested_rewrite: None,
                 });
             }
+            // `a..=b` (D-27, I.2.4): unrolled `b − a + 1` times, emitted `i <= b` — no
+            // `b + 1`, so an end at its type's maximum does not overflow. Refused (as
+            // "I.2.4: exclusive ranges only") until 2026-11-09 (line `II.3 found
+            // inclusive-for`, MEASUREMENTS §Z.10, §AA.3).
+            let inclusive = matches!(&*f.iter, ExprType::Range(r) if r.inclusive);
             let (start, end) = match &*f.iter {
-                ExprType::Range(r) if !r.inclusive => {
+                ExprType::Range(r) => {
                     let start = match &r.start {
                         Some(s) => lower_expr(s, ctx)?,
                         None => CHIRExpr::Lit(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(32) }, value: 0 }),
@@ -4053,7 +4058,7 @@ fn lower_expr_stmt(
                     (start, end)
                 }
                 _ => return Err(CHIRLowerError::UnsupportedConstruct {
-                    description: "only exclusive range `start..end` for-loops are supported".to_string(),
+                    description: "only range `start..end` / `start..=end` for-loops are supported".to_string(),
                     span,
                     suggested_rewrite: Some("rewrite the iterator as `a..b`".to_string()),
                 }),
@@ -4075,6 +4080,8 @@ fn lower_expr_stmt(
                     ExprType::Range(r) => (bound(r.start.as_deref()), r.end.as_deref().and_then(eval_const_usize)),
                     _ => (None, None),
                 };
+                // An inclusive range runs one more iteration (`hi` itself).
+                let hi = if inclusive { hi.and_then(|h| h.checked_add(1)) } else { hi };
                 if let (Some(lo), Some(hi)) = (lo, hi) {
                     if hi.saturating_sub(lo) > MAX_UNROLL {
                         return Err(CHIRLowerError::UnsupportedConstruct {
@@ -4222,7 +4229,7 @@ fn lower_expr_stmt(
             let body = lower_stmts(&body_src, ctx);
             ctx.comb_for_depth -= 1;
             let body = body?;
-            out.push(CHIRStmt::ForLoop { var, start, end, body, span });
+            out.push(CHIRStmt::ForLoop { var, start, end, inclusive, body, span });
             for (n, tmp) in write_back {
                 let back = assign_stmt(
                     &n,
@@ -7182,7 +7189,7 @@ fn validate_stmts(
                     validate_stmts(&arm.body, &mut arm_known, *s)?;
                 }
             }
-            CHIRStmt::ForLoop { var, start, end, body, span: s } => {
+            CHIRStmt::ForLoop { var, start, end, body, span: s, .. } => {
                 validate_expr(start, known, *s)?;
                 validate_expr(end, known, *s)?;
                 // The loop variable is in scope for the body. Bounds like a module

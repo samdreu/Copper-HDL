@@ -566,6 +566,12 @@ impl<'a> Exec<'a> {
     /// loop { if c >= e { break }; let v = c; c = c + 1; s }`. The counter and the
     /// bound live as hidden locals of the enclosing block (`__for@<depth>`), so
     /// they survive a tick inside the body; `v` is a local of the body's scope.
+    ///
+    /// `for v in a..=b` (D-27, 2026-11-09): a tick-bearing one is the same form exiting
+    /// on `c > e` (I.8.5), its increment checked like any (an end at its type's maximum
+    /// overflows there; a constant one is refused by both front-ends, II.1.2 R23); a
+    /// tick-free one is unrolled `b − a + 1` times (I.2.4) — the counter is not
+    /// incremented past `e`, so a maximum end runs its last iteration and stops.
     fn exec_for(&mut self, f: &syn::ExprForLoop, depth: usize, resume: Option<&[usize]>) -> Result<Flow, RefError> {
         if f.label.is_some() {
             return Err(unsup("a labelled loop (II.1 R12)"));
@@ -573,9 +579,11 @@ impl<'a> Exec<'a> {
         let Expr::Range(r) = &*f.expr else {
             return Err(unsup("a `for` over something other than a range (I.2.4: the counted loop is `a..b`)"));
         };
-        if matches!(r.limits, syn::RangeLimits::Closed(_)) {
-            return Err(unsup("an inclusive range in a `for` (I.2.4: exclusive ranges only)"));
-        }
+        let inclusive = matches!(r.limits, syn::RangeLimits::Closed(_));
+        let tick_free = !f.body.stmts.iter().any(copper_analysis::stmt_contains_tick);
+        // A tick-free inclusive `for` that has run its `e` iteration (no suspension
+        // inside one, so a frame variable).
+        let mut last_done = false;
         let (Some(lo), Some(hi)) = (&r.start, &r.end) else {
             return Err(unsup("a half-open range in a `for`"));
         };
@@ -601,11 +609,16 @@ impl<'a> Exec<'a> {
             let bindings = if r.is_none() {
                 let c = self.env.get(&ckey).cloned().ok_or_else(|| rt("lost for-counter"))?;
                 let e = self.env.get(&ekey).cloned().ok_or_else(|| rt("lost for-bound"))?;
-                if c.as_int()? >= e.as_int()? {
+                let (ci, ei) = (c.as_int()?, e.as_int()?);
+                if last_done || if inclusive { ci > ei } else { ci >= ei } {
                     return Ok(Flow::Done);
                 }
-                let next = self.binop(&BinOp::Add(Default::default()), c.clone(), Value::Int(1, IntTy::Unsuffixed))?;
-                self.env.set(&ckey, next)?;
+                if inclusive && tick_free && ci == ei {
+                    last_done = true;
+                } else {
+                    let next = self.binop(&BinOp::Add(Default::default()), c.clone(), Value::Int(1, IntTy::Unsuffixed))?;
+                    self.env.set(&ckey, next)?;
+                }
                 var.iter().map(|v| (v.clone(), c.clone())).collect()
             } else {
                 Vec::new()

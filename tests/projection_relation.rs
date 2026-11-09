@@ -699,9 +699,8 @@ fn lookahead<'a>(stack: &[Frame<'a>]) -> Vec<(Vec<Lab>, Vec<Frame<'a>>, Vec<(Pos
 
 fn for_bounds(f: &syn::ExprForLoop, consts: &dyn Fn(&str) -> Option<i128>) -> ForBounds {
     let Expr::Range(r) = &*f.expr else { return ForBounds::Unknown };
-    if !matches!(r.limits, syn::RangeLimits::HalfOpen(_)) {
-        return ForBounds::Unknown;
-    }
+    // An inclusive range (`a..=b`, D-27) is empty when `a > b`, an exclusive one when `a >= b`.
+    let inclusive = matches!(r.limits, syn::RangeLimits::Closed(_));
     // A path of several segments (`T::K`, an associated const) is looked up by its full name,
     // as `ConstEnv` keys it (the transpiler folds it the same way; MEASUREMENTS §Z.3).
     let eval = |e: &Expr| match e {
@@ -716,7 +715,7 @@ fn for_bounds(f: &syn::ExprForLoop, consts: &dyn Fn(&str) -> Option<i128>) -> Fo
     };
     let end = r.end.as_ref().and_then(|e| eval(e));
     match (start, end) {
-        (Some(a), Some(b)) if a >= b => ForBounds::StaticEmpty,
+        (Some(a), Some(b)) if a > b || (a == b && !inclusive) => ForBounds::StaticEmpty,
         (Some(_), Some(_)) => ForBounds::StaticNonEmpty,
         _ => ForBounds::Unknown,
     }
@@ -1022,10 +1021,11 @@ impl<'c, 's> Emit<'c, 's> {
             cur.ctrs.get(n).ok_or_else(|| format!("counted-`for` test at {} reads `{n}` before its declaration", fmt_pos(p)))
         };
         match strip(cond) {
-            CHIRExpr::BinOp { left, op: CHIRBinOp::Gte, .. } => Ok(fact(left)?.at_end),
+            // `c >= e` (exclusive) or `c > e` (inclusive, D-27): the counter has passed its range.
+            CHIRExpr::BinOp { left, op: CHIRBinOp::Gte | CHIRBinOp::Gt, .. } => Ok(fact(left)?.at_end),
             CHIRExpr::BinOp { left, op: CHIRBinOp::Neq, .. } => Ok(Some(fact(left)?.advanced)),
             CHIRExpr::BinOp { left, op: CHIRBinOp::LogicalAnd, right } => {
-                let (CHIRExpr::BinOp { left: a, op: CHIRBinOp::Gte, .. }, CHIRExpr::BinOp { left: b, op: CHIRBinOp::Neq, .. }) =
+                let (CHIRExpr::BinOp { left: a, op: CHIRBinOp::Gte | CHIRBinOp::Gt, .. }, CHIRExpr::BinOp { left: b, op: CHIRBinOp::Neq, .. }) =
                     (strip(left), strip(right))
                 else {
                     return Err(format!("unrecognized counted-`for` guard at {}", fmt_pos(p)));

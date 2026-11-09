@@ -404,7 +404,7 @@ fn lower_stmt_list(
                     out.push(SHIRStmt::Match { scrutinee, edge_scrutinee, arms: shir_arms });
                 }
             }
-            CHIRStmt::ForLoop { var, start, end, body, span } => {
+            CHIRStmt::ForLoop { var, start, end, inclusive, body, span } => {
                 // An SV `for` (Verilator unrolls it; SPEC I.2.4): its body is lowered ONCE, so
                 // it cannot take the forwarding walk's per-statement substitution — an
                 // iteration's assignment would never reach the next, nor the statements after
@@ -439,6 +439,7 @@ fn lower_stmt_list(
                         var: var.clone(),
                         start: fwd.at_edge(&rename_vars(lower_expr(start)?, renames)),
                         end: fwd.at_edge(&rename_vars(lower_expr(end)?, renames)),
+                        inclusive: *inclusive,
                         body: body_stmts,
                     });
                 }
