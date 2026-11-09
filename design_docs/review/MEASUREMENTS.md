@@ -5520,3 +5520,153 @@ single-tick), 0 uncovered; G-J 85 const items compared / 25 outside both, 218 co
 the SPEC; fixtures: 8 coreui, 3 example, 13 gone, 278 sweep, 158 test, 128 ui; 290 run checks`**, the 3
 example fixtures PASS. Not run remotely (nothing pushed). After this run, docs only: III.3.6's counts,
 D-28 in `SPEC_DECISIONS.md`, this section, CLAUDE.md.
+
+## AC. A shadow in a nested block: `for-var-shadow-nested` and the wider `scoped-shadow` closed; two unrelated findings OPEN (2026-11-09)
+
+Branch `claude/nested-for-shadow-c6819e`, cut from `paper` at `0751544` (ledger 226 lines — 226 CLOSED,
+0 OPEN, but with §AB.5's unledgered gap). `7fb1772` added the OPEN line `II.3 found for-var-shadow-nested`
+before any code change (ledger 227 — 226 CLOSED, 1 OPEN). `e6a3b66` is the code, the fixture and the
+ledger lines; `4b32ed8` (AC.9: the `continue` test the first regression run failed, and `ssh_continue_rest`), the final code commit — the bare regression of AC.9 ran on it; after it, docs only.
+"Before" is measured: the probes and the fixture swept against `0751544`'s `copper-codegen/src` (checked
+out over the committed tree and restored), every module's emission against an `sv-baseline snapshot`
+taken on `0751544`'s codegen. Predictions and probe notes: notes folder `nested-for-shadow-AC.md`.
+
+### AC.0 Predictions (written before reading any probe output)
+
+| shape | predicted | measured |
+|---|---|---|
+| tick-free `for`, nested shadow of its variable (combinational; clocked linear; clocked extraction) × (`if`, `match` arm, bare block) | the shadow is one SV signal with the loop variable; inside `for (int i …)` the name resolves to the SV loop variable, so the shadow assigns it — VARHIDDEN + WIDTH, lint-rejected | **as predicted, 9 of 9** (VARHIDDEN, WIDTHEXPAND, WIDTHTRUNC, UNUSEDSIGNAL) |
+| tick-bearing `for` over a `u8` range, same three blocks | `var` IS the counter in `expand_counted_for`: the shadow writes it, the trip count changes; silent, or a width refusal | the counter is written (`i <= (8'(i) + 8'd1) + 32'd1`), **lint-rejected** (WIDTHEXPAND: the 8-bit shadow into the 32-bit counter), 3 of 3 |
+| tick-bearing `for` over a `u32` range (the shadow's width the counter's) | Verilator-clean, `sim=ref≠SV` | **as predicted: `sim=ref≠SV` on 20 of 20 sequences, Verilator-clean** (`ssh_tick32_if` from cycle 0–4, `q` sim 35 SV 51; `ssh_tick32_block` from cycle 0) — the feared silent case |
+| wider: a nested shadow of a local (comb), of a register, of a port-read local, across a tick; a top-level body `let` shadowing a register; an outer loop's variable shadowed in an inner loop; an inner `for` rebinding the outer variable | shir_lower's own comment, "one SV signal either way": `sim=ref≠SV` for the locals and the register, lint for the loop-variable cases | locals: **`sim=ref≠SV`** (comb local, port-read local, across a tick); registers: **a duplicate SV declaration** (Verilator `%Error`), not a silent divergence — one wrong prediction; loop variables: lint-rejected (VARHIDDEN), as predicted |
+
+The answer to the question this section was opened for: **yes — a nested shadow in a tick-bearing `for`
+whose range type is 32 bits wide was `sim=ref≠SV` and Verilator-clean**, and so was a nested shadow of an
+ordinary local, a port-read local or a local live across a tick, in any body. Every variant over a
+narrower range or in a tick-free `for` was caught by Verilator's lint.
+
+### AC.1 The mechanism
+
+§AB.5 renamed a top-level `let` of a `for` body that shadows its variable (`cast_loop_var_reads`, in both
+`chir_lower` and `control_extract::expand_counted_for`). Below that, and for every other binding, the
+lowering maps every binding of one name onto one SV signal (`shir_lower::stmts_reassign`: "a shadowing
+`let` … one SV signal either way"). That is right for a re-`let` in the same block — the later binding
+hides the earlier one for the rest of the block, as a reassignment does — and wrong for a shadow in an
+inner block, which ends at the block's end, after which the outer binding is visible again, unchanged.
+
+### AC.2 The fix — `desugar::rename_scoped_shadows`
+
+The last step of `desugar`, before any other pass looks at the body: a scoped walk over the FIR in which
+every `let` (a tuple `let` per binder) and every `for` pattern that shadows a binding of an OUTER scope
+gets a name of its own, `<x>__shadow` (then `<x>__shadow1`, … for a name already in the module), for its
+scope; a same-block re-`let` keeps the name the block already lowers it under. Its initializer is
+rewritten before the binding takes effect (`let x = x + 1` reads the outer `x`). Scopes: a block, a branch,
+a loop body, a `for` body (inside the pattern's scope — so a top-level body `let` shadows the variable, as
+§AB.5's did), a `match` arm. A `match` arm's binders, an `if let`'s and a closure's are not renamed but
+mask an outer binding of their name in their scope, so a read there is never redirected. §AB.5's two
+lessons kept: the SHADOW is renamed, never the loop variable (the tick-bearing counter keeps the source
+name the register inference knows); and a hoisted shadow is judged as a register by its own liveness, not
+by name — `desugar::shadows_live_at_tick` (a statement of the shadow's scope holds a tick and that
+statement or a later one reads the shadow; a shadow's scope is entered afresh on every pass through its
+block, so no back edge carries it; a renamed tick-bearing `for` variable is its counter, always live).
+The first cut appended a hoisted shadow whenever the inference named its source local — `lvt_shadow`'s
+dead `j__shadow` would have become a flop (AB.5's measured failure) — and was replaced before any
+measurement was recorded. A second slip, caught by sv-baseline: the `for` body first shared the pattern's
+scope, so a top-level body `let i` counted as a same-block re-`let` and `lvt_shadow` regressed to the
+pre-§AB.5 SV; the body is now its own scope.
+
+§AB.5's top-level rename (`body_shadows`, the shadow branch of `cast_loop_var_reads`) is deleted: one
+mechanism. `lib.rs` reads a hoisted `<x>__shadow[k]` as the source local `x` (`desugar::shadow_source`);
+`register_reconciliation.rs` (P13) accepts `<x>__shadow[k]` as a spelling of an inferred `x`, beside
+`_r` and `_sig` (the inference is by name and gives both bindings one entry); `timing_model_derivations.rs`
+adds `ssh_for_shadows_local` to its extraction-route set (a ticking `for` and a tick after it in one module
+loop, as `lvt_shadow`).
+
+### AC.3 Fixture `tests/fixtures/scoped_shadow_dut.rs` — 22 modules
+
+| module | shape | on `0751544` | now |
+|---|---|---|---|
+| `ssh_comb_if`, `ssh_comb_match`, `ssh_comb_block` | tick-free `for`, combinational; the block one with a shadow of the shadow two blocks in and a same-block re-shadow | lint-rejected (VARHIDDEN, WIDTH) | 2/2 each |
+| `ssh_lin_if` (both branches shadow), `ssh_lin_match` (an arm and a bare block) | tick-free `for`, clocked, linear route | lint-rejected | 2/2 each |
+| `ssh_ext_if`, `ssh_ext_match` | tick-free `for`, clocked, extraction route | lint-rejected | 2/2 each |
+| `ssh_tick_if`, `ssh_tick_match`, `ssh_tick_live` (the shadow live across the `for`'s tick: a register) | tick-bearing `for`, `u8` | lint-rejected (WIDTHEXPAND) | 2/2 each |
+| `ssh_tick32_if`, `ssh_tick32_block` | tick-bearing `for`, `u32` | **`sim=ref≠SV`, 20/20 sequences** | 2/2 each |
+| `ssh_outer_var` | an outer loop's variable shadowed in an inner loop's branch; an inner `for` rebinding it | lint-rejected | 2/2 |
+| `ssh_inner_rebinds_counter` | a tick-free inner `for` rebinding a tick-bearing outer one's variable | lint-rejected (VARHIDDEN) | 2/2 |
+| `ssh_comb_local` | a nested shadow of a local; a tuple `let` shadowing two | **`sim=ref≠SV`** | 2/2 |
+| `ssh_arm_binder` | a `match` arm's binder inside a branch that shadows the local | **`sim=ref≠SV`** | 2/2 |
+| `ssh_reg` | a register shadowed in a branch | duplicate SV declaration | 2/2 |
+| `ssh_reg_top` | a top-level loop-body `let` shadowing a register (`let mut r`) | passed as first written with an immutable pre-loop `r` (a wire); the committed `let mut r` is the duplicate-declaration case of the probe `wsp_reg_top` | 2/2 |
+| `ssh_port_local` | a port-read local shadowed in a branch | **`sim=ref≠SV`** (the probe's `match` form — AC.6) | 2/2 |
+| `ssh_across_tick` | a local shadowed in a branch, live across a tick (extraction) | **`sim=ref≠SV`** | 2/2 |
+| `ssh_for_shadows_local` | a tick-bearing `for` whose variable shadows an outer local, read after the loop | lint-rejected (UNUSEDSIGNAL) | 2/2 |
+
+| `ssh_continue_rest` | a tick-free `for`'s `continue` whose rest names a local shadowed in the branch (AC.9) | refused (the `continue` rewrite declined) | 2/2 |
+
+On `0751544`: **20 of the first 21 differential cases failed** (every reference leg passed), and `ssh_continue_rest` was refused. Now **44/44**.
+
+### AC.4 sv-baseline against `0751544`
+
+**0 corpus modules changed**; the 22 fixture modules are new. (The probe files were swept and deleted
+before the diff; `lvt_shadow` changed in the first cut — AC.2 — and is unchanged in `e6a3b66`.)
+
+### AC.5 The wider class — `II.3 found scoped-shadow` (CLOSED)
+
+The task's step 5: shadowing beyond a `for`'s own variable. Same mechanism (AC.1), so closed by the same
+rename: the seven `ssh_` modules of the last rows of AC.3. One prediction was wrong: a register shadow
+was predicted `sim=ref≠SV` and is a loud SV error (the shadow's declaration duplicates the register's).
+
+### AC.6 Found, not fixed — `II.3 found stmt-match-wire` (OPEN, copper-codegen)
+
+The probe `wsp_port_local` (a nested shadow in a `match` arm) still failed with the rename in place, with
+the same values as before it (`q` sim 95 SV 80). Isolated without any shadow: in a clocked body, a wire
+local (a loop-body `let mut s`) assigned inside a statement `match`'s arm and read after the `match` in
+the same resumption is dropped from the forwarded value — `match a & 3 { 1 => { s = 5; } _ => {} }
+q.write(s)` emits `q <= 8'd0` — on every clocked route (single-tick, two-phase linear, extraction;
+probes `arm_a`–`arm_d`, `arm_port_scrut`, `arm_lin2`, `arm_ext` in the notes folder). The same assignment
+under an `if`, the same `match` in a combinational body, and a REGISTER assigned in the arm are right.
+`sim=ref≠SV` on 20 of 20 sequences, Verilator-clean, pre-existing, corpus 0 (the sweep agrees on every
+corpus module). A different mechanism (forwarding through a `Match`), so left OPEN per the task; fix
+direction recorded on the line. (A deferred `let s;` assigned in both arms is refused, "undefined
+variable"; not lined.) The fixture's port-read case uses an `if`.
+
+### AC.7 Found, not fixed — `II.3 found nested-ticking-for` (OPEN, copper-codegen) — a parity break
+
+A first fixture module had a tick-bearing inner `for i` rebinding a tick-bearing outer `for i`. The
+transpiler refused it, and with distinct names too (probe `nt_distinct`): "a repeating wait must be written
+as `loop { <test>; clk.tick().await; }`", from `chir_lower.rs`'s copy of the shape rule after the
+counted-`for` desugar. The macro admits it and the simulator and interpreter agree on it (20/20), so it is
+a macro-admits / transpiler-refuses shape: **II.1.3 is OPEN again** (owner copper-codegen), pointing at
+the line. Pre-existing, corpus 0. Fix direction: lower it, or refuse it in both front-ends with one
+message — a user decision if the second. The fixture keeps a tick-free inner `for` rebinding a ticking
+outer one's variable (`ssh_inner_rebinds_counter`).
+
+### AC.8 Ledger and counts
+
+Before: **226 lines — 226 CLOSED, 0 OPEN** (`0751544`). After: **230 lines — 227 CLOSED, 3 OPEN; 171
+required by the SPEC; fixtures: 8 coreui, 3 example, 13 gone, 300 sweep, 155 test, 127 ui; 312 run
+checks.** Added and CLOSED: `for-var-shadow-nested` (added OPEN in `7fb1772`, closed in `e6a3b66`),
+`scoped-shadow`. Added OPEN: `stmt-match-wire`, `nested-ticking-for`. Reopened: II.1.3 (its tokens no
+longer counted: `test` 158 → 155, `ui` 128 → 127). `for-var-shadow`'s text says what does it now.
+
+### AC.9 The bare regression — measured
+
+The first bare run (on `e6a3b66`) failed in `copper-codegen/tests/unsupported_constructs.rs::
+a_tickfree_for_continue_whose_rest_names_a_branch_binding_is_refused_with_its_own_message` (1498 passed,
+1 failed): the test expected `for_continue` to decline a `continue` whose rest names a binding made in the
+branch (the copy of the rest would capture it). `rename_scoped_shadows` runs first, and such a binding is
+necessarily a shadow of an outer one, so it has its own name and the rest lowers reading the outer
+binding — a shape refused before, now IN; the decline is a backstop. `4b32ed8` renames the test
+(`…_shadowed_binding_lowers`, asserting the branch reads `t__shadow` and the rest `t`), sweeps the module
+as `ssh_continue_rest` (2/2) and moves line `II.3 found tickfree-continue`'s token to both.
+
+**The second: bare `tools/regression.sh` on `4b32ed8` (the final code commit; laptop; `paper` at
+`0751544`): REGRESSION OK (320 s).** 1712 passed, 0 failed, 16 ignored, 159 test binaries (G-C 132 test
+files); examples **32/32**; G-D 344 differential cases (3 ignored-with-reason), G-F 344 (3 skipped with a
+reason) — the 22 new fixture modules added; **G-G differential 2702 PASS / 12 OUTSIDE / 0 TRUNCATED / 0
+EXCUSED / 0 DISAGREE**, **reference 2714 PASS / 0 DISAGREE**; G-I 265 clocked related (76 extracted, 21
+linear, 168 single-tick), 0 uncovered; G-J 85 const items compared / 25 outside both, 256 counted-`for`
+bounds compared, 9 asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; **G-K `230 lines — 227 CLOSED, 3
+OPEN; 171 required by the SPEC; fixtures: 8 coreui, 3 example, 13 gone, 300 sweep, 155 test, 127 ui; 312
+run checks`**, the 3 example fixtures PASS. Not run remotely (nothing pushed). After this run, docs only:
+III.3.6's counts, this section, CLAUDE.md.

@@ -4392,16 +4392,18 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | retired 14 | `multi_phase_out_write` | `gone:multi_phase_out_write`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8 |
 | retired 15 | `out_first_driven_late` | `gone:out_first_driven_late`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; I.11's class vacuous (D-14) |
 
-**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §AB.8
-(2026-11-09, on `4700ca4`, REGRESSION OK): **226 lines — 226 CLOSED, 0 OPEN**; 171 required by the SPEC
+**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §AC.9
+(2026-11-09, on `4b32ed8`, REGRESSION OK): **230 lines — 227 CLOSED, 3 OPEN**; 171 required by the SPEC
 (91 numbered clauses, 23 II.1.2 rules — R23 retired by D-28 and kept as a CLOSED line, 4 II.2.1 rules,
-14 II.3.3 rows, 28 row-(e) methods, 9 retired rules) and 55 beyond it (the 7 methods row (e) owes, 48
-II.3 rows found in Phase C and after). No line is OPEN. Fixture tokens on CLOSED lines: 278 `sweep`, 158
-`test`, 128 `ui`, 8 `coreui`, 3 `example`, 13 `gone`; G-K's run check found all 290 run checks satisfied
-and the 3 examples PASS. §AB closed the last two OPEN lines (`inclusive-for-runtime-max` by D-28,
-`loop-var-type`), and found and closed `signed-narrowing-cast`, `primitive-assoc-const` (a parity break)
-and `for-var-shadow`; II.1.3 re-verified on 63 probes; G-G 0 DISAGREE.
-(Before §AB, on `f09dfb6`: 223 lines — 221 CLOSED, 2 OPEN, §AA.6. Before §AA, on `89b3ef4`: 219 lines — 215 CLOSED, 4 OPEN, §Z.11. Before §Z, on `3e9db32`: 204 lines — 194 CLOSED, 10 OPEN, §Y.7. Before §Y, on `6df6270`: 200 lines — 192 CLOSED, 8 OPEN, §X.5. On `02cfaae`: 193 lines — 190 CLOSED, 3
+14 II.3.3 rows, 28 row-(e) methods, 9 retired rules) and 59 beyond it (the 7 methods row (e) owes, 52
+II.3 rows found in Phase C and after). OPEN: II.1.3 (a parity break, `nested-ticking-for`),
+`II.3 found nested-ticking-for` and `II.3 found stmt-match-wire`, each owned by copper-codegen. Fixture
+tokens on CLOSED lines: 300 `sweep`, 155 `test`, 127 `ui`, 8 `coreui`, 3 `example`, 13 `gone`; G-K's run
+check found all 312 run checks satisfied and the 3 examples PASS. §AC added `for-var-shadow-nested`
+(OPEN before any code change, then CLOSED) and `scoped-shadow` (CLOSED), and found the two OPEN
+`II.3` lines; G-G 0 DISAGREE.
+(Before §AC, on `4700ca4`: 226 lines — 226 CLOSED, 0 OPEN, §AB.8, with §AB.5's nested-shadow gap
+unledgered. Before §AB, on `f09dfb6`: 223 lines — 221 CLOSED, 2 OPEN, §AA.6. Before §AA, on `89b3ef4`: 219 lines — 215 CLOSED, 4 OPEN, §Z.11. Before §Z, on `3e9db32`: 204 lines — 194 CLOSED, 10 OPEN, §Y.7. Before §Y, on `6df6270`: 200 lines — 192 CLOSED, 8 OPEN, §X.5. On `02cfaae`: 193 lines — 190 CLOSED, 3
 OPEN, §U.12. The memory batch's counts, on `14739d6`: 193 lines — 187 CLOSED, 6 OPEN, §W.6. The codegen
 batch's, on `f29fe46`: 191 lines — 180 CLOSED, 11 OPEN, §U.10. The front-end batch's, on `c518b77`: 189
 lines — 171 CLOSED, 18 OPEN, §V.8. Step 11c's, on `7589204`: 187 lines — 166 CLOSED, 21 OPEN.)
