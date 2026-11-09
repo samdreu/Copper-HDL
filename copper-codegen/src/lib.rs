@@ -132,9 +132,14 @@ pub fn lower_fir_to_chir(
     // Only a SOURCE local is the inference's to judge: the passes' own state
     // (`__copper_ctr*`, which the counted-`for` desugar declares in the loop and the
     // hoist then moves out) is not in its domain and stays a register.
+    // A body `let` that shadows a `for`'s variable is renamed `<v>__shadow` by the counted-`for`
+    // rewrite (MEASUREMENTS §AB.5): it is the source's local `v` all the same.
     let hoisted: std::collections::BTreeSet<String> = hoisted_names(&fir)
         .into_iter()
-        .filter(|n| control_extract::stmts_mention(&source.raw_statements, n))
+        .filter(|n| {
+            let src = n.strip_suffix("__shadow").unwrap_or(n);
+            control_extract::stmts_mention(&source.raw_statements, src)
+        })
         .collect();
     for name in preloop_mut_names(&fir) {
         if !preloop_muts_before.contains(&name)

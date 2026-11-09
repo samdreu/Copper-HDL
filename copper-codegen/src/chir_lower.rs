@@ -373,54 +373,75 @@ fn infer_type_from_expr(
     }
 }
 
-/// Rewrite the reads of the loop variable `var` in `body`: to `<rename>` when the loop
-/// variable is renamed (a body `let` shadows it), and `as <ty>` — its Rust type where the
-/// declaration differs (line `II.3 found loop-var-type`) — except a read that IS an index
-/// (`x[i]`), which selects the same element at any width. Scoped like Rust: a top-level
-/// `let <var> = …` of the body ends the rewrite (its initializer still reads the loop
-/// variable; what follows reads the shadow). A shadow inside a nested block is not seen.
-pub(crate) fn cast_loop_var_reads(body: &mut [RawStmt], var: &str, ty: Option<&str>, rename: Option<&str>, span: SourceSpan) {
-    let target = rename.unwrap_or(var).to_string();
+/// Rewrite the reads of the loop variable `var` in `body` to `var as <ty>` — its Rust type
+/// where the declaration differs (line `II.3 found loop-var-type`) — except a read that IS an
+/// index (`x[i]`), which selects the same element at any width. Scoped like Rust: a top-level
+/// `let <var> = …` of the body shadows it — its initializer still reads the loop variable, and
+/// the shadow and every later read of it are renamed `<var>__shadow`, so the shadow's net does
+/// not take the loop variable's (or the counter's) name (line `II.3 found for-var-shadow`,
+/// MEASUREMENTS §AB.5). A shadow inside a nested block is not seen.
+pub(crate) fn cast_loop_var_reads(body: &mut [RawStmt], var: &str, ty: Option<&str>, span: SourceSpan) {
     let sentinel = format!("{var}\u{0}idx");
-    let rewrite = |stmts: &mut [RawStmt]| {
+    let shadow = format!("{var}__shadow");
+    let _ = span;
+    let cast = |stmts: &mut [RawStmt]| {
+        let Some(ty) = ty else { return };
         crate::desugar::visit_stmts(stmts, &mut |e| {
             if let ExprType::Index(ix) = e {
-                if matches!(&*ix.index, ExprType::Path(p) if compact_ident(&p.path_text) == var) {
-                    *ix.index = ExprType::Path(copper_core::frontend_ir::ExprPath { path_text: sentinel.clone(), span });
+                if let ExprType::Path(p) = &mut *ix.index {
+                    if compact_ident(&p.path_text) == var {
+                        p.path_text = sentinel.clone();
+                    }
+                }
+            }
+        });
+        // Each rewritten read keeps its own span: a pass that recognizes the `for`'s
+        // synthesized statements by the `for`'s span must not mistake a body read for one.
+        crate::desugar::visit_stmts(stmts, &mut |e| {
+            if let ExprType::Path(p) = e {
+                if compact_ident(&p.path_text) == var {
+                    let sp = p.span;
+                    *e = ExprType::Cast(copper_core::frontend_ir::ExprCast {
+                        expr: Box::new(e.clone()),
+                        target_ty: copper_core::frontend_ir::RawTypeRef { ty_text: ty.to_string(), span: sp },
+                        span: sp,
+                    });
                 }
             }
         });
         crate::desugar::visit_stmts(stmts, &mut |e| {
-            if matches!(e, ExprType::Path(p) if compact_ident(&p.path_text) == var) {
-                let read = ExprType::Path(copper_core::frontend_ir::ExprPath { path_text: target.clone(), span });
-                *e = match ty {
-                    Some(ty) => ExprType::Cast(copper_core::frontend_ir::ExprCast {
-                        expr: Box::new(read),
-                        target_ty: copper_core::frontend_ir::RawTypeRef { ty_text: ty.to_string(), span },
-                        span,
-                    }),
-                    None => read,
-                };
-            }
-        });
-        crate::desugar::visit_stmts(stmts, &mut |e| {
-            if matches!(e, ExprType::Path(p) if p.path_text == sentinel) {
-                *e = ExprType::Path(copper_core::frontend_ir::ExprPath { path_text: target.clone(), span });
+            if let ExprType::Path(p) = e {
+                if p.path_text == sentinel {
+                    p.path_text = var.to_string();
+                }
             }
         });
     };
+    let mut shadowed = false;
     for k in 0..body.len() {
-        let shadow = matches!(&body[k].kind, RawStmtKind::Local(l) if l.name == var);
-        rewrite(&mut body[k..k + 1]);
-        if shadow {
-            break;
+        if shadowed {
+            crate::desugar::visit_stmts(&mut body[k..k + 1], &mut |e| {
+                if let ExprType::Path(p) = e {
+                    if compact_ident(&p.path_text) == var {
+                        p.path_text = shadow.clone();
+                    }
+                }
+            });
+            continue;
         }
+        cast(&mut body[k..k + 1]);
+        if let RawStmtKind::Local(l) = &mut body[k].kind {
+            if l.name == var {
+                l.name = shadow.clone();
+                shadowed = true;
+            }
+        }
+
     }
 }
 
-/// Whether a top-level `let` of a `for` body shadows its loop variable `var` — the SV
-/// loop variable (or the tick-bearing `for`'s counter) is then renamed, so the shadow's
-/// net does not collide with it.
+/// Whether a top-level `let` of a `for` body shadows its loop variable `var` (the shadow is
+/// then renamed by [`cast_loop_var_reads`]).
 pub(crate) fn body_shadows(body: &[RawStmt], var: &str) -> bool {
     body.iter().any(|s| matches!(&s.kind, RawStmtKind::Local(l) if l.name == var))
 }
@@ -4515,14 +4536,12 @@ fn lower_expr_stmt(
             let read_ty = Some(var_ty.clone().unwrap_or(CHIRType::SInt { width: Width::Concrete(32) }));
             let mut f_body = f.body.clone();
             let cast_to = read_ty.filter(|t| *t != decl_ty).and_then(|t| rust_int_type_text(&t));
-            // A body `let` that shadows the variable: the SV loop variable takes another
-            // name, so the shadow's net does not hide it (Verilator's VARHIDDEN and the
-            // shadow's assignment landing on the loop variable; MEASUREMENTS §AB.5).
-            let rename = body_shadows(&f.body, &var).then(|| format!("{var}__iter"));
-            if cast_to.is_some() || rename.is_some() {
-                cast_loop_var_reads(&mut f_body, &var, cast_to.as_deref(), rename.as_deref(), span);
+            // A body `let` that shadows the variable is renamed, so its net does not hide the
+            // SV loop variable (Verilator's VARHIDDEN, and the shadow's assignment landing on
+            // the loop variable; MEASUREMENTS §AB.5).
+            if cast_to.is_some() || body_shadows(&f.body, &var) {
+                cast_loop_var_reads(&mut f_body, &var, cast_to.as_deref(), span);
             }
-            let var = rename.unwrap_or(var);
             let f_body = f_body;
             ctx.symbols.insert(var.clone(), decl_ty);
             // An element write to an array register in the body: unroll the `for` (I.2.4 —

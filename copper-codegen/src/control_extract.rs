@@ -497,13 +497,11 @@ fn expand_counted_for(
     let mut work: Vec<RawStmt> = work.to_vec();
     let named = !(pat == "_" || pat.is_empty());
     let cast_to = read_ty.as_deref().filter(|rt| *rt != counter_ty && named);
-    // A body `let` that shadows the variable: the counter takes another name (the shadow
-    // would otherwise be the counter, and the increment would add to it; MEASUREMENTS §AB.5).
-    let rename = (named && crate::chir_lower::body_shadows(work.as_slice(), &var)).then(|| format!("{var}__iter"));
-    if cast_to.is_some() || rename.is_some() {
-        crate::chir_lower::cast_loop_var_reads(&mut work, &var, cast_to, rename.as_deref(), span);
+    // A body `let` that shadows the variable is renamed (it would otherwise be the counter,
+    // and the increment would add to it; MEASUREMENTS §AB.5).
+    if cast_to.is_some() || (named && crate::chir_lower::body_shadows(work.as_slice(), &var)) {
+        crate::chir_lower::cast_loop_var_reads(&mut work, &var, cast_to, span);
     }
-    let var = rename.unwrap_or(var);
     let work = &work[..];
 
     // Rust evaluates `start..end` ONCE, when the loop is entered; the desugared
