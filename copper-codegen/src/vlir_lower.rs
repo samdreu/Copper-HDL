@@ -1239,6 +1239,37 @@ fn drop_unread_wires(
             }
         }
 
+        // Every name a comb `WireAssign` drives — a wire, as opposed to a port or a register.
+        fn wire_names(stmts: &[VLIRStmt], out: &mut HashSet<String>) {
+            for st in stmts {
+                match st {
+                    VLIRStmt::WireAssign { name, .. } => {
+                        out.insert(name.clone());
+                    }
+                    VLIRStmt::If { then_stmts, else_stmts, .. } => {
+                        wire_names(then_stmts, out);
+                        if let Some(e) = else_stmts {
+                            wire_names(e, out);
+                        }
+                    }
+                    VLIRStmt::Case { arms, default, .. } => {
+                        for a in arms {
+                            wire_names(&a.stmts, out);
+                        }
+                        if let Some(d) = default {
+                            wire_names(d, out);
+                        }
+                    }
+                    VLIRStmt::ForLoop { body, .. } => wire_names(body, out),
+                    VLIRStmt::PortAssign { .. } | VLIRStmt::IndexAssign { .. } => {}
+                }
+            }
+        }
+        let mut wires: HashSet<String> = HashSet::new();
+        for phase in comb_phases.iter() {
+            wire_names(&phase.stmts, &mut wires);
+        }
+
         let mut removed = false;
         for phase in comb_phases.iter_mut() {
             // A wire read NOWHERE loses every assignment, at any depth — with
@@ -1247,38 +1278,41 @@ fn drop_unread_wires(
             // the difference from dropping a SINGLE nested arm of a wire that
             // is still read, which would create one; reads gate the whole
             // removal above.
-            fn prune(stmts: &mut Vec<VLIRStmt>, read: &HashSet<String>) -> bool {
+            fn prune(stmts: &mut Vec<VLIRStmt>, read: &HashSet<String>, wires: &HashSet<String>) -> bool {
                 let before = stmts.len();
                 stmts.retain(|st| match st {
                     VLIRStmt::WireAssign { name, .. } => read.contains(name),
+                    // A bit write of a wire nothing reads (its value forwarded to every edge
+                    // consumer, line `II.3 found forwarded-wire-bit-write`, MEASUREMENTS §Z.2).
+                    VLIRStmt::IndexAssign { base, .. } => read.contains(base) || !wires.contains(base),
                     _ => true,
                 });
                 let mut removed = stmts.len() != before;
                 for st in stmts.iter_mut() {
                     match st {
                         VLIRStmt::If { then_stmts, else_stmts, .. } => {
-                            removed |= prune(then_stmts, read);
+                            removed |= prune(then_stmts, read, wires);
                             if let Some(e) = else_stmts {
-                                removed |= prune(e, read);
+                                removed |= prune(e, read, wires);
                             }
                         }
                         VLIRStmt::Case { arms, default, .. } => {
                             for a in arms {
-                                removed |= prune(&mut a.stmts, read);
+                                removed |= prune(&mut a.stmts, read, wires);
                             }
                             if let Some(d) = default {
-                                removed |= prune(d, read);
+                                removed |= prune(d, read, wires);
                             }
                         }
                         VLIRStmt::ForLoop { body, .. } => {
-                            removed |= prune(body, read);
+                            removed |= prune(body, read, wires);
                         }
                         _ => {}
                     }
                 }
                 removed
             }
-            removed |= prune(&mut phase.stmts, &read);
+            removed |= prune(&mut phase.stmts, &read, &wires);
         }
         // Dropping one wire can orphan another, so iterate to a fixpoint.
         if !removed {
@@ -1328,9 +1362,10 @@ fn collect_vlir_reads_stmt(stmt: &VLIRStmt, out: &mut HashSet<String>) {
                 collect_vlir_reads_stmt(s, out);
             }
         }
-        // `base` is read-modify-written.
-        VLIRStmt::IndexAssign { base, index, value } => {
-            out.insert(base.clone());
+        // `base` is read-modify-written — a read only of itself, so it does not keep a WIRE
+        // live: a wire read nowhere else loses its bit writes with its assignments (`prune`).
+        // A port base stays (ports are never pruned).
+        VLIRStmt::IndexAssign { base: _, index, value } => {
             collect_vlir_reads(index, out);
             collect_vlir_reads(value, out);
         }

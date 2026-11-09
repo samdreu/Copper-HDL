@@ -3541,6 +3541,50 @@ fn rewrite_block_tail(
     Ok(())
 }
 
+/// Whether `e` reads the local `name` anywhere — as a path, a field base, a call
+/// argument, inside a nested block. Conservative: a macro's token text that
+/// mentions the name counts as a read (a false "yes" costs a temp, a false "no"
+/// a miscompile).
+fn expr_reads_ident(e: &ExprType, name: &str) -> bool {
+    let stmts = |ss: &[RawStmt]| {
+        ss.iter().any(|s| match &s.kind {
+            RawStmtKind::Local(l) => l.init.as_ref().is_some_and(|i| expr_reads_ident(i, name)),
+            RawStmtKind::Expr(es) => expr_reads_ident(&es.expr, name),
+            RawStmtKind::Item(_) => false,
+        })
+    };
+    let r = |x: &ExprType| expr_reads_ident(x, name);
+    match e {
+        ExprType::Path(p) => compact_ident(&p.path_text) == name,
+        ExprType::Lit(_) => false,
+        ExprType::Field(f) => r(&f.base),
+        ExprType::Struct(s) => s.fields.iter().any(|f| r(&f.expr)) || s.rest.as_deref().is_some_and(r),
+        ExprType::Array(a) => a.elements.iter().any(r),
+        ExprType::Repeat(rp) => r(&rp.expr) || r(&rp.len),
+        ExprType::Range(rg) => rg.start.as_deref().is_some_and(r) || rg.end.as_deref().is_some_and(r),
+        ExprType::Unary(u) => r(&u.expr),
+        ExprType::Binary(b) => r(&b.left) || r(&b.right),
+        ExprType::Assign(a) => r(&a.left) || r(&a.right),
+        ExprType::MethodCall(mc) => r(&mc.receiver) || mc.args.iter().any(r),
+        ExprType::Call(c) => c.args.iter().any(r),
+        ExprType::Index(i) => r(&i.base) || r(&i.index),
+        ExprType::Cast(c) => r(&c.expr),
+        ExprType::Reference(rf) => r(&rf.expr),
+        ExprType::If(f) => r(&f.condition) || stmts(&f.then_block) || f.else_branch.as_deref().is_some_and(r),
+        ExprType::Block(b) => stmts(&b.stmts),
+        ExprType::Match(m) => {
+            r(&m.scrutinee) || m.arms.iter().any(|a| r(&a.body) || a.guard.as_deref().is_some_and(r))
+        }
+        ExprType::Loop(l) => stmts(&l.body),
+        ExprType::While(w) => r(&w.condition) || stmts(&w.body),
+        ExprType::ForLoop(f) => r(&f.iter) || stmts(&f.body),
+        ExprType::Tuple(t) => t.elements.iter().any(r),
+        ExprType::Await(a) => r(&a.base),
+        ExprType::Macro(m) => m.tokens_text.contains(name),
+        _ => false,
+    }
+}
+
 /// A synthesized `target = value;` statement, for the leaf rewrites above.
 fn assign_stmt(target: &str, value: ExprType, span: SourceSpan) -> RawStmt {
     RawStmt {
@@ -3959,13 +4003,42 @@ fn lower_expr_stmt(
             }
             // Whole-struct assignment: `ex_mem = new_ex_mem;` (or a struct
             // literal / ctor / conditional over them) expands to one assignment
-            // per field. RHS field reads see pre-assignment values only when
-            // they name OTHER locals' wires — a literal whose fields read the
-            // target's own fields would see forwarded values; no such shape
-            // exists in the corpus, and the plain-Var copy (the CPU latches) is
-            // hazard-free by construction.
+            // per field. A right-hand side that reads the TARGET itself
+            // (`p = Pr { x: p.y + a, y: p.x }`) is first bound to a fresh struct
+            // temp, `let p__litK = <rhs>; p = p__litK;`: Rust evaluates every
+            // field from the old value, and the per-field assignments, forwarded
+            // in order, would give `y` the new `x` (line `II.3 found
+            // struct-literal-self-read`, MEASUREMENTS §Z.1). The copy from a
+            // struct local is hazard-free by construction.
             if let ExprType::Path(pth) = assign.left.as_ref() {
                 let target = compact_ident(&pth.path_text);
+                if ctx.struct_locals.contains_key(&target)
+                    && !matches!(assign.right.as_ref(), ExprType::Path(_))
+                    && expr_reads_ident(&assign.right, &target)
+                {
+                    let tmp = format!("{target}__lit{}", ctx.for_temps);
+                    ctx.for_temps += 1;
+                    let decl = RawStmt {
+                        order: 0,
+                        kind: RawStmtKind::Local(copper_core::frontend_ir::LocalStmt {
+                            is_mut: false,
+                            ty: None,
+                            name: tmp.clone(),
+                            init: Some((*assign.right).clone()),
+                            attrs: Vec::new(),
+                            span,
+                        }),
+                        text: String::new(),
+                        span,
+                    };
+                    lower_stmt(&decl, ctx, out)?;
+                    let back = assign_stmt(
+                        &target,
+                        ExprType::Path(copper_core::frontend_ir::ExprPath { path_text: tmp, span }),
+                        span,
+                    );
+                    return lower_stmt(&back, ctx, out);
+                }
                 if let Some(sname) = ctx.struct_locals.get(&target).cloned() {
                     let fields = struct_fields(&sname, ctx, span)?;
                     let rewritten = {

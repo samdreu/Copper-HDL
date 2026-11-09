@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use copper_core::chir::{
     CHIRBody, CHIRExpr, CHIRLit, CHIRMemInit, CHIRModule, CHIRPattern, CHIRPort, CHIRPortDir,
     CHIRPortKind, CHIRRegDecl, CHIRSeqBody, CHIRStmt, CHIRStructuralBody, CHIRSubmoduleInst,
-    CHIRType, Width,
+    CHIRType, Width, CHIRBinOp, CHIRUnOp,
 };
 use copper_core::frontend_ir::SourceSpan;
 use copper_core::shir::{
@@ -13,6 +13,12 @@ use copper_core::shir::{
     SHIRPortDir, SHIRPortKind, SHIRReg, SHIRRegUpdate, SHIRSeqBody, SHIRStmt,
     SHIRStructuralBody, SHIRSubmoduleInst,
 };
+
+thread_local! {
+    /// The declared width of every scalar wire the forwarding walk has seen, by name — what
+    /// the whole-value form of a forwarded wire's bit write needs (`extract_updates_from_stmts`).
+    static WIRE_WIDTHS: std::cell::RefCell<HashMap<String, Width>> = std::cell::RefCell::new(HashMap::new());
+}
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -972,7 +978,10 @@ fn extract_updates_from_stmts(
             // register keeps its name, so existing Verilog is emitted unchanged and the
             // wire does not go unused — which `-Wall` would flag, failing the
             // equivalence harness rather than merely looking untidy.
-            CHIRStmt::Wire { name, value, .. } => {
+            CHIRStmt::Wire { name, value, ty, .. } => {
+                if let CHIRType::UInt { width } | CHIRType::SInt { width } = ty {
+                    WIRE_WIDTHS.with(|w| w.borrow_mut().insert(name.clone(), width.clone()));
+                }
                 let plain = rename_vars(lower_expr(value)?, renames);
                 let resolved = subst_vars(plain.clone(), forwarding);
                 // Recorded when substitution changed it (cause L-2) — and ALSO
@@ -1162,6 +1171,46 @@ fn extract_updates_from_stmts(
             CHIRStmt::ForLoop { body, .. } => {
                 for n in for_body_names(body) {
                     forwarding.insert(n.clone(), SHIRExpr::Var(n));
+                }
+            }
+
+            // A bit write to a wire whose value the walk RECORDS (its initializer read a
+            // register assigned earlier in the segment, L-2): the recorded value is updated by the
+            // whole-value form `v = (v & ~(W'(1) << i)) | (W'(e) << i)`, the form a register's bit
+            // write takes in `chir_lower` (§U.3). Without it an edge consumer read the value from
+            // before the bit write (`q <= (f ^ a)` for `let mut s = f; s[0] = d; q.write(s)`; line
+            // `II.3 found forwarded-wire-bit-write`, MEASUREMENTS §Y.4, §Z.2). An unrecorded wire is
+            // read by name, its `always_comb` value, which the `IndexAssign` already drives.
+            CHIRStmt::IndexAssign { base, index, value, span: s } => {
+                if let Some(cur) = forwarding.get(base).cloned() {
+                    let width = WIRE_WIDTHS.with(|w| w.borrow().get(base).cloned()).ok_or_else(|| {
+                        SHIRLowerError::UnsupportedConstruct {
+                            description: format!(
+                                "a bit write to `{base}`, a wire whose value is forwarded, \
+                                 whose width is not known here"
+                            ),
+                            span: *s,
+                        }
+                    })?;
+                    let ty = CHIRType::UInt { width: width.clone() };
+                    let idx = resolve(lower_expr(index)?, forwarding);
+                    let val = resolve(lower_expr(value)?, forwarding);
+                    let bit = |e: SHIRExpr| SHIRExpr::BinOp {
+                        left: Box::new(e),
+                        op: CHIRBinOp::Shl,
+                        right: Box::new(idx.clone()),
+                    };
+                    let one = SHIRExpr::Lit(SHIRLit { ty, value: 1 });
+                    let keep = SHIRExpr::BinOp {
+                        left: Box::new(cur),
+                        op: CHIRBinOp::BitAnd,
+                        right: Box::new(SHIRExpr::UnOp { op: CHIRUnOp::BitNot, expr: Box::new(bit(one)) }),
+                    };
+                    let set = bit(SHIRExpr::Resize { expr: Box::new(val), width });
+                    forwarding.insert(
+                        base.clone(),
+                        SHIRExpr::BinOp { left: Box::new(keep), op: CHIRBinOp::BitOr, right: Box::new(set) },
+                    );
                 }
             }
 
