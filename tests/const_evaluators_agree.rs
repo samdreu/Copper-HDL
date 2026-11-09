@@ -51,6 +51,9 @@ const ASYMMETRIC: &[(&str, &str)] = &[
     ("tests/fixtures/const_pattern_dut.rs::const CP_ZERO", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler folds a pattern naming it with `fold_const_init`, and the sweep checks that fold against rustc (`const_pattern_dut`, MEASUREMENTS §U.2)"),
     ("tests/fixtures/const_pattern_dut.rs::const CP_TWO", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler folds a pattern naming it with `fold_const_init`, and the sweep checks that fold against rustc (`const_pattern_dut`, MEASUREMENTS §U.2)"),
     ("tests/fixtures/const_pattern_dut.rs::const CP_THREE", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler folds a pattern naming it with `fold_const_init`, and the sweep checks that fold against rustc (`const_pattern_dut`, MEASUREMENTS §U.2)"),
+    ("tests/fixtures/parity_battery_dut.rs::const PB_MASK", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler states it as a sized `localparam` of the value `fold_const_init` folds it to, and the sweep checks that fold against rustc (`parity_battery_dut`, MEASUREMENTS §Z.8, line `II.3 found bits-const`)"),
+    ("tests/fixtures/parity_battery_dut.rs::const PB_ONE", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler states it as a sized `localparam` of the value `fold_const_init` folds it to, and the sweep checks that fold against rustc (`parity_battery_dut`, MEASUREMENTS §Z.8, line `II.3 found bits-const`)"),
+    ("tests/fixtures/parity_battery_dut.rs::pbt_bits_const::const PB_LOCAL", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler states it as a sized `localparam` of the value `fold_const_init` folds it to, and the sweep checks that fold against rustc (`parity_battery_dut`, MEASUREMENTS §Z.8, line `II.3 found bits-const`)"),
     ("tests/fixtures/const_pattern_dut.rs::cp_tuple_expr::const BODY_TWO", "a `Logic`/`Bits` const: `ConstEnv` is integer-valued (SPEC I.14.4's evaluator over integers), so only the interpreter evaluates it; the transpiler folds a pattern naming it with `fold_const_init`, and the sweep checks that fold against rustc (`const_pattern_dut`, MEASUREMENTS §U.2)"),
 ];
 
@@ -115,9 +118,30 @@ fn const_source(items: &[Item]) -> Vec<String> {
         .collect()
 }
 
-/// A body's own items as `Item`s.
+/// A body's own items as `Item`s, and the `const` items of its nested blocks (a loop body's
+/// `const`): both evaluators read a nested block's consts since 2026-11-08 (the transpiler
+/// hoists them, the interpreter collects them; MEASUREMENTS §Z.3).
 fn body_items(f: &ItemFn) -> Vec<Item> {
-    f.block.stmts.iter().filter_map(|s| if let Stmt::Item(it) = s { Some(it.clone()) } else { None }).collect()
+    struct V(Vec<Item>, usize);
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_block(&mut self, b: &'ast syn::Block) {
+            self.1 += 1;
+            syn::visit::visit_block(self, b);
+            self.1 -= 1;
+        }
+        fn visit_item_const(&mut self, c: &'ast syn::ItemConst) {
+            if self.1 > 1 {
+                self.0.push(Item::Const(c.clone()));
+            }
+        }
+        fn visit_item_fn(&mut self, _: &'ast ItemFn) {}
+    }
+    let mut out: Vec<Item> =
+        f.block.stmts.iter().filter_map(|s| if let Stmt::Item(it) = s { Some(it.clone()) } else { None }).collect();
+    let mut v = V(Vec::new(), 0);
+    syn::visit::Visit::visit_block(&mut v, &f.block);
+    out.extend(v.0);
+    out
 }
 
 /// The interpreter's value as an integer, when it is one (an `X` or a non-scalar is
