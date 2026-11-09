@@ -5833,3 +5833,160 @@ DISAGREE; G-E 5 anchored; **G-K `233 lines — 231 CLOSED, 2 OPEN; 171 required 
 coreui, 3 example, 13 gone, 331 sweep, 155 test, 127 ui; 342 run checks`**, the 3 example fixtures PASS. Not
 run remotely (nothing pushed). sv-baseline against `730a815` on `77f5c65`: 30 new modules, 1 changed
 (`pbt_aggregates`, AD.4). After this run, docs only: III.3.6's counts, this section, CLAUDE.md.
+
+## AE. D-29: `ticking-for-ends-in-loop` closed (lowered); `ticking-for-generic-range` found, OPEN with a decision packet; II.1.3 stays OPEN (2026-11-09)
+
+Branch `claude/open-lines-i-a66403`, cut from `paper` at `e71f7d5` (ledger 233 lines — 231 CLOSED, 2 OPEN).
+`e4961c4` added the OPEN line found while probing, before any fix (`ticking-for-generic-range`; widened in
+`c4fd345` to its measured class). "Before" is measured on `e71f7d5`'s code (the same binary, then
+`control_extract.rs` checked out over the tree and restored for zzi_29–34); every module's emission against an
+`sv-baseline snapshot` taken on `e71f7d5`. Predictions, probes and before-logs: notes folder `open-lines-i-AE.md`,
+`open-lines-i-AE-probes/`.
+
+### AE.0 Mechanism (read before measuring)
+
+R3 already decides the shape the D-29 way in both front-ends: a ticking `for` over a literal non-empty range
+enters its body (`cfg.rs::statically_nonempty_range`); a constant-shaped named range is decided by `ConstEnv` in
+the transpiler (the empty-range oracle) and by a rustc `const _: () = assert!(..)` per dependency set in the macro
+(`empty_range_dependencies`, I.8.4(b), §V.3); a range whose bound is not constant-shaped is an exit. So the break
+was in the realization only: (1) `expand_counted_for` declined a `for` whose body ends in a nested loop (no last
+tick to hoist); (2) the unhoisted form of §AD.2 kept its exit test at entry, dead over a constant non-empty range,
+and `splice_zero_time_gotos`'s structural cycle test walked through it (head → inner empty exit → skippable wait →
+back edge). No front-end rule changes.
+
+### AE.1 `II.3 found ticking-for-ends-in-loop` — CLOSED (D-29, lowered)
+
+**Fix** (`c4fd345`): a tick-bearing `for` whose body ends in a nested tick-bearing loop takes I.8.5's `D` with no
+hoisted tick — `loop { <exit test>; B; c = c + 1 }`, and over a range `ConstEnv` proves non-empty
+`loop { B; c = c + 1; if <passed> { break } }` (the entry test is never taken there; dropping it leaves the cycle
+test no dead path). The unhoisted form drops its entry test (its last iteration leaves through
+`if <passed> { tick; break }`). `body_ends_at_a_clock_boundary` — the flattener's own copy of the shape rule —
+admits tick-free statements after a body's last nested loop (they run in the `break` continuation, before the
+zero-time return to the head; the source is gated by the shared `check_nested_loop_shape` in both front-ends, so
+no source shape is widened). G-I's source walker, which required a tick to end every counted-`for` iteration,
+takes the Last/More decision at a back edge reached without one — where the emitted `D` tests. Without that, the
+first projection run would have failed on every new module (the walker's error), so it was changed with the
+lowering. G-I notes one unreachable emitted state per new module (the head state of a nested loop with no
+top-level tick, entered only through its inlined copy) — the note `arms_only_*` already carry.
+
+Fixture `tests/fixtures/ticking_for_ends_in_loop_dut.rs`, 8 modules, all on the extraction route (a nested
+ticking loop always is — there is no linear-route form of the shape):
+
+| module | shape |
+|---|---|
+| `tfl_outer_ends_wait` | §AD.5's `zzh_05` |
+| `tfl_handwritten` | §AD.5's `h1`, a hand-written `loop` with its own counter |
+| `tfl_const_items` | outer range through a file `const`, inner through a body-local `const` |
+| `tfl_loop_while_const` | a hand-written `loop` with an inner `0..TFL_K`; a `while` of the same shape |
+| `tfl_outer_runtime` | an outer range known only at run time (zero iterations), followed by a tick |
+| `tfl_break_inclusive_two` | an author `break`; arithmetic-literal and inclusive inner ranges; two inner `for`s |
+| `tfl_three_arms` | three levels, the middle `for` ending in the wait; the inner `for` in one arm |
+| `tfl_waits_wide_max` | wait, inner `for` over `u32` consts, wait; the variable read after a wait; end `u8::MAX` |
+
+Predicted on `e71f7d5`: all 8 refused by the transpiler, admitted by the macro — measured (the probes they were
+built from, zzi_01–28: see AE.2). Now 16/16 (differential and reference legs). ui: `fail/runtime_for_ends_in_loop`
+(an inner run-time range: R3's message, one message in both — `front_end_parity_ui` checks the transpiler's) and
+its twin `pass/ticking_for_ends_in_loop_ok`.
+
+**sv-baseline against `e71f7d5`:** predicted exactly `ntf_distinct`, `ntf_three`, `ntf_in_loop_while`,
+`ntf_then_for_then_wait` (the only modules with an unhoisted form over a constant range; `ntf_interact`,
+`ntf_bound_var` have run-time inner bounds, `ntf_break` a `break`, `ntf_if_inner` its `for` in an arm).
+**Measured: those 4 changed** (before the new fixture was added: 4 of 442), all sweep-agree; plus the 8 new modules.
+`timing_model_derivations`' extraction-route set gains `tfl_break_inclusive_two`, `tfl_handwritten`,
+`tfl_outer_runtime` (new modules of its kind, as §AD.8's).
+
+### AE.2 The zzi battery — predictions and measurements
+
+28 probes written and predicted before any measurement (notes `open-lines-i-AE.md`), then 6 more around the
+const-generic finding (zzi_29–34). Macro: trybuild ui/pass copies (removed after). Transpiler: `copper-transpile`.
+
+| probes | predicted | measured on `e71f7d5` | after `c4fd345` |
+|---|---|---|---|
+| 01–03, 06, 07, 09, 11–13, 15, 17, 18, 20, 21, 23, 24, 26, 28 (a `for`/`loop`/`while` ending in a wait, R3 through a constant inner `for`; 06/20 an outer run-time range) | macro admits, transpiler refuses; after: both | as predicted | both admit |
+| 05 (inner run-time range), 10 (inner `break` before its tick), 14 (inner `0..Z`, `Z = 0`), 16 (`0..two()`, a `const fn`) | refused by both, one message | as predicted (R3's message; the macro's for 14 is its E0080 assertion with the same text) | unchanged |
+| 22 (a bare tick mid-body, then a wait), 27 (an `if { wait } else { tick }` last) | refused by both (shape) [uncertain] | as predicted | unchanged |
+| 08, 19, 25 | both admit | as predicted | both admit |
+| 04 (inner `0..W`, `W` a const generic) | macro admits, transpiler refuses, before AND after | as predicted | **refused** — AE.5 |
+| 29–32, 34 (a const-generic range R3's verdict depends on) | — (written after 04) | macro admits all; transpiler refuses all | refused — AE.5 |
+| 33 (a const-generic inner range followed by a tick) | — | both admit | both admit |
+
+Every prediction held, including the two marked uncertain.
+
+### AE.3 Not a new line: the outer run-time range
+
+zzi_06 and zzi_20 (an outer `for` over a run-time range ending in a wait, R3 holding through a constant inner
+`for`, a tick after the `for`) were refused by the same mechanism as `zzh_05` (`expand_counted_for` declines) —
+recorded under `ticking-for-ends-in-loop` (its text widened), and lowered by the same change with the exit test at
+the top (`tfl_outer_runtime`).
+
+### AE.4 II.1.3 re-verified — stays OPEN
+
+§AD.6's 79 probes and the 34 zzi probes, 113 modules: **the macro admits 107; the transpiler 101.** The 79 old
+probes are admitted by both (`zzh_05` now too). The six both refuse are refused with one message each. The six
+the transpiler alone refuses are all line `ticking-for-generic-range` (zzi_04, 29, 30, 31, 32, 34). II.1.3 stays
+OPEN, its owner text now pointing at that line.
+
+### AE.5 Found, not closed — `II.3 found ticking-for-generic-range` (OPEN, a parity break) — decision packet
+
+**Question.** A tick-bearing `for` over a range bounded by a const generic (`0..W`), where R3's verdict depends on
+the range being non-empty — the module loop's only boundary (`loop { q.write(..); for _ in 0..W { tick } }`,
+zzi_29), followed by a skippable wait (zzi_30), inside a hand-written nested loop ending in one (zzi_31), or either
+`for` of `ticking-for-ends-in-loop`'s shape (zzi_04, 32, 34). Admitted (as R3 assumes) or refused?
+
+**What the docs say.** I.8.4(b) and II.2.2: a constant-shaped range no front-end folds is taken as non-empty — the
+"under" direction, recorded. D-29 (the user, 2026-11-09): a range *proven* non-empty by `ConstEnv` ticks on every
+path; a range known only at run time stays possibly-empty. A const generic is neither: it is fixed per instance
+(I.14.5(d)), unknown to the one parametric SV module the transpiler emits.
+
+**What the code does.** R3 in both front-ends: `literal_range_is_empty` answers "not empty" for `0..W`
+(`is_constant_expr` — a SCREAMING_CASE name); the macro emits no assertion (`constant_ticking_for_ranges` excludes
+generics: a `const _` item cannot name an outer generic). So the macro admits, and simulation with `W = 0` would
+livelock. The transpiler keeps the `for`'s empty-range exit (the guarded hoisted tick `if c != a { tick }`, or
+`D`'s entry test), and `splice_zero_time_gotos` finds the zero-time cycle through it: refused with the flattener's
+message. Pre-existing (measured on `e71f7d5` for every probe; zzi_04/32/34 there by the older `expand_counted_for`
+decline). Corpus 0: no corpus module's R3 verdict depends on a generic range (`det_for`'s generic `for` is followed
+by a tick; `counted_delay` uses a literal).
+
+**Options.**
+- **(a) Admit in both; check the hypothesis per instance.** The transpiler treats a const-generic range the way R3
+  does — non-empty — wherever R3's verdict depends on it (the do-while `D`, no guard), and the hypothesis is
+  checked where `W` gets its value: the macro emits an inline `const { assert!(W > 0, NESTED_EXIT_MESSAGE) }` in the
+  body (rustc evaluates it at monomorphization, so a `W = 0` instance fails to build — not under `cargo check` or
+  trybuild, which never instantiate), the transpiler an elaboration-time check in the parametric SV
+  (`if (!(0 < W)) $error(..)` in a `generate`, so Verilator refuses `-GW=0`). Changes: two emissions and their pins;
+  the parametric-delay idiom (`for _ in 0..N { tick }` as a generic module's only boundary) becomes legal. Corpus
+  SV: none expected (only shapes refused today change).
+- **(b) Refuse in both.** R3 stops assuming: a range with a const-generic bound counts as possibly empty, as a
+  run-time one does, so every probe above is refused by both with R3's message. Changes: `literal_range_is_empty`
+  and II.2.2's recorded direction for generics; corpus cost 0 (measured above); the parametric-delay idiom needs a
+  tick after the `for`.
+- **(c) A fourth named parity exception.** Keep both behaviours; witness-pinned as the three are. Not recommended:
+  the macro's side livelocks at `W = 0` with no check anywhere.
+
+**Recommendation: (a)** — it is D-29's rule applied where the constant is known, which for a generic is the
+instance; it keeps a natural idiom, and both front-ends then refuse exactly the instance whose range is empty.
+(b) is the smaller change if the per-instance checks are unwanted.
+
+### AE.6 Ledger and counts
+
+Before: **233 lines — 231 CLOSED, 2 OPEN** (`e71f7d5`). After (G-K in AE.7's run): **234 lines — 232 CLOSED, 2 OPEN; 171 required by the SPEC; fixtures: 8 coreui, 3 example, 13 gone, 339 sweep, 155 test, 129 ui; 350 run checks**. Closed:
+`ticking-for-ends-in-loop`. Added OPEN before any fix: `ticking-for-generic-range` (`e4961c4`). II.1.3 stays OPEN,
+now on `ticking-for-generic-range`.
+
+### AE.7 The bare regression — measured
+
+Before the code commit: `projection_relation`, `timing_model_derivations` (AE.1's three additions),
+`front_end_parity_ui`, `front_end_parity`, `register_reconciliation`, `conformance_ledger` and the trybuild ui
+suite, each passing. The first bare run (under `nohup`) failed at step 2 in 7 s: `nohup` leaves SIGPIPE ignored,
+so the driver's `echo "$SV" | grep -q` got EPIPE under `pipefail` — the environment, not the tree; re-run with
+SIGPIPE restored. **Bare `tools/regression.sh` on `c4fd345` (the final code commit; laptop; `paper` at
+`e71f7d5`): REGRESSION OK (590 s).** 1788 passed, 0 failed, 16 ignored, 159 test binaries (G-C 132 test files);
+examples **32/32**; G-D 382 differential cases (3 ignored-with-reason), G-F 382 (3 skipped with a reason) — the 8
+new fixture modules; **G-G differential 3462 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**,
+**reference 3474 PASS / 0 DISAGREE**; G-I 303 clocked related (98 extracted, 23 linear, 182 single-tick), 0
+uncovered, 2236 transitions; G-J 90 const items compared / 25 outside both, 336 counted-`for` bounds compared,
+9 asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; **G-K `234 lines — 232 CLOSED, 2 OPEN; 171 required by the
+SPEC; fixtures: 8 coreui, 3 example, 13 gone, 339 sweep, 155 test, 129 ui; 350 run checks`**, the 3 example
+fixtures PASS. Not run remotely (nothing pushed). sv-baseline against `e71f7d5` on `c4fd345`: 12 of 450 differ —
+8 new (`tfl_*`), 4 changed (`ntf_distinct`, `ntf_three`, `ntf_in_loop_while`, `ntf_then_for_then_wait`, AE.1).
+After this run, docs only: III.3.6's counts, this section, CLAUDE.md.
