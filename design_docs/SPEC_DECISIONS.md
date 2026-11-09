@@ -3829,3 +3829,44 @@ parametric module has none to give it. (2) the X pattern asks the coroutine's th
 admits the question only where it cannot see that it is one.
 Obligations: III.3.6's counts; CLAUDE.md's front-end parity paragraph (three named exceptions; the
 audit's new name) — the user's to approve.
+
+### D-27 — The inclusive `for` is IN, with Rust's meaning; a ticking constant end at its type's maximum refused in both (II.1.2 R23)   (2026-11-08, realized 2026-11-09)
+Clause: SPEC I.2.4's two counted-`for` rows (tick-bearing and tick-free), I.8.5 (the desugaring), II.1.2
+(a new rule row, R23), II.1.3 (the parity obligation: its last break closed), and III.3.4's line `II.3
+found inclusive-for` (CLOSED). Part I's carried item "the inclusive counted `for`" is closed.
+Question: is a `for` over an inclusive range (`for i in a..=b`), tick-free or tick-bearing, IN (with
+Rust's meaning) or OUTSIDE (refused by both front-ends)?
+Docs say: I.2.4 — the tick-bearing row "exclusive ranges only", the tick-free row `a..b` "unrolled
+`b − a` times"; Part I's carried list names the inclusive form for Phase C. No decision stated a meaning
+or a refusal. The packet: `review/MEASUREMENTS.md` §Z.10.
+Code did (f790444): the macro admits both; the simulator runs Rust's meaning; the interpreter refuses
+("I.2.4: exclusive ranges only"); the transpiler refuses ("only exclusive range"; the counted-loop
+message for a ticking one). Corpus 0.
+Anchor: none — decided.
+Options: (a) IN — `D` gains `for v in a..=b` ≡ Rust's: a tick-free one unrolled `b − a + 1` times (an SV
+`i <= b`, no `b + 1`), a tick-bearing one I.8.5's counter exiting on `c > e`, a ticking end at its type's
+maximum (where the increment past it overflows) either a one-bit-wider counter or refused R3-style;
+(b) OUTSIDE — one shared refusal, a ui/fail case, no lowering.
+Decided (the user, 2026-11-08, as recommended): (a), tick-free and tick-bearing; a ticking bound at its
+type's maximum refused in both front-ends, R3-style.
+Realized (MEASUREMENTS §AA.3): I.2.4's rows and I.8.5 state the form (`D`: `let mut c = a ; let e = b ;
+loop { if c > e { break } ; let v = c ; c = c + 1 ; s }`); a tick-free one is unrolled `b − a + 1` times
+and never increments past `e`. The transpiler: `CHIRStmt`/`SHIRStmt`/`VLIRStmt::ForLoop` carry
+`inclusive`, emitted `for (int i = a; i <= b; i++)`; the array-register unroll runs `b − a + 1` copies;
+`control_extract::expand_counted_for` writes `c > e` for the exit tests and the hoisted tick's guard. The
+interpreter (`copper-ref`) runs both forms. **II.1.2 R23**: a tick-bearing `for` over a range whose
+bounds are constant-shaped and *typed* (a path, a suffixed literal or a cast among the leaves —
+`copper_analysis::constant_ticking_inclusive_ranges`) and whose end is its type's maximum, refused with
+`INCLUSIVE_MAX_MESSAGE`: the macro emits `const _: () = assert!({ let r = (a)..=(b);
+(*r.end()).checked_add(1).is_some() }, MSG);` right before the `for` (rustc types the range as the `for`
+does; E0080 under `cargo check`), the transpiler folds the end at the range's type through `ConstEnv`
+(an end or type it cannot fold is refused, never assumed below the maximum). An all-unsuffixed range
+(`0..=255`) takes its type from the body, which neither front-end can name in a `const` item; it is not
+decided by R23 (packet §AA.5). ui/pass `inclusive_for`, ui/fail `inclusive_ticking_for_at_max`, swept
+fixture `tests/fixtures/inclusive_for_dut.rs` (8 modules). Measured basis: corpus 0, sv-baseline no
+corpus module changed.
+Left open (packet §AA.5, owner **decision**): a tick-bearing inclusive `for` whose end reaches its
+type's maximum only at run time (or an untyped constant end whose inferred type's maximum it is): `D`
+overflows there (a run-time failure, I.14.3), Rust's `RangeInclusive` — the simulator — does not, and
+the transpiler's 32-bit counter wraps for a type of 32 bits or more. Corpus 0; line `II.3 found
+inclusive-for-runtime-max`.
