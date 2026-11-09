@@ -20,8 +20,10 @@
 //!   `localparam int MOD = 1 << PTR_W`. That is also why this pass needs no
 //!   const evaluator: SystemVerilog evaluates the expression itself.
 //!
-//! A const this pass cannot express (a `const fn` call, a non-integer type) is
-//! *not* emitted. Referencing one is then the ordinary "undefined variable"
+//! A const whose initializer has no SystemVerilog spelling (a `const` method call,
+//! a tuple-struct field, a `const fn` call) is stated by the value `ConstEnv` folds
+//! it to (2026-11-08, MEASUREMENTS §X.1). One neither can express (a non-integer
+//! type, an initializer outside `ConstEnv`'s grammar) is *not* emitted. Referencing one is then the ordinary "undefined variable"
 //! error, with a note explaining which const was skipped and why — see
 //! [`rejection_note`].
 
@@ -41,11 +43,25 @@ const INT_TYPES: &[&str] = &[
 /// output is decided at emission, from the rendered SystemVerilog, because an
 /// unused `localparam` is a Verilator `UNUSEDPARAM` error under `-Wall`.
 pub fn candidates(fir: &FrontendModuleIR) -> Vec<ModuleLocalParam> {
+    // A const whose initializer has no SystemVerilog spelling but which rustc evaluates —
+    // a `const` integer method (`B.wrapping_add(10)`), a tuple-struct field
+    // (`PAIR.0 + PAIR.1`), a `const fn` call — is stated by its value, folded by the shared
+    // evaluator `ConstEnv` (SPEC I.14.4; line `II.3 found const-call-body`, MEASUREMENTS
+    // §X.1). Until 2026-11-08 such a const was skipped and a body naming it refused.
+    let env = std::cell::OnceCell::new();
+    let folded = |c: &ItemConst| -> Option<String> {
+        let env = env.get_or_init(|| {
+            copper_analysis::consts::ConstEnv::from_items(fir.file_const_source.iter().map(String::as_str))
+        });
+        let v = env.get(&c.name)?;
+        let ty = syn::parse_str::<syn::Type>(&c.ty.ty_text).ok().and_then(|t| copper_analysis::consts::IntTy::of_type(&t))?;
+        ty.holds(v).then(|| v.to_string())
+    };
     let usable: Vec<(&ItemConst, String)> = fir
         .file_consts
         .iter()
         .filter(|c| is_int_type(&c.ty.ty_text))
-        .filter_map(|c| sv_expr(&c.value_text).map(|sv| (c, sv)))
+        .filter_map(|c| sv_expr(&c.value_text).or_else(|| folded(c)).map(|sv| (c, sv)))
         .collect();
 
     let names: Vec<&str> = usable.iter().map(|(c, _)| c.name.as_str()).collect();
@@ -97,10 +113,11 @@ pub fn rejection_note(fir: &FrontendModuleIR, name: &str) -> Option<String> {
     }
     Some(format!(
         "`const {}` has an initializer the transpiler cannot express in \
-         SystemVerilog (`{}`) — only integer literals, other file-scope integer \
-         consts, and arithmetic/bitwise operators on them are supported. A \
-         `const fn` call is evaluated by rustc, and nothing of it survives into \
-         the emitted module",
+         SystemVerilog (`{}`) — an integer literal, other file-scope integer \
+         consts and arithmetic/bitwise operators on them are emitted as written, and \
+         an initializer the shared constant evaluator folds (a `const fn` call, a \
+         `const` integer method, a tuple-struct field, an immutable `static`) by its \
+         value; this one is neither",
         c.name,
         c.value_text.trim()
     ))

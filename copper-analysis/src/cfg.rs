@@ -249,6 +249,10 @@ pub struct Cfg {
     /// 0-iteration exit never false-rejects the outer loop); its own body's
     /// tickless-cycle well-formedness is enforced here instead.
     nested_ticking_loops: Vec<Cfg>,
+    /// This graph is a counted `for`'s sub-CFG: a zero-time cycle of it is an iteration
+    /// with no clock boundary (I.8.2(a)), not a livelock — the range runs out — so R3
+    /// names it with [`ZERO_TIME_FOR_ITERATION_MESSAGE`] (MEASUREMENTS §X.2).
+    counted_for: bool,
     /// The (memory, read port) pairs staged by the statements before the top-level loop
     /// (`s_pre`, SPEC I.2.3) — rule 6 (c)'s existence test counts them (I.10.4). Empty for
     /// a nested loop's sub-CFG and a combinational body.
@@ -306,6 +310,7 @@ impl Cfg {
             inputs: in_param_names(f),
             exit: None,
             nested_ticking_loops: b.nested,
+            counted_for: false,
             pre_staged: pre_loop_read_stagings(f),
             registers_cache: std::cell::OnceCell::new(),
             reg_nodes: rb.nodes,
@@ -339,6 +344,7 @@ impl Cfg {
             inputs: in_param_names(f),
             exit: Some(exit),
             nested_ticking_loops: b.nested,
+            counted_for: false,
             pre_staged: BTreeSet::new(),
             registers_cache: std::cell::OnceCell::new(),
             reg_nodes: Vec::new(),
@@ -734,10 +740,12 @@ impl Cfg {
                             .iter()
                             .find(|&&(m, _)| self.nodes[m].may_exit_without_tick);
                         if let Some(&(m, _)) = culprit {
-                            return Err((
-                                self.nodes[m].span,
-                                NESTED_EXIT_MESSAGE.to_string(),
-                            ));
+                            let msg = if self.counted_for {
+                                ZERO_TIME_FOR_ITERATION_MESSAGE
+                            } else {
+                                NESTED_EXIT_MESSAGE
+                            };
+                            return Err((self.nodes[m].span, msg.to_string()));
                         }
                         return Err((
                             self.nodes[n].span,
@@ -1292,7 +1300,7 @@ impl Builder {
     /// its own grandchild nested loops. Used only for reachability of the nested
     /// loop (no register/output analysis), so `defined_in_loop`/`comb_outputs`/
     /// `exit` are empty/`None`.
-    fn nested_loop_cfg(&self, body: &[Stmt], span: Span) -> Cfg {
+    fn nested_loop_cfg(&self, body: &[Stmt], span: Span, counted_for: bool) -> Cfg {
         let mut b = Builder::new(self.outputs.clone(), self.reg_outputs.clone(), self.inputs.clone(), self.mems.clone());
         let head = b.new_node(Node::empty(span));
         let brk = b.new_node(Node::empty(span)); // exit sink for `break`
@@ -1310,6 +1318,7 @@ impl Builder {
             inputs: self.inputs.clone(),
             exit: None,
             nested_ticking_loops: b.nested,
+            counted_for,
             pre_staged: BTreeSet::new(),
             // Not consulted on a sub-CFG (the multi-phase rule runs on the top level).
             registers_cache: std::cell::OnceCell::new(),
@@ -1517,7 +1526,7 @@ impl Builder {
                 // wait — as a same-cycle observation.
                 let mut mem = mem_accesses(expr, &self.mems);
                 if is_tick {
-                    let sub = self.nested_loop_cfg(loop_body_stmts(expr), expr.span());
+                    let sub = self.nested_loop_cfg(loop_body_stmts(expr), expr.span(), matches!(expr, Expr::ForLoop(_)));
                     mem = sub.entry_cycle_mem();
                     self.nested.push(sub);
                 }
@@ -2250,6 +2259,18 @@ fn untick_through(e: &Expr) -> (bool, bool, bool) {
     }
 }
 
+/// R3's message when the enclosing loop is a counted `for` (MEASUREMENTS §X.2): its
+/// range runs out, so a zero-time iteration is no livelock, but it is an iteration with
+/// no clock boundary (I.8.2(a)) — refused as [`NESTED_EXIT_MESSAGE`]'s shape is, in other
+/// words. The case where the nested loop ends the `for`'s body and its range may be empty
+/// at run time is `check_counted_for_nesting`'s, which both front-ends run first.
+pub const ZERO_TIME_FOR_ITERATION_MESSAGE: &str = "this `for`'s only clock boundary in an \
+    iteration is a nested loop that can be left before it ticks, so an iteration can take no \
+    time — every path through a nested tick-bearing loop must reach a `clk.tick().await` \
+    (SPEC I.8.2(a)), and the transpiler cannot give such an iteration the same meaning in \
+    hardware. Give the `for` body a `clk.tick().await` of its own after the nested loop, or \
+    make the nested loop one that always ticks";
+
 /// R3's message for an enclosing loop whose only boundary is a nested loop that can
 /// be left before it ticks (II.2.2; a literal- or constant-empty `for`, I.8.4(b)).
 pub const NESTED_EXIT_MESSAGE: &str = "this loop's only clock boundary is a nested loop that can be \
@@ -2466,6 +2487,15 @@ fn literal_range_is_empty(e: &Expr) -> bool {
             _ => None,
         }
     };
+    // A bound that is not constant-shaped (a parameter's read, a local, a method
+    // call) is a value of the run: the range may be empty at entry, and a `for`
+    // over it runs zero iterations then (I.8.4(b)) — an exit. A constant-shaped
+    // bound the oracle does not know (a const generic, a constant no front-end
+    // folded) is taken as non-empty, as before.
+    let runtime = |x: Option<&Expr>| x.is_some_and(|b| !is_constant_expr(b));
+    if r.end.is_some() && (runtime(r.start.as_deref()) || runtime(r.end.as_deref())) {
+        return true;
+    }
     let (Some(a), Some(b)) = (lit(r.start.as_deref()), lit(r.end.as_deref())) else { return false };
     match r.limits {
         syn::RangeLimits::HalfOpen(_) => a >= b,

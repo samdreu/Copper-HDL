@@ -316,6 +316,14 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             // attribute's cost on the transpilable CPU: four rebuilds of it,
             // measured 2026-09-03). `None` only for a body with no top-level
             // loop, which `validate_hardware_fn` has already refused.
+            // A run-time-empty counted `for` ending an enclosing ticking `for`
+            // (MEASUREMENTS §J.15): same function, same message, in `transpile_target`.
+            // Before reachability (§X.2): R3 counts a range that may be empty at run
+            // time as an exit (I.8.4(b)) and refuses that shape too, but its message
+            // speaks of a livelock, which a bounded enclosing `for` is not.
+            if let Err(err) = copper_analysis::check_counted_for_nesting(&input_fn) {
+                return err.to_compile_error().into();
+            }
             let cfg = copper_analysis::Cfg::build(&input_fn);
             if let Err(err) = cfg
                 .as_ref()
@@ -344,11 +352,6 @@ pub fn hardware(args: TokenStream, input: TokenStream) -> TokenStream {
             // SPEC II.1.2 R21: no tick before the module loop. Same function, same
             // message, in `transpile_target` (Phase C step 5, 2026-11-07).
             if let Err(err) = copper_analysis::check_no_preloop_tick(&input_fn) {
-                return err.to_compile_error().into();
-            }
-            // A run-time-empty counted `for` ending an enclosing ticking `for`
-            // (MEASUREMENTS §J.15): same function, same message, in `transpile_target`.
-            if let Err(err) = copper_analysis::check_counted_for_nesting(&input_fn) {
                 return err.to_compile_error().into();
             }
             // A pre-loop register must start from a constant or from `Bits::x()`

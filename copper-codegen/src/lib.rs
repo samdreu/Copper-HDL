@@ -443,6 +443,9 @@ fn checked_fir_for_target(
         let mode = mode.map_err(|e| e.to_string())?;
         copper_analysis::check_front_end_rules(target, mode).map_err(|e| e.to_string())?;
     }
+    // MEASUREMENTS §J.15's nesting rule, before reachability as in the macro (§X.2:
+    // R3 refuses the same shape with a livelock message a bounded `for` does not earn).
+    copper_analysis::check_counted_for_nesting(target).map_err(|e| e.to_string())?;
     // c2 (item 2): the transpiler enforces the SAME reachability well-formedness
     // the sim macro does, from the SAME shared analysis on the SAME `&syn::ItemFn`
     // — a tickless loop path is rejected here too (one authoritative check, both
@@ -495,7 +498,6 @@ fn checked_fir_for_target(
     copper_analysis::check_awaits(target).map_err(|e| e.to_string())?;
     // SPEC II.1.2 R21 (Phase C step 5): the macro runs the same function.
     copper_analysis::check_no_preloop_tick(target).map_err(|e| e.to_string())?;
-    copper_analysis::check_counted_for_nesting(target).map_err(|e| e.to_string())?;
     // A combinational `Out` written on some paths but not all is a latch — the
     // macro's rule, from the same analysis (2026-11-02, §10.12). Until then the
     // transpiler had only `check_no_latches` over its own lowering, which refused

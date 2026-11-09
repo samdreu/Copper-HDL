@@ -53,3 +53,52 @@ async fn cc_call_init(
         f = f.wrapping_add(3);
     }
 }
+
+// The same constants named in a body (line `II.3 found const-call-body`, MEASUREMENTS §V.4,
+// §X.1): until 2026-11-08 the transpiler emitted a file const as a `localparam` from its
+// Rust text only, so one whose initializer is a method call or a tuple field (or an
+// immutable `static`, never captured as a `localparam`) was refused wherever a body
+// expression or a `for` bound named it. It is now stated by the value `ConstEnv` folds it
+// to (a sized `localparam` for `u8`); rustc's values are pinned by
+// `tests/const_evaluators_agree.rs::the_widened_constant_grammar_agrees_with_rustc`.
+const CC_REPS: usize = (CC_ONES as usize).wrapping_sub(3); // 3
+
+/// Each constant in a clocked body expression: a method-call const, a tuple-field const, a
+/// `static` and a `u32` method-call const narrowed by a cast.
+#[hardware(sequential)]
+async fn cc_body_expr(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<8>, MainClk>, p: RegOut<Bits<8>, MainClk>) {
+    let mut m: u8 = 0;
+    let mut n: u8 = 0;
+    loop {
+        o.write(Bits::from_u8(m));
+        p.write(Bits::from_u8(n));
+        clk.tick().await;
+        m = m.wrapping_add(CC_WRAP) ^ a.read().as_u8();
+        n = n.wrapping_add(CC_SUM).wrapping_add(CC_SEED) ^ (CC_ONES as u8);
+    }
+}
+
+/// A method-call const as a tick-free `for` bound (accumulating into a wire of the
+/// resumption) and as a ticking `for` bound — the module loop's only boundary, non-empty
+/// through the constant (I.8.4(b), §V.3).
+#[hardware(sequential)]
+async fn cc_body_for(clk: Clock<MainClk>, a: In<Bits<8>, MainClk>, o: RegOut<Bits<8>, MainClk>) {
+    let mut m: u8 = 0;
+    loop {
+        let mut acc: u8 = CC_SUM;
+        for _ in 0..CC_WRAP {
+            acc = acc.wrapping_add(a.read().as_u8());
+        }
+        m = m ^ acc;
+        for _ in 0..CC_REPS {
+            o.write(Bits::from_u8(m));
+            clk.tick().await;
+        }
+    }
+}
+
+/// The constants in a combinational body.
+#[hardware(combinational)]
+pub fn cc_body_comb<D: ClockDomain>(a: In<Bits<8>, D>, o: Out<Bits<8>, D>) {
+    o.write(Bits::from_u8(a.read().as_u8().wrapping_add(CC_WRAP).wrapping_add(CC_SUM) ^ CC_SEED));
+}

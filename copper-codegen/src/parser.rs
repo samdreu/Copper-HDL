@@ -394,6 +394,21 @@ pub fn capture_file_scope(
             }
             syn::Item::Struct(s) => scope.structs.push(capture_item_struct(s)),
             syn::Item::Const(c) => scope.consts.push(capture_item_const(c)),
+            // An immutable `static` is read as its value (SPEC I.14.4; line `II.3 found
+            // const-call-body`, MEASUREMENTS §X.1): a body that names one gets the same
+            // `localparam` a `const` gets. Until 2026-11-08 only the register fold saw it.
+            syn::Item::Static(st) if matches!(st.mutability, syn::StaticMutability::None) => {
+                scope.consts.push(ItemConst {
+                    name: st.ident.to_string(),
+                    ty: RawTypeRef {
+                        ty_text: st.ty.to_token_stream().to_string(),
+                        span: capture_source_span(&*st.ty),
+                    },
+                    value_text: st.expr.to_token_stream().to_string(),
+                    attrs: st.attrs.iter().map(|a| quote!(#a).to_string()).collect(),
+                    span: capture_source_span(st),
+                })
+            }
             syn::Item::Impl(imp) => scope.impls.push(capture_impl(imp, hardware_fns)),
             syn::Item::Trait(t) => scope.traits.push(capture_trait(t, hardware_fns)),
             _ => {}

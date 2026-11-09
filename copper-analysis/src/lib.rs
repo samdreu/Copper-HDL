@@ -47,6 +47,7 @@ pub use cfg::{
     constant_empty_range_assertions, constant_ticking_for_ranges, empty_range_dependencies, range_key,
     stmt_contains_tick,
     with_empty_range_oracle, Cfg, DerivationFacts, EdgeKind, PhaseFacts, NESTED_EXIT_MESSAGE,
+    ZERO_TIME_FOR_ITERATION_MESSAGE,
 };
 pub use init::{
     call_path_text, check_held_preloop_values, check_register_initializer_calls, held_preloop_message,
