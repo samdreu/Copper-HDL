@@ -74,6 +74,7 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     "imx_u64_runtime",
     "imx_u8_const",
     "imx_u8_runtime",
+    "lvt_shadow",
     "lvt_signed",
     "lvt_use_ticking_break",
     // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
