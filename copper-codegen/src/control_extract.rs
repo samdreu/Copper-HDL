@@ -205,6 +205,7 @@ pub fn desugar_counted_loops_in(fir: &mut FrontendModuleIR) {
     let consts = Consts {
         values: const_values(fir),
         generics: fir.signature.generics.iter().map(|g| g.name.clone()).collect(),
+        typing: crate::chir_lower::ForTyping::of(fir),
     };
     let RawStmtKind::Expr(es) = &mut fir.raw_statements[idx].kind else {
         return;
@@ -389,8 +390,121 @@ fn expand_counted_for(
         *next_counter += 1;
         format!("{ANON_COUNTER}{n}")
     } else {
-        pat
+        pat.clone()
     };
+
+    // The counter's type (D-28, 2026-11-09; lines `II.3 found inclusive-for-runtime-max` and
+    // `II.3 found loop-var-type`, MEASUREMENTS §AB). The loop variable has its Rust type `T`
+    // (`chir_lower::for_var_type`: a typed bound's, else a use's). The counter holds every
+    // value the exit tests read: `a ..= e` and, for an inclusive range, `e + 1` — so for
+    // `T` of 32 bits or more it is one Rust type wider than `T` (`u64` for `u32`, `u128` for
+    // `u64`, a 129-bit internal type for `u128`), and an end at `T`'s maximum, constant or
+    // reached at run time, exits on `c > e` with nothing wrapped (Rust's `RangeInclusive`;
+    // I.8.5's done flag, realized by the width). A narrower `T` sits in a 32-bit counter, as
+    // every counter did until D-28; an exclusive range never passes its end, so its counter
+    // is `T` itself from 32 bits up. Both bounds are cast to the counter's type, and the
+    // body reads the variable at `T` (`v as T`; an index read is left alone). Until D-28 the
+    // counter was `u32` whatever `T`: a `u32` end at its maximum wrapped and never exited, a
+    // `u64` bound was truncated, and a `u8` variable was read at 32 bits (Verilator's
+    // WIDTHEXPAND).
+    let r_start = match &*f.iter {
+        ExprType::Range(r) => r.start.as_deref(),
+        _ => None,
+    };
+    let var_ty = consts.typing.var_type(r_start, &end, &pat, work);
+    let negative = |e: &ExprType| {
+        const_value(e, consts).is_some_and(|v| v < 0) || matches!(e, ExprType::Unary(u) if u.op.trim() == "-")
+    };
+    let (counter_ty, read_ty): (String, Option<String>) = match &var_ty {
+        None => {
+            let ct = if negative(&start) || negative(&end) { "i32" } else { COUNTER_TY };
+            // Nothing types the variable: rustc's `i32`, read as such from the counter.
+            (ct.to_string(), Some("i32".to_string()))
+        }
+        Some(t) => {
+            let text = crate::chir_lower::rust_int_type_text(t).unwrap_or_else(|| COUNTER_TY.to_string());
+            let signed = text.starts_with('i');
+            let w: usize = text[1..].parse().unwrap_or(32);
+            // Both bounds constant: the counter holds their values (and `e + 1`), the
+            // narrowest of 32, 64, 128 bits that does — a `usize` range `0..4` keeps a 32-bit
+            // counter; a run-time bound may reach `T`'s maximum, so the width follows `T`.
+            let need = match (const_value(&start, consts), const_value(&end, consts)) {
+                (Some(a), Some(b)) => {
+                    let past = if inclusive { b.saturating_add(1) } else { b };
+                    let fits = |bits: u32| {
+                        if signed {
+                            let lim = 1i128 << (bits - 1);
+                            a >= -lim && past < lim
+                        } else {
+                            a >= 0 && (bits >= 128 || past < (1i128 << bits))
+                        }
+                    };
+                    [32usize, 64, 128].into_iter().find(|b| fits(*b as u32)).unwrap_or(if inclusive { w + 1 } else { w })
+                }
+                _ => if inclusive { w + 1 } else { w },
+            };
+            let p = if signed { "i" } else { "u" };
+            let ct = match need {
+                n if n <= 32 => format!("{p}32"),
+                n if n <= 64 => format!("{p}64"),
+                // A 128-bit type whose end may be its maximum has no wider counter type:
+                // the counter is `T` itself and I.8.5's done flag ends the loop (below).
+                _ => format!("{p}128"),
+            };
+            (ct, Some(text))
+        }
+    };
+    // I.8.5's done flag (D-28) where no counter type holds `e + 1`: a 128-bit inclusive
+    // range whose end is not a constant below its maximum. The counter is never
+    // incremented past `e`: `if c == e { d = true } else { c = c + 1 }`, the exit tests
+    // read `d`, and the hoisted tick's guards read `d` and `a <= e` for "reached the end"
+    // and "not empty".
+    let done_flag: Option<String> = match &var_ty {
+        Some(t) if inclusive && crate::chir_lower::rust_int_type_text(t).is_some_and(|x| x.ends_with("128")) => {
+            let past_fits = matches!((const_value(&start, consts), const_value(&end, consts)), (Some(_), Some(b)) if b < i128::MAX);
+            (!past_fits).then(|| {
+                let n = *next_counter;
+                *next_counter += 1;
+                format!("{ANON_COUNTER}{n}_done")
+            })
+        }
+        _ => None,
+    };
+    let cast_bounds = var_ty.is_some() && read_ty.as_deref() != Some(counter_ty.as_str());
+    // A constant bound becomes a literal of its value at the counter's type (a cast of a
+    // typed literal would extend `-2i8` as an unsigned `8'd254`); any other is cast.
+    let to_counter = |e: ExprType| -> ExprType {
+        if !cast_bounds {
+            return e;
+        }
+        if let Some(v) = const_value(&e, consts) {
+            // Suffixed with the counter's type where it has a Rust name (an unsuffixed
+            // literal under a unary minus is sized by its context alone, `-64'd2`).
+            let suffix = if counter_ty.starts_with("__") { "" } else { counter_ty.as_str() };
+            let lit = ExprType::Lit(ExprLit { text: format!("{}{suffix}", v.unsigned_abs()), span });
+            return if v < 0 {
+                ExprType::Unary(copper_core::frontend_ir::ExprUnary { op: "-".to_string(), expr: Box::new(lit), span })
+            } else {
+                lit
+            };
+        }
+        ExprType::Cast(copper_core::frontend_ir::ExprCast {
+            expr: Box::new(e),
+            target_ty: RawTypeRef { ty_text: counter_ty.clone(), span },
+            span,
+        })
+    };
+    let mut work: Vec<RawStmt> = work.to_vec();
+    let named = !(pat == "_" || pat.is_empty());
+    let cast_to = read_ty.as_deref().filter(|rt| *rt != counter_ty && named);
+    // A body `let` that shadows the variable: the counter takes another name (the shadow
+    // would otherwise be the counter, and the increment would add to it; MEASUREMENTS §AB.5).
+    let rename = (named && crate::chir_lower::body_shadows(work.as_slice(), &var)).then(|| format!("{var}__iter"));
+    if cast_to.is_some() || rename.is_some() {
+        crate::chir_lower::cast_loop_var_reads(&mut work, &var, cast_to, rename.as_deref(), span);
+    }
+    let var = rename.unwrap_or(var);
+    let work = &work[..];
 
     // Rust evaluates `start..end` ONCE, when the loop is entered; the desugared
     // loop reads its bounds at every exit test and at the hoisted tick's guard. A
@@ -403,7 +517,7 @@ fn expand_counted_for(
     let mut snapshots: Vec<RawStmt> = Vec::new();
     let mut snapshot = |bound: ExprType, which: &str, snapshots: &mut Vec<RawStmt>| -> ExprType {
         if is_stable(&bound, consts) {
-            return bound;
+            return to_counter(bound);
         }
         let n = *next_counter;
         *next_counter += 1;
@@ -412,9 +526,9 @@ fn expand_counted_for(
             order,
             kind: RawStmtKind::Local(LocalStmt {
                 is_mut: false,
-                ty: Some(RawTypeRef { ty_text: COUNTER_TY.to_string(), span }),
+                ty: Some(RawTypeRef { ty_text: counter_ty.clone(), span }),
                 name: name.clone(),
-                init: Some(bound),
+                init: Some(to_counter(bound)),
                 attrs: Vec::new(),
                 span,
             }),
@@ -426,15 +540,20 @@ fn expand_counted_for(
     let start = snapshot(start, "start", &mut snapshots);
     let end = snapshot(end, "end", &mut snapshots);
 
+    // "The counter has passed its range": `c >= e` / `c > e`, or the done flag.
+    let passed = || match &done_flag {
+        Some(d) => path_expr(d, span),
+        None => ExprType::Binary(ExprBinary {
+            left: Box::new(path_expr(&var, span)),
+            op: exit_op.to_string(),
+            right: Box::new(end.clone()),
+            span,
+        }),
+    };
     let exit_test = || {
         expr_stmt(
             ExprType::If(ExprIf {
-                condition: Box::new(ExprType::Binary(ExprBinary {
-                    left: Box::new(path_expr(&var, span)),
-                    op: exit_op.to_string(),
-                    right: Box::new(end.clone()),
-                    span,
-                })),
+                condition: Box::new(passed()),
                 then_block: vec![expr_stmt(
                     ExprType::Break(ExprBreak { label: None, expr: None, span }),
                     span,
@@ -458,6 +577,30 @@ fn expand_counted_for(
         }),
         span,
     );
+    let incr = match &done_flag {
+        None => incr,
+        Some(d) => expr_stmt(
+            ExprType::If(ExprIf {
+                condition: Box::new(ExprType::Binary(ExprBinary {
+                    left: Box::new(path_expr(&var, span)),
+                    op: "==".to_string(),
+                    right: Box::new(end.clone()),
+                    span,
+                })),
+                then_block: vec![expr_stmt(
+                    ExprType::Assign(ExprAssign {
+                        left: Box::new(path_expr(d, span)),
+                        right: Box::new(ExprType::Lit(ExprLit { text: "true".to_string(), span })),
+                        span,
+                    }),
+                    span,
+                )],
+                else_branch: Some(Box::new(ExprType::Block(copper_core::frontend_ir::ExprBlock { stmts: vec![incr], span }))),
+                span,
+            }),
+            span,
+        ),
+    };
 
     let mut loop_body = vec![exit_test()];
     loop_body.extend(work.iter().cloned());
@@ -480,12 +623,7 @@ fn expand_counted_for(
     let hoisted = if stmts_break_enclosing_loop(work) {
         expr_stmt(
             ExprType::If(ExprIf {
-                condition: Box::new(ExprType::Binary(ExprBinary {
-                    left: Box::new(path_expr(&var, span)),
-                    op: exit_op.to_string(),
-                    right: Box::new(end.clone()),
-                    span,
-                })),
+                condition: Box::new(passed()),
                 then_block: vec![boundary.clone()],
                 else_branch: None,
                 span,
@@ -509,20 +647,24 @@ fn expand_counted_for(
         hoisted
     } else {
         let start_ref = start.clone();
-        let advanced = ExprType::Binary(ExprBinary {
-            left: Box::new(path_expr(&var, span)),
-            op: "!=".to_string(),
-            right: Box::new(start_ref),
-            span,
-        });
+        // With the done flag the counter need not move (`a..=a`): "entered" is `a <= e`.
+        let advanced = match &done_flag {
+            None => ExprType::Binary(ExprBinary {
+                left: Box::new(path_expr(&var, span)),
+                op: "!=".to_string(),
+                right: Box::new(start_ref),
+                span,
+            }),
+            Some(_) => ExprType::Binary(ExprBinary {
+                left: Box::new(start_ref),
+                op: "<=".to_string(),
+                right: Box::new(end.clone()),
+                span,
+            }),
+        };
         let condition = if stmts_break_enclosing_loop(work) {
             ExprType::Binary(ExprBinary {
-                left: Box::new(ExprType::Binary(ExprBinary {
-                    left: Box::new(path_expr(&var, span)),
-                    op: exit_op.to_string(),
-                    right: Box::new(end.clone()),
-                    span,
-                })),
+                left: Box::new(passed()),
                 op: "&&".to_string(),
                 right: Box::new(advanced),
                 span,
@@ -545,9 +687,9 @@ fn expand_counted_for(
         order,
         kind: RawStmtKind::Local(LocalStmt {
             is_mut: true,
-            ty: Some(RawTypeRef { ty_text: COUNTER_TY.to_string(), span }),
+            ty: Some(RawTypeRef { ty_text: counter_ty.clone(), span }),
             name: var,
-            init: Some(start),
+            init: Some(start.clone()),
             attrs: Vec::new(),
             span,
         }),
@@ -564,7 +706,25 @@ fn expand_counted_for(
         text: String::new(),
         span,
     };
-    Some(snapshots.into_iter().chain([decl, loop_stmt, hoisted]).collect())
+    let done_decl = done_flag.as_ref().map(|d| RawStmt {
+        order,
+        kind: RawStmtKind::Local(LocalStmt {
+            is_mut: true,
+            ty: Some(RawTypeRef { ty_text: "bool".to_string(), span }),
+            name: d.clone(),
+            init: Some(ExprType::Binary(ExprBinary {
+                left: Box::new(start.clone()),
+                op: ">".to_string(),
+                right: Box::new(end.clone()),
+                span,
+            })),
+            attrs: Vec::new(),
+            span,
+        }),
+        text: String::new(),
+        span,
+    });
+    Some(snapshots.into_iter().chain([decl]).chain(done_decl).chain([loop_stmt, hoisted]).collect())
 }
 
 /// What this pass knows is constant: the file's integer consts by value
@@ -573,6 +733,8 @@ fn expand_counted_for(
 struct Consts {
     values: std::collections::HashMap<String, i128>,
     generics: std::collections::HashSet<String>,
+    /// The module's types, for the loop variable's (`chir_lower::for_var_type`).
+    typing: crate::chir_lower::ForTyping,
 }
 
 /// A bound that cannot change while the loop runs: a constant of [`const_value`],
@@ -595,7 +757,10 @@ fn is_stable(e: &ExprType, consts: &Consts) -> bool {
 fn const_value(e: &ExprType, consts: &Consts) -> Option<i128> {
     match e {
         ExprType::Lit(l) => copper_analysis::consts::parse_int_lit(&l.text),
-        ExprType::Path(p) => consts.values.get(p.path_text.trim()).copied(),
+        ExprType::Path(p) => consts.values.get(p.path_text.trim()).copied().or_else(|| {
+            copper_analysis::consts::primitive_assoc_const(&p.path_text).map(|(v, _)| v)
+        }),
+        ExprType::Unary(u) if u.op.trim() == "-" => const_value(&u.expr, consts)?.checked_neg(),
         ExprType::Binary(b) => copper_analysis::consts::apply_binop(
             b.op.trim(),
             const_value(&b.left, consts)?,

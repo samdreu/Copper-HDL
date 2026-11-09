@@ -344,6 +344,9 @@ pub enum CHIRStmt {
         start: CHIRExpr,
         end: CHIRExpr,
         inclusive: bool,
+        /// The loop variable's declaration when SV's 32-bit `int` cannot carry the range
+        /// (see [`ForCounter`]); `None` is `int` over `start`/`end` as written.
+        counter: Option<ForCounter>,
         body: Vec<CHIRStmt>,
         span: SourceSpan,
     },
@@ -490,6 +493,21 @@ pub enum CHIRExpr {
     /// settle, no staging. Distinct from `MemData`, which is a staged read
     /// port's output.
     MemIndex { mem: String, addr: Box<CHIRExpr> },
+}
+
+/// The SV loop variable of a tick-free `for` whose constant bounds SV's `int` cannot carry
+/// (2026-11-09, lines `II.3 found loop-var-type` and `II.3 found inclusive-for-runtime-max`,
+/// MEASUREMENTS §AB): a negative bound of a typed range (the bound's own literal is sized
+/// at its type, `-8'd3`, which an `int` comparison widens unsigned), or a range reaching
+/// beyond `int` (`0xffff_fffdu32..=0xffff_ffffu32` — an `int` never passes the end and the
+/// unrolling does not stop). `bits` wide, `signed` as the range's type; the bounds are their
+/// folded values. `bits` is 32 and `signed` true for an `int`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForCounter {
+    pub bits: usize,
+    pub signed: bool,
+    pub start: i128,
+    pub end: i128,
 }
 
 #[derive(Debug, Clone)]

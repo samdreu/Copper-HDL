@@ -1,7 +1,7 @@
 use copper_core::chir::{
     CHIRBinOp, CHIRBody, CHIRCaseArm, CHIRCombBody, CHIRExpr, CHIRLit, CHIRLowerError,
     CHIRMatchArm, CHIRMemInit, CHIRMemoryDecl, CHIRModule, CHIRPattern, CHIRPort, CHIRPortDir, CHIRPortKind, CHIRRegDecl,
-    CHIRSeqBody, CHIRStmt, CHIRStructuralBody, CHIRSubmoduleInst, CHIRType, CHIRUnOp, Width,
+    CHIRSeqBody, CHIRStmt, CHIRStructuralBody, CHIRSubmoduleInst, CHIRType, CHIRUnOp, ForCounter, Width,
 };
 use copper_core::memory::WriteMode;
 use copper_core::frontend_ir::{
@@ -145,6 +145,16 @@ pub fn resolve_type(ty_text: &str, span: SourceSpan) -> Result<CHIRType, CHIRLow
         "Bit"  => Ok(CHIRType::UInt { width: Width::Concrete(1) }),
         "Logic" => Ok(CHIRType::UInt { width: Width::Concrete(1) }),
         _ if compact.starts_with("Bits<") => parse_bits_type(&compact, span),
+        // The internal counter type of a tick-bearing `for` over a `u128`/`i128` inclusive
+        // range (`control_extract::expand_counted_for`, D-28): 129 bits, one past the
+        // range's type. Never in source (R16 admits no such type).
+        _ if compact.starts_with("__copper_u") || compact.starts_with("__copper_i") => {
+            match compact[10..].parse::<usize>() {
+                Ok(w) if compact.as_bytes()[9] == b'u' => Ok(CHIRType::UInt { width: Width::Concrete(w) }),
+                Ok(w) => Ok(CHIRType::SInt { width: Width::Concrete(w) }),
+                Err(_) => Err(CHIRLowerError::UnresolvableType { ty_text: ty_text.to_string(), span }),
+            }
+        }
         _ if compact.starts_with('[') => parse_array_type(&compact, span),
         _ => Err(CHIRLowerError::UnresolvableType {
             ty_text: ty_text.to_string(),
@@ -363,6 +373,373 @@ fn infer_type_from_expr(
     }
 }
 
+/// Rewrite the reads of the loop variable `var` in `body`: to `<rename>` when the loop
+/// variable is renamed (a body `let` shadows it), and `as <ty>` — its Rust type where the
+/// declaration differs (line `II.3 found loop-var-type`) — except a read that IS an index
+/// (`x[i]`), which selects the same element at any width. Scoped like Rust: a top-level
+/// `let <var> = …` of the body ends the rewrite (its initializer still reads the loop
+/// variable; what follows reads the shadow). A shadow inside a nested block is not seen.
+pub(crate) fn cast_loop_var_reads(body: &mut [RawStmt], var: &str, ty: Option<&str>, rename: Option<&str>, span: SourceSpan) {
+    let target = rename.unwrap_or(var).to_string();
+    let sentinel = format!("{var}\u{0}idx");
+    let rewrite = |stmts: &mut [RawStmt]| {
+        crate::desugar::visit_stmts(stmts, &mut |e| {
+            if let ExprType::Index(ix) = e {
+                if matches!(&*ix.index, ExprType::Path(p) if compact_ident(&p.path_text) == var) {
+                    *ix.index = ExprType::Path(copper_core::frontend_ir::ExprPath { path_text: sentinel.clone(), span });
+                }
+            }
+        });
+        crate::desugar::visit_stmts(stmts, &mut |e| {
+            if matches!(e, ExprType::Path(p) if compact_ident(&p.path_text) == var) {
+                let read = ExprType::Path(copper_core::frontend_ir::ExprPath { path_text: target.clone(), span });
+                *e = match ty {
+                    Some(ty) => ExprType::Cast(copper_core::frontend_ir::ExprCast {
+                        expr: Box::new(read),
+                        target_ty: copper_core::frontend_ir::RawTypeRef { ty_text: ty.to_string(), span },
+                        span,
+                    }),
+                    None => read,
+                };
+            }
+        });
+        crate::desugar::visit_stmts(stmts, &mut |e| {
+            if matches!(e, ExprType::Path(p) if p.path_text == sentinel) {
+                *e = ExprType::Path(copper_core::frontend_ir::ExprPath { path_text: target.clone(), span });
+            }
+        });
+    };
+    for k in 0..body.len() {
+        let shadow = matches!(&body[k].kind, RawStmtKind::Local(l) if l.name == var);
+        rewrite(&mut body[k..k + 1]);
+        if shadow {
+            break;
+        }
+    }
+}
+
+/// Whether a top-level `let` of a `for` body shadows its loop variable `var` — the SV
+/// loop variable (or the tick-bearing `for`'s counter) is then renamed, so the shadow's
+/// net does not collide with it.
+pub(crate) fn body_shadows(body: &[RawStmt], var: &str) -> bool {
+    body.iter().any(|s| matches!(&s.kind, RawStmtKind::Local(l) if l.name == var))
+}
+
+/// What [`for_var_type`] needs to type a tick-bearing `for`'s variable before `chir_lower`'s
+/// context exists (`control_extract::expand_counted_for` rewrites those first): the
+/// module's ports and const generics, every body `let`'s type (annotated, else inferred
+/// from its initializer, in program order — a scope-blind approximation of the context
+/// the lowering will have), its enums and its file consts.
+pub(crate) struct ForTyping {
+    symbols: SymbolTable,
+    enums: EnumRegistry,
+    file_consts: Vec<copper_core::frontend_ir::ItemConst>,
+}
+
+impl ForTyping {
+    pub(crate) fn of(fir: &FrontendModuleIR) -> Self {
+        let enums = build_enum_registry(fir);
+        let mut symbols = build_symbol_table(fir);
+        fn stmts(list: &[RawStmt], symbols: &mut SymbolTable, enums: &EnumRegistry) {
+            for s in list {
+                match &s.kind {
+                    RawStmtKind::Local(l) => {
+                        if let Some(i) = &l.init {
+                            expr(i, symbols, enums);
+                        }
+                        let ty = match (&l.ty, &l.init) {
+                            (Some(t), _) => resolve_type(&t.ty_text, t.span).ok(),
+                            (None, Some(i)) => infer_type_from_expr(i, l.span, symbols, enums).ok(),
+                            _ => None,
+                        };
+                        if let Some(t) = ty {
+                            symbols.insert(l.name.clone(), t);
+                        }
+                    }
+                    RawStmtKind::Expr(es) => expr(&es.expr, symbols, enums),
+                    RawStmtKind::Item(_) => {}
+                }
+            }
+        }
+        fn expr(e: &ExprType, symbols: &mut SymbolTable, enums: &EnumRegistry) {
+            match e {
+                ExprType::Block(b) => stmts(&b.stmts, symbols, enums),
+                ExprType::If(i) => {
+                    stmts(&i.then_block, symbols, enums);
+                    if let Some(eb) = &i.else_branch {
+                        expr(eb, symbols, enums);
+                    }
+                }
+                ExprType::Loop(l) => stmts(&l.body, symbols, enums),
+                ExprType::While(w) => stmts(&w.body, symbols, enums),
+                ExprType::ForLoop(f) => stmts(&f.body, symbols, enums),
+                ExprType::Match(m) => m.arms.iter().for_each(|a| expr(&a.body, symbols, enums)),
+                _ => {}
+            }
+        }
+        stmts(&fir.raw_statements, &mut symbols, &enums);
+        ForTyping { symbols, enums, file_consts: fir.file_consts.clone() }
+    }
+
+    /// [`for_var_type`] against this module's types.
+    pub(crate) fn var_type(&self, start: Option<&ExprType>, end: &ExprType, var: &str, body: &[RawStmt]) -> Option<CHIRType> {
+        let mut symbols = self.symbols.clone();
+        symbols.remove(var);
+        for_var_type(start, end, var, body, &symbols, &self.enums, &self.file_consts)
+    }
+}
+
+// ── The type of a `for` loop variable ────────────────────────────────────────
+
+/// An integer `CHIRType` of a Rust integer type's width (8 … 128), else `None`.
+fn rust_int_type(t: CHIRType) -> Option<CHIRType> {
+    match &t {
+        CHIRType::UInt { width: Width::Concrete(w) } | CHIRType::SInt { width: Width::Concrete(w) }
+            if matches!(w, 8 | 16 | 32 | 64 | 128) => Some(t),
+        _ => None,
+    }
+}
+
+/// The Rust type text of an integer `CHIRType` (`u8` … `i128`; a 64-bit one is `u64`/`i64`,
+/// which the transpiler lowers as it lowers `usize`/`isize`, I.14.1(b)).
+pub(crate) fn rust_int_type_text(t: &CHIRType) -> Option<String> {
+    match t {
+        CHIRType::UInt { width: Width::Concrete(w) } => Some(format!("u{w}")),
+        CHIRType::SInt { width: Width::Concrete(w) } => Some(format!("i{w}")),
+        _ => None,
+    }
+}
+
+/// The type a range bound shows on its own — a suffixed literal, a cast, a typed file
+/// `const`, a signal or local of known type (a const generic is the transpiler's 32-bit
+/// `parameter int`), an integer view (`as_u8()`), and operators over those. `None` for an
+/// unsuffixed literal and anything rustc types from context.
+fn bound_int_type(
+    e: &ExprType,
+    symbols: &SymbolTable,
+    enums: &EnumRegistry,
+    file_consts: &[copper_core::frontend_ir::ItemConst],
+) -> Option<CHIRType> {
+    match e {
+        ExprType::Lit(l) => infer_type_from_suffix(&compact_ident(&l.text)).and_then(rust_int_type),
+        ExprType::Path(p) => {
+            let n = compact_ident(&p.path_text);
+            // A file const is read at the width the transpiler emits it: a sized `localparam`
+            // for an 8- or 16-bit type (MEASUREMENTS §U.6), `localparam int` (32 bits)
+            // otherwise — the bound as the SV compares it, as a const generic is a
+            // `parameter int` (I.14.1(b)'s `usize` gap for constants, masked in the corpus).
+            if let Some(c) = file_consts.iter().find(|c| c.name == n) {
+                let t = resolve_type(&c.ty.ty_text, p.span).ok().and_then(rust_int_type)?;
+                return Some(match crate::file_consts::narrow_int_width(&c.ty.ty_text) {
+                    Some(_) => t,
+                    None if matches!(t, CHIRType::SInt { .. }) => CHIRType::SInt { width: Width::Concrete(32) },
+                    None => CHIRType::UInt { width: Width::Concrete(32) },
+                });
+            }
+            if let Some((t, _)) = primitive_assoc_literal(&n) {
+                return Some(t);
+            }
+            symbols.get(&n).cloned().and_then(rust_int_type)
+        }
+        ExprType::Cast(c) => resolve_type(&c.target_ty.ty_text, c.span).ok().and_then(rust_int_type),
+        ExprType::Unary(u) if u.op.trim() == "-" => bound_int_type(&u.expr, symbols, enums, file_consts),
+        ExprType::Reference(r) => bound_int_type(&r.expr, symbols, enums, file_consts),
+        ExprType::Binary(b) => match b.op.trim() {
+            "<<" | ">>" => bound_int_type(&b.left, symbols, enums, file_consts),
+            "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" => bound_int_type(&b.left, symbols, enums, file_consts)
+                .or_else(|| bound_int_type(&b.right, symbols, enums, file_consts)),
+            _ => None,
+        },
+        ExprType::MethodCall(_) | ExprType::Call(_) | ExprType::Field(_) | ExprType::Index(_) => {
+            infer_type_from_expr(e, SourceSpan::default(), symbols, enums).ok().and_then(rust_int_type)
+        }
+        _ => None,
+    }
+}
+
+/// The Rust type of the loop variable of `for <var> in <start>..<end> { body }` (SPEC
+/// I.14.1: every expression has its Rust type; line `II.3 found loop-var-type`,
+/// MEASUREMENTS §AA.3, §AB.2). rustc gives the variable the range's element type: a typed
+/// bound's, or — both bounds unsuffixed — the type a use in the body unifies it with. This
+/// reads the use the way rustc's unification does for the operand shapes it meets: the
+/// variable (or an untyped `let` copy of it, or arithmetic over it and unsuffixed literals)
+/// beside an operand of known type in a binary operator, a `wrapping_*`-family argument or
+/// receiver, a `Bits::from_uN` argument, an annotated `let` or an assignment to a typed
+/// name; an index use alone makes it `usize`, returned as the 32-bit counter's `u32` (the
+/// same value for every index). `None` when nothing fixes it: rustc's `i32`, the caller's.
+pub(crate) fn for_var_type(
+    start: Option<&ExprType>,
+    end: &ExprType,
+    var: &str,
+    body: &[RawStmt],
+    symbols: &SymbolTable,
+    enums: &EnumRegistry,
+    file_consts: &[copper_core::frontend_ir::ItemConst],
+) -> Option<CHIRType> {
+    if let Some(t) = start
+        .and_then(|s| bound_int_type(s, symbols, enums, file_consts))
+        .or_else(|| bound_int_type(end, symbols, enums, file_consts))
+    {
+        return Some(t);
+    }
+    if var == "_" || var.is_empty() {
+        return None;
+    }
+    // Names that hold the variable's value at its type: the variable and the untyped `let`
+    // copies of expressions rooted in it (`let k = i + 1;`), to a fixpoint.
+    let mut names: std::collections::HashSet<String> = [var.to_string()].into_iter().collect();
+    // An operand with no type of its own unifies with the variable (rustc): an unsuffixed
+    // literal, or a name whose type is not known here (another loop's variable).
+    let untyped = |e: &ExprType| -> bool {
+        match e {
+            ExprType::Lit(l) => infer_type_from_suffix(&compact_ident(&l.text)).is_none()
+                && copper_analysis::consts::parse_int_lit(&compact_ident(&l.text)).is_some(),
+            ExprType::Path(p) => {
+                let n = compact_ident(&p.path_text);
+                is_ident(&n) && bound_int_type(e, symbols, enums, file_consts).is_none() && !symbols.contains_key(&n)
+            }
+            _ => false,
+        }
+    };
+    fn rooted(e: &ExprType, names: &std::collections::HashSet<String>, lit: &dyn Fn(&ExprType) -> bool) -> bool {
+        match e {
+            ExprType::Path(p) => names.contains(&compact_ident(&p.path_text)),
+            ExprType::Unary(u) => u.op.trim() != "!" && rooted(&u.expr, names, lit),
+            ExprType::Reference(r) => rooted(&r.expr, names, lit),
+            ExprType::Binary(b) => match b.op.trim() {
+                "<<" | ">>" => rooted(&b.left, names, lit),
+                "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" => {
+                    (rooted(&b.left, names, lit) && (rooted(&b.right, names, lit) || lit(&b.right)))
+                        || (rooted(&b.right, names, lit) && lit(&b.left))
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    fn lets(stmts: &[RawStmt], names: &mut std::collections::HashSet<String>, lit: &dyn Fn(&ExprType) -> bool) -> bool {
+        let mut grew = false;
+        let mut body = stmts.to_vec();
+        let mut found: Vec<String> = Vec::new();
+        fn walk(stmts: &[RawStmt], names: &std::collections::HashSet<String>, found: &mut Vec<String>, lit: &dyn Fn(&ExprType) -> bool) {
+            for s in stmts {
+                if let RawStmtKind::Local(l) = &s.kind {
+                    if l.ty.is_none() && l.init.as_ref().is_some_and(|i| rooted(i, names, lit)) {
+                        found.push(l.name.clone());
+                    }
+                }
+            }
+        }
+        walk(&body, names, &mut found, lit);
+        crate::desugar::visit_stmts(&mut body, &mut |e| {
+            let lists: Vec<&Vec<RawStmt>> = match e {
+                ExprType::Block(b) => vec![&b.stmts],
+                ExprType::If(i) => vec![&i.then_block],
+                ExprType::Loop(l) => vec![&l.body],
+                ExprType::While(w) => vec![&w.body],
+                ExprType::ForLoop(f) => vec![&f.body],
+                _ => vec![],
+            };
+            for l in lists {
+                walk(l, names, &mut found, lit);
+            }
+        });
+        for n in found {
+            grew |= names.insert(n);
+        }
+        grew
+    }
+    while lets(body, &mut names, &untyped) {}
+    let known = |e: &ExprType| -> Option<CHIRType> {
+        if rooted(e, &names, &untyped) {
+            return None;
+        }
+        bound_int_type(e, symbols, enums, file_consts)
+    };
+    let mut out: Option<CHIRType> = None;
+    let mut index_use = false;
+    let mut body_mut = body.to_vec();
+    // Annotated `let`s and their initializers.
+    fn annotated(stmts: &[RawStmt], names: &std::collections::HashSet<String>, out: &mut Option<CHIRType>, lit: &dyn Fn(&ExprType) -> bool) {
+        for s in stmts {
+            if out.is_some() {
+                return;
+            }
+            if let RawStmtKind::Local(l) = &s.kind {
+                if let (Some(t), Some(i)) = (&l.ty, &l.init) {
+                    if rooted(i, names, lit) {
+                        *out = resolve_type(&t.ty_text, t.span).ok().and_then(rust_int_type);
+                    }
+                }
+            }
+        }
+    }
+    annotated(&body_mut, &names, &mut out, &untyped);
+    crate::desugar::visit_stmts(&mut body_mut, &mut |e| {
+        if out.is_some() {
+            return;
+        }
+        if let ExprType::Index(ix) = e {
+            if rooted(&ix.index, &names, &untyped) {
+                index_use = true;
+            }
+        }
+        match e {
+            ExprType::Block(b) => annotated(&b.stmts, &names, &mut out, &untyped),
+            ExprType::If(i) => annotated(&i.then_block, &names, &mut out, &untyped),
+            ExprType::Loop(l) => annotated(&l.body, &names, &mut out, &untyped),
+            ExprType::While(w) => annotated(&w.body, &names, &mut out, &untyped),
+            ExprType::ForLoop(f) => annotated(&f.body, &names, &mut out, &untyped),
+            ExprType::Binary(b) => {
+                let op = b.op.trim();
+                if !matches!(op, "<<" | ">>" | "&&" | "||") {
+                    if rooted(&b.left, &names, &untyped) {
+                        out = known(&b.right);
+                    } else if rooted(&b.right, &names, &untyped) {
+                        out = known(&b.left);
+                    }
+                }
+            }
+            ExprType::Assign(a) => {
+                if rooted(&a.right, &names, &untyped) {
+                    out = known(&a.left);
+                }
+            }
+            ExprType::MethodCall(mc) => {
+                let m = mc.method.as_str();
+                let same_type = m.starts_with("wrapping_") || m.starts_with("checked_")
+                    || m.starts_with("saturating_") || m.starts_with("overflowing_")
+                    || matches!(m, "min" | "max" | "abs_diff");
+                if same_type && !matches!(m, "wrapping_shl" | "wrapping_shr" | "checked_shl" | "checked_shr") {
+                    if let Some(arg) = mc.args.first() {
+                        if rooted(arg, &names, &untyped) {
+                            out = known(&mc.receiver);
+                        } else if rooted(&mc.receiver, &names, &untyped) {
+                            out = known(arg);
+                        }
+                    }
+                }
+            }
+            ExprType::Call(c) => {
+                if let (ExprType::Path(p), [arg]) = (&*c.func, c.args.as_slice()) {
+                    if rooted(arg, &names, &untyped) {
+                        out = from_int_arg_width(&compact_ident(&p.path_text))
+                            .map(|w| CHIRType::UInt { width: Width::Concrete(w) });
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+    // An index use and no other: rustc's `usize`. Realized as the 32-bit unsigned counter —
+    // the value of every in-range index, and of `usize` arithmetic on it below 2^32 (a
+    // 64-bit read would be `64'(i)` in every index expression; MEASUREMENTS §AB.2).
+    if out.is_none() && index_use {
+        return Some(CHIRType::UInt { width: Width::Concrete(32) });
+    }
+    out
+}
+
 fn infer_type_from_text(
     text: &str,
     span: SourceSpan,
@@ -389,7 +766,24 @@ fn infer_type_from_text(
     if let Some((ty, _)) = resolve_enum_path(&compact, enums) {
         return Ok(ty);
     }
+    if let Some((ty, _)) = primitive_assoc_literal(&compact) {
+        return Ok(ty);
+    }
     Err(CHIRLowerError::AmbiguousWidth { span })
+}
+
+/// `u8::MAX`, `i16::MIN`, `u32::BITS`, … as a typed literal: its `CHIRType` and its value,
+/// two's complement at the type's width (`u128::MAX` included, which the shared evaluator's
+/// `i128` cannot hold).
+fn primitive_assoc_literal(compact: &str) -> Option<(CHIRType, u128)> {
+    if compact == "u128::MAX" {
+        return Some((CHIRType::UInt { width: Width::Concrete(128) }, u128::MAX));
+    }
+    let (v, t) = copper_analysis::consts::primitive_assoc_const(compact)?;
+    let w = t.bits as usize;
+    let ty = if t.signed { CHIRType::SInt { width: Width::Concrete(w) } } else { CHIRType::UInt { width: Width::Concrete(w) } };
+    let bits = if w >= 128 { v as u128 } else { (v as u128) & ((1u128 << w) - 1) };
+    Some((ty, bits))
 }
 
 /// True for operators that always produce a 1-bit boolean result.
@@ -4063,15 +4457,81 @@ fn lower_expr_stmt(
                     suggested_rewrite: Some("rewrite the iterator as `a..b`".to_string()),
                 }),
             };
-            // The loop variable is an integer index, in scope for the body.
-            ctx.symbols.insert(var.clone(), CHIRType::UInt { width: Width::Concrete(32) });
+            // The loop variable has its Rust type (I.14.1; line `II.3 found loop-var-type`,
+            // MEASUREMENTS §AB.2): `for_var_type` reads it off a typed bound or a use. The SV
+            // variable is an `int` unless the range needs more (`ForCounter`): a negative
+            // bound, or values `int` cannot carry. A body read of the variable is cast to its
+            // type where that differs from the declaration (an index read is left alone: it
+            // selects the same element at any width). Until 2026-11-09 it was read as the
+            // 32-bit `int` whatever its type (Verilator's WIDTHEXPAND against an `u8` operand).
+            let (r_start, r_end) = match &*f.iter {
+                ExprType::Range(r) => (r.start.as_deref(), r.end.as_deref()),
+                _ => (None, None),
+            };
+            let outer = ctx.symbols.remove(&var);
+            let var_ty = r_end.and_then(|e| {
+                for_var_type(r_start, e, &var, &f.body, &ctx.symbols, &ctx.enums, &ctx.file_consts)
+            });
+            if let Some(t) = outer {
+                ctx.symbols.insert(var.clone(), t);
+            }
+            let eff_ty = var_ty.clone().unwrap_or(CHIRType::SInt { width: Width::Concrete(32) });
+            let (eff_w, eff_signed) = match &eff_ty {
+                CHIRType::SInt { width: Width::Concrete(w) } => (*w, true),
+                CHIRType::UInt { width: Width::Concrete(w) } => (*w, false),
+                _ => (32, true),
+            };
+            let fold = |e: &ExprType| -> Option<i128> {
+                match fold_const_init(e, Some(eff_w), &ctx.enums, &ctx.file_consts) {
+                    Ok(RegisterInit::Value(v)) => {
+                        if eff_signed && eff_w < 128 && (v >> (eff_w - 1)) & 1 == 1 {
+                            Some(v as i128 - (1i128 << eff_w))
+                        } else {
+                            i128::try_from(v).ok()
+                        }
+                    }
+                    _ => None,
+                }
+            };
+            let folded = match (r_start.map(|s| fold(s)).unwrap_or(Some(0)), r_end.and_then(|e| fold(e))) {
+                (Some(a), Some(b)) => Some((a, b)),
+                _ => None,
+            };
+            let counter = folded.and_then(|(a, b)| {
+                let past = if inclusive { b.checked_add(1)? } else { b };
+                let fits_int = |v: i128| (i32::MIN as i128..=i32::MAX as i128).contains(&v);
+                if fits_int(a) && fits_int(past) {
+                    (a < 0 || b < 0).then_some(ForCounter { bits: 32, signed: true, start: a, end: b })
+                } else {
+                    Some(ForCounter { bits: eff_w + 1, signed: eff_signed, start: a, end: b })
+                }
+            });
+            let decl_ty = match &counter {
+                None => CHIRType::UInt { width: Width::Concrete(32) },
+                Some(c) if c.signed => CHIRType::SInt { width: Width::Concrete(c.bits) },
+                Some(c) => CHIRType::UInt { width: Width::Concrete(c.bits) },
+            };
+            // Nothing types it: rustc's `i32`.
+            let read_ty = Some(var_ty.clone().unwrap_or(CHIRType::SInt { width: Width::Concrete(32) }));
+            let mut f_body = f.body.clone();
+            let cast_to = read_ty.filter(|t| *t != decl_ty).and_then(|t| rust_int_type_text(&t));
+            // A body `let` that shadows the variable: the SV loop variable takes another
+            // name, so the shadow's net does not hide it (Verilator's VARHIDDEN and the
+            // shadow's assignment landing on the loop variable; MEASUREMENTS §AB.5).
+            let rename = body_shadows(&f.body, &var).then(|| format!("{var}__iter"));
+            if cast_to.is_some() || rename.is_some() {
+                cast_loop_var_reads(&mut f_body, &var, cast_to.as_deref(), rename.as_deref(), span);
+            }
+            let var = rename.unwrap_or(var);
+            let f_body = f_body;
+            ctx.symbols.insert(var.clone(), decl_ty);
             // An element write to an array register in the body: unroll the `for` (I.2.4 —
             // a tick-free constant-bound `for` IS an unrolling), one copy of the body per
             // iteration with the loop variable bound to its literal, so each iteration's
             // write is its own statement and takes its own write port — row (c)'s form
             // (line `II.3 found array-for`, MEASUREMENTS §U.4). A bound the transpiler cannot
             // fold keeps the refusal below.
-            if stmts_write_array_reg(&f.body, ctx) {
+            if stmts_write_array_reg(&f_body, ctx) {
                 let bound = |e: Option<&ExprType>| match e {
                     None => Some(0usize),
                     Some(e) => eval_const_usize(e),
@@ -4100,7 +4560,7 @@ fn lower_expr_stmt(
                             var.clone(),
                             CHIRExpr::Lit(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(32) }, value: k as u128 }),
                         );
-                        let body = lower_stmts(&f.body, ctx);
+                        let body = lower_stmts(&f_body, ctx);
                         let body = match body {
                             Ok(b) => b,
                             Err(e) => {
@@ -4133,9 +4593,9 @@ fn lower_expr_stmt(
             let temps = if ctx.clock_name.is_empty() {
                 Vec::new()
             } else {
-                for_outer_assigned(&f.body, &var, ctx)
+                for_outer_assigned(&f_body, &var, ctx)
             };
-            let mut body_src = f.body.clone();
+            let mut body_src = f_body.clone();
             // A `RegOut` written in a clocked `for` (line `II.3 found port-write-in-for`,
             // MEASUREMENTS §Z.7): I.2.4 unrolls the loop, and the resumption's last write is the
             // drive (I.6). Each write becomes an assignment to a combinational temp and a flag,
@@ -4229,7 +4689,7 @@ fn lower_expr_stmt(
             let body = lower_stmts(&body_src, ctx);
             ctx.comb_for_depth -= 1;
             let body = body?;
-            out.push(CHIRStmt::ForLoop { var, start, end, inclusive, body, span });
+            out.push(CHIRStmt::ForLoop { var, start, end, inclusive, counter, body, span });
             for (n, tmp) in write_back {
                 let back = assign_stmt(
                     &n,
@@ -5086,6 +5546,21 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
                         }),
                     }
                 }
+                // `as i*` to a NARROWER type truncates (I.14.3(c)): `$signed(8'(v))`. Until
+                // 2026-11-09 a narrowing cast to (or, below, from) a signed type kept the
+                // operand's width, `$signed(v)` — the right bits in an assignment of the
+                // target's width, the wrong value wherever the context is wider
+                // (`(x as i8) as i32` did not truncate; a 32-bit counter read `as i8` was
+                // compared at 32 bits; line `II.3 found signed-narrowing-cast`,
+                // MEASUREMENTS §AB.3).
+                (true, CHIRExpr::SignCast { expr, .. })
+                    if matches!((target_w, width_ignoring_default_lits(&expr, ctx)), (Some(t), Some(w)) if t < w) =>
+                {
+                    CHIRExpr::SignCast {
+                        signed: true,
+                        expr: Box::new(CHIRExpr::Resize { expr, width: Width::Concrete(target_w.unwrap()) }),
+                    }
+                }
                 (true, CHIRExpr::SignCast { expr, .. }) => {
                     CHIRExpr::SignCast { signed: true, expr }
                 }
@@ -5095,6 +5570,14 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
                     CHIRExpr::SignCast {
                         signed: true,
                         expr: Box::new(widening_resize(plain, target_w.unwrap(), ctx)),
+                    }
+                }
+                (true, plain)
+                    if matches!((target_w, width_ignoring_default_lits(&plain, ctx)), (Some(t), Some(w)) if t < w) =>
+                {
+                    CHIRExpr::SignCast {
+                        signed: true,
+                        expr: Box::new(CHIRExpr::Resize { expr: Box::new(plain), width: Width::Concrete(target_w.unwrap()) }),
                     }
                 }
                 (true, plain) => {
@@ -5117,6 +5600,16 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
                                 expr: Box::new(CHIRExpr::SignCast { signed: true, expr }),
                                 width: Width::Concrete(t),
                             }),
+                        },
+                        (_, Some(t), Some(w)) if t < w => CHIRExpr::SignCast {
+                            signed: false,
+                            expr: Box::new(CHIRExpr::Resize { expr, width: Width::Concrete(t) }),
+                        },
+                        // An unsigned value widened (`(s as u8) as u16`): zero-extended to the
+                        // target's width, stated (`16'($unsigned(8'(s)))`).
+                        (false, Some(t), Some(w)) if t > w => CHIRExpr::Resize {
+                            expr: Box::new(CHIRExpr::SignCast { signed: false, expr }),
+                            width: Width::Concrete(t),
                         },
                         _ => CHIRExpr::SignCast { signed: false, expr },
                     }
@@ -6327,6 +6820,13 @@ fn lower_lit_expr(
 
     // An enum variant path (`State::IDLE`) → its encoded value.
     if let Some((ty, value)) = resolve_enum_path(&compact, enums) {
+        return Ok(CHIRExpr::Lit(CHIRLit { ty, value }));
+    }
+
+    // A primitive integer type's associated constant (`u8::MAX`, `i16::MIN`, `u32::BITS`;
+    // I.14.4's `T::K`): a literal of its type, two's complement at its width. Refused as
+    // "cannot lower literal" until 2026-11-09 (line `II.3 found primitive-assoc-const`).
+    if let Some((ty, value)) = primitive_assoc_literal(&compact) {
         return Ok(CHIRExpr::Lit(CHIRLit { ty, value }));
     }
 

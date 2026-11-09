@@ -64,6 +64,18 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     // counter having advanced) — the guarded tick takes the extraction route, as theirs does.
     "ifr_ticking_break",
     "ifr_ticking_runtime",
+    // Added 2026-11-09 with the fixtures of D-28 and line `II.3 found loop-var-type`
+    // (MEASUREMENTS §AB): ticking counted `for`s over a run-time end, with an author's
+    // `break`, or two in one module loop (a nested loop each) — the extraction route, as
+    // `det_for`'s and `for_empty`'s.
+    "imx_i8_runtime",
+    "imx_u16_break",
+    "imx_u32_runtime",
+    "imx_u64_runtime",
+    "imx_u8_const",
+    "imx_u8_runtime",
+    "lvt_signed",
+    "lvt_use_ticking_break",
     // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
     // counted `for` over the data bits, each with its tick inside) and the one-tick
     // handshake (two `while` waits). Every tick sits inside a loop, so both extract

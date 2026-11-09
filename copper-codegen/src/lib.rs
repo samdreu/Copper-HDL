@@ -415,13 +415,6 @@ pub fn lower_source_module(src: &str, module: &str) -> Result<LoweredModule, Str
 
 /// R3's refusal of a ticking `for` whose emptiness its verdict depends on and which
 /// `ConstEnv` cannot fold (SPEC I.8.4(b), MEASUREMENTS §V.3).
-/// R23's transpiler half (D-27) when `ConstEnv` cannot fold a ticking inclusive range's
-/// end or its type: refused, as R3 and R5 refuse what the fold cannot read.
-pub const UNFOLDED_INCLUSIVE_END_MESSAGE: &str = "a tick-bearing `for` over an inclusive range whose \
-    end is a constant the transpiler's evaluator cannot fold at the range's type (SPEC II.1.2 R23, \
-    I.14.4): whether the end is its type's maximum decides whether the loop's counter overflows. \
-    Spell the bounds with literals, `const` items or `const fn` calls the evaluator reads";
-
 pub const UNFOLDED_BOUNDARY_RANGE_MESSAGE: &str = "this `for` may be the enclosing loop's only clock \
     boundary, and whether its range is empty is a constant the transpiler's evaluator cannot fold \
     (SPEC I.8.4(b), II.2.2 R3; I.14.4): an empty range runs no iteration and the enclosing loop \
@@ -499,23 +492,6 @@ fn checked_fir_for_target(
             || copper_analysis::check_reachability(target),
         )
         .map_err(|e| e.to_string())?;
-        // SPEC II.1.2 R23 (D-27, 2026-11-09): a ticking `for` over a constant, typed
-        // inclusive range whose end is its type's maximum — I.8.5's counter would
-        // overflow. The macro has rustc check the same ranges; here `ConstEnv` folds the
-        // end at the range's type (the end's, else the start's). An end or a type the
-        // fold cannot read is refused, never assumed below the maximum.
-        for r in copper_analysis::constant_ticking_inclusive_ranges(target) {
-            let none = std::collections::HashMap::new();
-            let (a, b) = (r.start.as_deref().unwrap(), r.end.as_deref().unwrap());
-            let ty = env.ty_of(b).or_else(|| env.ty_of(a));
-            match (ty, env.eval_expr(b, &none)) {
-                (Some(t), Some(v)) if !t.holds(v + 1) => {
-                    return Err(syn::Error::new_spanned(&r, copper_analysis::INCLUSIVE_MAX_MESSAGE).to_string());
-                }
-                (Some(_), Some(_)) => {}
-                _ => return Err(syn::Error::new_spanned(&r, UNFOLDED_INCLUSIVE_END_MESSAGE).to_string()),
-            }
-        }
     }
     // Front-end parity (2026-10-23): the two shape rules the macro now enforces
     // too, from the shared crate, AFTER reachability so a module that never ticks

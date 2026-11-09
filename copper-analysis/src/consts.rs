@@ -359,7 +359,7 @@ impl ConstEnv {
 
     /// The value of a const (`K` or `T::K`).
     pub fn get(&self, name: &str) -> Option<i128> {
-        self.values.get(name).copied()
+        self.values.get(name).copied().or_else(|| primitive_assoc_const(name).map(|(v, _)| v))
     }
 
     /// Whether `name` is a `const fn` of the file (`f` or `T::f`).
@@ -567,7 +567,8 @@ impl ConstEnv {
                         return Some(t);
                     }
                 }
-                self.types.get(&segs.join("::")).copied()
+                let name = segs.join("::");
+                self.types.get(&name).copied().or_else(|| primitive_assoc_const(&name).map(|(_, t)| t))
             }
             Expr::Field(fe) => {
                 let syn::Member::Unnamed(idx) = &fe.member else { return None };
@@ -651,7 +652,7 @@ impl ConstEnv {
                 if segs[0] == "Self" {
                     name = format!("{}::{}", self_ty?, segs[1..].join("::"));
                 }
-                self.values.get(&name).copied()
+                self.values.get(&name).copied().or_else(|| primitive_assoc_const(&name).map(|(v, _)| v))
             }
             Expr::Paren(p) => self.eval(&p.expr, locals, self_ty, fuel),
             Expr::Group(g) => self.eval(&g.expr, locals, self_ty, fuel),
@@ -965,5 +966,23 @@ mod widened_tests {
         assert_eq!(e("3u8.wrapping_add(1)"), Some(4));
         assert!(env.is_tuple_struct("Pair"));
         assert_eq!(env.type_of("PAIR.0"), Some(IntTy { bits: 8, signed: false }));
+    }
+}
+
+
+/// A primitive integer type's associated constant — `u8::MAX`, `i16::MIN`, `u32::BITS` — its
+/// value and type (`BITS` is a `u32`), as rustc evaluates it (SPEC I.14.4's `T::K`). `None`
+/// for any other path and for `u128::MAX`, which is outside `i128` (the evaluator's domain).
+/// Until 2026-11-09 the transpiler's evaluator knew none of them while the macro (rustc) and
+/// the interpreter did (line `II.3 found primitive-assoc-const`, MEASUREMENTS §AB.4).
+pub fn primitive_assoc_const(path: &str) -> Option<(i128, IntTy)> {
+    let compact: String = path.chars().filter(|c| !c.is_whitespace()).collect();
+    let (ty, k) = compact.split_once("::")?;
+    let t = IntTy::of_name(ty)?;
+    match k {
+        "MAX" => Some((t.max()?, t)),
+        "MIN" => Some((t.min(), t)),
+        "BITS" => Some((t.bits as i128, IntTy { bits: 32, signed: false })),
+        _ => None,
     }
 }

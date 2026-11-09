@@ -293,6 +293,7 @@ pub enum VLIRStmt {
         start: VLIRExpr,
         end: VLIRExpr,
         inclusive: bool,
+        counter: Option<crate::chir::ForCounter>,
         body: Vec<VLIRStmt>,
     },
     /// `base[index] = value;` — single-bit assignment.

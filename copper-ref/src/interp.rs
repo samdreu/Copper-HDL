@@ -567,11 +567,19 @@ impl<'a> Exec<'a> {
     /// bound live as hidden locals of the enclosing block (`__for@<depth>`), so
     /// they survive a tick inside the body; `v` is a local of the body's scope.
     ///
-    /// `for v in a..=b` (D-27, 2026-11-09): a tick-bearing one is the same form exiting
-    /// on `c > e` (I.8.5), its increment checked like any (an end at its type's maximum
-    /// overflows there; a constant one is refused by both front-ends, II.1.2 R23); a
-    /// tick-free one is unrolled `b − a + 1` times (I.2.4) — the counter is not
-    /// incremented past `e`, so a maximum end runs its last iteration and stops.
+    /// `for v in a..=b` (D-27; D-28, 2026-11-09): I.8.5's inclusive form, tick-free or
+    /// tick-bearing alike — `let mut d = c > e; loop { if d { break }; let v = c;
+    /// if c == e { d = true } else { c = c + 1 }; s }`. The counter is never incremented
+    /// past `e`, so an end at its type's maximum — constant or reached only at run time —
+    /// runs its last iteration and stops, as Rust's `RangeInclusive` does. The done flag
+    /// is a hidden local beside the counter (`__for@<depth>d`), so it survives a tick.
+    /// Until D-28 a tick-bearing one incremented past `e` and failed there (line `II.3
+    /// found inclusive-for-runtime-max`, MEASUREMENTS §AA.5, §AB.1).
+    ///
+    /// The loop variable has the range's type (I.14.1, line `II.3 found loop-var-type`):
+    /// a typed bound's, else an unsuffixed integer, which takes the type of the operand
+    /// it meets — rustc's inference from the use. Until 2026-11-09 two unsuffixed bounds
+    /// made it `usize` ("mixed integer types u8 and usize" at `a.as_u8() == i`).
     fn exec_for(&mut self, f: &syn::ExprForLoop, depth: usize, resume: Option<&[usize]>) -> Result<Flow, RefError> {
         if f.label.is_some() {
             return Err(unsup("a labelled loop (II.1 R12)"));
@@ -580,10 +588,6 @@ impl<'a> Exec<'a> {
             return Err(unsup("a `for` over something other than a range (I.2.4: the counted loop is `a..b`)"));
         };
         let inclusive = matches!(r.limits, syn::RangeLimits::Closed(_));
-        let tick_free = !f.body.stmts.iter().any(copper_analysis::stmt_contains_tick);
-        // A tick-free inclusive `for` that has run its `e` iteration (no suspension
-        // inside one, so a frame variable).
-        let mut last_done = false;
         let (Some(lo), Some(hi)) = (&r.start, &r.end) else {
             return Err(unsup("a half-open range in a `for`"));
         };
@@ -594,14 +598,17 @@ impl<'a> Exec<'a> {
         };
         let ckey = format!("__for@{depth}c");
         let ekey = format!("__for@{depth}e");
+        let dkey = format!("__for@{depth}d");
         let mut r = match resume {
             Some(p) => Some(strip_zero(p)?),
             None => {
                 let a = self.eval_expr(lo)?;
                 let b = self.eval_expr(hi)?;
                 let (a, b) = unify_ints(a, b)?;
+                let empty = if inclusive { a.as_int()? > b.as_int()? } else { a.as_int()? >= b.as_int()? };
                 self.env.declare(&ckey, a);
                 self.env.declare(&ekey, b);
+                self.env.declare(&dkey, Value::Bool(empty));
                 None
             }
         };
@@ -610,11 +617,12 @@ impl<'a> Exec<'a> {
                 let c = self.env.get(&ckey).cloned().ok_or_else(|| rt("lost for-counter"))?;
                 let e = self.env.get(&ekey).cloned().ok_or_else(|| rt("lost for-bound"))?;
                 let (ci, ei) = (c.as_int()?, e.as_int()?);
-                if last_done || if inclusive { ci > ei } else { ci >= ei } {
+                let done = matches!(self.env.get(&dkey), Some(Value::Bool(true)));
+                if done || (!inclusive && ci >= ei) {
                     return Ok(Flow::Done);
                 }
-                if inclusive && tick_free && ci == ei {
-                    last_done = true;
+                if inclusive && ci == ei {
+                    self.env.set(&dkey, Value::Bool(true))?;
                 } else {
                     let next = self.binop(&BinOp::Add(Default::default()), c.clone(), Value::Int(1, IntTy::Unsuffixed))?;
                     self.env.set(&ckey, next)?;
@@ -2192,7 +2200,10 @@ fn unify_ints(a: Value, b: Value) -> Result<(Value, Value), RefError> {
         other => return Err(rt(format!("range bound {other} is not an integer"))),
     };
     let t = match (at, bt) {
-        (IntTy::Unsuffixed, IntTy::Unsuffixed) => IntTy::Usize,
+        // Two unsuffixed bounds: the loop variable stays unsuffixed and takes its type
+        // from the operand it meets (rustc infers it from the use; `i32` when nothing
+        // fixes it, which an unbounded integer agrees with on every in-range value).
+        (IntTy::Unsuffixed, IntTy::Unsuffixed) => IntTy::Unsuffixed,
         (IntTy::Unsuffixed, t) | (t, IntTy::Unsuffixed) => t,
         (x, y) if x == y => x,
         (x, y) => return Err(rt(format!("range bounds of different types {} and {}", x.name(), y.name()))),

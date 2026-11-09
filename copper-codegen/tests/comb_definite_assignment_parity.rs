@@ -154,10 +154,12 @@ fn both_front_ends_admit_and_refuse_the_same_rows() {
     }
 }
 
-/// The `for` row's loop index is 32 bits; the port write is width-cast, as a
-/// `let` binding's value is, so `-Wall` does not refuse it as WIDTHTRUNC.
+/// The `for` row's loop index is the SV `int`; read as its Rust type — `usize`, which
+/// `Bits::from_usize(i)` gives it (line `II.3 found loop-var-type`, MEASUREMENTS §AB.2;
+/// `8'(i)` until 2026-11-09) — and the port write is width-cast, as a `let` binding's
+/// value is, so `-Wall` does not refuse it as WIDTHTRUNC.
 #[test]
 fn a_port_written_from_a_loop_index_is_width_cast() {
     let sv = transpile(ROWS.iter().find(|r| r.0 == "for_override").unwrap().1).unwrap();
-    assert!(sv.contains("o = 8'(i);"), "{sv}");
+    assert!(sv.contains("o = 8'(64'(i));"), "{sv}");
 }

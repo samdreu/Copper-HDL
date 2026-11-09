@@ -214,6 +214,7 @@ pub enum SHIRStmt {
         start: SHIRExpr,
         end: SHIRExpr,
         inclusive: bool,
+        counter: Option<crate::chir::ForCounter>,
         body: Vec<SHIRStmt>,
     },
     /// `base[index] = value;` — single-bit assignment.

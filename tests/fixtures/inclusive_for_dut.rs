@@ -1,9 +1,10 @@
 // A `for` over an inclusive range, `for v in a..=b` (D-27, 2026-11-09; line `II.3 found
 // inclusive-for`, MEASUREMENTS §Z.10, §AA.3): IN with Rust's meaning. A tick-free one is unrolled
 // `b − a + 1` times (SPEC I.2.4), emitted as an SV `for (… ; i <= b; …)`, so an end at its type's
-// maximum does not overflow; a tick-bearing one is I.8.5's counted loop exiting on `c > e`, and a
-// constant end at its type's maximum is refused by both front-ends (II.1.2 R23; ui/fail
-// `inclusive_ticking_for_at_max`). Each module is swept on three legs.
+// maximum does not overflow; a tick-bearing one is I.8.5's counted loop exiting on `c > e`. A
+// constant end at its type's maximum was refused by both front-ends (II.1.2 R23) until D-28
+// (2026-11-09) gave the form a done flag; the maxima are swept in `inclusive_max_dut.rs`. Each
+// module is swept on three legs.
 
 const IFR_LAST: u8 = 3;
 const IFR_HI: u8 = 254;
