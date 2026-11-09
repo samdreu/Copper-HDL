@@ -77,6 +77,9 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     "lvt_shadow",
     "lvt_signed",
     "lvt_use_ticking_break",
+    // Added 2026-11-09 with line `II.3 found scoped-shadow` (MEASUREMENTS §AC): a ticking
+    // counted `for` and a tick after it in one module loop, as `lvt_shadow`'s.
+    "ssh_for_shadows_local",
     // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
     // counted `for` over the data bits, each with its tick inside) and the one-tick
     // handshake (two `while` waits). Every tick sits inside a loop, so both extract

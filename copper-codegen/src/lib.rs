@@ -86,6 +86,8 @@ pub fn lower_fir_to_chir(
     // Body-local and associated consts hoisted to file scope, `v op= e` → `v = v op e` (SPEC
     // I.2.4, MEASUREMENTS §Z.3), before any pass looks at the body.
     desugar::desugar(&mut fir);
+    // Read before the counted-`for` rewrite below turns a `for` into its counter.
+    let shadows_live = desugar::shadows_live_at_tick(&fir.raw_statements);
     // A `continue` of a tick-free `for` → the rest of the iteration under the negated
     // condition (SPEC I.2.4, MEASUREMENTS §U.1), before any pass looks at a loop body.
     for_continue::eliminate_tickfree_continue(&mut fir);
@@ -132,15 +134,22 @@ pub fn lower_fir_to_chir(
     // Only a SOURCE local is the inference's to judge: the passes' own state
     // (`__copper_ctr*`, which the counted-`for` desugar declares in the loop and the
     // hoist then moves out) is not in its domain and stays a register.
-    // A body `let` that shadows a `for`'s variable is renamed `<v>__shadow` by the counted-`for`
-    // rewrite (MEASUREMENTS §AB.5): it is the source's local `v` all the same.
+    // A `let` that shadows an outer binding is renamed `<x>__shadow[k]` by
+    // `desugar::rename_scoped_shadows` (MEASUREMENTS §AB.5, §AC): it is the source's local `x`
+    // all the same, and a register when it is live at a tick (`desugar::shadows_live_at_tick`
+    // — the inference is by name, so it cannot tell the shadow from the binding it shadows).
     let hoisted: std::collections::BTreeSet<String> = hoisted_names(&fir)
         .into_iter()
         .filter(|n| {
-            let src = n.strip_suffix("__shadow").unwrap_or(n);
+            let src = desugar::shadow_source(n).unwrap_or(n);
             control_extract::stmts_mention(&source.raw_statements, src)
         })
         .collect();
+    for n in &hoisted {
+        if shadows_live.contains(n) && !fir.registers.contains(n) {
+            fir.registers.push(n.clone());
+        }
+    }
     for name in preloop_mut_names(&fir) {
         if !preloop_muts_before.contains(&name)
             && !fir.registers.contains(&name)

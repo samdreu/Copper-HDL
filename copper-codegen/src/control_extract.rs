@@ -497,10 +497,11 @@ fn expand_counted_for(
     let mut work: Vec<RawStmt> = work.to_vec();
     let named = !(pat == "_" || pat.is_empty());
     let cast_to = read_ty.as_deref().filter(|rt| *rt != counter_ty && named);
-    // A body `let` that shadows the variable is renamed (it would otherwise be the counter,
-    // and the increment would add to it; MEASUREMENTS §AB.5).
-    if cast_to.is_some() || (named && crate::chir_lower::body_shadows(work.as_slice(), &var)) {
-        crate::chir_lower::cast_loop_var_reads(&mut work, &var, cast_to, span);
+    // A body `let` shadowing the variable, at any depth, was renamed by
+    // `desugar::rename_scoped_shadows` (it would otherwise be the counter, and the increment
+    // would add to it; MEASUREMENTS §AB.5, §AC).
+    if let Some(ty) = cast_to {
+        crate::chir_lower::cast_loop_var_reads(&mut work, &var, ty);
     }
     let work = &work[..];
 
@@ -2285,7 +2286,7 @@ fn stmts_contain_tick(stmts: &[RawStmt]) -> bool {
     stmts.iter().any(stmt_contains_tick)
 }
 
-fn stmt_contains_tick(s: &RawStmt) -> bool {
+pub(crate) fn stmt_contains_tick(s: &RawStmt) -> bool {
     match &s.kind {
         RawStmtKind::Expr(es) => expr_contains_tick(&es.expr),
         RawStmtKind::Local(l) => l.init.as_ref().is_some_and(expr_contains_tick),

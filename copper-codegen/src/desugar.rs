@@ -31,6 +31,9 @@ pub fn desugar(fir: &mut FrontendModuleIR) {
     hoist_body_consts(&mut body, fir);
     hoist_assoc_consts(&mut body, fir);
     hoist_body_structs(&body, fir);
+    // Last: a `let` in an inner scope that shadows an outer binding gets a name of its own
+    // (MEASUREMENTS §AC), so no later pass maps the two bindings onto one SV signal.
+    rename_scoped_shadows(&mut body);
     fir.raw_statements = body;
 }
 
@@ -590,5 +593,387 @@ fn for_each_nested_list(s: &mut RawStmt, f: &mut dyn FnMut(&mut Vec<RawStmt>)) {
         }
         RawStmtKind::Expr(es) => in_expr(&mut es.expr, f),
         RawStmtKind::Item(_) => {}
+    }
+}
+
+// ── scoped shadows ────────────────────────────────────────────────────────────
+
+/// The suffix of a renamed shadow (`x__shadow`, `x__shadow1`, …; see [`rename_scoped_shadows`]).
+pub(crate) const SHADOW_SUFFIX: &str = "__shadow";
+
+/// The source local a renamed shadow stands for: `x__shadow` and `x__shadow3` are `x`.
+pub fn shadow_source(name: &str) -> Option<&str> {
+    let i = name.rfind(SHADOW_SUFFIX)?;
+    let rest = &name[i + SHADOW_SUFFIX.len()..];
+    (i > 0 && rest.chars().all(|c| c.is_ascii_digit())).then(|| &name[..i])
+}
+
+/// Give every binding that shadows a binding of an OUTER scope a name of its own, for its
+/// scope only (Rust's block scoping; SPEC I.14, line `II.3 found for-var-shadow-nested`,
+/// MEASUREMENTS §AC). The lowering maps every binding of one name onto one SV signal, which is
+/// right for a re-`let` in the same block — the later binding hides the earlier one for the
+/// rest of that block, as a reassignment does — and wrong for a shadow in an inner block, which
+/// ends at the block's end: after it the outer binding is visible again, unchanged. Until
+/// 2026-11-09 a shadow in an `if` branch, a `match` arm or a bare block overwrote the outer
+/// local; a body `let` shadowing a `for`'s variable overwrote the loop variable (tick-free: the
+/// SV `for`'s own variable, lint-rejected) or the tick-bearing `for`'s counter (silently: the
+/// trip count changed); one shadowing a register was a duplicate SV declaration.
+///
+/// The SHADOW is renamed (`<x>__shadow`, then `<x>__shadow1`, … for a name already taken),
+/// never the binding it shadows: a `for`'s variable keeps its name, so the tick-bearing `for`'s
+/// counter stays the source local the register inference names (§AB.5). Its initializer is
+/// read before the binding takes effect (`let x = x + 1` reads the outer `x`). Binders this pass
+/// does not rename — a `match` arm's, an `if let`'s, a closure's — still hide an outer binding
+/// of their name in their scope, so a read there is never redirected to the outer one's name.
+pub(crate) fn rename_scoped_shadows(body: &mut [RawStmt]) {
+    let mut taken: HashSet<String> = HashSet::new();
+    collect_names(body, &mut taken);
+    let mut sc = Scopes { stack: vec![HashMap::new()], taken };
+    shadow_list(body, &mut sc);
+}
+
+struct Scopes {
+    /// Source name → the name it is lowered under, innermost scope last.
+    stack: Vec<HashMap<String, String>>,
+    taken: HashSet<String>,
+}
+
+impl Scopes {
+    fn lookup(&self, n: &str) -> Option<(usize, &String)> {
+        self.stack.iter().enumerate().rev().find_map(|(d, m)| m.get(n).map(|v| (d, v)))
+    }
+
+    /// Bind `n` in the innermost scope; the name it is lowered under.
+    fn bind(&mut self, n: &str) -> String {
+        if n == "_" || n.is_empty() {
+            return n.to_string();
+        }
+        let top = self.stack.len() - 1;
+        let name = match self.lookup(n) {
+            Some((d, cur)) if d == top => cur.clone(),
+            Some(_) => {
+                let mut k = 0usize;
+                loop {
+                    let c = if k == 0 { format!("{n}{SHADOW_SUFFIX}") } else { format!("{n}{SHADOW_SUFFIX}{k}") };
+                    if !self.taken.contains(&c) {
+                        self.taken.insert(c.clone());
+                        break c;
+                    }
+                    k += 1;
+                }
+            }
+            None => n.to_string(),
+        };
+        self.stack[top].insert(n.to_string(), name.clone());
+        name
+    }
+
+    /// Bind `n` to itself in the innermost scope: a binder this pass does not rename.
+    fn mask(&mut self, n: &str) {
+        let top = self.stack.len() - 1;
+        self.stack[top].insert(n.to_string(), n.to_string());
+    }
+
+    fn renamed(&self, n: &str) -> Option<String> {
+        self.lookup(n).filter(|(_, v)| v.as_str() != n).map(|(_, v)| v.clone())
+    }
+
+    fn scoped<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.stack.push(HashMap::new());
+        let r = f(self);
+        self.stack.pop();
+        r
+    }
+}
+
+fn is_ident(t: &str) -> bool {
+    let mut cs = t.chars();
+    cs.next().is_some_and(|c| c.is_alphabetic() || c == '_') && cs.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// The binders of a `let` name as the parser keeps it: `x`, or `(a, b, _)`.
+fn let_binders(name: &str) -> Option<Vec<String>> {
+    let t = name.trim();
+    if is_ident(t) {
+        return Some(vec![t.to_string()]);
+    }
+    let inner = t.strip_prefix('(')?.strip_suffix(')')?;
+    inner.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()).map(|p| is_ident(p).then(|| p.to_string())).collect()
+}
+
+/// The lower-case identifiers of a pattern's text that may be binders (a superset: a
+/// path segment, a field name, a keyword are left out; a lower-case const is not).
+fn pattern_binders(text: &str) -> Vec<String> {
+    let bytes: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_alphabetic() || c == '_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_alphanumeric() || bytes[i] == '_') {
+                i += 1;
+            }
+            let w: String = bytes[start..i].iter().collect();
+            let before: String = bytes[..start].iter().rev().take_while(|c| !c.is_whitespace()).take(2).collect();
+            let after: String = bytes[i..].iter().skip_while(|c| c.is_whitespace()).take(2).collect();
+            let lower = w.chars().next().is_some_and(|c| c.is_lowercase() || c == '_');
+            let keyword = matches!(w.as_str(), "_" | "ref" | "mut" | "true" | "false");
+            let path = before.starts_with("::") || after.starts_with("::") || after.starts_with('(') || after.starts_with('{') || after.starts_with('!');
+            if lower && !keyword && !path && !w.chars().all(|c| c.is_ascii_digit() || c == '_') {
+                out.push(w);
+            }
+        } else if c.is_ascii_digit() {
+            while i < bytes.len() && (bytes[i].is_alphanumeric() || bytes[i] == '_') {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn collect_names(stmts: &[RawStmt], out: &mut HashSet<String>) {
+    let mut v = stmts.to_vec();
+    visit_stmts(&mut v, &mut |e| match e {
+        ExprType::Path(p) => {
+            out.insert(p.path_text.chars().filter(|c| !c.is_whitespace()).collect());
+        }
+        ExprType::ForLoop(f) => {
+            out.insert(f.pat_text.trim().to_string());
+        }
+        _ => {}
+    });
+    fn lets(stmts: &[RawStmt], out: &mut HashSet<String>) {
+        for s in stmts {
+            if let RawStmtKind::Local(l) = &s.kind {
+                out.extend(let_binders(&l.name).unwrap_or_default());
+            }
+        }
+    }
+    lets(stmts, out);
+    for s in &mut v {
+        let mut lists = Vec::new();
+        for_each_nested_list(s, &mut |l| lists.push(l.clone()));
+        for l in lists {
+            collect_names(&l, out);
+        }
+    }
+}
+
+fn shadow_list(stmts: &mut [RawStmt], sc: &mut Scopes) {
+    for s in stmts.iter_mut() {
+        match &mut s.kind {
+            RawStmtKind::Local(l) => {
+                if let Some(i) = l.init.as_mut() {
+                    shadow_expr(i, sc);
+                }
+                match let_binders(&l.name) {
+                    Some(bs) if bs.len() == 1 && is_ident(l.name.trim()) => {
+                        l.name = sc.bind(&bs[0]);
+                    }
+                    Some(bs) => {
+                        let names: Vec<String> = bs.iter().map(|b| sc.bind(b)).collect();
+                        l.name = format!("({})", names.join(", "));
+                    }
+                    None => {}
+                }
+            }
+            RawStmtKind::Expr(es) => shadow_expr(&mut es.expr, sc),
+            RawStmtKind::Item(_) => {}
+        }
+    }
+}
+
+fn shadow_expr(e: &mut ExprType, sc: &mut Scopes) {
+    match e {
+        ExprType::Path(p) => {
+            let id: String = p.path_text.chars().filter(|c| !c.is_whitespace()).collect();
+            if let Some(to) = sc.renamed(&id) {
+                p.path_text = to;
+            }
+        }
+        ExprType::Macro(m) => {
+            for (from, to) in sc.stack.iter().flat_map(|m| m.iter()).filter(|(f, t)| f != t).map(|(f, t)| (f.clone(), t.clone())).collect::<Vec<_>>() {
+                if sc.renamed(&from).as_deref() == Some(to.as_str()) {
+                    m.tokens_text = rename_ident_in_text(&m.tokens_text, &from, &to);
+                }
+            }
+        }
+        ExprType::Block(b) => sc.scoped(|sc| shadow_list(&mut b.stmts, sc)),
+        ExprType::Async(a) => sc.scoped(|sc| shadow_list(&mut a.block, sc)),
+        ExprType::Const(c) => sc.scoped(|sc| shadow_list(&mut c.stmts, sc)),
+        ExprType::Loop(l) => sc.scoped(|sc| shadow_list(&mut l.body, sc)),
+        ExprType::While(w) => {
+            shadow_expr(&mut w.condition, sc);
+            sc.scoped(|sc| shadow_list(&mut w.body, sc));
+        }
+        ExprType::If(i) => {
+            shadow_expr(&mut i.condition, sc);
+            let mut lets = Vec::new();
+            if_let_binders(&i.condition, &mut lets);
+            sc.scoped(|sc| {
+                lets.iter().for_each(|b| sc.mask(b));
+                shadow_list(&mut i.then_block, sc);
+            });
+            if let Some(eb) = i.else_branch.as_mut() {
+                shadow_expr(eb, sc);
+            }
+        }
+        ExprType::Let(l) => shadow_expr(&mut l.expr, sc),
+        ExprType::ForLoop(f) => {
+            shadow_expr(&mut f.iter, sc);
+            sc.scoped(|sc| {
+                let pat = f.pat_text.trim().to_string();
+                if is_ident(&pat) {
+                    f.pat_text = sc.bind(&pat);
+                } else {
+                    pattern_binders(&pat).iter().for_each(|b| sc.mask(b));
+                }
+                // The body is a block of its own, inside the pattern's scope: a body `let` of
+                // the variable's name shadows it (`II.3 found for-var-shadow`).
+                sc.scoped(|sc| shadow_list(&mut f.body, sc));
+            });
+        }
+        ExprType::Match(m) => {
+            shadow_expr(&mut m.scrutinee, sc);
+            for arm in &mut m.arms {
+                sc.scoped(|sc| {
+                    pattern_binders(&arm.pattern_text).iter().for_each(|b| sc.mask(b));
+                    if let Some(g) = arm.guard.as_mut() {
+                        shadow_expr(g, sc);
+                    }
+                    shadow_expr(&mut arm.body, sc);
+                });
+            }
+        }
+        ExprType::Closure(c) => sc.scoped(|sc| {
+            c.params.iter().flat_map(|p| pattern_binders(p)).for_each(|b| sc.mask(&b));
+            shadow_expr(&mut c.body, sc);
+        }),
+        ExprType::Array(a) => a.elements.iter_mut().for_each(|x| shadow_expr(x, sc)),
+        ExprType::Assign(a) => {
+            shadow_expr(&mut a.left, sc);
+            shadow_expr(&mut a.right, sc);
+        }
+        ExprType::Await(a) => shadow_expr(&mut a.base, sc),
+        ExprType::Binary(b) => {
+            shadow_expr(&mut b.left, sc);
+            shadow_expr(&mut b.right, sc);
+        }
+        ExprType::Call(c) => {
+            shadow_expr(&mut c.func, sc);
+            c.args.iter_mut().for_each(|x| shadow_expr(x, sc));
+        }
+        ExprType::Cast(c) => shadow_expr(&mut c.expr, sc),
+        ExprType::Field(fl) => shadow_expr(&mut fl.base, sc),
+        ExprType::Index(i) => {
+            shadow_expr(&mut i.base, sc);
+            shadow_expr(&mut i.index, sc);
+        }
+        ExprType::MethodCall(mc) => {
+            shadow_expr(&mut mc.receiver, sc);
+            mc.args.iter_mut().for_each(|x| shadow_expr(x, sc));
+        }
+        ExprType::Range(r) => {
+            if let Some(x) = r.start.as_mut() {
+                shadow_expr(x, sc);
+            }
+            if let Some(x) = r.end.as_mut() {
+                shadow_expr(x, sc);
+            }
+        }
+        ExprType::Reference(r) => shadow_expr(&mut r.expr, sc),
+        ExprType::Repeat(r) => {
+            shadow_expr(&mut r.expr, sc);
+            shadow_expr(&mut r.len, sc);
+        }
+        ExprType::Return(r) => {
+            if let Some(v) = r.value.as_mut() {
+                shadow_expr(v, sc);
+            }
+        }
+        ExprType::Break(b) => {
+            if let Some(v) = b.expr.as_mut() {
+                shadow_expr(v, sc);
+            }
+        }
+        ExprType::Yield(y) => {
+            if let Some(v) = y.value.as_mut() {
+                shadow_expr(v, sc);
+            }
+        }
+        ExprType::Struct(st) => {
+            st.fields.iter_mut().for_each(|x| shadow_expr(&mut x.expr, sc));
+            if let Some(r) = st.rest.as_mut() {
+                shadow_expr(r, sc);
+            }
+        }
+        ExprType::Tuple(t) => t.elements.iter_mut().for_each(|x| shadow_expr(x, sc)),
+        ExprType::Unary(u) => shadow_expr(&mut u.expr, sc),
+        ExprType::Try(t) => shadow_expr(&mut t.expr, sc),
+        ExprType::Lit(_) | ExprType::Continue(_) => {}
+    }
+}
+
+/// The binders of the `let` patterns in an `if` condition (`if let p = e`, `&&`-chained).
+fn if_let_binders(cond: &ExprType, out: &mut Vec<String>) {
+    match cond {
+        ExprType::Let(l) => out.extend(pattern_binders(&l.pattern_text)),
+        ExprType::Binary(b) if b.op.trim() == "&&" => {
+            if_let_binders(&b.left, out);
+            if_let_binders(&b.right, out);
+        }
+        _ => {}
+    }
+}
+
+/// The renamed shadows (see [`rename_scoped_shadows`]) whose value is live at a tick: a
+/// statement of the shadow's scope — the rest of its block, after its `let` — holds a tick, and
+/// that statement or a later one reads the shadow. A shadow's scope is entered afresh on every
+/// pass through its block, so no back edge carries it; this is liveness at a tick (SPEC I.7.1)
+/// for the shadow alone, which the register inference — by name, over the source, where the
+/// shadow and the binding it shadows share one — cannot give. Over-approximate only where the
+/// tick-bearing statement reads the shadow before its tick (a flop holding what a wire would
+/// pass on).
+pub(crate) fn shadows_live_at_tick(stmts: &[RawStmt]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    live_in_list(stmts, &mut out);
+    out
+}
+
+fn live_in_list(stmts: &[RawStmt], out: &mut HashSet<String>) {
+    for (k, s) in stmts.iter().enumerate() {
+        if let RawStmtKind::Local(l) = &s.kind {
+            for b in let_binders(&l.name).unwrap_or_default() {
+                if shadow_source(&b).is_none() {
+                    continue;
+                }
+                let rest = &stmts[k + 1..];
+                if let Some(t) = rest.iter().position(crate::control_extract::stmt_contains_tick) {
+                    if crate::control_extract::stmts_mention(&rest[t..], &b) {
+                        out.insert(b);
+                    }
+                }
+            }
+        }
+        let mut s = s.clone();
+        for_each_nested_list(&mut s, &mut |l| live_in_list(l, out));
+        // A renamed `for` variable: its scope is the body.
+        if let RawStmtKind::Expr(es) = &s.kind {
+            for_pats_live(&es.expr, out);
+        }
+    }
+}
+
+fn for_pats_live(e: &ExprType, out: &mut HashSet<String>) {
+    if let ExprType::ForLoop(f) = e {
+        let p = f.pat_text.trim();
+        // A tick-bearing `for`'s variable is its counter: a register whether or not the body
+        // reads it.
+        if shadow_source(p).is_some() && f.body.iter().any(crate::control_extract::stmt_contains_tick) {
+            out.insert(p.to_string());
+        }
     }
 }

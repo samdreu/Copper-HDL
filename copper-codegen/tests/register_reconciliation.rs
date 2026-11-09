@@ -146,6 +146,14 @@ fn strip_r(name: &str) -> String {
     name.strip_suffix("_r").unwrap_or(name).to_string()
 }
 
+/// The source local a renamed shadow stands for (`x__shadow`, `x__shadow2` → `x`; the
+/// transpiler's `desugar::rename_scoped_shadows`).
+fn shadow_source(name: &str) -> Option<&str> {
+    let i = name.rfind("__shadow")?;
+    let rest = &name[i + "__shadow".len()..];
+    (i > 0 && rest.chars().all(|c| c.is_ascii_digit())).then(|| &name[..i])
+}
+
 fn is_hardware(f: &ItemFn) -> bool {
     f.attrs.iter().any(|a| a.path().segments.last().is_some_and(|s| s.ident == "hardware"))
 }
@@ -342,10 +350,13 @@ fn reconcile(src: &str, file: &syn::File, f: &ItemFn, multi: bool) -> Option<Rec
         // Two spellings of an inferred name (found by the corpus run, §K.5): a source
         // local that already ends in `_r` (`a0_r`), which `strip_r` above turned into
         // `a0`; and a name the legalizer renamed because it is reserved in SV
-        // (`byte` → `byte_sig`).
+        // (`byte` → `byte_sig`). A third (MEASUREMENTS §AC): a `let` that shadows a binding of
+        // an outer scope is lowered as `<x>__shadow` (`<x>__shadow1`, …), and is the source's
+        // `x` all the same — the inference is by name and gives the two bindings one entry.
         .filter(|r| {
             !inferred.contains(&format!("{r}_r"))
                 && !r.strip_suffix("_sig").is_some_and(|b| inferred.contains(b))
+                && !shadow_source(r).is_some_and(|b| inferred.contains(b))
         })
         .cloned()
         .collect();
