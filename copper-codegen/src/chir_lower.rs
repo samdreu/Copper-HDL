@@ -1846,6 +1846,36 @@ fn lower_seq_body(
     hardware_fns: &std::collections::HashSet<String>,
     registry: &ModuleRegistry,
 ) -> Result<CHIRSeqBody, CHIRLowerError> {
+    // The trailing region (after the last tick) runs at the head of the next
+    // resumption (SPEC I.0.2): `shir_lower` lowers it into phase 0 AHEAD of segment
+    // 0. Its array-register element writes therefore precede the head's reads in one
+    // resumption, and a head read must see them through the write-through mux, as it
+    // sees an earlier write of its own segment. Lowering runs in source order (head
+    // first), so the trailing region's port count is known only after one pass: a
+    // body with trailing element writes is lowered again with the head seeded with
+    // that count — its reads mux over the trailing ports `0..t`, its own writes take
+    // ports from `t`. Until 2026-11-09 the head muxed only the previous resumption's
+    // staged write (`r_wr0_s1_*`): line `II.3 found array-register-trailing-write`,
+    // 8/8 sequences `sim=ref≠SV` (MEASUREMENTS §Z.9, §AA.1).
+    let (body, trailing) = lower_seq_body_seeded(fir, hardware_fns, registry, &Default::default())?;
+    if trailing.is_empty() {
+        return Ok(body);
+    }
+    let (body, again) = lower_seq_body_seeded(fir, hardware_fns, registry, &trailing)?;
+    debug_assert_eq!(again, trailing, "the trailing region's port count is seed-independent");
+    Ok(body)
+}
+
+/// [`lower_seq_body`] with the head's array-register write-through seeded by the
+/// trailing region's element-write ports (`seed`, array → port count). Returns the
+/// body and the trailing region's port counts (empty when it writes no array
+/// register, or when a tick is nested — never the case after `control_extract`).
+fn lower_seq_body_seeded(
+    fir: &FrontendModuleIR,
+    hardware_fns: &std::collections::HashSet<String>,
+    registry: &ModuleRegistry,
+    seed: &std::collections::HashMap<String, usize>,
+) -> Result<(CHIRSeqBody, std::collections::HashMap<String, usize>), CHIRLowerError> {
     // The file's constants for the register-initializer fold (SPEC I.14.4).
     let _const_env = ConstEnvScope::enter(copper_analysis::consts::ConstEnv::from_items(
         fir.file_const_source.iter().map(String::as_str),
@@ -2450,7 +2480,24 @@ fn lower_seq_body(
             span: fir.span,
         });
     }
-    loop_body.extend(lower_stmts(loop_stmts, &mut ctx)?);
+    // The head reads the trailing region's writes (see `lower_seq_body`); a write the
+    // pre-loop statements staged shares those low ports (the two never run in one
+    // resumption: `!__copper_started` / `__copper_started`).
+    for (name, &t) in seed {
+        let e = ctx.array_written.entry(name.clone()).or_insert(0);
+        *e = (*e).max(t);
+    }
+    let lowered_loop = lower_stmts(loop_stmts, &mut ctx)?;
+    // After the last tick `array_written` counts the trailing region's ports.
+    let trailing_ports: std::collections::HashMap<String, usize> =
+        if lowered_loop.iter().all(|s| matches!(s, CHIRStmt::AwaitTick { .. })
+            || first_tick_span(std::slice::from_ref(s)).is_none())
+        {
+            ctx.array_written.iter().filter(|&(_, &n)| n > 0).map(|(k, &n)| (k.clone(), n)).collect()
+        } else {
+            Default::default()
+        };
+    loop_body.extend(lowered_loop);
     // An array register's write-port count is the most element writes one segment
     // staged (at least the one port it was declared with).
     for m in memories.iter_mut() {
@@ -2468,14 +2515,14 @@ fn lower_seq_body(
         });
     }
 
-    Ok(CHIRSeqBody {
+    Ok((CHIRSeqBody {
         clock,
         registers,
         memories,
         loop_body,
         entry_guard,
         pre_loop_constants,
-    })
+    }, trailing_ports))
 }
 
 // ── Structural body (item 4: hierarchical clocked instantiation) ──────────────
@@ -4738,13 +4785,13 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
         ExprType::Path(path) => lower_name_or_lit(&path.path_text, path.span, ctx),
 
         ExprType::Binary(bin) => {
-            let left = lower_expr(&bin.left, ctx)?;
+            let left = signed_read(lower_expr(&bin.left, ctx)?, ctx);
             // A shift amount through an integer view is the receiver's value (the
             // view's zero-extension moves no bit of the amount; I.14.7 (3)).
             let right = if matches!(bin.op.as_str(), "<<" | ">>") {
                 peel_widening_resize(lower_expr(peel_index_views(&bin.right), ctx)?, ctx)
             } else {
-                lower_expr(&bin.right, ctx)?
+                signed_read(lower_expr(&bin.right, ctx)?, ctx)
             };
             let op = lower_binop(&bin.op, bin.span)?;
             // A comparison with the X literal (`v == Logic::X`) asks whether a value
@@ -4789,7 +4836,7 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
         }
 
         ExprType::Unary(un) => {
-            let inner = lower_expr(&un.expr, ctx)?;
+            let inner = signed_read(lower_expr(&un.expr, ctx)?, ctx);
             let op = lower_unop(&un.op, un.span)?;
             // Rust has no `~`: `!` IS bitwise Not on integers and `Bits<N>`
             // (`std::ops::Not`), and logical not only on `bool`. Emitting `!`
@@ -5006,23 +5053,66 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
             // lint-clean and wrong (the signedness claim-ledger entries).
             // `as u*` of a signed expression re-interprets back (`$unsigned`);
             // `as u*` of a plain expression stays a strip, as before.
-            let inner = lower_expr(&cast.expr, ctx)?;
+            let inner = signed_read(lower_expr(&cast.expr, ctx)?, ctx);
             let target = compact_type(&cast.target_ty.ty_text);
             let to_signed = matches!(
                 target.as_str(),
                 "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
             );
+            let target_w = resolve_type(&cast.target_ty.ty_text, cast.target_ty.span)
+                .ok()
+                .and_then(|t| width_of_type_concrete(&t));
             Ok(match (to_signed, inner) {
+                // `as i*` to a WIDER type extends by the operand's own signedness
+                // (`i8 as i16` sign-extends, `u8 as i16` zero-extends) and states the
+                // width, `$signed(16'($signed(v)))`. Until 2026-11-09 the width was
+                // left to the context, `x = $signed(v)` for a 16-bit `x` (-Wall
+                // WIDTHEXPAND; MEASUREMENTS §AA.2).
+                (true, CHIRExpr::SignCast { expr, signed })
+                    if matches!((target_w, width_ignoring_default_lits(&expr, ctx)), (Some(t), Some(w)) if t > w) =>
+                {
+                    CHIRExpr::SignCast {
+                        signed: true,
+                        expr: Box::new(CHIRExpr::Resize {
+                            expr: Box::new(CHIRExpr::SignCast { signed, expr }),
+                            width: Width::Concrete(target_w.unwrap()),
+                        }),
+                    }
+                }
                 (true, CHIRExpr::SignCast { expr, .. }) => {
                     CHIRExpr::SignCast { signed: true, expr }
+                }
+                (true, plain)
+                    if matches!((target_w, width_ignoring_default_lits(&plain, ctx)), (Some(t), Some(w)) if t > w) =>
+                {
+                    CHIRExpr::SignCast {
+                        signed: true,
+                        expr: Box::new(widening_resize(plain, target_w.unwrap(), ctx)),
+                    }
                 }
                 (true, plain) => {
                     CHIRExpr::SignCast { signed: true, expr: Box::new(plain) }
                 }
                 // `as u*` of a SIGNED expression re-interprets it back — the
-                // explicit `$unsigned` keeps the emitted type honest.
-                (false, CHIRExpr::SignCast { expr, .. }) => {
-                    CHIRExpr::SignCast { signed: false, expr }
+                // explicit `$unsigned` keeps the emitted type honest. A WIDER target
+                // sign-extends first (Rust: `i8 as u16` of -1 is 0xffff): the size
+                // cast of the signed value, `$unsigned(16'($signed(v)))`. Until
+                // 2026-11-09 the `$unsigned` alone zero-extended in its context
+                // (MEASUREMENTS §AA.2).
+                (false, CHIRExpr::SignCast { expr, signed }) => {
+                    let tw = resolve_type(&cast.target_ty.ty_text, cast.target_ty.span)
+                        .ok()
+                        .and_then(|t| width_of_type_concrete(&t));
+                    match (signed, tw, width_ignoring_default_lits(&expr, ctx)) {
+                        (true, Some(t), Some(w)) if t > w => CHIRExpr::SignCast {
+                            signed: false,
+                            expr: Box::new(CHIRExpr::Resize {
+                                expr: Box::new(CHIRExpr::SignCast { signed: true, expr }),
+                                width: Width::Concrete(t),
+                            }),
+                        },
+                        _ => CHIRExpr::SignCast { signed: false, expr },
+                    }
                 }
                 // `as u*`/`as usize` of a plain expression: Rust's integer cast
                 // truncates or zero-extends (I.14.3(c)), so a known width that
@@ -6238,6 +6328,23 @@ fn lower_lit_expr(
         span,
         suggested_rewrite: None,
     })
+}
+
+/// A read of a SIGNED local, register or const (`let v = x as i8`, `let mut acc: i8`)
+/// carries its signedness, as the cast at the use does: `SignCast { signed: true }`
+/// around the name, so a comparison, a right shift, `/`, `%` or a widening cast of it
+/// is emitted signed. The net itself is a plain `logic` vector. Applied where an
+/// operand is lowered (`lower_expr`'s binary, unary and cast arms); an assignment
+/// target or a bare value read is unaffected. Until 2026-11-09 a signed local read
+/// unsigned: line `II.3 found signed-local`, `v < 3` an unsigned compare, 6/6
+/// sequences `sim=ref≠SV` (MEASUREMENTS §Z.9, §AA.2).
+fn signed_read(e: CHIRExpr, ctx: &LowerCtx) -> CHIRExpr {
+    match &e {
+        CHIRExpr::Var(n) if matches!(ctx.symbols.get(n), Some(CHIRType::SInt { .. })) => {
+            CHIRExpr::SignCast { signed: true, expr: Box::new(e) }
+        }
+        _ => e,
+    }
 }
 
 /// Assemble a binary operation with **signedness propagation** (see

@@ -59,7 +59,7 @@ const EXPECTED: &[(&str, &str)] = &[
          Reaches ticks only to place them.",
     ),
     (
-        "chir_lower.rs::lower_seq_body",
+        "chir_lower.rs::lower_seq_body_seeded",
         "lowering: builds the sequential body and refuses a loop with no tick at all — \
          a structural precondition of the IR, not a phase count.",
     ),
