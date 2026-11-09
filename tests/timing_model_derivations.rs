@@ -59,6 +59,11 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     "for_empty",
     "for_empty_start",
     "nested_loop_added",
+    // Added 2026-11-09 with D-27 (MEASUREMENTS §AA.3): the inclusive twins of `det_for` (an
+    // author's `break` guards the hoisted tick) and `for_empty` (a run-time end guards it on the
+    // counter having advanced) — the guarded tick takes the extraction route, as theirs does.
+    "ifr_ticking_break",
+    "ifr_ticking_runtime",
     // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
     // counted `for` over the data bits, each with its tick inside) and the one-tick
     // handshake (two `while` waits). Every tick sits inside a loop, so both extract
