@@ -4706,3 +4706,142 @@ asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; **G-K** `193 lines — 187 CLOS
 the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 168 sweep, 143 test, 114 ui; 199 run checks`, the 3
 example fixtures PASS. The pre-rebase run of W.5 (on `8f21db8`, `paper` at `d022fbe`) is superseded. Not
 run remotely (nothing pushed).
+
+## X. The last OPEN lines of SPEC §III.3 — const-call-body, runtime-empty-boundary, II.1.3 (2026-11-08)
+
+Branch `claude/open-lines-last-4e2ae7`, cut from `paper` at `e265c0b` (ledger 193 lines — 190 CLOSED, 3
+OPEN). Code commit `6df6270`. Probes are in the session notes folder `open-lines-last-X-probes/`
+(outside the repo), not in the tree.
+
+### X.0 Predictions (written before any code change)
+
+runtime-empty-boundary: making a ticking `for` whose bound is not constant-shaped an exit of R3 refuses
+corpus 0 modules; it moves `ui/fail/nested_runtime_empty_for` to R3's message unless
+`check_counted_for_nesting` runs first, and with that reorder no existing ui message moves; a
+const-generic bound is still taken as non-empty, corpus 0 such boundaries. const-call-body: folding
+through `ConstEnv` turns the refusal into a sized `localparam` equal to rustc's value; corpus SV
+unchanged. **Measured against them:** as predicted, except two finds not predicted — a file `const fn`
+initializer is folded too (an existing test asserted its refusal, X.1), and a register written inside a
+tick-free `for` is silently dropped (X.3).
+
+### X.1 `II.3 found const-call-body` — CLOSED
+
+**Baseline (`e265c0b`, CLI probes `const_body/`):** a method-call const (`CB_BASE.wrapping_add(10)`), a
+tuple-field const (`CB_PAIR.0 + CB_PAIR.1`) and an immutable `static` named in a clocked body, a
+tick-free `for` bound, a ticking `for` bound or a combinational body are all refused ("undefined
+variable … has an initializer the transpiler cannot express in SystemVerilog"; for the `static`, a bare
+"undefined variable": statics were never captured as consts). An inline `CB_BASE.wrapping_add(7)` in a
+body already lowered (`CB_BASE + 8'd7`).
+
+**Change.** `file_consts::candidates`: a const whose initializer `sv_expr` cannot render is stated by
+the value `ConstEnv` (over `fir.file_const_source`) folds it to, if the value fits its declared type;
+the narrow types keep the sized form (`localparam logic [7:0] CB_WRAP = 8'(4)`). `parser::
+capture_file_scope` captures an immutable integer `static` as a const. The value goes through
+`dependency_order` with no references. `rejection_note`'s text names what is now emitted.
+
+**Measured.** The probes: `CB_WRAP = 8'(4)`, `CB_SUM = 8'(8)`, `CB_SEED = 8'(33)`, `CB_N = 3` (a `usize`
+method-call const as a ticking `for` bound) — rustc 1.92's values (a compiled `println!` of the fixture's
+consts: `4 33 8 6 3`). Swept fixtures in `tests/fixtures/const_call_dut.rs`: `cc_body_expr` (four
+constants in a clocked body), `cc_body_for` (a method-call const as a tick-free `for` bound over a wire
+accumulator, and `CC_REPS = (CC_ONES as usize).wrapping_sub(3)` as the module loop's only — ticking —
+boundary), `cc_body_comb`; all three pass differential and reference leg. **Not predicted:**
+`file_scope_consts.rs::a_const_the_transpiler_cannot_express_is_refused_with_the_reason` asserted the
+refusal of `const ADDR_W: usize = clog2(8)` (a `const fn`); `ConstEnv` folds it, so it is now
+`localparam int ADDR_W = 3`. The test is replaced by
+`a_const_rustc_evaluates_is_stated_by_its_value` (the `const fn`, the method call, the tuple field, the
+`static`, the `usize` method-call bound, each against rustc's recorded value), and the refusal test kept
+on an initializer outside `ConstEnv`'s grammar (`[1usize, 2, 3].len()`). **sv-baseline** (snapshot of
+`e265c0b`'s code with this tree's fixtures): **3 of 306 modules differ — exactly `cc_body_comb`,
+`cc_body_expr`, `cc_body_for`** (REFUSED → SV); no corpus module changed.
+
+### X.2 `II.3 found runtime-empty-boundary` — CLOSED (settled by I.8.4; no packet)
+
+**Why no packet.** I.8.4(b) (D-10 A4-i) states the meaning: a ticking `for` over a range empty only at
+run time runs zero iterations and is case (a) — legal iff the enclosing path still reaches a tick; an
+enclosing loop whose only tick is inside it is refused (R3). Lowering it is not open, and for the line's
+own shape (the module loop's only boundary) R3's "livelock in simulation" is literally true at
+`cnt == 0`. What §V.3 left open was the message for a *bounded* enclosing `for`; I.8.2(a) makes "every
+path of a nested loop reaches a tick" a shape rule for a counted `for` too, so R3's verdict is the
+spec's there and only its wording ("livelock") is wrong. R3 already gave that wording to the identical
+`while` shape (probe `while_in_for`, unchanged by this change), so a run-time `for` now joins `while`
+exactly.
+
+**Change.** `cfg.rs::literal_range_is_empty` answers "may be empty" for a range with an end whose start
+or end is not constant-shaped (`is_constant_expr`: a parameter's read, a local, a method call); a
+constant-shaped bound the oracle does not know (a const generic) is taken as non-empty, as before.
+`Cfg::counted_for` marks a counted `for`'s sub-CFG, and R3 names a zero-time cycle there with
+`ZERO_TIME_FOR_ITERATION_MESSAGE` ("this `for`'s only clock boundary in an iteration is a nested loop
+that can be left before it ticks … (SPEC I.8.2(a))") instead of `NESTED_EXIT_MESSAGE`.
+`check_counted_for_nesting` (§J.15) moves ahead of R3 in both front-ends.
+
+**Measured** (baseline = `e265c0b`):
+
+| probe / ui case | baseline macro | baseline transpiler | now (both) |
+|---|---|---|---|
+| `runtime_empty_for_boundary` (module loop's only boundary) | admits | flattener's message | R3, `NESTED_EXIT_MESSAGE` |
+| `runtime_empty_for_in_loop` (a nested `loop`'s only boundary) | admits | arms-only-loop message | R3, `NESTED_EXIT_MESSAGE` |
+| `runtime_empty_for_in_bounded_for` (not last in a `for 0..2`) | refuses, nested-loop shape | same | R3, `ZERO_TIME_FOR_ITERATION_MESSAGE` |
+| `nested_runtime_empty_for` (last in a `for 0..2`) | `check_counted_for_nesting` | same | unchanged |
+| `while_in_for` (probe, a `while` in a `for 0..2`) | R3, `NESTED_EXIT_MESSAGE` | same | R3, `ZERO_TIME_FOR_ITERATION_MESSAGE` |
+| `runtime_empty_for_with_tick_ok` (a module tick after the `for`) | admits | transpiles | unchanged |
+
+The first version (predicate only, old order) moved `nested_runtime_empty_for` to R3's message — §V.3's
+measurement, reproduced; the reorder restored it. No other ui/fail `.stderr` moved (trybuild,
+`TRYBUILD=overwrite` wrote only the three new cases). `front_end_parity_ui.rs` requires the transpiler's
+message to equal the macro's on the three new ui/fail cases. Corpus 0 (the shared-rule audit and the
+sweep; I.8.6's "no corpus module has a run-time `for` bound").
+
+### X.3 Found — a register written in a tick-free `for` is dropped (ADMITTED-AND-DIVERGENT)
+
+While building `cc_body_for`: `let mut f: Bits<8> = …; loop { q.write(f); for _ in 0..4 { f = f + 1 };
+f = f ^ a.read(); tick }` emits `f <= (f ^ a)` — the loop's assignments are gone — on both routes, with a
+literal bound, a file const or a method-call const, on `Bits<8>` and `u8`; on `e265c0b` too (measured,
+code reverted). A wire accumulator in the same position transpiles (`g = (g + 8'd1)` in `always_comb`),
+which is why the corpus — every tick-free `for` in it accumulates into a wire — never shows it. Swept
+once as a temporary fixture (`zz_reg_in_for`, deleted after): **6 of 6 sequences DISAGREE,
+`sim=ref≠SV`**, SV off by the loop's +4 from cycle 1. Both front-ends admit it, so it is not a parity
+break: line `II.3 found register-in-tickfree-for`, OPEN, owner copper-codegen, the one OPEN line that
+emits wrong text. Not fixed here.
+
+### X.4 II.1.3 re-verified — six shapes found
+
+A 23-probe battery of ui/pass cases (`parity/zzp_*.rs`, deleted from the tree after the run) through
+trybuild and `front_end_parity_ui.rs::the_transpiler_admits_every_shape_the_macro_admits`; each
+refusal then narrowed by CLI variants (`variants/`), each variant also compiled under the macro
+(trybuild: all admitted). **Predicted:** `zzp_01` (body-local const as a ticking bound, §V.3) and maybe
+range patterns and tuple `let` REFUSED-one, the rest admitted by both. **Measured:** 16 admitted by both
+(of them `zzp_25`, a register written in a tick-free `for`, transpiles to wrong text — X.3; the others: tuple `let`, shadowing, block/if/match values, signed casts, `u64`, `bool` operators, a module-loop
+`continue`, a helper `fn`, a const generic in the body, a `while` wait, a `static` and a `const fn`
+const as ticking bounds — the last two closed by X.1); **7 REFUSED-one**, in six classes, each I.2.4
+IN or DESUGARED, corpus 0 (no corpus module is refused with these messages), never wrong text:
+
+| line | shape | transpiler's refusal |
+|---|---|---|
+| `II.3 found body-const` | a body-local `const` in a body expression / tick-free bound / ticking bound | "undefined variable"; R5's "not a constant"; the flattener's |
+| `II.3 found compound-assign` | `v += e`, `v ^= e`, `v <<= e` | "binary operator '+=' not supported in hardware" |
+| `II.3 found field-assign` | `s.x = e` on a struct local (whole-struct assignment transpiles) | "complex assignment targets not supported" |
+| `II.3 found array-literal` | `[c, …]` local (the `[c; n]` form transpiles) | "array literal is not supported in hardware" |
+| `II.3 found range-pattern` | `0..=3 =>`, `0..4 =>` | "unsupported pattern" |
+| `II.3 found assoc-const-body` | `T::K` in a body expression or `for` bound | "cannot lower literal: T :: K" |
+
+II.1.3 stays **OPEN**: three named exceptions plus these six breaks. All seven new lines name
+copper-codegen and the fix direction is a lowering (I.2.4 admits each); none waits on a decision.
+
+### X.5 Ledger and counts
+
+Before: **193 lines — 190 CLOSED, 3 OPEN**. After (G-K on `6df6270`): **200 lines — 192 CLOSED, 8
+OPEN** — closed `II.3 found const-call-body`, `runtime-empty-boundary`; opened the six of X.4 and X.3's;
+II.1.3 OPEN with the new list. I.8.4's line, I.8.4(b)'s realized note, II.2.2's R3 and R11 rows name the
+closures.
+
+### X.6 The bare regression — measured
+
+**Bare `tools/regression.sh` on `6df6270` (the final code commit; laptop; `paper` at `e265c0b`):
+REGRESSION OK (667 s wall).** 1501 passed, 0 failed, 16 ignored, 158 test binaries (G-C 131 test
+files); examples **32/32**; G-D 239 differential cases (3 ignored-with-reason), G-F 239 (3 skipped with
+a reason) — the three `cc_body_*` fixtures added; **G-G differential 1873 PASS / 12 OUTSIDE / 0
+TRUNCATED / 0 EXCUSED / 0 DISAGREE**, **reference 1885 PASS / 0 DISAGREE**; G-I 182 clocked related, 0
+uncovered; G-J 74 const items compared / 25 outside both, 0 DISAGREE; G-E 5 anchored; **G-K `200 lines —
+192 CLOSED, 8 OPEN; 170 required by the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 174 sweep, 153
+test, 123 ui; 206 run checks`**, the 3 example fixtures PASS (as predicted in X.5). Not run remotely
+(nothing pushed). After this run, docs only: III.3.6's counts, this section, CLAUDE.md.

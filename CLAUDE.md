@@ -38,7 +38,7 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (236 of 239 since 2026-11-08, after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
+`_reference_leg` cases as build.rs generated to run (239, 3 of them skipped with a reason, since 2026-11-08 §X — the three `cc_body_*` fixtures; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
 clocked, 18 of them binding a `Memory` (I.10), 52 combinational (I.11); `REF_SKIP` empty), each
 leg non-empty, and the design leg (I.13, `copper_ref::Design` on `two_domain_top` vs the hand-wired
 simulation, `tests/two_domain_hierarchy_cdc.rs`) — and
@@ -313,7 +313,8 @@ continuous `assign`, the every-path mux, the Moore default hoist, the mux +
 and the trailing region was FOLDED into the last phase's edge; all of that is gone
 (`design_docs/review/MEASUREMENTS.md` §H). A combinational module still emits a
 top-level drive as `assign` and a branch-nested one (or a port written twice at the top level,
-§U.5) in `always_comb`. A `u8`/`u16`/`i8`/`i16` file const is a sized `localparam` (§U.6).
+§U.5) in `always_comb`. A `u8`/`u16`/`i8`/`i16` file const is a sized `localparam` (§U.6); a file const (or immutable `static`) whose initializer has no SV spelling — a `const` method
+call, a tuple-struct field, a `const fn` call — is stated by the value `ConstEnv` folds it to (§X.1).
 
 ### Execution / timing model (sim)
 
@@ -420,7 +421,9 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   loop must end at a clock boundary; `check_awaits` — only `clk.tick().await` may be
   awaited), reachability (a ticking `for` over a range empty only through a constant is no boundary — the
   transpiler folds it through `ConstEnv`, the macro emits a `const _: () = assert!(..)` body item per
-  hypothesis R3 depends on, `cfg.rs::empty_range_dependencies`, since 2026-11-08), the register power-on rule R11 (2026-10-29; D-21 A3,
+  hypothesis R3 depends on, `cfg.rs::empty_range_dependencies`, since 2026-11-08; one whose bound is
+  not constant-shaped may be empty at run time and is an exit, as a `while` is, §X.2, with
+  `check_counted_for_nesting` run first so a bounded enclosing `for` keeps its own message), the register power-on rule R11 (2026-10-29; D-21 A3,
   2026-11-07 — a pre-loop register's initializer must be a Rust constant, which reaches the
   SV as its `initial` value, or `Bits::x()`; no opt-out). Since D-21 rustc judges it: the
   macro wraps every pre-loop register initializer in `const { … }` (every `Bits`/`Logic`
@@ -456,12 +459,14 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   file const, and requires `tests/recursive_helper_r6.rs`, `tests/let_instance_d24.rs` and
   `tests/file_x_const_pattern_d26.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins
   one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). These are the only *named* exceptions, not the
-  only breaks: re-verified 2026-11-08 (MEASUREMENTS §S.4, §T), shapes the macro admits and the
-  transpiler refuses remain, each an OPEN `II.3 found` line of SPEC §III.3.4 (const-call-body and
-  runtime-empty-boundary, §V; 2026-11-08 §V closed body-wire and const-call, §U closed array-for,
-  tickfree-continue, const-pattern, preload-ok, u8-const, comb-double-write and signed/`u128`
-  `saturating_*`, and §U.11 (D-26) closed array-for-generic, now refused by both, and
-  file-x-const-pattern, now the third named exception). The standing audit is
+  only breaks: re-verified 2026-11-08 on a 23-probe battery (MEASUREMENTS §X.4), six shapes the macro
+  admits and the transpiler refuses remain, each an OPEN `II.3 found` line of SPEC §III.3.4 —
+  body-const (a body-local `const`), compound-assign (`v += e`), field-assign (`s.x = e`),
+  array-literal (`[c, …]`), range-pattern (`0..=3 =>`) and assoc-const-body (`T::K` in a body) —
+  each a lowering the transpiler owes (I.2.4 admits all six), never wrong text. A seventh OPEN line
+  is not a parity break but worse: a register written inside a tick-free `for` of a clocked body is
+  admitted by both and its assignments are dropped from the SV (`II.3 found
+  register-in-tickfree-for`, §X.3, measured `sim=ref≠SV`, corpus 0 so the sweep does not reach it). The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one
