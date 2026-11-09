@@ -475,7 +475,16 @@ fn nonblocking_assign_targets(text: &str) -> BTreeSet<String> {
         while j > 0 && (bytes[j - 1].is_ascii_alphanumeric() || bytes[j - 1] == b'_') {
             j -= 1;
         }
-        if j < end {
+        // A comparison `(v <= 8'd99)` is no assignment: a nonblocking target starts a
+        // statement, never follows an open parenthesis (the emitter parenthesizes every
+        // comparison; the range-pattern guards of 2026-11-08 put one in `always_ff`,
+        // MEASUREMENTS §Z.5).
+        let mut k = j;
+        while k > 0 && bytes[k - 1].is_ascii_whitespace() {
+            k -= 1;
+        }
+        let after_paren = k > 0 && bytes[k - 1] == b'(';
+        if j < end && !after_paren {
             names.insert(text[j..end].to_string());
         }
         i = pos + 2;
