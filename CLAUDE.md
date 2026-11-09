@@ -322,7 +322,12 @@ call, a tuple-struct field, a `const fn` call — is stated by the value `ConstE
 
 ### Execution / timing model (sim)
 
-This is the semantic core; read `design_docs/SYNCHRONOUS_SEMANTICS.md`. The
+This is the semantic core. `design_docs/SPEC.md` is the language specification
+(Parts I–III, decisions D-1…D-30 in `SPEC_DECISIONS.md`, ledger §III.3 checked by G-K),
+but its own status line still reads "Not yet normative": until it is adopted,
+`design_docs/SYNCHRONOUS_SEMANTICS.md` remains the reference and wins where the two
+disagree. Much of that document predates D-8 (it describes the retired two-job executor
+and plain-`Out` rules), so read the SPEC for what the code does now. The
 rules the whole project is built around:
 
 - Every `clk.tick().await` is a **clock-cycle boundary**; each suspension point
@@ -375,8 +380,13 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   modules against independent BaseJump STL Verilog; that Verilog is under the
   Solderpad license and needs attribution.
 - Design docs live in `design_docs/`, by role:
-  **normative semantics** — `SYNCHRONOUS_SEMANTICS.md` (start here; where another
-  doc disagrees with it, it wins);
+  **the language specification** — `SPEC.md` (start here), its decision log
+  `SPEC_DECISIONS.md` (D-1…D-30) and one-page generator `SPEC_OVERVIEW.md`. SPEC.md's
+  status line says it is **not yet normative**: until it is adopted,
+  `SYNCHRONOUS_SEMANTICS.md` remains the reference and wins where the two disagree
+  (`FORMAL_SEMANTICS.md` is an earlier draft that defers to it the same way);
+  **the pre-SPEC reference** — `SYNCHRONOUS_SEMANTICS.md` (rebased 2026-08-27; much of it
+  predates D-8, and the SPEC is what the implementation was rebuilt against);
   **the sweep and anchoring** — `CORPUS_DIFFERENTIAL_SWEEP.md`,
   `ANCHORING_A_MODULE.md`;
   **the pre-tick alignment family** — `PRETICK_ALIGNMENT_GUARDRAIL.md`;
