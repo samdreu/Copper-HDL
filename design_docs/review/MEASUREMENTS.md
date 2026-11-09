@@ -4215,6 +4215,26 @@ consts and the ui case's not swept); **G-K `191 lines — 183 CLOSED, 8 OPEN; 16
 fixtures: 6 coreui, 3 example, 11 gone, 163 sweep, 136 test, 104 ui; 182 run checks`**. After this run,
 docs only: III.3.6's counts and this paragraph.
 
+### U.12 D-26 rebased onto the memory batch, and the bare regression (2026-11-08)
+
+`paper` moved to `b3d0d09` (the memory batch, D-25). D-26 rebased onto it: the code commit applied
+cleanly (batch C's one `memory_rules` call in `check_front_end_rules` and D-26's
+`check_array_write_in_generic_for` sit side by side); `SPEC_DECISIONS.md` kept D-25 then D-26;
+III.3.6's paragraph was rewritten from the merged ledger; CLAUDE.md's shared-rule list keeps both the
+D-25 memory shape rules and the D-26 rule. The final code commit is `02cfaae`.
+
+**Predicted.** C alone gave 193/187/6; D-26 closes I.2.4 and the two found rows, both of which C counts
+OPEN, and adds no line: **193 lines — 190 CLOSED, 3 OPEN** (II.1.3, const-call-body,
+runtime-empty-boundary).
+
+**Bare `tools/regression.sh` on the rebased tip (code identical to `02cfaae`; laptop): REGRESSION OK
+(382 s wall).** 1494 passed, 0 failed, 16 ignored, 158 test binaries (G-C 131 test files); examples
+**32/32**; G-D 236 (3 ignored-with-reason), G-F 236; **G-G differential 1860 PASS / 12 OUTSIDE / 0
+TRUNCATED / 0 EXCUSED / 0 DISAGREE**, **reference 1872 PASS / 0 DISAGREE**; G-I 180 clocked related, 0
+uncovered; G-J 5 asymmetric (pinned), 0 DISAGREE; **G-K `193 lines — 190 CLOSED, 3 OPEN; 170 required by
+the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 171 sweep, 149 test, 118 ui; 201 run checks`** (as
+predicted). After this run, docs only: III.3.6's counts and this paragraph.
+
 ## V. The front-end batch of SPEC §III.3's OPEN lines (2026-11-08)
 
 Branch `claude/open-lines-frontend-f6a287` (from `paper` at `e4a9aae`), one of three parallel batches
