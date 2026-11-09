@@ -868,6 +868,21 @@ fn build_fn_registry(fir: &FrontendModuleIR) -> std::collections::HashMap<String
     fns
 }
 
+/// `impl` methods taking `self` or `&self`, by `Type::method`.
+fn build_method_registry(fir: &FrontendModuleIR) -> std::collections::HashMap<String, FrontendFnIR> {
+    use copper_core::frontend_ir::Receiver;
+    let mut out = std::collections::HashMap::new();
+    for imp in fir.file_impls.iter().filter(|i| i.trait_name.is_none()) {
+        let self_ty: String = imp.self_ty.chars().filter(|c| !c.is_whitespace()).collect();
+        for m in &imp.methods {
+            if matches!(m.receiver, Some(Receiver::Value) | Some(Receiver::Ref)) {
+                out.insert(format!("{self_ty}::{}", m.name), m.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Registry of file-scope struct definitions by name, for struct lowering
 /// (milestone 2). A struct-valued binding becomes one wire per field.
 fn build_struct_registry(fir: &FrontendModuleIR) -> std::collections::HashMap<String, ItemStruct> {
@@ -1304,6 +1319,29 @@ impl Drop for ConstEnvScope {
 /// register's concrete width when known, used to give `!`, `-` and casts their
 /// two's-complement meaning; `Err` carries the reason, for `lower_register_init`'s
 /// message.
+/// The width of a `Bits<N>` (concrete `N`) or `Logic` const type, and the value its
+/// initializer folds to (a `Bits` constructor is a `const fn`, I.14.4) — what a `localparam`
+/// states for it (lines `II.3 found bits-const`, MEASUREMENTS §Z.8). `None` for any other type,
+/// an X value or an initializer the fold does not take.
+pub(crate) fn fold_bits_const(c: &copper_core::frontend_ir::ItemConst, fir: &FrontendModuleIR) -> Option<(usize, u128)> {
+    let w = bits_const_width(&c.ty.ty_text)?;
+    let expr = syn::parse_str::<syn::Expr>(&c.value_text).ok()?;
+    let expr = crate::parser::parse_expr_type(&expr, &std::collections::HashSet::new());
+    match fold_const_init(&expr, Some(w), &build_enum_registry(fir), &fir.file_consts).ok()? {
+        RegisterInit::Value(v) => Some((w, v)),
+        RegisterInit::Undefined => None,
+    }
+}
+
+/// `Bits<N>` with a literal `N` → `N`; `Logic` → 1.
+pub(crate) fn bits_const_width(ty_text: &str) -> Option<usize> {
+    let t = compact_ident(ty_text);
+    if t == "Logic" {
+        return Some(1);
+    }
+    t.strip_prefix("Bits<")?.strip_suffix('>')?.parse().ok().filter(|w| (1..=128).contains(w))
+}
+
 fn fold_const_init(
     expr: &ExprType,
     width: Option<usize>,
@@ -1754,7 +1792,12 @@ fn lower_comb_body(
     ctx.narrow_consts = fir
         .file_consts
         .iter()
-        .filter_map(|c| crate::file_consts::narrow_int_width(&c.ty.ty_text).map(|(w, _)| (c.name.clone(), w)))
+        .filter_map(|c| {
+            crate::file_consts::narrow_int_width(&c.ty.ty_text)
+                .map(|(w, _)| w)
+                .or_else(|| bits_const_width(&c.ty.ty_text))
+                .map(|w| (c.name.clone(), w))
+        })
         .collect();
     ctx.output_ports = fir.signature.params.iter()
         .filter_map(|p| {
@@ -1765,6 +1808,7 @@ fn lower_comb_body(
     ctx.symbols = build_symbol_table(fir);
     ctx.enums = build_enum_registry(fir);
     ctx.fns = build_fn_registry(fir);
+    ctx.methods = build_method_registry(fir);
     ctx.structs = build_struct_registry(fir);
     ctx.write_inferred = build_write_inferred_types(fir, &ctx.symbols);
 
@@ -1876,9 +1920,40 @@ fn lower_seq_body(
                 // combinational word selects (`CHIRExpr::MemIndex`), not staged
                 // read ports. A one-bit element keeps the historical packed-
                 // vector lowering (bit-selects over `logic [N-1:0]`).
-                if let Some(ExprType::Repeat(rep)) = &local.init {
-                    let elem_ty =
-                        infer_type_from_expr(&rep.expr, local.span, &symbols, &enums).ok();
+                // An array literal (`[1, 2, 3, 4]`) is the same register file with one stated
+                // power-on word each (line `II.3 found array-literal-register`, MEASUREMENTS §Z.8):
+                // its element type is the declared one, else the first element's.
+                let lit_words: Option<&Vec<ExprType>> = match &local.init {
+                    Some(ExprType::Array(a)) if !a.elements.is_empty() => Some(&a.elements),
+                    _ => None,
+                };
+                let declared_elem: Option<CHIRType> = local.ty.as_ref().and_then(|t| {
+                    match resolve_type(&t.ty_text, t.span).ok()? {
+                        CHIRType::Array { elem, .. } => Some(*elem),
+                        _ => None,
+                    }
+                });
+                let rep_owned;
+                let as_repeat: Option<&ExprRepeat> = match (&local.init, lit_words) {
+                    (Some(ExprType::Repeat(rep)), _) => Some(rep),
+                    (_, Some(words)) => {
+                        rep_owned = ExprRepeat {
+                            expr: Box::new(words[0].clone()),
+                            len: Box::new(ExprType::Lit(copper_core::frontend_ir::ExprLit {
+                                text: words.len().to_string(),
+                                span: local.span,
+                            })),
+                            span: local.span,
+                        };
+                        Some(&rep_owned)
+                    }
+                    _ => None,
+                };
+                if let Some(rep) = as_repeat {
+                    let elem_ty = declared_elem
+                        .clone()
+                        .filter(|_| lit_words.is_some())
+                        .or_else(|| infer_type_from_expr(&rep.expr, local.span, &symbols, &enums).ok());
                     let elem_w = elem_ty.as_ref().and_then(width_of_type_concrete);
                     let depth = match repeat_len(&rep.len) {
                         Some(Width::Concrete(n)) => Some(n),
@@ -1918,7 +1993,29 @@ fn lower_seq_body(
                                 // fill, the form a `from_fn` preload takes, so the
                                 // array starts where the simulator's does. `None`
                                 // only for an undefined (`Bits::x()`) element.
-                                init: match fold_const_init(&rep.expr, Some(w), &enums, &fir.file_consts) {
+                                init: match lit_words {
+                                    Some(words) => {
+                                        let mut out = Vec::new();
+                                        for (k, e) in words.iter().enumerate() {
+                                            match fold_const_init(e, Some(w), &enums, &fir.file_consts) {
+                                                Ok(RegisterInit::Value(v)) => out.push(CHIRExpr::Lit(CHIRLit { ty: elem_ty.clone(), value: v })),
+                                                Ok(RegisterInit::Undefined) => out.push(CHIRExpr::XLit { width: Some(Width::Concrete(w)) }),
+                                                Err(why) => {
+                                                    return Err(CHIRLowerError::UnsupportedConstruct {
+                                                        description: format!(
+                                                            "array register `{}` has no power-on value the \
+                                                             emitted SystemVerilog can state: its element {k} {why}",
+                                                            local.name
+                                                        ),
+                                                        span: local.span,
+                                                        suggested_rewrite: None,
+                                                    })
+                                                }
+                                            }
+                                        }
+                                        Some(CHIRMemInit::Words(out))
+                                    }
+                                    None => match fold_const_init(&rep.expr, Some(w), &enums, &fir.file_consts) {
                                     Ok(RegisterInit::Value(v)) => Some(CHIRMemInit::Fill {
                                         var: "__copper_init_i".to_string(),
                                         value: CHIRExpr::Lit(CHIRLit { ty: elem_ty.clone(), value: v }),
@@ -1935,6 +2032,7 @@ fn lower_seq_body(
                                             suggested_rewrite: None,
                                         })
                                     }
+                                    },
                                 },
                                 received: false,
                                 span: local.span,
@@ -2184,7 +2282,12 @@ fn lower_seq_body(
     ctx.narrow_consts = fir
         .file_consts
         .iter()
-        .filter_map(|c| crate::file_consts::narrow_int_width(&c.ty.ty_text).map(|(w, _)| (c.name.clone(), w)))
+        .filter_map(|c| {
+            crate::file_consts::narrow_int_width(&c.ty.ty_text)
+                .map(|(w, _)| w)
+                .or_else(|| bits_const_width(&c.ty.ty_text))
+                .map(|w| (c.name.clone(), w))
+        })
         .collect();
     ctx.clock_name = clock.clone();
     ctx.output_ports = fir.signature.params.iter()
@@ -2200,6 +2303,7 @@ fn lower_seq_body(
     ctx.symbols = symbols;
     ctx.enums = enums;
     ctx.fns = build_fn_registry(fir);
+    ctx.methods = build_method_registry(fir);
     ctx.structs = build_struct_registry(fir);
     ctx.write_inferred = build_write_inferred_types(fir, &ctx.symbols);
     ctx.struct_locals = pre_struct_locals;
@@ -2720,6 +2824,9 @@ pub(crate) struct LowerCtx<'a> {
     /// Names of `RegOut<T,D>` ports (a clocked body's outputs) — a `for` that writes one
     /// accumulates the write into a temp (line `II.3 found port-write-in-for`).
     regout_ports: std::collections::HashSet<String>,
+    /// `impl` methods with a `self` / `&self` receiver, by `Type::method` — inlined at a
+    /// method call on a struct local (I.2.4; MEASUREMENTS §Z.8).
+    methods: std::collections::HashMap<String, FrontendFnIR>,
     /// In-scope names (ports, wires, registers) → type, for width inference.
     symbols: SymbolTable,
     /// Enum encodings visible to this module.
@@ -2795,6 +2902,7 @@ impl<'a> LowerCtx<'a> {
             clock_name: String::new(),
             output_ports: std::collections::HashSet::new(),
             regout_ports: std::collections::HashSet::new(),
+            methods: std::collections::HashMap::new(),
             symbols: SymbolTable::new(),
             enums: EnumRegistry::new(),
             bindings: std::collections::HashMap::new(),
@@ -3664,6 +3772,49 @@ fn match_arms_as_if_chain(
     Ok(Some(rest.unwrap_or_default()))
 }
 
+/// The binders of a statement-`match` arm with one alternative: a lone lowercase identifier
+/// (the whole scrutinee) or the lowercase identifiers of a tuple pattern over a tuple scrutinee.
+fn stmt_arm_binders(
+    pattern_text: &str,
+    scrut_src: &ExprType,
+    scrut: &CHIRExpr,
+    ctx: &mut LowerCtx,
+) -> Result<Vec<(String, CHIRExpr)>, CHIRLowerError> {
+    let p = pattern_text.trim();
+    let binder = |t: &str, ctx: &LowerCtx| {
+        is_ident(t) && t != "_" && t.chars().next().is_some_and(|c| c.is_lowercase() || c == '_') && !ctx.params.contains(t)
+    };
+    if split_top_level_pipes(p).len() > 1 {
+        return Ok(Vec::new());
+    }
+    if binder(p, ctx) {
+        return Ok(vec![(p.to_string(), scrut.clone())]);
+    }
+    if p.starts_with('(') && p.ends_with(')') {
+        if let ExprType::Tuple(t) = scrut_src {
+            let elems = split_top_level_commas(&p[1..p.len() - 1]);
+            if elems.len() == t.elements.len() {
+                let mut out = Vec::new();
+                for (e, src) in elems.iter().zip(&t.elements) {
+                    let e = e.trim();
+                    if binder(e, ctx) {
+                        out.push((e.to_string(), lower_expr(src, ctx)?));
+                    }
+                }
+                return Ok(out);
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+/// The `impl` method a call `s.m(..)` on a struct local names, if any.
+fn struct_method<'a>(mc: &copper_core::frontend_ir::ExprMethodCall, ctx: &'a LowerCtx) -> Option<&'a FrontendFnIR> {
+    let ExprType::Path(p) = strip_ref(&mc.receiver) else { return None };
+    let sname = ctx.struct_locals.get(&compact_ident(&p.path_text))?;
+    ctx.methods.get(&format!("{sname}::{}", mc.method))
+}
+
 /// `p.write(e)` with `p` one of `ports`: `Some(p)`.
 fn regout_write_target(e: &ExprType, ports: &std::collections::HashSet<String>) -> Option<String> {
     let ExprType::MethodCall(mc) = e else { return None };
@@ -4328,7 +4479,13 @@ fn lower_expr_stmt(
                             right: Box::new(CHIRExpr::UnOp { op: CHIRUnOp::BitNot, expr: Box::new(bit(one)) }),
                         };
                         let set = bit(CHIRExpr::Resize { expr: Box::new(value), width: Width::Concrete(w) });
-                        let value = CHIRExpr::BinOp { left: Box::new(keep), op: CHIRBinOp::BitOr, right: Box::new(set) };
+                        // Cast to its own width: read inside a wider context (`8'(…)` of an `as_u8`
+                        // view) the SV operators would otherwise be sized to it (`-Wall`
+                        // WIDTHEXPAND; MEASUREMENTS §Z.8).
+                        let value = CHIRExpr::Resize {
+                            expr: Box::new(CHIRExpr::BinOp { left: Box::new(keep), op: CHIRBinOp::BitOr, right: Box::new(set) }),
+                            width: Width::Concrete(w),
+                        };
                         out.push(CHIRStmt::Assign { target: base, value, span });
                         return Ok(());
                     }
@@ -4370,7 +4527,32 @@ fn lower_expr_stmt(
             for arm in &match_expr.arms {
                 let patterns = parse_or_patterns(&arm.pattern_text, span, &ctx.enums)?;
                 let patterns = size_patterns_to_scrutinee(patterns, &scrutinee, span, ctx)?;
-                let guard = arm.guard.as_ref().map(|g| lower_expr(g, ctx)).transpose()?;
+                // A binder (`x => …`, `(a, 3) => …`) names the scrutinee (or its element) in the
+                // arm's guard and body (I.2.4 IN; until 2026-11-08 an "undefined variable",
+                // MEASUREMENTS §Z.8). Restored after the arm.
+                let binders = stmt_arm_binders(&arm.pattern_text, &match_expr.scrutinee, &scrutinee, ctx)?;
+                let saved: Vec<(String, Option<CHIRExpr>)> = binders
+                    .into_iter()
+                    .map(|(n, e)| {
+                        let old = ctx.bindings.insert(n.clone(), e);
+                        (n, old)
+                    })
+                    .collect();
+                let restore = |ctx: &mut LowerCtx| {
+                    for (n, old) in &saved {
+                        match old {
+                            Some(b) => ctx.bindings.insert(n.clone(), b.clone()),
+                            None => ctx.bindings.remove(n),
+                        };
+                    }
+                };
+                let guard = match arm.guard.as_ref().map(|g| lower_expr(g, ctx)).transpose() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        restore(ctx);
+                        return Err(e);
+                    }
+                };
                 let body_stmts = match arm.body.as_ref() {
                     ExprType::Block(block) => lower_stmts(&block.stmts, ctx)?,
                     ExprType::If(_) | ExprType::Match(_) | ExprType::Assign(_) => {
@@ -4401,13 +4583,22 @@ fn lower_expr_stmt(
                         vec![]
                     }
                 };
+                restore(ctx);
                 arms.push(CHIRMatchArm { patterns, guard, body: body_stmts, span });
             }
             // A guarded arm has no `case` label: a statement `match` with one is the `if`
             // chain Rust's arm order means — each arm's patterns, then its guard (SPEC I.2.4;
             // until 2026-11-08 refused downstream as a "tuple-pattern match", line `II.3 found
             // stmt-match-guard`, MEASUREMENTS §Z.5).
-            if arms.iter().any(|a| a.guard.is_some()) {
+            // So is an arm whose tuple pattern has a wildcard or binder element (no single
+            // concatenated `case` label; `vlir_lower` refuses it).
+            fn partial_tuple(p: &CHIRPattern) -> bool {
+                match p {
+                    CHIRPattern::Tuple(ps) => ps.iter().any(|q| matches!(q, CHIRPattern::Wildcard) || partial_tuple(q)),
+                    _ => false,
+                }
+            }
+            if arms.iter().any(|a| a.guard.is_some() || a.patterns.iter().any(partial_tuple)) {
                 if let Some(chain) = match_arms_as_if_chain(&scrutinee, arms.clone(), span, ctx)? {
                     out.extend(chain);
                     return Ok(());
@@ -5358,6 +5549,29 @@ fn balance_binop_literals(
         }
     }
 
+    // A negated bare literal (`v < -1`, a signed range pattern's `-128..=-1`) is a bare
+    // literal too: the magnitude takes the other side's width (it was `-64'd1` against an
+    // 8-bit operand, a `-Wall` WIDTHEXPAND; MEASUREMENTS §Z.8).
+    let neg_default = |e: &CHIRExpr| {
+        matches!(e, CHIRExpr::UnOp { op: CHIRUnOp::Neg, expr } if is_default_lit(expr))
+    };
+    let retype_neg = |e: CHIRExpr, w: usize| -> Result<CHIRExpr, CHIRLowerError> {
+        match e {
+            CHIRExpr::UnOp { op, expr } => Ok(CHIRExpr::UnOp { op, expr: Box::new(retype_lit_checked(*expr, w, span)?) }),
+            other => Ok(other),
+        }
+    };
+    if !is_shift && neg_default(&right) && !neg_default(&left) && !is_default_lit(&left) {
+        if let Some(w) = other_width(&left) {
+            return Ok((left, retype_neg(right, w)?));
+        }
+    }
+    if !is_shift && neg_default(&left) && !neg_default(&right) && !is_default_lit(&right) {
+        if let Some(w) = other_width(&right) {
+            return Ok((retype_neg(left, w)?, right));
+        }
+    }
+
     // Case A — a bare literal against anything with a known width (the other
     // side may itself be a width-carrying literal: `Bits::<32>::from_lit::<1>()`
     // vs `Bits::zero()`, the `lit_width_in_ternary` ledger entry).
@@ -5902,8 +6116,11 @@ fn lower_index(idx: &ExprIndex, ctx: &mut LowerCtx) -> Result<CHIRExpr, CHIRLowe
     // has no bit range — `v[0]` is the operand itself (any other index is Rust's
     // run-time failure, outside the trace). Before: `v[0]` on a scalar, which
     // Verilator refuses ("Illegal bit or array select", `w1_index`, `w1_comb`).
+    // Not an array (`[Logic; N]`): its width query answers the ELEMENT's width, and an index
+    // into it is an element select (dropped as `v` until 2026-11-08, MEASUREMENTS §Z.8).
     if width_of_chir_expr(&base, ctx) == Some(1)
         && !matches!(&base, CHIRExpr::Var(n) if ctx.array_regs.contains_key(n))
+        && !matches!(&base, CHIRExpr::Var(n) if matches!(ctx.symbols.get(n), Some(CHIRType::Array { .. })))
         && matches!(eval_const_usize(&idx.index), Some(0) | None)
     {
         return Ok(base);
@@ -5914,6 +6131,23 @@ fn lower_index(idx: &ExprIndex, ctx: &mut LowerCtx) -> Result<CHIRExpr, CHIRLowe
         Some(bit) => Ok(CHIRExpr::Slice { expr: Box::new(base), high: bit, low: bit }),
         None => {
             let index = peel_widening_resize(lower_expr(peel_index_views(&idx.index), ctx)?, ctx);
+            // An index wider than the select needs and narrower than `int` (`(a & 3) as usize`,
+            // 8 bits, into a 4-bit vector) is cast to 32 bits, the width Verilator takes for any
+            // select (`-Wall` WIDTHTRUNC otherwise; MEASUREMENTS §Z.8).
+            let bits = match &base {
+                CHIRExpr::Var(n) => match ctx.symbols.get(n) {
+                    Some(CHIRType::Array { len: Width::Concrete(l), .. }) => Some(*l),
+                    _ => width_of_chir_expr(&base, ctx),
+                },
+                _ => width_of_chir_expr(&base, ctx),
+            };
+            let need = bits.map(|b| (usize::BITS - (b.max(2) - 1).leading_zeros()) as usize);
+            let index = match (width_ignoring_default_lits(&index, ctx), need) {
+                (Some(w), Some(n)) if w > n && w < 32 => {
+                    CHIRExpr::Resize { expr: Box::new(index), width: Width::Concrete(32) }
+                }
+                _ => index,
+            };
             Ok(CHIRExpr::DynBit { base: Box::new(base), index: Box::new(select_index(index, ctx)) })
         }
     }
@@ -6434,6 +6668,27 @@ fn lower_method_call(
             Ok(CHIRExpr::BinOp { left: Box::new(left), op, right: Box::new(right) })
         }
         "as_array" if mc.args.is_empty() => lower_expr(&mc.receiver, ctx),
+        // `s.m(args)` with `s` a struct local and `m` an `impl` method taking `self` / `&self`:
+        // inlined as a helper is, `self` bound to `s` (I.2.4: "helper `fn` and `impl` method calls
+        // from the body — inlined"; until 2026-11-08 refused, MEASUREMENTS §Z.8).
+        _ if struct_method(mc, ctx).is_some() => {
+            let fn_ir = struct_method(mc, ctx).expect("checked");
+            let mut with_self = fn_ir.clone();
+            let span = mc.span;
+            with_self.signature.params.insert(
+                0,
+                copper_core::frontend_ir::RawParam {
+                    name: "self".to_string(),
+                    ty: copper_core::frontend_ir::RawTypeRef { ty_text: "Self".to_string(), span },
+                    raw_text: "self".to_string(),
+                    span,
+                },
+            );
+            let mut args = vec![strip_ref(&mc.receiver).clone()];
+            args.extend(mc.args.iter().cloned());
+            let inlined = build_inlined_expr(&with_self, &args, span)?;
+            lower_expr(&inlined, ctx)
+        }
         _ => Err(CHIRLowerError::UnsupportedConstruct {
             description: format!("method `{}` is not supported in hardware expressions", mc.method),
             span: mc.span,

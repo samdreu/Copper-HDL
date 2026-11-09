@@ -1206,10 +1206,13 @@ fn extract_updates_from_stmts(
                         op: CHIRBinOp::BitAnd,
                         right: Box::new(SHIRExpr::UnOp { op: CHIRUnOp::BitNot, expr: Box::new(bit(one)) }),
                     };
-                    let set = bit(SHIRExpr::Resize { expr: Box::new(val), width });
+                    let set = bit(SHIRExpr::Resize { expr: Box::new(val), width: width.clone() });
                     forwarding.insert(
                         base.clone(),
-                        SHIRExpr::BinOp { left: Box::new(keep), op: CHIRBinOp::BitOr, right: Box::new(set) },
+                        SHIRExpr::Resize {
+                            expr: Box::new(SHIRExpr::BinOp { left: Box::new(keep), op: CHIRBinOp::BitOr, right: Box::new(set) }),
+                            width,
+                        },
                     );
                 }
             }

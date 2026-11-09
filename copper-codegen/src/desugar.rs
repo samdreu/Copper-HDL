@@ -30,6 +30,7 @@ pub fn desugar(fir: &mut FrontendModuleIR) {
     });
     hoist_body_consts(&mut body, fir);
     hoist_assoc_consts(&mut body, fir);
+    hoist_body_structs(&body, fir);
     fir.raw_statements = body;
 }
 
@@ -199,6 +200,50 @@ fn split_top(s: &str, sep: char) -> Vec<String> {
     out
 }
 
+// ── body-local struct items ───────────────────────────────────────────────────
+
+/// A `struct` item declared in the body (I.2.4: DESUGARED, one local per field) is a file
+/// struct for the lowering (§Z.8); the name is the module's own, so it is added only when no
+/// file struct has it.
+fn hoist_body_structs(body: &[RawStmt], fir: &mut FrontendModuleIR) {
+    fn walk(stmts: &[RawStmt], out: &mut Vec<copper_core::frontend_ir::ItemStruct>) {
+        for s in stmts {
+            match &s.kind {
+                RawStmtKind::Item(ItemStmt::Struct(st)) => out.push(st.clone()),
+                RawStmtKind::Expr(es) => walk_e(&es.expr, out),
+                RawStmtKind::Local(l) => {
+                    if let Some(i) = &l.init {
+                        walk_e(i, out)
+                    }
+                }
+                RawStmtKind::Item(_) => {}
+            }
+        }
+    }
+    fn walk_e(e: &ExprType, out: &mut Vec<copper_core::frontend_ir::ItemStruct>) {
+        match e {
+            ExprType::Block(b) => walk(&b.stmts, out),
+            ExprType::Loop(l) => walk(&l.body, out),
+            ExprType::While(w) => walk(&w.body, out),
+            ExprType::ForLoop(f) => walk(&f.body, out),
+            ExprType::If(i) => {
+                walk(&i.then_block, out);
+                if let Some(e) = &i.else_branch {
+                    walk_e(e, out)
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    walk(body, &mut found);
+    for st in found {
+        if !fir.file_structs.iter().any(|f| f.name == st.name) {
+            fir.file_structs.push(st);
+        }
+    }
+}
+
 // ── compound assignment ───────────────────────────────────────────────────────
 
 const COMPOUND: &[(&str, &str)] = &[
@@ -362,6 +407,51 @@ fn hoist_assoc_consts(body: &mut [RawStmt], fir: &mut FrontendModuleIR) {
             }
         };
         *e = ExprType::Path(ExprPath { path_text: name, span: p.span });
+    });
+    // A pattern naming `T::K` (`T::K => …`) names the hoisted const.
+    visit_stmts(body, &mut |e| {
+        let ExprType::Match(m) = e else { return };
+        for arm in &mut m.arms {
+            let alts = split_top(&arm.pattern_text, '|');
+            let mut changed = false;
+            let new: Vec<String> = alts
+                .iter()
+                .map(|a| {
+                    let key: String = a.chars().filter(|c| !c.is_whitespace()).collect();
+                    match (declared.get(&key), env.get(&key)) {
+                        (Some(ty), Some(v)) => {
+                            changed = true;
+                            let name = match hoisted.get(&key) {
+                                Some(c) => c.name.clone(),
+                                None => {
+                                    let base = key.replace("::", "__");
+                                    let mut name = base.clone();
+                                    let mut k = 0;
+                                    while taken.contains(&name) {
+                                        name = format!("{base}{k}");
+                                        k += 1;
+                                    }
+                                    taken.insert(name.clone());
+                                    hoisted.insert(key.clone(), ItemConst {
+                                        name: name.clone(),
+                                        ty: RawTypeRef { ty_text: ty.clone(), span: arm.span },
+                                        value_text: v.to_string(),
+                                        attrs: Vec::new(),
+                                        span: arm.span,
+                                    });
+                                    name
+                                }
+                            };
+                            format!(" {name} ")
+                        }
+                        _ => a.clone(),
+                    }
+                })
+                .collect();
+            if changed {
+                arm.pattern_text = new.join("|").trim().to_string();
+            }
+        }
     });
     let mut hoisted: Vec<ItemConst> = hoisted.into_values().collect();
     hoisted.sort_by(|a, b| a.name.cmp(&b.name));

@@ -67,6 +67,22 @@ pub fn candidates(fir: &FrontendModuleIR) -> Vec<ModuleLocalParam> {
     let names: Vec<&str> = usable.iter().map(|(c, _)| c.name.as_str()).collect();
     let ordered = dependency_order(&usable, &names);
 
+    // A `Bits<N>` / `Logic` const (file-scope, or a body-local one hoisted, §Z.8) is a sized
+    // `localparam` of its folded value. Until 2026-11-08 it was skipped as "not an integer
+    // constant", and a body naming it refused (line `II.3 found bits-const`).
+    let bits: Vec<ModuleLocalParam> = fir
+        .file_consts
+        .iter()
+        .filter_map(|c| {
+            let (w, v) = crate::chir_lower::fold_bits_const(c, fir)?;
+            Some(ModuleLocalParam {
+                name: c.name.clone(),
+                value_expr: format!("{w}'d{v}"),
+                sv_type: if w == 1 { "logic".to_string() } else { format!("logic [{}:0]", w - 1) },
+            })
+        })
+        .collect();
+
     ordered
         .into_iter()
         .map(|(c, sv)| match narrow_int_width(&c.ty.ty_text) {
@@ -81,6 +97,7 @@ pub fn candidates(fir: &FrontendModuleIR) -> Vec<ModuleLocalParam> {
             },
             None => ModuleLocalParam { name: c.name.clone(), value_expr: sv, sv_type: "int".to_string() },
         })
+        .chain(bits)
         .collect()
 }
 
