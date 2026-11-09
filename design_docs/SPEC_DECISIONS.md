@@ -3870,3 +3870,43 @@ type's maximum only at run time (or an untyped constant end whose inferred type'
 overflows there (a run-time failure, I.14.3), Rust's `RangeInclusive` — the simulator — does not, and
 the transpiler's 32-bit counter wraps for a type of 32 bits or more. Corpus 0; line `II.3 found
 inclusive-for-runtime-max`.
+Partly reversed by D-28 (2026-11-09): the form at the maximum (a done flag, no step past the end) and
+II.1.2 R23 (retired); the inclusive `for` stays IN.
+
+### D-28 — The inclusive `for` has Rust's meaning everywhere: a done flag, no step past the end; II.1.2 R23 retired   (2026-11-09)
+Clause: SPEC I.8.5 (the inclusive desugaring), I.2.4's two counted-`for` rows, II.1.2 R23 (retired), and
+III.3.4's lines `II.3 found inclusive-for-runtime-max` (CLOSED) and `II.1.2 R23`. Reverses D-27's form at
+the maximum (D-27 otherwise stands: the inclusive `for` is IN).
+Question: a tick-bearing `for v in a..=b` whose end equals its type's maximum at run time (or an untyped
+constant end at the maximum of the type the body infers) — what is its meaning?
+Docs said: D-27 — "IN, with Rust's meaning", and I.8.5's `D` `… c = c + 1 ; s` exiting on `c > e`, which
+overflows at the maximum (I.14.3, a run-time failure); R23 refused a constant, typed end there.
+Code did (5aaa6ca): the simulator runs Rust (no failure); the interpreter realizes `D` (its checked
+increment fails: `sim≠ref` on every sequence reaching the maximum); the transpiler's counter was `u32`
+whatever the range's type (a `u32` end at its maximum wrapped and never exited; a `u64` bound did not
+fit). Corpus 0. Packet: `review/MEASUREMENTS.md` §AA.5.
+Anchor: none — decided.
+Options: (a) Rust's meaning everywhere — `D` tests before stepping past the end, R23 retired or kept as a
+realization limit; (b) `D` as written, the simulator made to fail too; (c) refuse every ticking inclusive
+`for` whose end is not a constant typed range below the maximum.
+Recommendation: (a).
+Decision: (a) — the user, 2026-11-09.
+Realized (MEASUREMENTS §AB.1): I.8.5's inclusive `D` is `let mut c = a ; let e = b ; let mut d = c > e ;
+loop { if d { break } ; let v = c ; if c == e { d = true } else { c = c + 1 } ; s }`. The interpreter
+runs it tick-free and tick-bearing (`__for@<depth>d` beside the counter). The transpiler realizes it with
+a counter whose type holds `e + 1`, so its `c > e` exit sees the step past the end unwrapped: 32 bits for
+a range type below 32 bits (as before), the next wider Rust type for 32 and 64 bits, sized by the values
+when both bounds are constant; a 128-bit range type has no wider one and uses the done flag itself. A
+tick-free range SV's `int` cannot carry gets a wider SV loop variable (`chir::ForCounter`). **R23 is
+retired, not kept as a realization limit**: the new form realizes a constant end at the maximum on every
+leg (swept: `imx_u8_const`, `pac_values`; a `u128` one simulator-vs-Verilator,
+`tests/inclusive_max_u128.rs`), so the refusal had no reason left. Its macro assertion
+(`place_inclusive_max_assertions`), shared range set (`constant_ticking_inclusive_ranges`), message and
+the transpiler's fold (with `UNFOLDED_INCLUSIVE_END_MESSAGE`) are deleted; ui `inclusive_ticking_for_at_max`
+moved from `fail` to `pass` (its `.stderr` deleted) — the one ui case the retirement changes.
+Measured basis: fixture `tests/fixtures/inclusive_max_dut.rs` (7 modules; run-time ends reaching the
+maximum at `u8`, `u16`, `u32`, `u64`, `i8`, a constant `u8` end, tick-free `u32`/`u64` maxima): 6 of 7
+failed on 5aaa6ca (and the 7th was R23-refused as written), 14/14 cases pass after. Corpus SV: D-28
+itself changed no corpus module (a range type below 32 bits keeps its 32-bit counter and its `c > e`);
+the 6 modules sv-baseline shows changed are the loop variable's typing (MEASUREMENTS §AB.2), all
+sweep-agree. Ledger after: 226 lines, 226 CLOSED, 0 OPEN (§AB.7).

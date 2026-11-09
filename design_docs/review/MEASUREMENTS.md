@@ -5363,3 +5363,160 @@ single-tick), 0 uncovered; G-J 84 const items compared / 25 outside both, 180 co
 the SPEC; fixtures: 8 coreui, 3 example, 11 gone, 256 sweep, 156 test, 128 ui; 269 run checks`**, the 3
 example fixtures PASS. Not run remotely (nothing pushed). After this run, docs only: III.3.6's counts,
 this section, CLAUDE.md; the AA.5 probe was swept as a temporary fixture after the run and deleted.
+
+## AB. The last two OPEN lines of III.3 closed: D-28 (the inclusive `for` at its maximum) and the loop variable's type; three more found and closed (2026-11-09)
+
+Branch `claude/open-lines-g-e2f9fd`, cut from `paper` at `5aaa6ca` (ledger 223 lines — 221 CLOSED, 2 OPEN).
+Code commits `23931ec` (the code, the fixtures and the ledger lines), `2da5fe8` and `170bc8c` (two pins
+the first two regression runs found, AB.8) and `4700ca4` (the shadow renamed instead of the loop variable,
+AB.5), the final code commit — the bare regression of AB.8 ran on it; after it, docs only. "Before" is measured: every new fixture swept on a
+scratch worktree of `5aaa6ca` (the fixture files copied in), and every module's emission against an
+`sv-baseline snapshot` taken on `5aaa6ca` before any change. Probes are in the notes folder
+`open-lines-g-AB-probes/`.
+
+### AB.0 Predictions (written before any code change)
+
+| change | predicted | measured |
+|---|---|---|
+| before, `loop_var_type_dut` (6 modules) | lint failures (WIDTHEXPAND) on the typed/used-`u8` ones, "mixed integer types" on the interpreter, the negative `i8` range wrong on a `u32` counter, a `usize` underflow of `i - 2` in the interpreter | as predicted, except `lvt_typed_ticking` **passed** (a `u32` counter read in `i ^ a` was widened cleanly) and `lvt_signed`'s reference leg passed: **8 of 12 cases failed** |
+| before, `inclusive_max_dut` (7) | `sim≠ref` overflow at `u8`/`u16`/`i8`; the `u32` counter wraps; the `u64` truncates; tick-free wide unrolling fails | `sim≠ref` at `u8`, `u16`, `u32`, `u64`, `i8` (the interpreter fails first); `imx_u32_runtime` `sim≠SV` too (the counter wrapped: `q` 0, 1, 2 … where 7 was due); `imx_u64_runtime` refused ("4294967296 does not fit in the 32-bit operand"); **`imx_tickfree_wide` refused** as first written — not predicted: the transpiler could not read `u32::MAX` (AB.4) — and, with the maxima spelled as literals (the fixture as committed), lint-rejected (the `int` loop variable assigned a 64-bit constant); the constant `u8` end R23-refused as written (swept with its end lowered to 254 to compile): **11 of 14 cases failed** |
+| D-28's corpus SV | the 4 tick-bearing inclusive `ifr_*` modules | **0** by D-28 itself: a range type below 32 bits keeps its 32-bit counter, so `c > e` is unchanged |
+| loop-var typing's corpus SV | the typed-narrow `ifr_*` and "the untyped default `i32` read signed", guessed 10–25 | **6** (AB.2) after two refinements made on measurements, not predicted: a file const bound types `v` at the width the transpiler reads it (first cut: 15 modules, the UART counters widened to 64 bits by a `usize` const), and an index use types `v` `usize`, realized at 32 bits (`i32` for every untyped variable: 11 more modules) |
+| battery | 47/47 + the new probes admitted by both | **63/63**, after one break found and closed (AB.4) |
+
+### AB.1 `II.3 found inclusive-for-runtime-max` — CLOSED (D-28)
+
+D-28 (decided by the user 2026-11-09, packet §AA.5 option (a); recorded in `SPEC_DECISIONS.md`): Rust's
+meaning everywhere. I.8.5's inclusive `D` tests a done flag and never increments past the end:
+`let mut c = a ; let e = b ; let mut d = c > e ; loop { if d { break } ; let v = c ; if c == e { d = true }
+else { c = c + 1 } ; s }`.
+- **Interpreter** (`copper-ref` `exec_for`): the done flag is a hidden local `__for@<depth>d` declared with
+  the counter, so it survives a tick; the tick-free frame flag of D-27 is gone (one path).
+- **Transpiler, tick-bearing** (`control_extract::expand_counted_for`): the counter's type holds `e + 1`,
+  so the unchanged `c > e` exits sees the step past the end without wrapping — `u32`/`i32` for a range type
+  below 32 bits (as before: no corpus change), `u64`/`i64` for 32 bits, `u128`/`i128` for 64; with both
+  bounds constant, the narrowest of 32/64/128 bits that holds their values. A 128-bit range type has no
+  wider Rust type: there the done flag itself is emitted (`__copper_ctr<n>_done`, the step `if c == e
+  { d = true } else { c = c + 1 }`, the hoisted tick guarded by `d` / `a <= e`). A first try at a 129-bit
+  internal counter type lost its width downstream (registers declared 64 bits); dropped for the flag.
+  Bounds are cast to the counter's type (a constant one written as a literal of it: a cast of `-2i8`
+  zero-extended `8'd254`). `const_value` now folds a unary minus.
+- **Transpiler, tick-free**: a range SV's `int` cannot carry (`0xffff_fffdu32..=0xffff_ffffu32`) or with a
+  negative bound gets `chir::ForCounter` through CHIR/SHIR/VLIR: the emitter declares `logic [w:0]` (or
+  `logic signed`, or `int`) and writes the folded bounds.
+- **II.1.2 R23 retired** (D-28): realized on every leg, so the refusal had no reason left. Deleted:
+  `place_inclusive_max_assertions` (macro), `constant_ticking_inclusive_ranges` and
+  `INCLUSIVE_MAX_MESSAGE` (analysis), the fold and `UNFOLDED_INCLUSIVE_END_MESSAGE` (transpiler). ui
+  `inclusive_ticking_for_at_max` moved from `fail` to `pass`, admitted by both.
+- Fixture `tests/fixtures/inclusive_max_dut.rs`, 7 modules, each run-time end OR-ing a narrow input into
+  the top of the range so the sweep's stimulus reaches the maximum (`u8` `a | 0xfc`, `u16` with an author's
+  `break`, `u32`, `u64` plus a wide exclusive range, `i8`), a constant `255u8` end and an untyped `254..=255`
+  typed `u8` by its use, tick-free `u32`/`u64` maxima: **14/14 cases pass** (before: AB.0). `tests/
+  inclusive_max_u128.rs`: a `u128` run-time end reaching `u128::MAX`, the done flag, simulator against
+  Verilator over 64 cycles of every input value (the loop reaches 0xff and exits) — not swept: the
+  interpreter has no `i128` and stops `u128` at `i128::MAX` (recorded there, not a line).
+- `timing_model_derivations.rs`: 8 new modules take the extraction route (run-time ends, `break`s, two
+  ticking `for`s in one loop) — added to its expected set with that reason.
+
+### AB.2 `II.3 found loop-var-type` — CLOSED
+
+`v` has the range's type (SPEC I.14.1; I.8.5's paragraph): `chir_lower::for_var_type` reads it as rustc
+does — a typed bound's (a suffix, a cast, a typed local or port view, `uN::MAX`; a file const or const
+generic at the 32 bits the transpiler reads a `localparam int`/`parameter int` at, an 8/16-bit const at its
+own), else the first use that unifies it with a typed operand (a binary operator's other side, a
+`wrapping_*`-family receiver or argument, a `Bits::from_uN` argument, an annotated `let`, a typed
+assignment target), following untyped `let` copies and operands of unknown type (`i + j` of two loop
+variables); `usize` when the only use is an index, realized as the 32-bit counter (the value of every
+in-range index); `i32` when nothing types it. The transpiler rewrites the body's reads to `v as T` where
+`T` differs from the declaration (an index read is left alone); the tick-bearing counter is typed through
+`ForTyping` (the module's ports, consts and every `let`, before `chir_lower`'s context exists). The
+interpreter keeps two unsuffixed bounds unsuffixed (was `usize`), so `v` takes its type at the use.
+Fixture `tests/fixtures/loop_var_type_dut.rs`, 9 modules (the two §AA.3 probes as written, a use-typed
+comb loop with a `let` copy, a typed ticking range, a signed `i8` range tick-free and ticking, rustc's
+`i32` default with `i - 2 < 0`, a `u16` receiver, a negative `i64` range, a shadowing `let` — AB.5):
+**18/18 cases pass** (before: AB.0, and 3 of the 3 added later failed). sv-baseline, 6 corpus modules
+changed, each a read at the variable's Rust type, each sweep-agreeing: `cdo_for_override` (`8'(64'(i))`,
+`from_usize(i)` makes `i` a `usize`), `ifr_tickfree_seq` (`a >> 8'(i)`, a `u8` const bound),
+`ifr_ticking_break` (`$unsigned(8'(i))`, the default `i32` cast `as u8`), `ifr_ticking_const` (the `u8`
+const bounds written as `u32` literals; the two `localparam`s no longer referenced), `tfr_nested`
+(`64'(k) == (64'(i) + 64'(j))`, `as_usize() == i + j`), and `fold_defect` (`tests/ref_probes`, not swept:
+`8'((64'(v) + 64'(i)))`, the same low byte). `comb_definite_assignment_parity.rs`'s pin `o = 8'(i)` is
+now `o = 8'(64'(i))`.
+
+### AB.3 Found and closed — `II.3 found signed-narrowing-cast`
+
+Reading a 32-bit counter `as i8` showed it: a narrowing cast to a signed type emitted `$signed(x)` at the
+operand's width, and from a signed one `$unsigned(x)` — right in an assignment of the target's width,
+wrong anywhere wider (`(x as i8) as i32` did not truncate; `(x as i16) < 0` compared at 32 bits); an
+unsigned widening of an `$unsigned(…)` was not stated either. Now `$signed(8'(x))`, `$unsigned(8'(s))`,
+`16'($unsigned(8'(s)))`. Fixture `tests/fixtures/signed_narrowing_cast_dut.rs::snc_probe`: on `5aaa6ca`
+`sim=ref≠SV` from cycle 0 (`q` expected 4294956489, got 13210569); now 2/2. **Corpus 0** (no corpus SV
+changed).
+
+### AB.4 Found and closed — `II.3 found primitive-assoc-const` (a parity break)
+
+The new probes (`zzg_01`, `zzg_02`, `zzg_07`) found that the transpiler read no primitive associated
+constant — `u8::MAX`, `i8::MIN`, `u16::BITS` (I.14.4's `T::K`) — which rustc and the interpreter read:
+"cannot lower literal: u8 :: MAX", and R3's fold refused `250u8..=u8::MAX` as unfoldable. Pre-existing
+(the corpus spells no such constant). `copper_analysis::consts::primitive_assoc_const` feeds `ConstEnv`
+(`get`, `eval`, `ty_of`) and the transpiler's literal lowering and width inference (`u128::MAX` handled
+apart: outside `i128`). Fixture `tests/fixtures/primitive_assoc_const_dut.rs`, 2 modules (as a value, in a
+file const, as a ticking range's end; `i8::MIN`/`MAX`, `u16::BITS` in a combinational body): on `5aaa6ca`
+both refused by the transpiler; now 4/4. II.1.3 (CLOSED) is re-verified with it (AB.6).
+
+### AB.5 Found and closed — `II.3 found for-var-shadow`
+
+`for i in 0u8..4 { let i = i + 1; … }` (`zzg_09`): the shadow's net took the loop variable's name — the SV
+`always_comb` assigned the `int` loop variable itself (`i = (8'(i) + 8'd1)`; Verilator VARHIDDEN, WIDTH),
+and in a ticking `for` the shadow would have been the counter. Pre-existing (the same lint failures on
+`5aaa6ca`). A top-level `let` of the body that shadows the variable is renamed `<v>__shadow` (its
+initializer still reads the loop variable; the later reads are renamed); a shadow inside a nested block is
+not seen (recorded, not a line). Two attempts on the way, both measured: renaming the *loop variable*
+instead (`<v>__iter`) made the tick-bearing counter a register the shared inference does not name
+(`register_reconciliation`, P13: `j__iter` surplus); renaming the shadow then made the shadow a flop,
+because the extraction route hoists a body `let` read in two states and the register authority judges a
+hoisted name only when the *source* mentions it — `transpile_fir` now reads `<v>__shadow` as the source
+local `v`, so the inference decides (dead at every tick: a wire). Rewritten reads keep their own spans.
+Swept as `loop_var_type_dut.rs::lvt_shadow` (tick-free and ticking): lint-rejected on `5aaa6ca`, 2/2 now.
+
+### AB.6 II.1.3 re-verified
+
+§Z.8's 47 probes (notes folder `open-lines-e-Z-probes/battery`) and 16 new ones around this change
+(`zzg_01`–`zzg_16`: `u8::MAX` as a bound and a value, constant and run-time maxima at `u8`/`u16`/`u128`, an
+untyped end typed by its use, a `u16` receiver, a signed ticking range, an annotated `let`, a shadowing
+`let`, a `match` on the variable, a `u64` exclusive run-time range, a negative `i64` range, two loop
+variables in one index, the variable as a shift amount, an `i8` range at its minimum), copied as ui/pass
+cases and removed after: **trybuild admits all 63; `front_end_parity_ui.rs::
+the_transpiler_admits_every_shape_the_macro_admits` passes with them — 63/63 admitted by both.** On the
+first transpiler pass 2 probes were refused (`zzg_01`, `zzg_02`: AB.4) and `zzg_07` too; after AB.4 all
+16 transpile, and all 16 are Verilator `-Wall` clean once AB.5 and the `u128` done flag landed (re-checked on `4700ca4`) (on
+`5aaa6ca`: 8 refused, 3 lint-rejected). The three named exceptions' test passes in AB.8's run.
+
+### AB.7 Ledger and counts
+
+Before: **223 lines — 221 CLOSED, 2 OPEN**. After (`cargo test --test conformance_ledger` on `23931ec`, and G-K in AB.8's run):
+**226 lines — 226 CLOSED, 0 OPEN; 171 required by the SPEC; fixtures: 8 coreui, 3 example, 13 gone, 278
+sweep, 158 test, 128 ui; 290 run checks.** Closed: `II.3 found inclusive-for-runtime-max` (D-28) and
+`II.3 found loop-var-type`; `II.1.2 R23` stays a CLOSED line as a retired rule (`gone:` tokens, the ui case
+in `pass`). Added and CLOSED: `signed-narrowing-cast`, `primitive-assoc-const`, `for-var-shadow`. No line is
+OPEN.
+
+### AB.8 The bare regression — measured
+
+The first bare run (on `23931ec`) failed in G-J: the `u128` probe's bound `u128::MAX - 1` is one evaluator's
+only — `ConstEnv` (over `i128`) declines it, the interpreter gives a value (its `u128` stops at
+`i128::MAX`, so not this one). `2da5fe8` pins it `ASYMMETRIC` with that reason (9 rows). The second (on
+`2da5fe8`) failed in `timing_model_derivations.rs`: `lvt_shadow`, added after the first workspace run, takes
+the extraction route too; `170bc8c` adds it. The third (on `170bc8c`) failed in `register_reconciliation`
+(AB.5); `4700ca4` is the fix.
+
+**The fourth: bare `tools/regression.sh` on `4700ca4` (the final code commit; laptop; `paper` at `5aaa6ca`):
+REGRESSION OK (331 s).** 1668 passed, 0 failed, 16 ignored, 159 test binaries (G-C 132 test files);
+examples **32/32**; G-D 322 differential cases (3 ignored-with-reason), G-F 322 (3 skipped with a reason) —
+the 19 new fixture modules added; **G-G differential 2395 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0
+DISAGREE**, **reference 2407 PASS / 0 DISAGREE**; G-I 250 clocked related (66 extracted, 19 linear, 165
+single-tick), 0 uncovered; G-J 85 const items compared / 25 outside both, 218 counted-`for` bounds compared,
+9 asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; **G-K `226 lines — 226 CLOSED, 0 OPEN; 171 required by
+the SPEC; fixtures: 8 coreui, 3 example, 13 gone, 278 sweep, 158 test, 128 ui; 290 run checks`**, the 3
+example fixtures PASS. Not run remotely (nothing pushed). After this run, docs only: III.3.6's counts,
+D-28 in `SPEC_DECISIONS.md`, this section, CLAUDE.md.
