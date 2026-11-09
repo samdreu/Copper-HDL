@@ -38,7 +38,7 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (382, 3 of them skipped with a reason, since 2026-11-09 §AE — 8 modules in one fixture file; 374 after §AD — 30 modules in three fixture files; 344 after §AC's 22 modules in one fixture file; 322 after §AB's 19 modules in four fixture files; 303 after §AA's 20 modules in three fixture files; 283 after §Z's 34 modules in five fixture files; 249 after §Y's ten `tfr_*` fixtures; 239 after §X's three `cc_body_*`; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
+`_reference_leg` cases as build.rs generated to run (388, 3 of them skipped with a reason, since 2026-11-09 §AF — 6 modules in one fixture file; 382 after §AE's 8 modules in one fixture file; 374 after §AD — 30 modules in three fixture files; 344 after §AC's 22 modules in one fixture file; 322 after §AB's 19 modules in four fixture files; 303 after §AA's 20 modules in three fixture files; 283 after §Z's 34 modules in five fixture files; 249 after §Y's ten `tfr_*` fixtures; 239 after §X's three `cc_body_*`; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
 clocked, 18 of them binding a `Memory` (I.10), 52 combinational (I.11); `REF_SKIP` empty), each
 leg non-empty, and the design leg (I.13, `copper_ref::Design` on `two_domain_top` vs the hand-wired
 simulation, `tests/two_domain_hierarchy_cdc.rs`) — and
@@ -459,12 +459,16 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   tree's helper call graph, every behavioural body's `let`s and every pattern naming an X-valued
   file const, and requires `tests/recursive_helper_r6.rs`, `tests/let_instance_d24.rs` and
   `tests/file_x_const_pattern_d26.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins
-  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). **One more break is known since 2026-11-09 §AE** (OPEN, `II.3 found ticking-for-generic-range`, so SPEC
-  II.1.3 stays OPEN; a decision packet, MEASUREMENTS §AE.5): a tick-bearing `for` over a range bounded by a
-  const generic (`0..W`) where R3's verdict depends on its being non-empty (the module loop's only boundary, or
-  followed by a skippable wait) — R3 takes it as non-empty in both front-ends (II.2.2), the macro admits it with
-  no assertion, and the transpiler, which cannot prove `0..W` non-empty for its parametric SV, keeps the empty-range
-  exit and refuses (pre-existing; corpus 0). **D-29** (2026-11-09, §AE) closed §AD.5's break,
+  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). **No break is known since 2026-11-09 §AF** (SPEC II.1.3 CLOSED; the 113-probe battery
+  admitted and refused alike by both). **D-30** (§AF) closed the last, `ticking-for-generic-range`: a
+  tick-bearing `for` over a range bounded by a const generic where R3's verdict depends on its being
+  non-empty (`loop { q.write(..); for _ in 0..W { tick } }`) is admitted by both and the hypothesis held per
+  instance — `copper_analysis::assumed_nonempty_generic_ranges` picks the ranges (each checked on its own: a set
+  of several is over-checked), the macro places an inline `const { assert!(..) }` (E0080 at monomorphization —
+  `cargo check`/trybuild never see it, so `src/lib.rs` pins it with a `compile_fail,E0080` doctest), the
+  transpiler lowers the `for` as non-empty and emits an elaboration-time `$error`
+  (`width_checks::generic_range_checks`; Verilator and Yosys refuse the instance, Icarus 12 ignores it)
+  (`tests/fixtures/generic_range_dut.rs`, `tests/generic_range_instance_d30.rs`). **D-29** (2026-11-09, §AE) closed §AD.5's break,
   `ticking-for-ends-in-loop`: a nested tick-bearing loop (a counted `for`, a hand-written `loop`, a `while`)
   whose body has no bare tick and ends in a skippable wait, R3 holding through an earlier inner `for` over a
   range non-empty by its constants, is lowered — such a `for` takes I.8.5's `D` with no hoisted tick, its exit
@@ -511,8 +515,7 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   (`tests/fixtures/stmt_match_wire_dut.rs`) — and `forwarded-narrow-widening`: a register or wire's
   forwarded value substituted under a widening cast (`32'(r)` → `32'(8'(a) + 8'd250)`) was evaluated at
   the cast's width (`sim=ref≠SV`, silent); `shir_lower::at_own_width` keeps it at its own
-  (`tests/fixtures/forwarded_width_dut.rs`). The ledger has 2 OPEN lines since §AE: II.1.3 and
-  `ticking-for-generic-range` above. The standing audit is
+  (`tests/fixtures/forwarded_width_dut.rs`). The ledger has no OPEN line since §AF (234 lines, all CLOSED). The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one

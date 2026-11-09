@@ -5990,3 +5990,78 @@ SPEC; fixtures: 8 coreui, 3 example, 13 gone, 339 sweep, 155 test, 129 ui; 350 r
 fixtures PASS. Not run remotely (nothing pushed). sv-baseline against `e71f7d5` on `c4fd345`: 12 of 450 differ —
 8 new (`tfl_*`), 4 changed (`ntf_distinct`, `ntf_three`, `ntf_in_loop_while`, `ntf_then_for_then_wait`, AE.1).
 After this run, docs only: III.3.6's counts, this section, CLAUDE.md.
+
+## AF. D-30: `ticking-for-generic-range` closed (held per instance); II.1.3 closed — the ledger has no OPEN line (2026-11-09)
+
+Same branch, after §AE (`ec993b3`). The user decided §AE.5's packet: **(a), admit in both, checked per instance**
+(D-30). Predictions (notes `open-lines-i-AE.md`, written before the code): zzi_04, 29–32, 34 admitted by both;
+zzi_25, zzi_33, `det_for` untouched (no dependency); sv-baseline 0 corpus modules changed; the existing
+constant-only `const _` assertions unchanged.
+
+### AF.1 Feasibility, measured before the design
+
+- An inline `const { ::core::assert!(!((0) >= (W)), ..) };` written in a `#[hardware(sequential)]` body and the
+  module spawned in a test: `W = 2` builds; `W = 0` fails the build with E0080 (rustc evaluates it at
+  monomorphization; `cargo check` and trybuild never instantiate).
+- A generate `if (!((0) < (W))) begin … $error(..); end`: Verilator 5.044 reports `%Warning-USERERROR`, fatal
+  without `-Wno-fatal` (the harness passes `-Wall` and no `-Wno-fatal`): `-GW=0` refused, `-GW=2` clean; `$fatal`
+  behaves the same (USERFATAL). Yosys (`chparam -set W 0; hierarchy`) refuses; **Icarus 12 accepts it silently**
+  (`iverilog` and `vvp` exit 0) — recorded, not a harness tool for this check.
+
+### AF.2 The realization
+
+- **Which ranges** (`copper_analysis::assumed_nonempty_generic_ranges`): a ticking `for` range of the shape of
+  `constant_ticking_for_ranges` naming a const generic (`generic_ticking_for_ranges`) that belongs to a minimal set
+  of `empty_range_dependencies` — now computed over constant and generic ranges both as variables (a constant-only
+  minimal set is unchanged: its subsets take every generic as non-empty, as before). The macro's view, so both
+  front-ends choose the same ranges. Each is checked **on its own**: a set of several is over-checked
+  (`grn_two_generic`, two generic delays in a row, refuses `W = 0, V = 3` though R3 would hold through `0..V`).
+- **Macro**: `const { ::core::assert!(<a < b>, GENERIC_EMPTY_RANGE_MESSAGE) };` right before the `for`; a set naming a
+  generic no longer reaches the `const _` item path (an item cannot name the fn's generics).
+- **Transpiler**: `FrontendModuleIR::assumed_nonempty_ranges` captured from the `ItemFn` (span and bound text);
+  `expand_counted_for` takes such a range as non-empty (no entry guard on the hoisted tick, D-29's bottom test for a
+  body ending in a loop); `transpile_target`'s oracle answers non-empty for every generic range (no
+  `UNFOLDED_BOUNDARY_RANGE_MESSAGE`); `width_checks::generic_range_checks` adds one `__copper_width_check_<n>` per
+  range to the module (the generics as SV parameters, other names by their `ConstEnv` value; a bound it cannot state
+  refuses the module).
+- **G-I**: the source walker classifies an assumed range `StaticNonEmpty`, as the lowering does — the first run,
+  without it, failed on `grn_only_boundary` ("source path did not reach a tick": the walker explored the empty exit
+  that R3's hypothesis excludes).
+
+### AF.3 Fixtures and pins
+
+`tests/fixtures/generic_range_dut.rs`, 6 modules (`PARAMS` widths not 1): `grn_only_boundary` (the parametric
+delay, `W = 3`), `grn_then_wait`, `grn_handwritten`, `grn_inner_ends_wait` (`ticking-for-ends-in-loop`'s shape with a
+generic inner range and an inclusive `GRN_ONE..=(W + GRN_ONE)` — a set of two, both checked), `grn_outer_ends_wait`,
+`grn_two_generic`. 12/12 cases. `tests/generic_range_instance_d30.rs`: the assumed set per module (and empty for
+`det_for` and a generic range followed by a tick), one check per range in the emitted SV, Verilator refusing
+`W = 0` (USERERROR with D-30's message) and admitting `W = 1, 3`, the over-check. `src/lib.rs`: a `compile_fail,E0080`
+doctest spawning `grn_only_boundary::<0>` — measured to FAIL as a doctest when the instance is `::<3>` (it then
+compiles), so it pins the monomorphization check, not any compile error. `timing_model_derivations` gains
+`grn_handwritten`, `grn_then_wait`, `grn_two_generic` (the extraction route, as `imx_*`).
+
+**sv-baseline against `e71f7d5` on `0709b9b`:** 18 of 456 differ — the 4 of §AE.1, 8 `tfl_*` and 6 `grn_*` new;
+**D-30 changed no existing module** (predicted 0).
+
+### AF.4 II.1.3 — CLOSED
+
+The 113-probe battery (§Z.8's 47, §AB.6's 16, §AD.6's 16, §AE's 34) on `0709b9b`: **the macro admits 107 and refuses
+6; the transpiler admits the same 107 and refuses the same 6** (zzi_05, 10, 14, 16: R3's message; zzi_22, 27: the
+shape rule's), one message each. Nothing but the three named exceptions remains; II.1.3 is CLOSED.
+
+### AF.5 Ledger and counts
+
+Before §AE: 233 — 231 CLOSED, 2 OPEN (`e71f7d5`). After §AE: 234 — 232 CLOSED, 2 OPEN (`c4fd345`). **After §AF (G-K
+in AF.6's run): 234 lines — 234 CLOSED, 0 OPEN; 171 required by the SPEC; fixtures: 8 coreui, 3 example, 13 gone,
+345 sweep, 160 test, 132 ui; 358 run checks.**
+
+### AF.6 The bare regression — measured
+
+**Bare `tools/regression.sh` on `0709b9b` (the final code commit; laptop; SIGPIPE restored under `nohup`): REGRESSION
+OK (360 s).** 1803 passed, 0 failed, 16 ignored, 160 test binaries (G-C 133 test files; +15 over §AE.7: 12 `grn_*`
+cases, 2 D-30 tests, 1 doctest); examples **32/32**; G-D 388 differential cases (3 ignored-with-reason), G-F 388 (3
+skipped); **G-G differential 3582 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**, **reference 3594 PASS /
+0 DISAGREE**; G-I 309 clocked related (104 extracted, 23 linear, 182 single-tick), 0 uncovered, 2379 transitions;
+G-J 91 const items compared / 25 outside both, 348 counted-`for` bounds compared, 9 asymmetric (pinned), 0
+DISAGREE; G-E 5 anchored; **G-K `234 lines — 234 CLOSED, 0 OPEN`**. Not run remotely (nothing pushed). After this
+run, docs only: III.3.6's counts, this section, CLAUDE.md.
