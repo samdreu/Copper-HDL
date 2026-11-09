@@ -162,7 +162,25 @@ fn place_empty_range_assertions(f: &mut ItemFn) {
         let span = syn::spanned::Spanned::span(&set[0]);
         syn::parse_quote_spanned!(span=> const _: () = ::core::assert!(#c, #msg);)
     };
-    let sets = copper_analysis::empty_range_dependencies(f);
+    // D-30 (2026-11-09, MEASUREMENTS §AF): a set naming a const generic cannot be a `const _`
+    // item (an item does not see the fn's generics). Each const-generic range R3's verdict
+    // depends on is asserted non-empty on its own, as an inline `const { }` statement right
+    // before its `for` — evaluated when the module is monomorphized, so an instance whose
+    // range is empty fails to build (E0080; `cargo check` does not see it). The transpiler
+    // lowers the same ranges as non-empty and states the same check in the emitted module.
+    let gkeys: std::collections::BTreeSet<String> =
+        copper_analysis::generic_ticking_for_ranges(f).iter().map(copper_analysis::range_key).collect();
+    let generic = copper_analysis::assumed_nonempty_generic_ranges(f);
+    let sets: Vec<Vec<syn::ExprRange>> = copper_analysis::empty_range_dependencies(f)
+        .into_iter()
+        .filter(|set| !set.iter().any(|r| gkeys.contains(&copper_analysis::range_key(r))))
+        .collect();
+    let gmsg = copper_analysis::GENERIC_EMPTY_RANGE_MESSAGE;
+    let inline = |r: &syn::ExprRange| -> syn::Stmt {
+        let c = cond(std::slice::from_ref(r));
+        let span = syn::spanned::Spanned::span(r);
+        syn::parse_quote_spanned!(span=> const { ::core::assert!(#c, #gmsg) };)
+    };
     let mut singles: Vec<syn::ExprRange> = Vec::new();
     let mut top: Vec<syn::Stmt> = Vec::new();
     for set in &sets {
@@ -175,6 +193,8 @@ fn place_empty_range_assertions(f: &mut ItemFn) {
     struct Place<'a> {
         singles: &'a [syn::ExprRange],
         item: &'a dyn Fn(&[syn::ExprRange]) -> syn::Stmt,
+        generic: &'a [syn::ExprRange],
+        inline: &'a dyn Fn(&syn::ExprRange) -> syn::Stmt,
     }
     impl VisitMut for Place<'_> {
         fn visit_block_mut(&mut self, b: &mut syn::Block) {
@@ -187,6 +207,9 @@ fn place_empty_range_assertions(f: &mut ItemFn) {
                         if let Some(s) = self.singles.iter().find(|s| copper_analysis::range_key(s) == k) {
                             out.push((self.item)(std::slice::from_ref(s)));
                         }
+                        if let Some(g) = self.generic.iter().find(|g| copper_analysis::range_key(g) == k) {
+                            out.push((self.inline)(g));
+                        }
                     }
                 }
                 out.push(st);
@@ -194,7 +217,7 @@ fn place_empty_range_assertions(f: &mut ItemFn) {
             b.stmts = out;
         }
     }
-    Place { singles: &singles, item: &item }.visit_block_mut(&mut f.block);
+    Place { singles: &singles, item: &item, generic: &generic, inline: &inline }.visit_block_mut(&mut f.block);
     for (i, st) in top.into_iter().enumerate() {
         f.block.stmts.insert(i, st);
     }

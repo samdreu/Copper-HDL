@@ -207,6 +207,7 @@ pub fn desugar_counted_loops_in(fir: &mut FrontendModuleIR) {
         generics: fir.signature.generics.iter().map(|g| g.name.clone()).collect(),
         typing: crate::chir_lower::ForTyping::of(fir),
         enclosing: std::cell::RefCell::new(Vec::new()),
+        assumed: fir.assumed_nonempty_ranges.iter().map(|r| (r.span.start_line, r.span.start_col)).collect(),
     };
     let RawStmtKind::Expr(es) = &mut fir.raw_statements[idx].kind else {
         return;
@@ -441,7 +442,9 @@ fn expand_counted_for(
     let statically_nonempty = match (const_value(&start, consts), const_value(&end, consts)) {
         (Some(a), Some(b)) if a > b || (a == b && !inclusive) => return Some(Vec::new()),
         (Some(_), Some(_)) => true,
-        _ => false,
+        // D-30: a const-generic range R3's verdict depends on is non-empty by hypothesis,
+        // checked per instance (the emitted module's elaboration-time `$error`).
+        _ => matches!(&*f.iter, ExprType::Range(r) if consts.assumed.contains(&(r.span.start_line, r.span.start_col))),
     };
 
     let pat = f.pat_text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
@@ -866,6 +869,9 @@ struct Consts {
     /// (`for j in 0..i`) has that variable's type, as rustc infers it (line `II.3 found
     /// for-bound-loop-var`, MEASUREMENTS §AD.3).
     enclosing: std::cell::RefCell<Vec<(String, copper_core::chir::CHIRType)>>,
+    /// The ranges taken as non-empty by D-30 (`FrontendModuleIR::assumed_nonempty_ranges`),
+    /// by the range expression's start position.
+    assumed: std::collections::HashSet<(usize, usize)>,
 }
 
 /// A bound that cannot change while the loop runs: a constant of [`const_value`],

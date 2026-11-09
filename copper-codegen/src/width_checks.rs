@@ -119,3 +119,78 @@ fn to_sv(e: &Expr, env: &copper_analysis::consts::ConstEnv) -> Option<String> {
         _ => return None,
     })
 }
+
+/// D-30's per-instance checks (2026-11-09, MEASUREMENTS §AF): one elaboration-time check
+/// per ticking `for` range bounded by a const generic that R3 takes as non-empty
+/// (`FrontendModuleIR::assumed_nonempty_ranges`) — `if (!(a < b))` (`a <= b` inclusive),
+/// with D-30's message. The lowering treats each such `for` as non-empty, so an instance
+/// whose range is empty must not elaborate; the macro's inline `const { assert!(..) }` is
+/// the same check on the Rust side. A bound names the module's const generics (stated as
+/// the SV parameter) and constants `ConstEnv` folds (stated by value); one this cannot
+/// state is an error — the lowering has already assumed the range non-empty.
+pub fn generic_range_checks(fir: &copper_core::FrontendModuleIR) -> Result<Vec<VLIRWidthCheck>, String> {
+    let env = copper_analysis::consts::ConstEnv::from_items(fir.file_const_source.iter().map(String::as_str));
+    let generics: std::collections::BTreeSet<String> = fir.signature.generics.iter().map(|g| g.name.clone()).collect();
+    let mut out = Vec::new();
+    for r in &fir.assumed_nonempty_ranges {
+        let bound = |text: &str| -> Option<String> {
+            let e: Expr = syn::parse_str(text).ok()?;
+            bound_sv(&e, &generics, &env)
+        };
+        let (Some(a), Some(b)) = (bound(&r.start), bound(&r.end)) else {
+            return Err(format!(
+                "{}:{}: the range `{}..{}{}` is bounded by a const generic and taken as non-empty (SPEC I.8.4(b), D-30), \
+                 but the transpiler cannot state its per-instance check in SystemVerilog: write its bounds with the \
+                 module's const generics, integer literals, constants and `+ - * / %`",
+                r.span.start_line,
+                r.span.start_col,
+                r.start,
+                if r.inclusive { "=" } else { "" },
+                r.end
+            ));
+        };
+        let op = if r.inclusive { "<=" } else { "<" };
+        out.push(VLIRWidthCheck { cond: format!("({a} {op} {b})"), message: copper_analysis::GENERIC_EMPTY_RANGE_MESSAGE.to_string() });
+    }
+    Ok(out)
+}
+
+fn bound_sv(e: &Expr, generics: &std::collections::BTreeSet<String>, env: &copper_analysis::consts::ConstEnv) -> Option<String> {
+    let names_generic = {
+        struct G<'a>(&'a std::collections::BTreeSet<String>, bool);
+        impl<'ast> syn::visit::Visit<'ast> for G<'_> {
+            fn visit_path(&mut self, p: &'ast syn::Path) {
+                if p.get_ident().is_some_and(|i| self.0.contains(&i.to_string())) {
+                    self.1 = true;
+                }
+                syn::visit::visit_path(self, p);
+            }
+        }
+        let mut g = G(generics, false);
+        syn::visit::Visit::visit_expr(&mut g, e);
+        g.1
+    };
+    if !names_generic {
+        // A constant subexpression: stated by its value.
+        let v = env.eval_expr(e, &std::collections::HashMap::new())?;
+        return Some(if v < 0 { format!("(-{})", v.unsigned_abs()) } else { v.to_string() });
+    }
+    Some(match e {
+        Expr::Paren(p) => format!("({})", bound_sv(&p.expr, generics, env)?),
+        Expr::Group(g) => bound_sv(&g.expr, generics, env)?,
+        Expr::Path(p) => p.path.get_ident()?.to_string(),
+        Expr::Binary(b) => {
+            use syn::BinOp::*;
+            let op = match b.op {
+                Add(_) => "+",
+                Sub(_) => "-",
+                Mul(_) => "*",
+                Div(_) => "/",
+                Rem(_) => "%",
+                _ => return None,
+            };
+            format!("({} {op} {})", bound_sv(&b.left, generics, env)?, bound_sv(&b.right, generics, env)?)
+        }
+        _ => return None,
+    })
+}

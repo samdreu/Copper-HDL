@@ -226,6 +226,10 @@ struct Src<'a> {
     sites: BTreeSet<Vec<usize>>,
     /// Sites inside a statically empty `for` — no continuation reaches them.
     dead_sites: BTreeSet<Vec<usize>>,
+    /// The const-generic ranges R3 takes as non-empty and D-30 holds per instance
+    /// (`copper_analysis::assumed_nonempty_generic_ranges`), by `range_key`: non-empty here
+    /// too, as the transpiler lowers them.
+    assumed: HashSet<String>,
 }
 
 /// A `const { … }` block statement: evaluated by rustc, no statement of any
@@ -298,6 +302,7 @@ impl<'a> Src<'a> {
             fors: HashMap::new(),
             sites: BTreeSet::new(),
             dead_sites: BTreeSet::new(),
+            assumed: copper_analysis::assumed_nonempty_generic_ranges(f).iter().map(copper_analysis::range_key).collect(),
         };
         for s in src.pre {
             match s {
@@ -379,7 +384,10 @@ impl<'a> Src<'a> {
                 prefix.pop();
             }
             Expr::ForLoop(f) => {
-                let b = for_bounds(f, consts);
+                let mut b = for_bounds(f, consts);
+                if matches!(b, ForBounds::Unknown) && matches!(&*f.expr, Expr::Range(r) if self.assumed.contains(&copper_analysis::range_key(r))) {
+                    b = ForBounds::StaticNonEmpty;
+                }
                 self.fors.insert(pos_of(f), b);
                 prefix.push(0);
                 self.classify_stmts(&f.body.stmts, prefix, consts, dead || matches!(b, ForBounds::StaticEmpty));

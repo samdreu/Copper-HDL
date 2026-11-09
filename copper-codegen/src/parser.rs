@@ -75,6 +75,15 @@ pub fn capture_frontend_ir(design_fn: &ItemFn, hardware_fns: &std::collections::
         file_const_source: Vec::new(),
         file_impls: Vec::new(),
         file_traits: Vec::new(),
+        assumed_nonempty_ranges: copper_analysis::assumed_nonempty_generic_ranges(design_fn)
+            .iter()
+            .map(|r| copper_core::frontend_ir::AssumedRange {
+                span: capture_source_span(r),
+                start: r.start.as_deref().map(|e| quote::ToTokens::to_token_stream(e).to_string()).unwrap_or_default(),
+                end: r.end.as_deref().map(|e| quote::ToTokens::to_token_stream(e).to_string()).unwrap_or_default(),
+                inclusive: matches!(r.limits, syn::RangeLimits::Closed(_)),
+            })
+            .collect(),
         span: capture_source_span(design_fn),
     })
 }

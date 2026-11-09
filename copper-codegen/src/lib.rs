@@ -398,6 +398,7 @@ fn vlir_for_target(
     let fir = checked_fir_for_target(target, prepared)?;
     let mut vlir = lower_fir_to_vlir(&fir, &prepared.hardware_fns, &prepared.registry)?;
     vlir.width_checks = width_checks::width_checks(target, &fir.file_const_source).0;
+    vlir.width_checks.extend(width_checks::generic_range_checks(&fir)?);
     Ok(vlir)
 }
 
@@ -423,6 +424,7 @@ pub fn lower_source_module(src: &str, module: &str) -> Result<LoweredModule, Str
     let shir = lower_to_shir(&chir).map_err(|e| format!("{e}"))?;
     let mut vlir = lower_to_vlir(&shir).map_err(|e| format!("{e}"))?;
     vlir.width_checks = width_checks::width_checks(target, &fir.file_const_source).0;
+    vlir.width_checks.extend(width_checks::generic_range_checks(&fir)?);
     let sv = emit_verilog(&vlir, &EmitConfig::default());
     Ok(LoweredModule { fir, chir, shir, sv })
 }
@@ -493,6 +495,12 @@ fn checked_fir_for_target(
                 };
                 known.insert(copper_analysis::range_key(r), empty);
             }
+        }
+        // D-30: a const-generic range R3 depends on is taken as non-empty, as R3 takes it;
+        // the lowering treats it so and the emitted module checks it per instance
+        // (`FrontendModuleIR::assumed_nonempty_ranges`, `generic_range_checks`).
+        for r in copper_analysis::generic_ticking_for_ranges(target) {
+            known.insert(copper_analysis::range_key(&r), false);
         }
         if ranges.iter().any(|r| !known.contains_key(&copper_analysis::range_key(r))) {
             for set in copper_analysis::empty_range_dependencies(target) {

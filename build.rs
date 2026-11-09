@@ -121,6 +121,14 @@ const PARAMS: &[(&str, &[(&str, i64)])] = &[
     // a value that is not 0, so `initial n = 8'(START)` is visibly the parameter.
     ("const_generic_init", &[("START", 5)]),
     ("det_for", &[("N", 3)]),
+    // D-30 (MEASUREMENTS §AF): ticking `for`s over a range bounded by a const generic, R3's
+    // verdict depending on it — not 1, so a range lowered as one iteration too few or many shows.
+    ("grn_only_boundary", &[("W", 3)]),
+    ("grn_then_wait", &[("W", 2)]),
+    ("grn_handwritten", &[("W", 2)]),
+    ("grn_inner_ends_wait", &[("W", 2)]),
+    ("grn_outer_ends_wait", &[("W", 3)]),
+    ("grn_two_generic", &[("W", 2), ("V", 3)]),
     ("mux", &[("WIDTH_P", 8), ("ELS_P", 4), ("LG_ELS_LP", 2)]),
     ("priority_encode", &[("N", 8), ("N_LOG", 3)]),
     ("ripple_carry_adder", &[("N", 8)]),

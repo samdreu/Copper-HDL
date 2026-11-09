@@ -2279,6 +2279,15 @@ pub const NESTED_EXIT_MESSAGE: &str = "this loop's only clock boundary is a nest
     enclosing loop a `clk.tick().await` of its own, or make the nested loop one that always ticks \
     (a `for` over a constant range, whose body runs before any exit test)";
 
+/// D-30's per-instance check (2026-11-09, MEASUREMENTS §AF): a ticking `for` over a range
+/// bounded by a const generic that R3 takes as non-empty ([`assumed_nonempty_generic_ranges`]),
+/// at an instance whose range is empty. The macro's inline `const { assert!(..) }` (rustc, at
+/// monomorphization) and the transpiler's elaboration-time `$error` carry this text.
+pub const GENERIC_EMPTY_RANGE_MESSAGE: &str = "this instance's const generics make a ticking `for`'s \
+    range empty, and the module's only clock boundary on some path is that `for` — the loop would \
+    return to its top in zero time (SPEC I.8.4(b), D-30). Instantiate the module with a non-empty \
+    range, or give the enclosing loop a `clk.tick().await` of its own";
+
 type RangeOracle = Box<dyn Fn(&syn::ExprRange) -> Option<bool>>;
 
 thread_local! {
@@ -2320,6 +2329,50 @@ pub fn range_key(r: &syn::ExprRange) -> String {
 /// source order. Both front-ends decide exactly these: the transpiler through
 /// `ConstEnv`, the macro through rustc.
 pub fn constant_ticking_for_ranges(f: &ItemFn) -> Vec<syn::ExprRange> {
+    ticking_for_ranges(f, false)
+}
+
+/// The ranges of `f`'s tick-bearing counted `for`s whose bounds have the shape of
+/// [`constant_ticking_for_ranges`] but name at least one of `f`'s const generics
+/// (`0..W`, `0..(W + 1)`, `K..W`): constant per instance, unknown to the transpiler's
+/// one parametric module and to a `const _` item (D-30, SPEC I.8.4(b)). Distinct by
+/// [`range_key`], in source order.
+pub fn generic_ticking_for_ranges(f: &ItemFn) -> Vec<syn::ExprRange> {
+    ticking_for_ranges(f, true)
+}
+
+/// The const-generic ranges R3's verdict depends on (D-30, 2026-11-09, MEASUREMENTS §AF):
+/// each range of [`generic_ticking_for_ranges`] that belongs to a minimal set of
+/// [`empty_range_dependencies`] — whose emptiness, with the others of its set, would make
+/// R3 fail. R3 takes each as non-empty (II.2.2); both front-ends then hold the hypothesis
+/// per instance, each range ON ITS OWN (a set of several is over-checked, recorded): the
+/// macro with an inline `const { assert!(..) }` rustc evaluates at monomorphization, the
+/// transpiler by lowering the `for` as non-empty and stating the check in the emitted
+/// module (an elaboration-time `$error`). Computed with every constant range a variable
+/// too — the macro's view — so the two front-ends choose the same ranges.
+pub fn assumed_nonempty_generic_ranges(f: &ItemFn) -> Vec<syn::ExprRange> {
+    let generic: Vec<syn::ExprRange> = generic_ticking_for_ranges(f);
+    if generic.is_empty() {
+        return Vec::new();
+    }
+    let gkeys: BTreeSet<String> = generic.iter().map(range_key).collect();
+    let mut out: Vec<syn::ExprRange> = Vec::new();
+    for set in empty_range_dependencies(f) {
+        for r in set {
+            let k = range_key(&r);
+            if gkeys.contains(&k) && !out.iter().any(|o| range_key(o) == k) {
+                out.push(r);
+            }
+        }
+    }
+    let order: Vec<String> = generic.iter().map(range_key).collect();
+    out.sort_by_key(|r| order.iter().position(|k| *k == range_key(r)));
+    out
+}
+
+/// [`constant_ticking_for_ranges`] (`generics` false: no const generic may be named) or
+/// [`generic_ticking_for_ranges`] (`generics` true: at least one must be).
+fn ticking_for_ranges(f: &ItemFn, generics: bool) -> Vec<syn::ExprRange> {
     struct Binders(BTreeSet<String>);
     impl<'a> Visit<'a> for Binders {
         fn visit_pat_ident(&mut self, p: &'a syn::PatIdent) {
@@ -2330,12 +2383,22 @@ pub fn constant_ticking_for_ranges(f: &ItemFn) -> Vec<syn::ExprRange> {
     let mut b = Binders(BTreeSet::new());
     b.visit_signature(&f.sig);
     b.visit_block(&f.block);
+    let mut cgen: BTreeSet<String> = BTreeSet::new();
     for g in &f.sig.generics.params {
         if let syn::GenericParam::Const(c) = g {
-            b.0.insert(c.ident.to_string());
+            cgen.insert(c.ident.to_string());
         }
     }
-    fn shape(e: &Expr, binders: &BTreeSet<String>, named: &mut bool) -> bool {
+    if !generics {
+        b.0.extend(cgen.iter().cloned());
+    } else {
+        for g in &cgen {
+            b.0.remove(g);
+        }
+    }
+    // `named`: a path names something (a const item, `T::K`, a generic); `generic`: a const
+    // generic among them.
+    fn shape(e: &Expr, binders: &BTreeSet<String>, cgen: &BTreeSet<String>, named: &mut bool, generic: &mut bool) -> bool {
         match e {
             Expr::Lit(l) => matches!(l.lit, syn::Lit::Int(_)),
             Expr::Path(p) => {
@@ -2345,19 +2408,26 @@ pub fn constant_ticking_for_ranges(f: &ItemFn) -> Vec<syn::ExprRange> {
                 if p.path.segments.len() == 1 && binders.contains(&p.path.segments[0].ident.to_string()) {
                     return false;
                 }
+                if p.path.segments.len() == 1 && cgen.contains(&p.path.segments[0].ident.to_string()) {
+                    *generic = true;
+                }
                 *named = true;
                 true
             }
-            Expr::Paren(p) => shape(&p.expr, binders, named),
-            Expr::Group(g) => shape(&g.expr, binders, named),
-            Expr::Cast(c) => shape(&c.expr, binders, named),
-            Expr::Unary(u) => matches!(u.op, syn::UnOp::Neg(_)) && shape(&u.expr, binders, named),
-            Expr::Binary(x) => shape(&x.left, binders, named) && shape(&x.right, binders, named),
+            Expr::Paren(p) => shape(&p.expr, binders, cgen, named, generic),
+            Expr::Group(g) => shape(&g.expr, binders, cgen, named, generic),
+            Expr::Cast(c) => shape(&c.expr, binders, cgen, named, generic),
+            Expr::Unary(u) => matches!(u.op, syn::UnOp::Neg(_)) && shape(&u.expr, binders, cgen, named, generic),
+            Expr::Binary(x) => {
+                shape(&x.left, binders, cgen, named, generic) && shape(&x.right, binders, cgen, named, generic)
+            }
             _ => false,
         }
     }
     struct V<'b> {
         binders: &'b BTreeSet<String>,
+        cgen: &'b BTreeSet<String>,
+        generics: bool,
         out: Vec<syn::ExprRange>,
     }
     impl<'a> Visit<'a> for V<'_> {
@@ -2365,10 +2435,11 @@ pub fn constant_ticking_for_ranges(f: &ItemFn) -> Vec<syn::ExprRange> {
             if fl.body.stmts.iter().any(stmt_contains_tick) {
                 if let Expr::Range(r) = &*fl.expr {
                     if let (Some(a), Some(b)) = (&r.start, &r.end) {
-                        let mut named = false;
-                        if shape(a, self.binders, &mut named)
-                            && shape(b, self.binders, &mut named)
+                        let (mut named, mut generic) = (false, false);
+                        if shape(a, self.binders, self.cgen, &mut named, &mut generic)
+                            && shape(b, self.binders, self.cgen, &mut named, &mut generic)
                             && named
+                            && generic == self.generics
                             && !self.out.iter().any(|o| range_key(o) == range_key(r))
                         {
                             self.out.push(r.clone());
@@ -2380,7 +2451,7 @@ pub fn constant_ticking_for_ranges(f: &ItemFn) -> Vec<syn::ExprRange> {
         }
         fn visit_item(&mut self, _: &'a syn::Item) {}
     }
-    let mut v = V { binders: &b.0, out: Vec::new() };
+    let mut v = V { binders: &b.0, cgen: &cgen, generics, out: Vec::new() };
     v.visit_block(&f.block);
     v.out
 }
@@ -2398,8 +2469,12 @@ pub fn constant_ticking_for_ranges(f: &ItemFn) -> Vec<syn::ExprRange> {
 /// than 10 ranges: only the singletons and the full set are asked (an under-approximation,
 /// recorded; the corpus maximum is far below).
 pub fn constant_empty_range_assertions(f: &ItemFn) -> Vec<(Span, TokenStream)> {
+    let gkeys: BTreeSet<String> = generic_ticking_for_ranges(f).iter().map(range_key).collect();
     empty_range_dependencies(f)
         .into_iter()
+        // A set naming a const generic is held per instance instead (D-30,
+        // [`assumed_nonempty_generic_ranges`]): a `const _` item cannot name a generic.
+        .filter(|set| !set.iter().any(|r| gkeys.contains(&range_key(r))))
         .map(|set| {
             let span = set[0].span();
             let conds: Vec<String> = set
@@ -2424,7 +2499,10 @@ pub fn constant_empty_range_assertions(f: &ItemFn) -> Vec<(Span, TokenStream)> {
 /// R3 fail (see [`constant_empty_range_assertions`]); empty when no assumption about
 /// emptiness changes R3's verdict.
 pub fn empty_range_dependencies(f: &ItemFn) -> Vec<Vec<syn::ExprRange>> {
-    let ranges = constant_ticking_for_ranges(f);
+    // D-30: the const-generic ranges are variables too (taken as non-empty when not in
+    // the set, as before); a constant-only minimal set is unchanged by them.
+    let mut ranges = constant_ticking_for_ranges(f);
+    ranges.extend(generic_ticking_for_ranges(f));
     if ranges.is_empty() {
         return Vec::new();
     }

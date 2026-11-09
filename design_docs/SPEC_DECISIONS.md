@@ -3943,3 +3943,35 @@ range: R3's message, both). sv-baseline against e71f7d5: the 4 predicted modules
 test), all sweep-agree. Not settled by D-29: a range bounded by a const generic, which R3 takes as non-empty
 and `ConstEnv` cannot prove — measured a pre-existing break wider than this shape, line
 `II.3 found ticking-for-generic-range`, decision packet MEASUREMENTS §AE.5.
+
+### D-30 — A const-generic range R3 takes as non-empty is held per instance, in both front-ends   (2026-11-09)
+Clause: SPEC I.8.4(b), II.2.2 (R3's direction at a const-generic bound), II.1.3, and III.3.4's line
+`II.3 found ticking-for-generic-range` (CLOSED).
+Question: a tick-bearing `for` over a range bounded by a const generic (`0..W`), where R3's verdict depends on
+its being non-empty — the module loop's only boundary (`loop { q.write(..); for _ in 0..W { tick } }`), or
+followed by a skippable wait. R3 takes it as non-empty in both front-ends; the macro admitted it with no check
+(a `W = 0` instance livelocks the simulator), the transpiler refused it (it cannot prove `0..W` non-empty for
+its one parametric module). Admit, or refuse? Packet: `review/MEASUREMENTS.md` §AE.5.
+Docs said: I.8.4(b)/II.2.2 — an unfolded constant-shaped range is taken as non-empty ("under", recorded);
+D-29 — a range *proven* non-empty by `ConstEnv` ticks on every path, a run-time range stays possibly-empty.
+Code did (c4fd345): as in the question; pre-existing (measured on e71f7d5); corpus 0.
+Anchor: none — decided.
+Options: (a) admit in both, the hypothesis checked per instance (a monomorphization-time `const` assertion in the
+macro, an elaboration-time check in the emitted SV); (b) refuse in both (R3 treats a generic range as
+possibly-empty); (c) a fourth named parity exception.
+Recommendation: (a).
+Decision: (a) — the user, 2026-11-09.
+Realized (MEASUREMENTS §AF): the ranges are `copper_analysis::assumed_nonempty_generic_ranges` — each
+const-generic range in a minimal set of `empty_range_dependencies` (constants and generics both variables, the
+macro's view, so the two front-ends choose the same ranges); each is checked ON ITS OWN, so a set of several is
+over-checked (recorded: `grn_two_generic` at `W = 0, V = 3` is refused though R3 would hold through `0..V`). The
+macro places `const { ::core::assert!(<a < b>, GENERIC_EMPTY_RANGE_MESSAGE) };` before the `for` (rustc
+evaluates it at monomorphization: E0080; `cargo check` and trybuild never instantiate, so the pin is a
+`compile_fail,E0080` doctest in `src/lib.rs`, measured to fail when the instance is made non-empty). The
+transpiler records the ranges at capture (`FrontendModuleIR::assumed_nonempty_ranges`), lowers each `for` as
+non-empty and emits `if (!(a < b)) begin … $error(GENERIC_EMPTY_RANGE_MESSAGE); end`
+(`width_checks::generic_range_checks`; the generics as SV parameters, other names by `ConstEnv` value; a bound it
+cannot state refuses the module). Measured: Verilator 5.044 (USERERROR, fatal under the harness's `-Wall`) and
+Yosys refuse `W = 0`; Icarus 12 accepts it silently. Fixture `tests/fixtures/generic_range_dut.rs` (6 modules),
+`tests/generic_range_instance_d30.rs`. sv-baseline: 0 corpus modules changed. With it the battery's last
+parity break is closed and II.1.3 is CLOSED (§AF.4): ledger 234 lines, 0 OPEN.

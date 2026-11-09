@@ -96,6 +96,12 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     "tfl_break_inclusive_two",
     "tfl_handwritten",
     "tfl_outer_runtime",
+    // Added 2026-11-09 with D-30 (MEASUREMENTS §AF): counted `for`s over a const-generic range
+    // R3 depends on, followed by a wait, in a hand-written loop, or two in one module loop — the
+    // extraction route, as `imx_*`'s.
+    "grn_handwritten",
+    "grn_then_wait",
+    "grn_two_generic",
     // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
     // counted `for` over the data bits, each with its tick inside) and the one-tick
     // handshake (two `while` waits). Every tick sits inside a loop, so both extract

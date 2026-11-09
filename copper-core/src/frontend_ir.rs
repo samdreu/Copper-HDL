@@ -64,8 +64,24 @@ pub struct FrontendModuleIR {
     pub file_impls: Vec<FrontendImplIR>,
     pub file_traits: Vec<FrontendTraitIR>,
 
+    /// The ticking counted `for` ranges bounded by a const generic that R3 takes as
+    /// non-empty (D-30, `copper_analysis::assumed_nonempty_generic_ranges`, computed at
+    /// capture from the `ItemFn`): the lowering treats each as non-empty and the emitted
+    /// module states the per-instance check.
+    pub assumed_nonempty_ranges: Vec<AssumedRange>,
+
     /// span for full module/function declaration
     pub span: SourceSpan,
+}
+
+/// One range of [`FrontendModuleIR::assumed_nonempty_ranges`]: its span (the range
+/// expression's, as `ExprRange::span`) and its bounds as source text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssumedRange {
+    pub span: SourceSpan,
+    pub start: String,
+    pub end: String,
+    pub inclusive: bool,
 }
 
 /// A free function or a method body captured from file scope, source-shaped.
