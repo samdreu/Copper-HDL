@@ -702,11 +702,19 @@ fn for_bounds(f: &syn::ExprForLoop, consts: &dyn Fn(&str) -> Option<i128>) -> Fo
     if !matches!(r.limits, syn::RangeLimits::HalfOpen(_)) {
         return ForBounds::Unknown;
     }
+    // A path of several segments (`T::K`, an associated const) is looked up by its full name,
+    // as `ConstEnv` keys it (the transpiler folds it the same way; MEASUREMENTS §Z.3).
+    let eval = |e: &Expr| match e {
+        Expr::Path(p) if p.path.segments.len() > 1 => {
+            consts(&p.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"))
+        }
+        other => copper_analysis::consts::eval_syn(other, consts),
+    };
     let start = match &r.start {
-        Some(s) => copper_analysis::consts::eval_syn(s, consts),
+        Some(s) => eval(s),
         None => Some(0),
     };
-    let end = r.end.as_ref().and_then(|e| copper_analysis::consts::eval_syn(e, consts));
+    let end = r.end.as_ref().and_then(|e| eval(e));
     match (start, end) {
         (Some(a), Some(b)) if a >= b => ForBounds::StaticEmpty,
         (Some(_), Some(_)) => ForBounds::StaticNonEmpty,
@@ -1419,6 +1427,33 @@ fn file_consts(file: &syn::File) -> copper_analysis::consts::ConstEnv {
     copper_analysis::consts::ConstEnv::from_items(texts.iter().map(|s| s.as_str()))
 }
 
+/// The file's constants with `f`'s body `const` items (any depth) added; `None` when the body
+/// declares none.
+fn body_consts_env(file: &syn::File, f: &syn::ItemFn) -> Option<copper_analysis::consts::ConstEnv> {
+    use quote::ToTokens;
+    use syn::visit::Visit;
+    struct V(Vec<String>);
+    impl<'a> Visit<'a> for V {
+        fn visit_item_const(&mut self, c: &'a syn::ItemConst) {
+            self.0.push(c.to_token_stream().to_string());
+        }
+    }
+    let mut v = V(Vec::new());
+    v.visit_block(&f.block);
+    if v.0.is_empty() {
+        return None;
+    }
+    let mut texts: Vec<String> = file
+        .items
+        .iter()
+        .filter(|i| matches!(i, syn::Item::Const(_) | syn::Item::Impl(_) | syn::Item::Fn(_)))
+        .filter(|i| !matches!(i, syn::Item::Fn(f) if copper_ref::module::hardware_mode(f).is_some()))
+        .map(|i| i.to_token_stream().to_string())
+        .collect();
+    texts.extend(v.0);
+    Some(copper_analysis::consts::ConstEnv::from_items(texts.iter().map(|s| s.as_str())))
+}
+
 #[test]
 fn the_projection_relation_holds_on_the_corpus() {
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -1452,8 +1487,12 @@ fn the_projection_relation_holds_on_the_corpus() {
                 }
                 _ => {}
             }
+            // The module's own `const` items, at any depth, join the file's (both front-ends
+            // read them; MEASUREMENTS §Z.3).
+            let fenv = body_consts_env(&file, f);
+            let flookup = |n: &str| fenv.as_ref().map_or_else(|| lookup(n), |e| e.get(n));
             let listed = UNCOVERED.iter().find(|(m, _)| *m == key);
-            match relate(&text, f, &lookup) {
+            match relate(&text, f, &flookup) {
                 Ok(rep) => {
                     if listed.is_some() {
                         failures.push(format!("{key}: listed in UNCOVERED but related — delete the row"));

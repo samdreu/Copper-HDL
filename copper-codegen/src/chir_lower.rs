@@ -4365,13 +4365,25 @@ fn lower_expr_stmt(
                 {
                     let tmp = format!("{target}__lit{}", ctx.for_temps);
                     ctx.for_temps += 1;
+                    // A constructor call inlines to the helper's literal, whose field spans are
+                    // the helper body's; the temp's wires belong to this statement.
+                    let rhs = match (assign.right.as_ref(), resolve_struct_literal(&assign.right, ctx)?) {
+                        (ExprType::Call(_), Some(mut lit)) => {
+                            lit.span = span;
+                            for f in &mut lit.fields {
+                                f.span = span;
+                            }
+                            ExprType::Struct(lit)
+                        }
+                        (other, _) => other.clone(),
+                    };
                     let decl = RawStmt {
                         order: 0,
                         kind: RawStmtKind::Local(copper_core::frontend_ir::LocalStmt {
                             is_mut: false,
                             ty: None,
                             name: tmp.clone(),
-                            init: Some((*assign.right).clone()),
+                            init: Some(rhs),
                             attrs: Vec::new(),
                             span,
                         }),
