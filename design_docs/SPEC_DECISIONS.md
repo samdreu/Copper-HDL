@@ -3910,3 +3910,36 @@ failed on 5aaa6ca (and the 7th was R23-refused as written), 14/14 cases pass aft
 itself changed no corpus module (a range type below 32 bits keeps its 32-bit counter and its `c > e`);
 the 6 modules sv-baseline shows changed are the loop variable's typing (MEASUREMENTS §AB.2), all
 sweep-agree. Ledger after: 226 lines, 226 CLOSED, 0 OPEN (§AB.7).
+
+### D-29 — A counted `for` over a range non-empty by its constants ticks on every path; the shape ending in a wait is lowered   (2026-11-09)
+Clause: SPEC I.8.4(b) (realization), I.8.5 (`D` for a body ending in a nested loop), II.1.3, and III.3.4's
+lines `II.3 found ticking-for-ends-in-loop` (CLOSED) and `II.3 found ticking-for-generic-range` (OPEN, found
+realizing it).
+Question: a nested tick-bearing loop (a counted `for`, a hand-written `loop`, a `while`) whose body has no bare
+tick and ends in a skippable wait, R3 holding through an earlier inner `for` that always ticks — the macro admits
+it, the transpiler refused it (MEASUREMENTS §AD.5). Lower it, or refuse it in both front-ends?
+Docs said: I.8.2(b) admits a body ending in a loop that ends at a tick; I.8.4(b) makes a range non-empty by its
+constants a boundary (R3, both front-ends, since §V.3); I.8.5's `D` is defined for any `s` ending at its tick.
+Code did (e71f7d5): `expand_counted_for` declined a body ending in a loop (no tick to hoist); with `D` unhoisted
+(tried in §AD.5, reverted) `splice_zero_time_gotos` found a zero-time cycle through the inner `for`'s
+empty-range exit — structural, where R3 knows the exit is never taken.
+Anchor: none — decided.
+Options: (a) lower it: the transpiler's realization learns what R3 knows (a `for` over a range proven non-empty
+by `ConstEnv` ticks on every path), a run-time range stays possibly-empty and the shape refused by both with
+one message; (b) refuse it in both front-ends.
+Recommendation: (a).
+Decision: (a) — the user, 2026-11-09.
+Realized (MEASUREMENTS §AE): R3 already decided the shape this way in both front-ends — the same evaluation as
+R5 and I.8.4's `empty_range_dependencies` (literals in the shared analysis, `ConstEnv` as the transpiler's
+oracle, a rustc `const _: () = assert!(..)` per dependency set in the macro), so no front-end rule changed. The
+realization changed: a counted `for` whose body ends in a nested loop takes `D` with no hoisted tick, its exit
+test after the increment over a range `ConstEnv` proves non-empty (before the body otherwise); the unhoisted
+form of §AD.2 drops its entry test over such a range; the flattener's own copy of the shape rule admits
+tick-free statements after a body's last nested loop (the source is gated in both front-ends by
+`check_nested_loop_shape`); the projection test's source walker takes a `for`'s Last/More decision at a back
+edge reached without a tick. Fixture `tests/fixtures/ticking_for_ends_in_loop_dut.rs` (8 modules, every one on
+the extraction route — a nested ticking loop always is); ui `fail/runtime_for_ends_in_loop` (an inner run-time
+range: R3's message, both). sv-baseline against e71f7d5: the 4 predicted modules changed (the dropped entry
+test), all sweep-agree. Not settled by D-29: a range bounded by a const generic, which R3 takes as non-empty
+and `ConstEnv` cannot prove — measured a pre-existing break wider than this shape, line
+`II.3 found ticking-for-generic-range`, decision packet MEASUREMENTS §AE.5.

@@ -382,12 +382,11 @@ fn descend_counted_expr(e: &mut ExprType, next_counter: &mut usize, consts: &Con
 ///
 /// Declined shapes:
 /// * a header that is not a `start..end` or `start..=end` range;
-/// * a body whose last statement is not `clk.tick().await`. The tick has to be
-///   last for the same reason it does in a `loop` (see
-///   `body_ends_at_a_clock_boundary`), and after the recursive descent above an
-///   inner counted `for` already ends in one — so what is left here is a body
-///   ending in a hand-written nested loop, whose own boundary this rewrite has no
-///   tick to hoist.
+/// * a body whose last statement is neither `clk.tick().await` nor a nested
+///   tick-bearing loop (the shape rule, I.8.2(b), refuses those in both front-ends
+///   first). A body ending in a nested loop — a hand-written wait, after the
+///   recursive descent above never an inner counted `for`, which ends in its hoisted
+///   tick — has no tick to hoist and takes I.8.5's `D` as written (D-29).
 fn expand_counted_for(
     f: &copper_core::frontend_ir::ExprForLoop,
     order: usize,
@@ -412,10 +411,26 @@ fn expand_counted_for(
     };
     let exit_op = if inclusive { ">" } else { ">=" };
 
-    // The boundary has to be the body's last statement, so that hoisting it out
-    // leaves a well-formed loop behind.
-    let boundary = f.body.last().filter(|s| is_tick_stmt(s))?.clone();
-    let work = &f.body[..f.body.len() - 1];
+    // The boundary is the body's last statement: a bare tick, which is hoisted out
+    // (below), or a nested tick-bearing loop the body ends in (I.8.2(b)), whose own
+    // boundary ends each iteration — then there is no tick to hoist, and the `for` takes
+    // I.8.5's `D` as written (D-29, line `II.3 found ticking-for-ends-in-loop`, MEASUREMENTS
+    // §AE): `loop { <exit test>; B; c = c + 1 }`, or, over a range non-empty by its
+    // constants, `loop { B; c = c + 1; if <passed> { break } }` — the exit test at entry is
+    // never taken there, and dropping it leaves the flattener's zero-time cycle test
+    // (`splice_zero_time_gotos`) no path through an exit R3 knows is dead.
+    let last = f.body.last()?;
+    let boundary: Option<RawStmt> = if is_tick_stmt(last) {
+        Some(last.clone())
+    } else if as_nested_loop(last).is_some() && stmt_contains_tick(last) {
+        None
+    } else {
+        return None;
+    };
+    let work = match &boundary {
+        Some(_) => &f.body[..f.body.len() - 1],
+        None => &f.body[..],
+    };
     // A `continue` of this `for` (see `unflattenable_in_expr`): declined.
     if stmts_continue_enclosing_loop(work) {
         return None;
@@ -659,7 +674,25 @@ fn expand_counted_for(
     // not a bare tick, and was always lowered; it keeps its form.
     let unhoisted = followed_in_nested_body && statically_nonempty && !stmts_break_enclosing_loop(work);
 
-    let mut loop_body = vec![exit_test()];
+    // D-29: a body ending in a nested loop — `D` with no hoisted tick (see `boundary`).
+    let Some(boundary) = boundary else {
+        let mut loop_body = Vec::new();
+        if !statically_nonempty {
+            loop_body.push(exit_test());
+        }
+        loop_body.extend(work.iter().cloned());
+        loop_body.push(incr);
+        if statically_nonempty {
+            loop_body.push(exit_test());
+        }
+        return Some(for_stmts(snapshots, var, counter_ty, start, end, done_flag, loop_body, None, order, span));
+    };
+
+    // Over a range non-empty by its constants, the unhoisted form's exit test at the top is
+    // never taken (the last iteration leaves through `if <passed> { tick; break }`); it is
+    // dropped (D-29), so no zero-time path runs through it (the hoisted forms end in a bare
+    // or guarded tick after the loop and keep it).
+    let mut loop_body = if unhoisted { Vec::new() } else { vec![exit_test()] };
     loop_body.extend(work.iter().cloned());
     loop_body.push(incr);
     if unhoisted {
@@ -757,6 +790,25 @@ fn expand_counted_for(
         )
     };
 
+    let hoisted = (!unhoisted).then_some(hoisted);
+    Some(for_stmts(snapshots, var, counter_ty, start, end, done_flag, loop_body, hoisted, order, span))
+}
+
+/// The statements of an expanded counted `for`: the bound snapshots, the counter (and
+/// done flag), the loop, and the hoisted tick if any.
+#[allow(clippy::too_many_arguments)]
+fn for_stmts(
+    snapshots: Vec<RawStmt>,
+    var: String,
+    counter_ty: String,
+    start: ExprType,
+    end: ExprType,
+    done_flag: Option<String>,
+    loop_body: Vec<RawStmt>,
+    hoisted: Option<RawStmt>,
+    order: usize,
+    span: SourceSpan,
+) -> Vec<RawStmt> {
     let decl = RawStmt {
         order,
         kind: RawStmtKind::Local(LocalStmt {
@@ -798,8 +850,7 @@ fn expand_counted_for(
         text: String::new(),
         span,
     });
-    let hoisted = (!unhoisted).then_some(hoisted);
-    Some(snapshots.into_iter().chain([decl]).chain(done_decl).chain([loop_stmt]).chain(hoisted).collect())
+    snapshots.into_iter().chain([decl]).chain(done_decl).chain([loop_stmt]).chain(hoisted).collect()
 }
 
 /// What this pass knows is constant: the file's integer consts by value
@@ -2172,9 +2223,15 @@ pub(crate) fn body_ends_at_a_clock_boundary(body: &[RawStmt]) -> bool {
         // Ticks that live only inside `if`/`match` arms of the body (`loop { if c {
         // tick; } else { tick; } }`): admitted since Phase C step 5 (II.3 (b),
         // MEASUREMENTS §J.5) — the lowering returns to the head in zero time.
+        // Tick-free statements may follow that loop: the counted `for` whose body ends in a
+        // nested loop is I.8.5's `D` with its increment and exit test after the body (D-29,
+        // `expand_counted_for`). They run in the resumption that leaves the inner loop, its
+        // `break` continuation, before the zero-time return to the head. The source never
+        // has this shape (`check_nested_loop_shape`, both front-ends, runs on the source).
         None => {
-            body.last()
-                .and_then(as_nested_loop)
+            body.iter()
+                .rposition(stmt_contains_tick)
+                .and_then(|k| as_nested_loop(&body[k]))
                 .is_some_and(|inner| body_ends_at_a_clock_boundary(&inner.body))
                 || ticks_only_in_arms(body)
         }

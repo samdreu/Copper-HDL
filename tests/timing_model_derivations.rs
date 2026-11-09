@@ -90,6 +90,12 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     "fnw_for_bound_wrap",
     "ntf_in_loop_while",
     "ntf_then_for_then_wait",
+    // Added 2026-11-09 with D-29 (line `II.3 found ticking-for-ends-in-loop`, MEASUREMENTS
+    // §AE): a counted `for` (or hand-written `loop`) whose body ends in a wait, an inner `for`
+    // ticking first — nested ticking loops on the extraction route, as the `ntf_*` ones.
+    "tfl_break_inclusive_two",
+    "tfl_handwritten",
+    "tfl_outer_runtime",
     // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
     // counted `for` over the data bits, each with its tick inside) and the one-tick
     // handshake (two `while` waits). Every tick sits inside a loop, so both extract

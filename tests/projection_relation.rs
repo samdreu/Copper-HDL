@@ -501,11 +501,17 @@ impl<'a> Src<'a> {
                     }
                     stack.push(Frame::Seq { stmts: body, next: 0, prefix });
                 }
+                // The iteration ended at a nested loop's exit, not at a tick (a body ending in a
+                // wait, D-29): Rust's test runs here, in this resumption — `Last` leaves the
+                // `for`, `More` re-enters its body. The emitted `D` tests after its increment.
                 None => {
-                    return Err(format!(
-                        "the counted `for` at {} reached its back edge without a tick ending the iteration",
-                        fmt_pos(pos)
-                    ))
+                    let mut exit = stack.clone();
+                    exit.pop();
+                    let mut el = labs.clone();
+                    push_lab(&mut el, Lab::Count(pos, Cnt::Last));
+                    work.push((exit, el, steps));
+                    push_lab(labs, Lab::Count(pos, Cnt::More));
+                    stack.push(Frame::Seq { stmts: body, next: 0, prefix });
                 }
             },
             _ => unreachable!(),
