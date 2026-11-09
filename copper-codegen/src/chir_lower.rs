@@ -2193,6 +2193,10 @@ fn lower_seq_body(
             if compact.starts_with("Out<") { Some(p.name.clone()) } else { None }
         })
         .collect();
+    ctx.regout_ports = fir.signature.params.iter()
+        .filter(|p| compact_type(&p.ty.ty_text).starts_with("RegOut<"))
+        .map(|p| p.name.clone())
+        .collect();
     ctx.symbols = symbols;
     ctx.enums = enums;
     ctx.fns = build_fn_registry(fir);
@@ -2713,6 +2717,9 @@ pub(crate) struct LowerCtx<'a> {
     clock_name: String,
     /// Names of `Out<T,D>` ports — used to validate `.write()` targets.
     output_ports: std::collections::HashSet<String>,
+    /// Names of `RegOut<T,D>` ports (a clocked body's outputs) — a `for` that writes one
+    /// accumulates the write into a temp (line `II.3 found port-write-in-for`).
+    regout_ports: std::collections::HashSet<String>,
     /// In-scope names (ports, wires, registers) → type, for width inference.
     symbols: SymbolTable,
     /// Enum encodings visible to this module.
@@ -2787,6 +2794,7 @@ impl<'a> LowerCtx<'a> {
             registry,
             clock_name: String::new(),
             output_ports: std::collections::HashSet::new(),
+            regout_ports: std::collections::HashSet::new(),
             symbols: SymbolTable::new(),
             enums: EnumRegistry::new(),
             bindings: std::collections::HashMap::new(),
@@ -3656,6 +3664,17 @@ fn match_arms_as_if_chain(
     Ok(Some(rest.unwrap_or_default()))
 }
 
+/// `p.write(e)` with `p` one of `ports`: `Some(p)`.
+fn regout_write_target(e: &ExprType, ports: &std::collections::HashSet<String>) -> Option<String> {
+    let ExprType::MethodCall(mc) = e else { return None };
+    if mc.method != "write" || mc.args.len() != 1 {
+        return None;
+    }
+    let ExprType::Path(p) = mc.receiver.as_ref() else { return None };
+    let name = compact_ident(&p.path_text);
+    ports.contains(&name).then_some(name)
+}
+
 /// `s.x` (or `s.x[i]`) with `s` a struct local, as the place of its field's net (`s_x`,
 /// `s_x[i]`); `None` for any other place.
 fn struct_field_place(e: &ExprType, ctx: &LowerCtx) -> Option<ExprType> {
@@ -3806,7 +3825,13 @@ fn lower_expr_stmt(
                     suggested_rewrite: None,
                 });
             }
-            let var = f.pat_text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+            let mut var = f.pat_text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+            // A nested `for _` would declare a second SV loop variable `_` hiding the outer one
+            // (Verilator `-Wall` VARHIDDEN; MEASUREMENTS §Z.7): the body never names `_`, so the
+            // inner one takes a name of its depth.
+            if var == "_" && ctx.comb_for_depth > 0 {
+                var = format!("__for_i{}", ctx.comb_for_depth);
+            }
             if !is_ident(&var) {
                 return Err(CHIRLowerError::UnsupportedConstruct {
                     description: format!("unsupported for-loop pattern `{}`; use a simple loop variable", f.pat_text),
@@ -3906,6 +3931,51 @@ fn lower_expr_stmt(
                 for_outer_assigned(&f.body, &var, ctx)
             };
             let mut body_src = f.body.clone();
+            // A `RegOut` written in a clocked `for` (line `II.3 found port-write-in-for`,
+            // MEASUREMENTS §Z.7): I.2.4 unrolls the loop, and the resumption's last write is the
+            // drive (I.6). Each write becomes an assignment to a combinational temp and a flag,
+            //
+            //     for .. { q.write(e) }   ⇒   q__forK = 0; q__forK_w = false;
+            //                                 for .. { q__forK = e; q__forK_w = true; }
+            //                                 if q__forK_w { q.write(q__forK) }
+            //
+            // so the one port write after the loop carries the last iteration's value, and an
+            // iteration (or a run of zero) that writes nothing leaves the port as it was.
+            let mut port_back: Vec<(String, String, String)> = Vec::new();
+            if !ctx.clock_name.is_empty() {
+                let mut written: Vec<String> = Vec::new();
+                crate::desugar::visit_stmts(&mut body_src.clone(), &mut |e| {
+                    if let Some(p) = regout_write_target(e, &ctx.regout_ports) {
+                        if !written.contains(&p) {
+                            written.push(p);
+                        }
+                    }
+                });
+                for p in written {
+                    let Some(pty) = ctx.symbols.get(&p).cloned() else { continue };
+                    let tmp = format!("{p}__for{}", ctx.for_temps);
+                    let flag = format!("{tmp}_w");
+                    ctx.for_temps += 1;
+                    ctx.symbols.insert(tmp.clone(), pty.clone());
+                    ctx.symbols.insert(flag.clone(), CHIRType::Bool);
+                    out.push(CHIRStmt::Wire { name: tmp.clone(), ty: pty.clone(), value: CHIRExpr::Lit(CHIRLit { ty: pty, value: 0 }), span });
+                    out.push(CHIRStmt::Wire { name: flag.clone(), ty: CHIRType::Bool, value: CHIRExpr::Lit(CHIRLit { ty: CHIRType::Bool, value: 0 }), span });
+                    let (pp, tt, ff) = (p.clone(), tmp.clone(), flag.clone());
+                    crate::desugar::visit_stmts(&mut body_src, &mut |e| {
+                        let regs: std::collections::HashSet<String> = [pp.clone()].into_iter().collect();
+                        if regout_write_target(e, &regs).is_some() {
+                            let ExprType::MethodCall(mc) = &*e else { unreachable!() };
+                            let v = mc.args[0].clone();
+                            let lit_true = ExprType::Lit(copper_core::frontend_ir::ExprLit { text: "true".to_string(), span });
+                            *e = ExprType::Block(copper_core::frontend_ir::ExprBlock {
+                                stmts: vec![assign_stmt(&tt, v, span), assign_stmt(&ff, lit_true, span)],
+                                span,
+                            });
+                        }
+                    });
+                    port_back.push((p, tmp, flag));
+                }
+            }
             let mut write_back: Vec<(String, String)> = Vec::new();
             if !temps.is_empty() {
                 let mut subst = std::collections::HashMap::new();
@@ -3962,6 +4032,29 @@ fn lower_expr_stmt(
                     span,
                 );
                 lower_stmt(&back, ctx, out)?;
+            }
+            for (p, tmp, flag) in port_back {
+                let path = |t: &str| ExprType::Path(copper_core::frontend_ir::ExprPath { path_text: t.to_string(), span });
+                let write = ExprType::MethodCall(copper_core::frontend_ir::ExprMethodCall {
+                    receiver: Box::new(path(&p)),
+                    method: "write".to_string(),
+                    args: vec![path(&tmp)],
+                    turbofish: Vec::new(),
+                    span,
+                });
+                let stmt = |e: ExprType| RawStmt {
+                    order: 0,
+                    kind: RawStmtKind::Expr(copper_core::frontend_ir::ExprStmt { expr: e, has_semi: true, span }),
+                    text: String::new(),
+                    span,
+                };
+                let back = ExprType::If(copper_core::frontend_ir::ExprIf {
+                    condition: Box::new(path(&flag)),
+                    then_block: vec![stmt(write)],
+                    else_branch: None,
+                    span,
+                });
+                lower_stmt(&stmt(back), ctx, out)?;
             }
         }
 

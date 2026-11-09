@@ -129,6 +129,8 @@ const PARAMS: &[(&str, &[(&str, i64)])] = &[
     // A register accumulating in a tick-free `for` over a const-generic range (MEASUREMENTS §Y):
     // not 1, so a dropped or single iteration shows.
     ("tfr_generic_bound", &[("N", 5)]),
+    // A `RegOut` written in a tick-free `for` over a const-generic range (MEASUREMENTS §Z.7).
+    ("pwf_generic_bound", &[("N", 3)]),
     ("wide_alu", &[("N", 32)]),
 ];
 

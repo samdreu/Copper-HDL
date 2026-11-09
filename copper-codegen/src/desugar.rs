@@ -373,7 +373,7 @@ fn hoist_assoc_consts(body: &mut [RawStmt], fir: &mut FrontendModuleIR) {
 
 // ── a mutable post-order visitor over every expression of a body ─────────────
 
-fn visit_stmts(stmts: &mut [RawStmt], f: &mut dyn FnMut(&mut ExprType)) {
+pub(crate) fn visit_stmts(stmts: &mut [RawStmt], f: &mut dyn FnMut(&mut ExprType)) {
     for s in stmts {
         match &mut s.kind {
             RawStmtKind::Local(l) => {
