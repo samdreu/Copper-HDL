@@ -38,7 +38,7 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (344, 3 of them skipped with a reason, since 2026-11-09 §AC — 22 modules in one fixture file; 322 after §AB's 19 modules in four fixture files; 303 after §AA's 20 modules in three fixture files; 283 after §Z's 34 modules in five fixture files; 249 after §Y's ten `tfr_*` fixtures; 239 after §X's three `cc_body_*`; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
+`_reference_leg` cases as build.rs generated to run (374, 3 of them skipped with a reason, since 2026-11-09 §AD — 30 modules in three fixture files; 344 after §AC's 22 modules in one fixture file; 322 after §AB's 19 modules in four fixture files; 303 after §AA's 20 modules in three fixture files; 283 after §Z's 34 modules in five fixture files; 249 after §Y's ten `tfr_*` fixtures; 239 after §X's three `cc_body_*`; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
 clocked, 18 of them binding a `Memory` (I.10), 52 combinational (I.11); `REF_SKIP` empty), each
 leg non-empty, and the design leg (I.13, `copper_ref::Design` on `two_domain_top` vs the hand-wired
 simulation, `tests/two_domain_hierarchy_cdc.rs`) — and
@@ -459,10 +459,15 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   tree's helper call graph, every behavioural body's `let`s and every pattern naming an X-valued
   file const, and requires `tests/recursive_helper_r6.rs`, `tests/let_instance_d24.rs` and
   `tests/file_x_const_pattern_d26.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins
-  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). **One more break is known since 2026-11-09 §AC** (OPEN,
-  `II.3 found nested-ticking-for`, so SPEC II.1.3 is OPEN again): a tick-bearing `for` nested in a
-  tick-bearing `for` compiles, simulates and interprets, and the transpiler refuses it after the
-  counted-`for` desugar ("a repeating wait must be written as …"). Before §AC they were the only ones:
+  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). **One more break is known since 2026-11-09 §AD.5** (OPEN,
+  `II.3 found ticking-for-ends-in-loop`, so SPEC II.1.3 stays OPEN): a nested tick-bearing loop (a
+  counted `for`, or a hand-written `loop`) whose body has no bare tick and ends in a skippable wait, R3
+  holding through an earlier inner `for` that always ticks, compiles and simulates; the transpiler
+  refuses it — `splice_zero_time_gotos`'s cycle test is structural and sees the inner `for`'s
+  never-taken empty-range exit. §AC's break, a tick-bearing `for` nested in a tick-bearing loop and
+  followed by more of its body, is lowered since §AD.2 (`nested-ticking-for` CLOSED: such a `for` takes
+  I.8.5's `D` unhoisted, `control_extract::expand_counted_for`, `tests/fixtures/nested_ticking_for_dut.rs`);
+  an inner bound naming the outer variable types the inner one by it (§AD.3). Before §AC they were the only ones:
   the inclusive `for` (`0..=3`), the last shape the macro admitted and the transpiler refused, is IN
   with Rust's meaning (D-27: tick-free unrolled `b − a + 1` times as an SV `i <= b`; tick-bearing
   I.8.5's counter exiting on `c > e`), and since **D-28** (2026-11-09) with Rust's meaning at its type's
@@ -492,10 +497,15 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   duplicate SV declaration. `desugar::rename_scoped_shadows` (the last step of `desugar`) now renames
   the SHADOW `<x>__shadow[k]` for its scope, never the loop variable; a same-block re-`let` keeps the
   shared signal; a renamed shadow is a register by its own liveness (`desugar::shadows_live_at_tick`)
-  and P13 reads it as `x` (`tests/fixtures/scoped_shadow_dut.rs`, 22 modules). The ledger has 3 OPEN
-  lines since §AC: II.1.3 and `nested-ticking-for` above, and `stmt-match-wire` — a clocked body's
-  wire local assigned in a statement `match` arm and read after it is dropped from the forwarded
-  value on every clocked route (`sim=ref≠SV`, silent, corpus 0). The standing audit is
+  and P13 reads it as `x` (`tests/fixtures/scoped_shadow_dut.rs`, 22 modules). §AD (2026-11-09) closed
+  `stmt-match-wire` — a clocked body's wire assigned in a statement `match` arm was dropped from the
+  forwarded value after the `match` (`sim=ref≠SV`, silent); the `Match` arm of
+  `shir_lower::extract_updates_from_stmts` now merges the arms' wires as the `If` arm does
+  (`tests/fixtures/stmt_match_wire_dut.rs`) — and `forwarded-narrow-widening`: a register or wire's
+  forwarded value substituted under a widening cast (`32'(r)` → `32'(8'(a) + 8'd250)`) was evaluated at
+  the cast's width (`sim=ref≠SV`, silent); `shir_lower::at_own_width` keeps it at its own
+  (`tests/fixtures/forwarded_width_dut.rs`). The ledger has 2 OPEN lines since §AD: II.1.3 and
+  `ticking-for-ends-in-loop` above. The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one

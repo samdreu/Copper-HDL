@@ -5670,3 +5670,166 @@ bounds compared, 9 asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; **G-K `230 l
 OPEN; 171 required by the SPEC; fixtures: 8 coreui, 3 example, 13 gone, 300 sweep, 155 test, 127 ui; 312
 run checks`**, the 3 example fixtures PASS. Not run remotely (nothing pushed). After this run, docs only:
 III.3.6's counts, this section, CLAUDE.md.
+
+## AD. The three OPEN lines of §AC: `stmt-match-wire` and `nested-ticking-for` closed, three more found, two closed; II.1.3 stays OPEN (2026-11-09)
+
+Branch `claude/open-lines-h-d93d51`, cut from `paper` at `730a815` (ledger 230 lines — 227 CLOSED, 3 OPEN).
+`0862490` and `60f6225` added the OPEN lines found while probing, before any fix (`for-bound-loop-var`,
+`forwarded-narrow-widening`; `ticking-for-ends-in-loop`). "Before" is measured: every fixture module swept
+against `730a815`'s `copper-codegen/src` (checked out over the tree and restored), every module's emission
+against an `sv-baseline snapshot` taken on `730a815`. Predictions, probes and before-logs: notes folder
+`open-lines-h-AD.md`, `open-lines-h-AD-probes/`.
+
+### AD.1 `II.3 found stmt-match-wire` — CLOSED
+
+**Mechanism** (read before measuring): `shir_lower::extract_updates_from_stmts`'s `Match` arm ran each arm
+from a copy of the forwarding map and merged the arms' REGISTER updates into a `Case`, but dropped the
+copies — a wire an arm assigned kept, after the `match`, the value it had before it. The `If` arm merges
+both (registers, then every wire whose forwarded value changed in a branch). **Fix:** the `Match` arm keeps
+each arm's map and merges every changed wire into a `Case` over the arms, guards resolved once.
+
+Fixture `tests/fixtures/stmt_match_wire_dut.rs`, 13 modules (linear single-tick, two-phase linear,
+extraction, the trailing region; an arm that assigns and one that does not; every arm; a guarded and a
+binding arm; a `match` in an `if`, an `if` and a `match` in an arm; a `match` in a tick-free `for`; a wire
+whose initializer reads a register; a port write inside the arm; a condition and a register update after
+the `match`; a `Bits` bit write in an arm).
+
+| prediction (before measuring) | measured on `730a815` |
+|---|---|
+| `sim=ref≠SV`, Verilator-clean: every module whose wire an unguarded `match` arm assigns and something after the `match` reads | **11 of 13 fail, all as predicted but one**; every reference leg passes |
+| `smw_guard_bind` agrees (`desugar` lowers a guarded/binding `match` into an `if` chain) | agrees |
+| `smw_in_for` agrees (after a tick-free `for` a name is read by name) | agrees |
+| `smw_write_in_arm` agrees (the port write is inside the arm) | **fails — the one wrong prediction**: its other arm's `if s == 50` follows a nested `match` inside the arm, the same mechanism one level down |
+
+Now 26/26. **sv-baseline against `730a815`: 0 corpus modules changed** (predicted: 0 — §AC.6, the sweep
+agreed on every corpus module, so none read an arm-assigned forwarded wire after a `match`). The `if` chain
+§Z lowers a guarded or binding `match` into was already right (`smw_guard_bind`), and no other statement
+form drops writes: the walk's other compound arms are `If` (merges) and `ForLoop` (reads by name after).
+
+### AD.2 `II.3 found nested-ticking-for` — CLOSED (the SPEC gives it a meaning: lowered)
+
+**Does the SPEC decide it?** Yes. I.8.2 makes every tick of a nested loop — a `loop`, a desugared `while`,
+a counted `for` — a suspension site of the kernel, and I.8.2(b) admits a nested body whose only bare tick is
+its last statement or that ends in a loop ending at one; I.8.5's `D` is a rewrite that composes. A tick-bearing
+`for` in a tick-bearing `for`'s body, followed by statements and the body's tick, meets both; the macro's
+`check_nested_loop_shape` is that rule on the source. So it is lowered, not a decision packet.
+
+**Mechanism:** `desugar_counted_loops` expands the inner `for` first, to `let c; loop { … }; tick` — its
+tick hoisted after the loop (the §8 cause-K comment of `expand_counted_for`: with the tick inside, a `for`
+LAST in its body has an empty continuation, and the flattener's fall-off costs a cycle). In the middle of
+the enclosing body that hoisted tick is a bare statement, so the outer body reads `W; tick; C; tick` and
+the flattener's copy of the shape rule (`body_ends_at_a_clock_boundary`) refuses it. Narrowed on probes:
+an outer body ENDING in the inner `for`, a `loop` wait in a `for`, a `loop` in a `loop` all transpiled; a
+`for` in a nested `loop` followed by a tick did not. **Fix:** a tick-bearing `for` that is not the last
+statement of a nested loop's body keeps its last tick inside its loop — `loop { <exit test>; B; c = c + 1;
+if <passed> { tick; break } tick }` — when its hoisted tick would be bare (a range non-empty by its
+constants, no author `break`): its exit continues into statements that reach the body's boundary, so cause K
+cannot arise, and no bare tick sits mid-body. The first cut was I.8.5's `D` plain (`loop { <exit test>; B;
+c = c + 1; tick }`): the sweep agreed, but G-I's P1 failed on four modules — the source walker labels a
+path with the `for`'s "last iteration?" decision before the tick (`for=Last` / `for=More`), and plain `D`
+takes it at the next resumption's head; the arm form takes it where the source does, and P1 holds. A guarded hoisted tick (`if … { tick }`,
+an author `break` or a run-time range) was never bare and keeps its form.
+
+Fixture `tests/fixtures/nested_ticking_for_dut.rs`, 9 modules:
+
+| module | shape | predicted on `730a815` | measured on `730a815` | now |
+|---|---|---|---|---|
+| `ntf_distinct` | §AC.7's probe | refused | refused | 2/2 |
+| `ntf_interact` | inner `0..i` (zero iterations at `i = 0`), both counters read | refused | **transpiled, lint-rejected** (AD.3) | 2/2 |
+| `ntf_break` | an inner `break` before its tick | refused | **2/2** (guarded hoisted tick) | 2/2 |
+| `ntf_runtime_empty` | an inner range empty at run time | refused | **2/2** (guarded) | 2/2 |
+| `ntf_three` | three levels, an anonymous middle counter, an inclusive inner range | refused | refused | 2/2 |
+| `ntf_in_loop_while` | the inner `for` in a nested `loop` and in a `while` | refused | refused | 2/2 |
+| `ntf_if_inner` | the inner `for` inside an `if` | agrees | agrees | 2/2 |
+| `ntf_then_for_then_wait` | an inner `for` followed by another; one followed by a wait and a tick | refused | refused | 2/2 |
+| `ntf_bound_var` | AD.3's shape | — | lint-rejected | 2/2 |
+
+Three predictions wrong (`ntf_break`, `ntf_runtime_empty`: a guarded hoisted tick is an `if`, so the body's
+only bare tick stays last; `ntf_interact`: the same, then AD.3). Every reference leg passed before and
+after. **sv-baseline: 0 corpus modules changed** by this part (predicted 0: the new form applies only where
+the hoisted bare tick made the transpiler refuse). The fix first keyed on a following BARE tick; the battery
+(AD.6, `zzh_06`: an inner `for` followed by another tick-bearing `for`) refused, and the rule became "not the
+body's last statement" (the body ends at its boundary by the shape rule).
+
+### AD.3 Found and closed — `II.3 found for-bound-loop-var`
+
+`ntf_interact`'s first measurement: Verilator WIDTHEXPAND/WIDTHTRUNC. `for j in 0..i`, `i` an enclosing
+`for`'s `u8` variable: rustc types `j` `u8`; `chir_lower::bound_int_type` looked `i` up in the symbol table,
+where a loop variable is not, so `j` fell back to `i32`. Probes (tick-free nests with a variable bound are
+R5's refusal in both front-ends, so only a tick-bearing inner `for` reaches it): `bvp_tick_both` (= the
+fixture's `ntf_bound_var`) lint-rejected — loud, never silent in the forms tried. OPEN line added in
+`0862490`, before the fix. **Fix:** `desugar_counted_loops` keeps the enclosing tick-bearing `for`s'
+variables whose type is determined (`Consts::enclosing`, `for_var_scope`) and `ForTyping::var_type` puts
+them in scope. Both modules 2/2; corpus 0.
+
+### AD.4 Found and closed — `II.3 found forwarded-narrow-widening` (a silent miscompile)
+
+Probing a run-time inner bound (`let n: u8 = …; for j in 8..n`) for AD.3: `bvp_tick_inner` lint-rejected
+(WIDTHEXPAND inside `32'(((8'(a) & 8'd3) + 8'd9))`), predicted to agree — wrong. The wrapping variant
+`bvp_rt_wrap` (`n = a.wrapping_add(250); for _ in 250u8..n`) is **Verilator-clean and `sim=ref≠SV` on 20 of
+20 sequences**: `n` is 0 in Rust for `a = 6`, and `32'(8'(a) + 8'd250)` is 256 — IEEE 1800 sizes a cast's
+operand by the cast's width. Not a `for` mechanism: a register assigned a wrapping `u8` and compared `as u32`
+in the same resumption (`bvp_fwd_reg_cmp`, `_cmp1`) fails the same way. **Mechanism:**
+`chir_lower::widening_resize` gives a compound operand its own width before widening (`32'(8'(e))`) but a
+name none (`32'(r)`, a name is self-sized); `shir_lower::subst_vars` then substitutes `r`'s forwarded value
+under the cast. All pre-existing (the same five probes fail on `730a815`). OPEN line added in `0862490`,
+before the fix. **Fix:** a name directly under a widening `Resize` (or `Resize(SignCast(name))`) whose
+substitute is not self-sized keeps its own width (`shir_lower::at_own_width`; the widths of the body's
+registers, wires and promoted carriers, `seq_var_widths`).
+
+Fixture `tests/fixtures/forwarded_width_dut.rs`, 8 modules. **Predicted on `730a815`:** `fnw_reg_cmp`,
+`_cmp1`, `_signed` (`as i32` of a wrapping product), `_match_value` (a `match`-merged wire widened after the
+`match`), `_for_bound_wrap` fail silently, `_for_bound_narrow` lint-rejected, the two controls (a port-read
+bound, a bound in the header) agree. **Measured: as predicted, 6 fail, 2 agree; every reference leg passes.**
+Now 16/16. **sv-baseline: predicted a subset of the 55 baseline modules whose SV contains `N'((`; measured 1
+corpus module changed, `pbt_aggregates`** (`8'((__copper_started ? … : s_x))` → `8'(4'(…))`, a trailing-region
+mux whose arms are 4 bits — the same values), and it agrees.
+
+### AD.5 Found, not closed — `II.3 found ticking-for-ends-in-loop` (OPEN, a parity break)
+
+The battery's `zzh_05`: a tick-bearing `for` whose body ENDS in a hand-written wait loop, an inner `for`
+ticking first (so R3 holds). The macro admits it; `expand_counted_for` declines it (no last bare tick to
+hoist). OPEN line added in `60f6225`, before any fix. Tried: `D` with a counter of its own (`let v = c;
+c = c + 1; B`, the loop ending at `B`'s wait). The transpiler then declined in `extract_control`:
+`splice_zero_time_gotos` found a zero-time goto cycle — through the inner `for`'s empty-range exit (never
+taken: the range is constant and non-empty, which R3 knows), the skippable wait, and the back edge. The
+hand-written twin `h1` (a nested `loop` with a counter, no bare tick, ending in a wait) is admitted by the
+macro and refused the same way. The flattener's cycle test is structural, R3's is not: a lowering change of
+its own, or a refusal in both front-ends (a user decision). Reverted; the line stays OPEN with both probes.
+The same bodies with no earlier tick are R3's refusal in both (measured: `fe_top`, `fe_while`, `h2`).
+
+### AD.6 II.1.3 re-verified — stays OPEN
+
+§Z.8's 47 probes, §AB.6's 16 and 16 new (`zzh_01`–`zzh_16`: nested tick-bearing `for`s, a `for` in a nested
+`loop` and `while`, three levels, an inner `for` in an `if`, an inner `break`, interacting and inclusive
+bounds, an inner `for` then a wait, then another `for`, statement-`match` wires with guards, widening casts,
+anonymous counters, a run-time inner range, a nested `for` in the trailing region), copied into
+`copper-macros/tests/ui/pass` and removed after. **Predicted:** all 79 admitted by the macro; the transpiler
+admits all but possibly `zzh_05` and `zzh_06`. **Measured:** trybuild admits 79/79; the transpiler refused
+exactly `zzh_05` and `zzh_06`; after AD.2's widening, 78/79 — `zzh_05` is AD.5. II.1.3 stays OPEN, its owner
+text now pointing at `ticking-for-ends-in-loop`.
+
+### AD.7 Ledger and counts
+
+Before: **230 lines — 227 CLOSED, 3 OPEN** (`730a815`). After (G-K in AD.8's run): **233 lines — 231
+CLOSED, 2 OPEN; 171 required by the SPEC; fixtures: 8 coreui, 3 example, 13 gone, 331 sweep, 155 test, 127
+ui; 342 run checks.** Closed: `stmt-match-wire`, `nested-ticking-for`. Added OPEN before any fix, then
+closed: `for-bound-loop-var`, `forwarded-narrow-widening` (`0862490`). Added OPEN: `ticking-for-ends-in-loop`
+(`60f6225`). II.1.3 stays OPEN, now on `ticking-for-ends-in-loop`.
+
+### AD.8 The bare regression — measured
+
+A workspace `cargo test` before the code commit found two harness checks failing on the first cut. G-I's P1,
+on four `ntf_` modules (AD.2: plain `D` takes the "last iteration?" decision at the next head; the arm form
+replaced it). And `timing_model_derivations`, whose expected extraction-route set gains `fnw_for_bound_*` and
+`ntf_in_loop_while`, `ntf_then_for_then_wait` (new modules of the set's kind, as `for_empty` and `det_for`).
+**Bare `tools/regression.sh` on `77f5c65` (the final code commit; laptop; `paper` at `730a815`): REGRESSION
+OK (330 s).** 1772 passed, 0 failed, 16 ignored, 159 test binaries (G-C 132 test files); examples **32/32**;
+G-D 374 differential cases (3 ignored-with-reason), G-F 374 (3 skipped with a reason) — the 30 new fixture
+modules; **G-G differential 3302 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**, **reference 3314
+PASS / 0 DISAGREE**; G-I 295 clocked related (90 extracted, 23 linear, 182 single-tick), 0 uncovered; G-J 85
+const items compared / 25 outside both, 303 counted-`for` bounds compared, 9 asymmetric (pinned), 0
+DISAGREE; G-E 5 anchored; **G-K `233 lines — 231 CLOSED, 2 OPEN; 171 required by the SPEC; fixtures: 8
+coreui, 3 example, 13 gone, 331 sweep, 155 test, 127 ui; 342 run checks`**, the 3 example fixtures PASS. Not
+run remotely (nothing pushed). sv-baseline against `730a815` on `77f5c65`: 30 new modules, 1 changed
+(`pbt_aggregates`, AD.4). After this run, docs only: III.3.6's counts, this section, CLAUDE.md.
