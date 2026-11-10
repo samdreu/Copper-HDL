@@ -4461,7 +4461,13 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | retired 14 | `multi_phase_out_write` | `gone:multi_phase_out_write`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8 |
 | retired 15 | `out_first_driven_late` | `gone:out_first_driven_late`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; I.11's class vacuous (D-14) |
 
-**III.3.6 Counts.** With the integer-method probe's 36 lines added OPEN (MEASUREMENTS §AI.3, before any
+**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §AI.9 (2026-11-09,
+on `61d3b1f`, rustc 1.98.1, REGRESSION OK): **277 lines — 244 CLOSED, 33 OPEN** (II.1.3 and the 32
+`int-method-*` lines); 171 required by the SPEC; fixture tokens on CLOSED lines: 375 `sweep`, 169 `test`, 129 `ui`,
+8 `coreui`, 3 `example`, 13 `gone`; all 379 run checks satisfied, the 3 examples PASS. §AI closed `int-bit-count`,
+`int-port-unswept`, `int-method-leading-ones`, `-trailing-ones`, `-is-power-of-two`, `-path-call`, and found and
+closed `yosys-unary-cast`.
+(Before:) With the integer-method probe's 36 lines added OPEN (MEASUREMENTS §AI.3, before any
 fix; `cargo test --test conformance_ledger`): **276 lines — 237 CLOSED, 39 OPEN**.
 (Before:) With II.1.3 re-opened (the user's decision, relayed 2026-11-10; `cargo test --test
 conformance_ledger`, MEASUREMENTS §AI): **240 lines — 237 CLOSED, 3 OPEN** (`II.1.3`, `int-bit-count`,

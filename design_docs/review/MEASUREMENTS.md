@@ -6397,3 +6397,16 @@ Before: **240 lines — 238 CLOSED, 2 OPEN** (`10b4165`). II.1.3 re-opened: 240 
 The probe's 36 lines added OPEN: 276 — 237 CLOSED, 39 OPEN (`3a81ac7`). After AI.1–AI.2 (`dd2674a`, with
 `yosys-unary-cast` found and closed): 277 — 243 CLOSED, 34 OPEN. After AI.4 (`61d3b1f`): **277 lines — 244
 CLOSED, 33 OPEN** (II.1.3 and the 32 `int-method-*` lines).
+
+### AI.9 The bare regression — measured
+
+**Bare `tools/regression.sh` on `61d3b1f` (the final code commit; laptop; rustc 1.98.1; under `nohup caffeinate
+-i`): REGRESSION OK (810 s).** 1841 passed, 0 failed, 16 ignored, 161 test binaries (G-C 134 test files: +1,
+`tests/int_bit_count_tools.rs`); examples **32/32**; G-D 405 differential cases (3 ignored-with-reason), G-F 405 (3
+skipped) — the 6 `ibc_*` and 4 `ip_*` modules added; **G-G differential 3741 PASS / 12 OUTSIDE / 0 TRUNCATED / 0
+EXCUSED / 0 DISAGREE**, **reference 3753 PASS / 0 DISAGREE**; G-I 323 clocked related (106 extracted, 23 linear, 194
+single-tick), 0 uncovered, 2440 transitions; G-J 96 const items compared / 25 outside both, 351 counted-`for` bounds,
+9 asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; **G-K `277 lines — 244 CLOSED, 33 OPEN; 171 required by the
+SPEC; fixtures: 8 coreui, 3 example, 13 gone, 375 sweep, 169 test, 129 ui; 379 run checks`**, the 3 example
+fixtures PASS. Not run remotely (nothing pushed). After this run, docs only: III.3.6's counts, this section and
+CLAUDE.md.

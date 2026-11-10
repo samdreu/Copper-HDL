@@ -38,7 +38,7 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (395 on 2026-11-09, 3 of them
+`_reference_leg` cases as build.rs generated to run (405 on 2026-11-09, §AI, 3 of them
 skipped with a reason, `REF_SKIP` empty; the per-batch growth is in
 `design_docs/review/MEASUREMENTS.md`), each
 leg non-empty,each
