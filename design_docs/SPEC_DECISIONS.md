@@ -3975,3 +3975,34 @@ cannot state refuses the module). Measured: Verilator 5.044 (USERERROR, fatal un
 Yosys refuse `W = 0`; Icarus 12 accepts it silently. Fixture `tests/fixtures/generic_range_dut.rs` (6 modules),
 `tests/generic_range_instance_d30.rs`. sv-baseline: 0 corpus modules changed. With it the battery's last
 parity break is closed and II.1.3 is CLOSED (§AF.4): ledger 234 lines, 0 OPEN.
+
+### D-31 — SPEC.md adopted as the normative semantics   (2026-11-09)
+Clause: SPEC.md's status line; every document that named another one the reference.
+Question: SPEC.md's status line read "UNDER CONSTRUCTION … Not yet normative. Until this document is
+adopted, `SYNCHRONOUS_SEMANTICS.md` remains the reference and wins where the two disagree". In turn,
+SYNCHRONOUS_SEMANTICS.md named `CYCLE_DATAFLOW_SEMANTICS.md` normative. Read literally, the authority was
+the two-job, barrier and plain-`Out` model D-8 reversed, while the code had been rebuilt against SPEC
+(Phase C, MEASUREMENTS §E–§AG). Adopt SPEC?
+Docs said: SPEC.md:3-5 (not yet normative); SYNCHRONOUS_SEMANTICS.md:3-5 and :29 (CYCLE_DATAFLOW
+normative); CLAUDE.md (SPEC not yet adopted, SYNCHRONOUS_SEMANTICS.md wins until it is, 3cb2ede);
+README.md (SYNCHRONOUS_SEMANTICS.md "start here").
+Code did (d18a8f0): SPEC. The ledger §III.3 held 238 lines, 238 CLOSED, 0 OPEN (§AG.6), G-K checking
+every CLOSED line's fixture.
+Anchor: none — decided.
+Options: (a) adopt SPEC.md, label the older references historical in place; (b) keep SPEC not adopted
+and rewrite SYNCHRONOUS_SEMANTICS.md to current.
+Recommendation: (a) (`review/DOCS_AUDIT.md` §1 Q1).
+Decision: (a) — the user, 2026-11-09, accepting DOCS_AUDIT Q1 as written (relayed by the coordinator).
+Changes: docs only. SPEC.md's status line now reads NORMATIVE since 2026-11-09. SYNCHRONOUS_SEMANTICS.md,
+CYCLE_DATAFLOW_SEMANTICS.md and FORMAL_SEMANTICS.md carry dated historical headers and no longer call
+themselves or each other normative. CLAUDE.md and README.md point at SPEC.md.
+The three retirements this log deferred to adoption are made:
+- D-5's: SYNCHRONOUS_SEMANTICS "Output timing"'s "the synthesized combinational Mealy output is correct;
+  the simulator loses a cycle" (reversed by I.5.5), marked retired in place.
+- D-6's: SYNCHRONOUS_SEMANTICS's and DERIVATION_TABLE §1's "a trailing region's commits anchor to the edge
+  that opens its cycle" (reversed for `RegOut` by I.6.1), marked retired in place. The `RegOut` row of
+  `review/MEASUREMENTS.md` §C that D-6 asks to correct belongs to an append-only log and is not edited:
+  §C's "A trailing `RegOut` commits at the next edge" (debt item 3) is SPEC I.6.1's reading, and the
+  correction is this entry.
+- D-7's: FORMAL_SEMANTICS §3.2's two-instant `φ`, superseded by I.0.2, marked in place.
+The remaining edits are `review/DOCS_AUDIT.md`'s phase 2.
