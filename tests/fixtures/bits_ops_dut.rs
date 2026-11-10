@@ -10,8 +10,9 @@
 /// boolean-guarded, so `!` on a bool or a comparison stays logical). Was
 /// emitted as SystemVerilog LOGICAL `!`, collapsing the result to one bit —
 /// found via `rv32i_cpu_pipelined`'s JALR alignment mask, where it turned every
-/// jump target into 0. Sweeps green, anchored against the independent
-/// hand-written `reference_sv/bit_not_bits.sv` (`assign o = ~a`).
+/// jump target into 0. Sweeps green on three legs. Not anchored: its former
+/// `REFERENCE` file `reference_sv/bit_not_bits.sv` was written in a session, not
+/// independently, and its row was removed on 2026-11-10 (MEASUREMENTS §AK).
 #[hardware(combinational)]
 pub fn bit_not_bits(
     a: In<Bits<32>, MainClk>,

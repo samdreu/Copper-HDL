@@ -176,10 +176,11 @@ const PARAMS: &[(&str, &[(&str, i64)])] = &[
 /// many there are on every run — the gap is tracked rather than rediscovered.
 const REFERENCE: &[(&str, &str)] = &[
     ("ram_read_first", "tests/fixtures/reference_sv/ram_read_first.sv"),
-    // This reference is what proved the original `!`-on-`Bits<N>` bug was the
-    // TRANSPILER's and not the simulator's (it agreed with the sim and disagreed with
-    // the emitted SV). Live since the module's SKIP row was deleted on 2026-09-01.
-    ("bit_not_bits", "tests/fixtures/reference_sv/bit_not_bits.sv"),
+    // `bit_not_bits` had a row here until 2026-11-10. Its file,
+    // tests/fixtures/reference_sv/bit_not_bits.sv, was written in a session, not by the
+    // user, so it is not independent of Copper and anchors nothing (MEASUREMENTS §AK).
+    // The module still sweeps on three legs; an independent reference is owed (SPEC
+    // III.2.11 (j) item 9).
     // The paper's §2.1 listing. Hand-written as the explicit three-state machine a
     // Verilog designer writes; anchors BOTH `handshake` spellings (while_wait's and
     // wait_loop's), which tests/handshake_equivalence.rs shows are cycle-identical.

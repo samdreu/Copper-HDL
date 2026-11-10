@@ -381,7 +381,7 @@ descending order of authority:
    that can adjudicate a timing question. `examples/basejump/` checks Copper
    modules against [BaseJump STL](https://github.com/bespoke-silicon-group/basejump_stl)
    Verilog that Copper had no hand in writing; the sweep's `REFERENCE` rows add
-   hand-written references (G-E counts them).
+   references the user wrote by hand (G-E counts them).
 2. **The three legs of the sweep**: the simulator, the reference interpreter and the
    transpiled SV, judged under SPEC §III.2's agreement relation. Agreement of the three is
    consistency, not correctness. A disagreement says which side to suspect.
@@ -460,6 +460,7 @@ of the specification work is `design_docs/review/MEASUREMENTS.md`.
 | [`design_docs/ANCHORING_A_MODULE.md`](design_docs/ANCHORING_A_MODULE.md) | how to add an independent Verilog reference to a swept module (the `REFERENCE` table) |
 | [`design_docs/ARRAY_PORT_ABI.md`](design_docs/ARRAY_PORT_ABI.md), [`design_docs/RECEIVED_MEMORY_ABI.md`](design_docs/RECEIVED_MEMORY_ABI.md) | the emitted port shapes for array-typed ports and for a `Memory` received as a parameter |
 | [`design_docs/TIMING_COVERAGE_MATRIX.md`](design_docs/TIMING_COVERAGE_MATRIX.md) | which timing patterns have an independent hardware anchor |
+| [`design_docs/PUBLICATION_CHECKLIST.md`](design_docs/PUBLICATION_CHECKLIST.md) | what blocks a public release: unlicensed third-party references, provenance, open items |
 | [`CLAUDE.md`](CLAUDE.md) | orientation for contributors (and for Claude Code) |
 
 The other documents in `design_docs/` are historical and say so in a dated header:
@@ -504,7 +505,8 @@ is the record:
   `examples/sequential/sv/pattern_detector_010.sv`,
   `tests/fixtures/reference_sv/ram_read_first.sv`; the other files under
   `tests/fixtures/reference_sv/` are test-specific reference models written for
-  the tests that name them.
+  the tests that name them, except `bit_not_bits.sv`, which was written in a
+  session, is no longer a `REFERENCE` row and is read by nothing (2026-11-10).
 - **Adapted from third-party tutorial or template sources**:
   `examples/sequential/sv/shift_register.sv` (chipverify.com, cited in its
   header), `examples/combinational/sv/priority_encode.sv` (Greg Stitt, University
@@ -512,6 +514,6 @@ is the record:
   — `examples/memory/sv/dual_port_ram.sv` (a textbook simple-dual-port block-RAM
   template), `examples/sequential/sv/pattern_detector.sv`, and
   `examples/combinational/sv/one_bit_comparator.sv`. No license is recorded for
-  any of these five.
-
-`examples/counter_enable.sv` is tracked but referenced by nothing in the tree.
+  any of these five. The first three block a public release until the user replaces
+  them; [`design_docs/PUBLICATION_CHECKLIST.md`](design_docs/PUBLICATION_CHECKLIST.md)
+  lists them with every other open item.

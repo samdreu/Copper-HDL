@@ -386,6 +386,8 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   history this file no longer carries lives), with the review's baseline snapshots and
   records beside it (`review/README.md`; the docs audit is `review/DOCS_AUDIT.md`);
   **the reference interpreter** — `../copper-ref/README.md`;
+  **what blocks a public release** — `PUBLICATION_CHECKLIST.md` (unlicensed third-party
+  references, provenance of the reference `.sv` files, open items);
   **the sweep and anchoring** — `CORPUS_DIFFERENTIAL_SWEEP.md`,
   `ANCHORING_A_MODULE.md`, `TIMING_COVERAGE_MATRIX.md`;
   **emitted ABIs** — `ARRAY_PORT_ABI.md`, `RECEIVED_MEMORY_ABI.md`;

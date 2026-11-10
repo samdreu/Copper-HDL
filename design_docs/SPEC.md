@@ -3884,7 +3884,7 @@ proposition that no surviving rule or realization consumes is **retired**, not d
 | P5 | **Order independence**: the levelized settle and the fixpoint oracle compute the same settled wires on every acyclic design | I.13.2(a), (c) | simulator | THEOREM (I.13.2(a): a DAG has one fixpoint) and MEASURED: `tests/levelized_differential.rs` 6/6, `tests/poll_order_fuzz.rs` 2/2, `tests/golden_traces.rs` 6+6, a 65-case corpus sample under the oracle (D-18 (i)) | the static cycle refusal at spawn (I.11.6, I.13.7 (4)) (D-22: discharged — the refusal at spawn under both schedulers and over a structural parent, Phase C step 10, §P.3) |
 | P6 | **The simulator's X algebra equals IEEE 1800 4-state** on every operator but `eq_logic`/`ne_logic` | I.14.2 | simulator, interpreter | ANCHORED: Icarus Verilog 12.0, 400 rows per operator (D-19 (i-b)), a recorded table not in the tree | Phase C: `eq_logic`/`ne_logic` IEEE-exact; the table as a standing pin (I.14.7 (1)) |
 | P7 | **`RefBits` ≡ `Bits<N>`** | I.14.7 | interpreter | MEASURED: `copper-ref/tests/bits_property.rs` (widths {1, 4, 8, 16, 32, 64, 128}, X-sprinkled operands) | the uncovered operators of I.14.8 |
-| P8 | **Realizability**: for every shape both front-ends admit, the emitted text realizes the resumption's effects in every cycle — its reads of `x_{N+1}`, its register updates, its pending values, shown from `obs_{N+1}` — except the ADMITTED-AND-DIVERGENT rows of II.3.3 | I.0.6, II.3.1 | transpiler | MEASURED (consistency): the sweep over 166 modules (G-D); ANCHORED for the 5 `REFERENCE` modules and the goldens of III.2.11; the six defect rows measured divergent (D-13 §0, D-19) | the II.3.6 fix list; mechanization proposed (III.1.4) |
+| P8 | **Realizability**: for every shape both front-ends admit, the emitted text realizes the resumption's effects in every cycle — its reads of `x_{N+1}`, its register updates, its pending values, shown from `obs_{N+1}` — except the ADMITTED-AND-DIVERGENT rows of II.3.3 | I.0.6, II.3.1 | transpiler | MEASURED (consistency): the sweep over 166 modules (G-D); ANCHORED for the 4 `REFERENCE` modules and the goldens of III.2.11; the six defect rows measured divergent (D-13 §0, D-19) | the II.3.6 fix list; mechanization proposed (III.1.4) |
 | P9 | **Two iterations suffice** (FORMAL_SEMANTICS P6/G6, [anvil Lemma C.19]) | I.3.6 | analysis | **retired** (D-20): its consumers were the trailing alignment rules, retired by D-8; the surviving analyses (`check_reachability`, `infer_registers`) are fixpoints over the CFG and unroll nothing. I.3.6's lemma (a segment crosses the back edge at most once) stays a fact Part I uses | none |
 | P10 | **Front-end parity**: a module compiles under `#[hardware]` iff it transpiles | II.1.3 | macro, transpiler | MEASURED: `copper-analysis/tests/front_end_parity.rs:121`, `:158`; blind spots — R2, R16, `check_definite_assignment`, the header rules, I.2.4's syntactic shapes, the transpiler-admits direction; the open breaks of II.1.3 measured on probes (D-12 §0 (v), D-13 §0 (i)) | the II.1.3 fixes and the audit's extension |
 | P11 | **Per-domain determinism**: a module none of whose inputs another domain drives has one trace under every interleaving | I.12.1 | simulator | THEOREM (I.12.1, I.0.2) and MEASURED (`two_domain_counter` under two interleavings, D-17 (vi); `tests/two_domain_counter_behavioral.rs:124` at three ratios); **false today** at startup: the first settle of any domain resumes every coroutine (D-17 (i), probe not in the tree) | Phase C I.12.6 (1) with probe (i) as a two-clock pin (III.2.8) (D-22: no longer false — `tests/two_clock_pins.rs::never_ticked_startup_one_resumption_agrees_on_all_three_legs`, sim ≡ SV ≡ ref, Phase C steps 2–3; checked in step 10, §P.2) |
@@ -3900,7 +3900,7 @@ proposition that no surviving rule or realization consumes is **retired**, not d
 | P21 | **`check_admissible` never over-rejects** (admissible Err ⟹ transpile Err) | II.2.2 | analysis | MEASURED: `copper-codegen/tests/admissible_calibration.rs` | none |
 | P22 | **Every direction of II.2.2 is as stated** | II.2.2 | analysis | MEASURED by the witnesses in the table (`livelock_a`/`livelock_b`, the fold probe, `tuple_local`, `comb_definite_assignment_parity.rs`); D2's folded loop and unwritten port unpinned | the pins of II.2.3 (D-22: D2's two directions pinned — `static_predicate_directions.rs`, Phase C step 10, §P.5) |
 | P23 | **The memory**: `ReadFirst`, latency 1, dual port | I.10 | simulator, transpiler | ANCHORED (`examples/memory/sv/dual_port_ram.sv`; `ram_read_first` `REFERENCE`); latency above 1, port priority and preloads sim ≡ SV only; no interpreter leg | the interpreter's memory model (D-16); the references of III.2.11 |
-| P24 | **A combinational module** is a function evaluated per settle; the Mealy composition | I.11 | simulator, transpiler | ANCHORED: the five `examples/combinational/sv` goldens, `bit_not_bits`, the Mealy pair (D-14 (v)) | no interpreter leg (25 modules skipped by class) |
+| P24 | **A combinational module** is a function evaluated per settle; the Mealy composition | I.11 | simulator, transpiler | ANCHORED: the five `examples/combinational/sv` goldens, the Mealy pair (D-14 (v)) | no interpreter leg (25 modules skipped by class) |
 
 Counts (2026-11-05): 24 rows — THEOREM 4 (P5, P11, P17, P18), MEASURED 14, ANCHORED 4 (P6,
 P19, P23, P24), ASSERTED 1 (P14), retired 1 (P9); measured false today 3 (P11, P12, P15).
@@ -4098,10 +4098,14 @@ reference leg runs **211** of the sweep's 214 modules: 159 clocked (18 of them b
 **III.2.11 (j) Anchors.** An independent reference — one nobody derived from the simulator, the
 transpiler or the interpreter — is the only evidence of correctness (`SPEC_OVERVIEW.md` §7,
 `ANCHORING_A_MODULE.md`): a misreading shared by the legs is invisible to the relation and
-visible to it. In the sweep: 3 `REFERENCE` rows (`build.rs:194-205`: `ram_read_first`,
-`bit_not_bits`, `handshake`), anchoring **5** modules (`handshake` has three copies —
+visible to it. In the sweep: 2 `REFERENCE` rows (`build.rs:177-188`: `ram_read_first`,
+`handshake`), anchoring **4** modules (`handshake` has three copies —
 `examples/sequential/handshake.rs`, `tests/fixtures/handshake_dut.rs`,
-`tests/fixtures/wait_loop_dut.rs`); G-E reports 5 anchored, 161 not. Outside the sweep, in their
+`tests/fixtures/wait_loop_dut.rs`); G-E reports 4 anchored, 410 not (2026-11-10). A third row,
+`bit_not_bits`, was removed on 2026-11-10: its file was written in a session, not by the user,
+so it was not independent of Copper (`review/MEASUREMENTS.md` §AK). Three of the references
+below are third-party with no redistribution license and block publication
+(`PUBLICATION_CHECKLIST.md`). Outside the sweep, in their
 own tests: the BaseJump set (`examples/basejump/sv/`, 7), `examples/sequential/sv/` (4),
 `examples/combinational/sv/` (5), `examples/memory/sv/dual_port_ram.sv`, `examples/cdc/sv/` (2),
 `tests/fixtures/timing_probe_sv/mac_fsm.sv` (register set only), the `det_010` goldens, the
@@ -4115,7 +4119,9 @@ a loop-born register (I.7.7; D-9); (4) a nested tick-bearing loop other than the
 power-on operand (I.9.7; D-11); (6) a RAM with a write (`bsg_mem_1r1w_sync`, not vendored) and a
 two-cycle read (I.10.8; D-16); (7) a two-domain design under an interleaving beyond 2:1, and the
 never-ticked startup (I.12.7; D-17); (8) a single-domain hierarchy of a `RegOut` core and a
-`combinational` reader, and a two-domain parent under a second interleaving (I.13.8; D-18).
+`combinational` reader, and a two-domain parent under a second interleaving (I.13.8; D-18);
+(9) `bit_not_bits` (`tests/fixtures/bits_ops_dut.rs`), `!` on a `Bits<N>` as a bitwise
+complement, demoted from anchor on 2026-11-10.
 D-4's dual-consumer `Out` leg of `sipo_block` and the parking rule's definition are vacuous under
 D-8 (no plain `Out`, no park).
 

@@ -25,7 +25,10 @@ and G-E over-reported by one the whole time). The result is written as the
 `ANCHORED` / `UNANCHORED` constants in the generated file and as a
 `cargo:warning=anchoring: …` line in the build log, which G-E greps. The current
 count is the G-E line of a `tools/regression.sh` run (first verified 2026-09-01 at 2:
-`ram_read_first`, `bit_not_bits`).
+`ram_read_first`, `bit_not_bits`; 5 until 2026-11-10, then 4 — `ram_read_first` and the
+three copies of `handshake` — when `bit_not_bits`'s row was removed because its file was
+written in a session, not by the user: an anchor must be written independently of
+Copper, `review/MEASUREMENTS.md` §AK).
 
 What the count does **not** include is every module anchored *outside* the sweep:
 the examples checked against `examples/**/sv/*.sv` through
@@ -75,8 +78,9 @@ failure mode the whole guard family exists to prevent.
 declares it (`verilog_has_clock_port` in `copper-sim/src/verification.rs`), and the
 transpiler emits none for a combinational module. If a reference does declare one, an
 *unused* input is UNUSEDSIGNAL under `-Wall`, which is fatal; consume it with an empty
-`always_ff @(posedge clk) begin end`. `reference_sv/bit_not_bits.sv` still does this; it was
-written when the harness drove `clk` unconditionally.
+`always_ff @(posedge clk) begin end`. `reference_sv/bit_not_bits.sv` (no longer a
+`REFERENCE` row, and read by nothing since 2026-11-10) still does this; it was written when
+the harness drove `clk` unconditionally.
 
 Two things about the starting state:
 
@@ -148,7 +152,9 @@ An independent-Verilog-only failure is also how you localise a bug you already k
 `bit_not_bits` was the worked example: while `!` on a `Bits<N>` still lowered to
 logical `!`, `assign o = ~a` agreed with the simulator and disagreed with the emitted
 SystemVerilog, which is what said the lowering was wrong rather than the executor.
-The lowering is fixed and the row is live — it now guards the fix.
+The lowering is fixed. The row was removed on 2026-11-10: the reference was written in a
+session, not independently, so it localised the bug but anchors nothing, and the module is
+owed an independent reference (SPEC III.2.11 (j) item 9).
 
 Confirm the leg actually ran, too (`EquivalenceTest::finish` prints this line
 before Verilating the reference):

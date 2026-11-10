@@ -5,6 +5,13 @@
 > axis is now *registered outputs* against *combinational modules*. The standing anchoring
 > mechanism is G-E with `build.rs`'s `REFERENCE` table (`ANCHORING_A_MODULE.md`). The 2026-10-23
 > addendum is retired.
+>
+> **2026-11-10.** Two goldens below are third-party with no redistribution license and block
+> publication until the user replaces them (`PUBLICATION_CHECKLIST.md`): row 4's
+> `examples/memory/sv/dual_port_ram.sv` (reads like a vendor template, unconfirmed), and
+> `examples/combinational/sv/priority_encode.sv`, one of row 3's five combinational goldens
+> (Greg Stitt, University of Florida). Each still anchors its row today; a replacement must
+> anchor the same behaviour.
 
 > Groundwork for `SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md` gate **G1**. Establishes,
 > per timing pattern, whether Copper's simulation semantics are anchored to an
