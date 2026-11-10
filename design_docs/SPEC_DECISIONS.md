@@ -4006,3 +4006,43 @@ The three retirements this log deferred to adoption are made:
   correction is this entry.
 - D-7's: FORMAL_SEMANTICS §3.2's two-instant `φ`, superseded by I.0.2, marked in place.
 The remaining edits are `review/DOCS_AUDIT.md`'s phase 2.
+
+### D-32 — An integer method the transpiler does not lower is II.1.3's fourth named exception; `to_be`/`to_le` are refused in both   (2026-11-10)
+Clause: II.1.3 (the parity obligation), I.14.3(c) (Rust integers keep Rust's meaning).
+Question: the macro admits every inherent method of a Rust integer (rustc type-checks it; the macro sees
+no types), and the transpiler lowers a finite list. Batch K measured 44 methods on 88 probes: 32 compiled
+and were refused by the transpiler, one OPEN III.3.4 line each, and II.1.3 OPEN with them; std has more
+methods than were probed. How does II.1.3 close? Sub-question: what do `to_be`/`to_le` mean, whose Rust
+meaning is the target's byte order?
+Docs said: II.1.3 (three named exceptions, each pinned by its witnesses); I.14.3(c) (Rust's meaning;
+`checked_*` OUTSIDE, refused in both by name); II.3.3 row (e) (enumerates `Bits` methods, not integer ones).
+Code did (61d3b1f): `chir_lower::lower_method_call` lowered `wrapping_*`, `saturating_*` and the seven bit
+counts; any other method was refused with "method `<m>` is not supported in hardware expressions", and its
+path-call form (`u16::pow(v, 2)`) with "non-hardware function calls cannot appear …" or "cannot infer bit
+width". No wrong text was emitted. The simulator runs on the host, little-endian on every machine measured.
+Anchor: none — decided (MEASUREMENTS §AI.7's packet).
+Options: (a) lower the long tail; (b) refuse in both by a name list (false refusals of a user `impl`
+method of the same name; a missing name is again a break); (c) a fourth named exception whose extent is
+the transpiler's lowered list. For `to_be`/`to_le`: (i) the host's meaning, stated as little-endian;
+(ii) refuse both in both front-ends as target-dependent.
+Recommendation: (c), with the cheap methods lowered as they are needed; (ii).
+Decision: (c) and (ii) — the user, 2026-11-10, both as recommended (relayed by the coordinator).
+Changes (MEASUREMENTS §AJ):
+- (1) II.1.3 has four named exceptions. The fourth: a Rust integer method the transpiler does not lower
+  compiles and simulates with Rust's meaning, and the transpiler refuses it with one message, "method
+  `<m>` " followed by `copper_analysis::UNLOWERED_METHOD_MESSAGE`, in the `.`-form and the path-call form;
+  it emits no text. Its extent is the complement of `copper_codegen::LOWERED_INT_METHODS`, the list the
+  transpiler's path-call reading uses, so lowering a method shrinks the exception. Pinned by
+  `copper-analysis/tests/front_end_parity.rs::the_four_named_parity_exceptions_have_exactly_their_witnesses`
+  (renamed from `the_three_…`): it reads the list from the code, transpiles 62 probes over 51 methods in both
+  spellings and both body kinds (every listed method must transpile, every other must be refused with
+  that message), and requires `tests/int_method_unlowered_d32.rs` to hold the only modules calling an
+  unlowered one; `ui:pass/int_method_unlowered_d32` is its row in `NAMED_PARITY_EXCEPTIONS`.
+- (2) `to_be` / `to_le` (and `<int>::to_be(v)`) are refused in both front-ends by
+  `copper_analysis::check_target_byte_order` (in `check_front_end_rules`) with
+  `TARGET_BYTE_ORDER_MESSAGE`; ui/fail `target_byte_order_to_be`, `_to_le`, `_path_call`.
+- Lowered on the way (cheap, §AI.7's list): the bit permutations `rotate_left`, `rotate_right`,
+  `swap_bytes`, `reverse_bits`; `min`, `max`, `abs_diff`; `signum`, `is_positive`, `is_negative`,
+  `wrapping_abs`, `unsigned_abs`; `wrapping_neg`, `wrapping_shl`, `wrapping_shr` — swept on three legs
+  (`tests/fixtures/int_method_dut.rs`), in the interpreter and (the `const fn`s) in `ConstEnv`. `clamp`
+  (a run-time failure when `min > max`), `pow` and the rest stay under the exception.
