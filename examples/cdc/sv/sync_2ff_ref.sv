@@ -1,4 +1,5 @@
 // Independent hand-written reference for the Copper standard-library
+// PROVENANCE (confirmed 2026-11-10): written by the user, the project's author. The Claude co-author trailer on the commit that added this file is commit attribution only.
 // synchronizer `copper::sync_2ff` (`src/sync.rs`).
 //
 // NOT produced by the Copper transpiler — authored directly from the textbook

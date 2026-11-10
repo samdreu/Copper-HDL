@@ -6571,3 +6571,9 @@ differential cases (3 ignored with a reason); G-F 411 (3 skipped); G-G different
 OUTSIDE / 0 DISAGREE, reference 3816 PASS / 0 DISAGREE; G-I 414/414; G-J 0 DISAGREE; **G-E 4
 anchored, 410 not**; **G-K `278 lines — 278 CLOSED, 0 OPEN`**; examples 32/32. After this run, docs
 only: this section.
+
+**Addendum (2026-11-10).** The user confirmed that they wrote the six headed references this
+section listed as unconfirmed: `ram_read_first.sv`, `handshake.sv`, `sync_2ff_ref.sv`,
+`two_domain_hierarchy.sv`, `pattern_detector_010.sv` and `mac_fsm.sv`. The Claude co-author
+trailers on their commits are commit attribution only. Each header gained a `PROVENANCE` comment
+line, no logic changed, and G-E's four anchors stand.

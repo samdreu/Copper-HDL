@@ -1,4 +1,5 @@
 // Hand-written reference for the request/acknowledge handshake counter
+// PROVENANCE (confirmed 2026-11-10): written by the user, the project's author. The Claude co-author trailer on the commit that added this file is commit attribution only.
 // (examples/sequential/handshake.rs; tests/fixtures/handshake_dut.rs). Written
 // 2026-09-02 from the module's English description — wait for `req`, take one
 // cycle, wait for `ack`, count — as the explicit three-state machine a Verilog

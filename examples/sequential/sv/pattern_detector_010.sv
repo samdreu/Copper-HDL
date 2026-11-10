@@ -1,4 +1,5 @@
 // Independent hand-written hardware reference for the "010" sequence detector.
+// PROVENANCE (confirmed 2026-11-10): written by the user, the project's author. The Claude co-author trailer on the commit that added this file is commit attribution only.
 //
 // This is the golden that fills the G1 variable-iteration-loop gap in
 // design_docs/SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md: the "010" detector previously

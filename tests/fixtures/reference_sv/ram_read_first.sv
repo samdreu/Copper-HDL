@@ -1,4 +1,5 @@
 // Independent hardware reference for `tests/fixtures/write_first_ram_dut.rs::ram_read_first`.
+// PROVENANCE (confirmed 2026-11-10): written by the user, the project's author. The Claude co-author trailer on the commit that added this file is commit attribution only.
 //
 // PROVENANCE: hand-written for this repository. It is therefore evidence that the
 // emitted SystemVerilog does what a hardware engineer would write by hand for a

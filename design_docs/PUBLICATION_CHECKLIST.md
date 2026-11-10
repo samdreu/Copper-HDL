@@ -50,23 +50,20 @@ wrote it. Each file has exactly one commit in its history.
 | `tests/fixtures/timing_probe_sv/counter_comb.sv`, `counter_reg.sv`, `dff.sv`, `enff.sv` | `tests/timing_probe_investigation.rs` (probe goldens) | 1d13296a, 2026-07-25, Claude co-author | unknown |
 | `tests/fixtures/timing_probe_sv/ram1.sv` | `tests/mem_latency_probe.rs`; `TIMING_COVERAGE_MATRIX.md` calls it a dormant golden | 1d13296a, Claude co-author | unknown |
 
-**Found on this pass (2026-11-10). These files have a header but no confirmed author.** The
-provenance check covered only the 16 files without a header. Every file below has a header that
-calls it hand-written or independent, and each was added in a commit with a Claude co-author. That
-is the same evidence that demoted `bit_not_bits`. The user decides whether each one is theirs. This
-pass changed none of them.
+**Written by the user, confirmed 2026-11-10.** The provenance check covered only the 16 files
+without a header. The six files below have a header that calls them hand-written or independent,
+and each was added in a commit with a Claude co-author. The user confirmed on 2026-11-10 that they
+wrote all six; the co-author trailers are commit attribution only. Each header now has a
+`PROVENANCE` line that says so. They are not blocking.
 
-| file | anchors | added in |
-|---|---|---|
-| `tests/fixtures/reference_sv/ram_read_first.sv` | **G-E** (`REFERENCE` row): `ram_read_first` | 7abfd98a, 2026-08-26 |
-| `tests/fixtures/reference_sv/handshake.sv` | **G-E** (`REFERENCE` row): the three `handshake` copies | 89284f2, 2026-09-03 |
-| `examples/cdc/sv/sync_2ff_ref.sv` | `tests/cdc_synchronizer_anchor.rs`; matrix row 5 | 525a0dce, 2026-08-21 |
-| `examples/cdc/sv/two_domain_hierarchy.sv` | `tests/two_domain_hierarchy_cdc.rs`; SPEC P19; matrix row 5 | 0d67f9ea, 2026-07-30 |
-| `examples/sequential/sv/pattern_detector_010.sv` | `tests/det_010_independent_golden.rs`; matrix row 6 | d1cab795, 2026-07-29 |
-| `tests/fixtures/timing_probe_sv/mac_fsm.sv` | the `mac_fsm` register set (SPEC III.2.11) | 1d13296a, 2026-07-25 |
-
-If the user did not write `ram_read_first.sv` and `handshake.sv`, G-E's four anchors are not
-independent of Copper, and G-E would count 0.
+| file | anchors | added in | status |
+|---|---|---|---|
+| `tests/fixtures/reference_sv/ram_read_first.sv` | **G-E** (`REFERENCE` row): `ram_read_first` | 7abfd98a, 2026-08-26 | user (confirmed 2026-11-10) |
+| `tests/fixtures/reference_sv/handshake.sv` | **G-E** (`REFERENCE` row): the three `handshake` copies | 89284f2, 2026-09-03 | user (confirmed 2026-11-10) |
+| `examples/cdc/sv/sync_2ff_ref.sv` | `tests/cdc_synchronizer_anchor.rs`; matrix row 5 | 525a0dce, 2026-08-21 | user (confirmed 2026-11-10) |
+| `examples/cdc/sv/two_domain_hierarchy.sv` | `tests/two_domain_hierarchy_cdc.rs`; SPEC P19; matrix row 5 | 0d67f9ea, 2026-07-30 | user (confirmed 2026-11-10) |
+| `examples/sequential/sv/pattern_detector_010.sv` | `tests/det_010_independent_golden.rs`; matrix row 6 | d1cab795, 2026-07-29 | user (confirmed 2026-11-10) |
+| `tests/fixtures/timing_probe_sv/mac_fsm.sv` | the `mac_fsm` register set (SPEC III.2.11) | 1d13296a, 2026-07-25 | user (confirmed 2026-11-10) |
 
 ## Open: other items found on a quick pass
 

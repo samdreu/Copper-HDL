@@ -1,4 +1,5 @@
 // Independent hand-written reference for the item-4 dual-clock hierarchy
+// PROVENANCE (confirmed 2026-11-10): written by the user, the project's author. The Claude co-author trailer on the commit that added this file is commit attribution only.
 // (`examples/cdc/two_domain_hierarchy.rs`). NOT produced by the Copper
 // transpiler — authored directly from the design intent to anchor Copper's
 // dual-clock / CDC timing against an outside implementation (fills the G1

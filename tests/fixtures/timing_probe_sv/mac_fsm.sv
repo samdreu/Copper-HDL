@@ -1,4 +1,5 @@
 // Faithful hand-written translation of the Copper mac_fsm 3-state machine.
+// PROVENANCE (confirmed 2026-11-10): written by the user, the project's author. The Claude co-author trailer on the commit that added this file is commit attribution only.
 // Load=0, Mul=1, Out=2.  Each arm's assignments are registered; out <= result
 // only in the Out state (held otherwise).
 module mac_fsm (clk, a, b, c, out);
