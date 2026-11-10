@@ -67,11 +67,11 @@ wrote all six; the co-author trailers are commit attribution only. Each header n
 
 ## Open: other items found on a quick pass
 
-- **`rust-version = "1.85"`** in every crate's `Cargo.toml` has not been checked. The tree builds
-  only on the pinned 1.98.1 (`rust-toolchain.toml`), and no build with 1.85 has been recorded.
-  `edition = "2024"` needs at least 1.85. To close it, build the library crates with 1.85, or
-  set `rust-version` to the oldest version that was measured. The trybuild `.stderr` files pin
-  1.98.1's diagnostics, so only the build can be checked on an older compiler, not the tests.
+- **`rust-version`: done (2026-11-10).** Every crate now declares `rust-version = "1.98.1"`, the
+  compiler `rust-toolchain.toml` pins and the only one any build, test or regression has run on.
+  The earlier `"1.85"` (the floor `edition = "2024"` needs) was never built. Lowering it later
+  needs a recorded build of the library crates on that older compiler; the trybuild `.stderr`
+  files pin 1.98.1 diagnostics, so the tests themselves stay 1.98.1-only.
 - **README § License** lists five references "adapted from third-party tutorial or template
   sources". Three of them are the blocking items above. The other two, `one_bit_comparator.sv`
   and `pattern_detector.sv`, have unknown status. That section must agree with this file once the

@@ -5,7 +5,7 @@ edition = "2024"
 description = "Copper transpiler (FIR -> CHIR -> SHIR -> VLIR -> SystemVerilog) and the copper-transpile CLI"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/samdreu/Copper-HDL"
-rust-version = "1.85"
+rust-version = "1.98.1"
 
 [[bin]]
 name = "copper-transpile"

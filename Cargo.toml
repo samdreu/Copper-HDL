@@ -9,7 +9,7 @@ edition = "2024"
 description = "Copper: a Rust-embedded HDL — hardware as #[hardware] async fns, simulated and transpiled to SystemVerilog"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/samdreu/Copper-HDL"
-rust-version = "1.85"
+rust-version = "1.98.1"
 
 [dependencies]
 copper-core = { path = "copper-core" }
