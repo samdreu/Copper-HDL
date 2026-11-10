@@ -4424,8 +4424,11 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | retired 14 | `multi_phase_out_write` | `gone:multi_phase_out_write`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8 |
 | retired 15 | `out_first_driven_late` | `gone:out_first_driven_late`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; I.11's class vacuous (D-14) |
 
-**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §AG.6
-(2026-11-09, on `0f4a0f3`, rustc 1.98.1, REGRESSION OK): **238 lines — 238 CLOSED, 0 OPEN**; 171 required by the SPEC
+**III.3.6 Counts.** Measured by G-K on the bare regression of `review/DOCS_AUDIT.md` §5.4
+(2026-11-09, on `eb31a18`, rustc 1.98.1, REGRESSION OK): **240 lines — 238 CLOSED, 2 OPEN**
+(`int-bit-count`, `int-port-unswept`, recorded with D-31's docs pass); fixture tokens and run checks
+as below (366 run checks satisfied, the 3 examples PASS).
+(Before, on `0f4a0f3`, §AG.6:) **238 lines — 238 CLOSED, 0 OPEN**; 171 required by the SPEC
 (91 numbered clauses, 23 II.1.2 rules — R23 retired by D-28 and kept as a CLOSED line, 4 II.2.1 rules,
 14 II.3.3 rows, 28 row-(e) methods, 9 retired rules) and 67 beyond it (the 7 methods row (e) owes, 60
 II.3 rows found in Phase C and after). Fixture tokens on CLOSED lines: 355 `sweep`, 165 `test`, 132 `ui`,

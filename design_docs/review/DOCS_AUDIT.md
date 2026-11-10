@@ -1,5 +1,7 @@
 # Documentation audit — phase 1 inventory (2026-11-09, tree c81b59f)
 
+**Phase 2 (applied 2026-11-09) is recorded in §5 at the end.**
+
 **What this is.** An inventory of every documentation file in scope, classified against the
 tree as it stands at c81b59f (MEASUREMENTS §AF, ledger 234/234/0), with each stale claim given
 as `file:line` plus the grep evidence. **No doc was edited in phase 1.** Phase 2 applies the
@@ -1847,3 +1849,104 @@ Common stale vocabulary in the 2026-11-02 notes (each verified once, cited per l
 - copper-analysis/tests/front_end_parity.rs:21 — "`allow_pretick_alignment` (the opt-out both front-ends honour)" — retired.
 - tests/two_domain_hierarchy_cdc.rs:32 — names `copper_analysis::unprotected_pretick_out_write` as live.
 - copper-codegen/src/vlir_lower.rs:3349 — "`unprotected_pretick_out_write` refuses the module in both front-ends".
+
+---
+
+## 5. Phase 2 — what was changed, and how it was checked (2026-11-09)
+
+The user accepted all 17 recommendations of §1 as written (relayed by the coordinator,
+2026-11-09). Batch J merged first (`paper` at d18a8f0, ledger 238/238/0), and this branch was
+rebased onto it. J had changed CLAUDE.md (3cb2ede) but not SPEC.md:3-5, so Q1's adoption is
+this branch's.
+
+### 5.1 Commits (docs only, except the two `//!` blocks of Q14)
+
+| commit | content | §1 items |
+|---|---|---|
+| 50acf9a | D-31 in SPEC_DECISIONS.md; SPEC.md's status line NORMATIVE since 2026-11-09; two OPEN lines in SPEC §III.3.4 | Q1, and the coordinator's two lines |
+| 16611f4 | dated historical/superseded headers in place; the three "when SPEC is adopted" retirements (D-5, D-6, D-7) marked inline in SYNCHRONOUS_SEMANTICS.md, DERIVATION_TABLE.md and FORMAL_SEMANTICS.md §3.2; prior_art and review/ pointers | Q2–Q7, Q12, Q13 |
+| 28e4470 | in-place fixes: README.md, copper-ref/README.md, CORPUS_DIFFERENTIAL_SWEEP.md, ANCHORING_A_MODULE.md, TIMING_COVERAGE_MATRIX.md, SPEC_OVERVIEW.md | Q8, Q9, Q15, Q16 |
+| d7bd90d | OUTDATED/README.md → README_2026-07.md plus a new index; copper-core/src/memory.md deleted; `//!` in copper-analysis and copper-ref | Q10, Q11, Q14 |
+| eb31a18 | CLAUDE.md: SPEC normative, the doc-roles list, six crates, history trimmed | phase 2 CLAUDE.md |
+
+No file was moved out of `design_docs/` (Q2–Q7: headers in place). The Q17 code comments
+(§3) are untouched.
+
+D-6's retirement asked for `review/MEASUREMENTS.md` §C's `RegOut` row to be corrected.
+MEASUREMENTS is append-only, so D-31 carries the correction instead. §C's "a trailing `RegOut`
+commits at the next edge" (debt item 3) is SPEC I.6.1's reading.
+
+### 5.2 The two OPEN ledger lines — what was measured
+
+**`II.3 found int-bit-count`** (owner copper-codegen), measured on d18a8f0. Two probe
+modules were used per method:
+- a sequential one: `let n = a.read().as_u8().count_ones(); q.write(Bits::from_u8(n as u8))`;
+- a combinational one, generic over its domain.
+
+They were run on `count_ones`, `count_zeros`, `leading_zeros` and `trailing_zeros`:
+- **The macro admits all eight.** `cargo test` built a temporary `tests/` file that
+  `include!`d them and passed; the file was deleted after the run and never committed.
+- **`copper-transpile` refuses all eight** with "unsupported construct: method `<m>` is not
+  supported in hardware expressions".
+
+This is a parity break. II.1.3's line stays CLOSED as J left it, but the new OPEN line says
+that II.1.3's "no break known" does not hold until this closes. **Whether II.1.3's own
+line should be re-opened is the user's call.** The coordinator asked only to record the line.
+
+**`II.3 found int-port-unswept`** (owner the sweep harness): `build.rs::is_stimulable`
+admits `Logic`, `Bits<N>` and arrays of them only. A module with any other payload is
+`#[ignore]`d with "unsupported port payload" (build.rs:764-774). No module in the corpus has
+one today: `grep 'In<u\|In<i'` over `examples/` and `tests/fixtures/` finds nothing.
+
+`cargo test --test conformance_ledger` on 50acf9a printed: `240 lines — 238 CLOSED, 2 OPEN;
+171 required by the SPEC; fixtures: 8 coreui, 3 example, 13 gone, 355 sweep, 165 test, 132 ui;
+366 run checks`. SPEC §III.3.6's counts paragraph is updated from the bare regression below.
+
+### 5.3 Verification
+
+- **Names in the added text.** Every backticked path and identifier in the lines this branch
+  adds (`git diff -U0 d18a8f0`, 30 files) was resolved against the code. Every path resolves
+  except the names the added text itself says are deleted: `pretick_alignment_corpus.rs`,
+  `hold_form_audit.rs`, `iterate_scc`, `diff_convergent_comb_loop`, `forward_opening_drives`,
+  `trailing_out_reads_input`, `branch_trailing`, `ReadMode`, `PROGRESS.md`. `corpus_manifest.rs`
+  also does not resolve: `build.rs` writes it into `OUT_DIR` (build.rs:545).
+- **`cargo doc --workspace --no-deps`** builds. It emits 4 warnings, all pre-existing dangling
+  links in `copper-analysis/src/cfg.rs` (:487, :908, :2028, :2599, Q17). None come from the edited
+  `lib.rs` text.
+- **`cargo test --test conformance_ledger`** and **bare `tools/regression.sh`**: §5.4.
+
+### 5.4 The bare regression, measured
+
+`tools/regression.sh`, run with no arguments on eb31a18 (rustc 1.98.1 from `rust-toolchain.toml`,
+on the laptop; **not** a `recycle` number, so it is not for quoting), ended
+`REGRESSION OK (774s)`:
+- G-C: 133 test files ran.
+- G-D: 395 differential cases (3 ignored-with-reason).
+- G-F: the reference leg ran on 395 modules (3 skipped with a reason).
+- G-G: no unexcused, unpinned disagreement.
+- G-I: 316 clocked modules related, 0 uncovered.
+- G-J: 0 DISAGREE.
+- G-K: `240 lines — 238 CLOSED, 2 OPEN; 171 required by the SPEC; fixtures: 8 coreui, 3 example,
+  13 gone, 355 sweep, 165 test, 132 ui; 366 run checks`, with the 3 example fixtures PASS.
+- 32/32 examples passed.
+
+The `.rs` changes were the two `//!` blocks only. After the run, SPEC §III.3.6 gained the
+counts above. That change is a SPEC.md text edit, and `cargo test --test conformance_ledger` was
+re-run on it (§5.5).
+
+
+### 5.5 After the counts edit
+
+`cargo test --test conformance_ledger` on the tip after the §III.3.6 edit passed: 2 passed,
+0 failed, and it printed the same `240 lines — 238 CLOSED, 2 OPEN` line. That edit touches no
+`.rs` file and no ledger row, so the bare regression of §5.4 stands for the code.
+
+### 5.6 Left for the user or a later session
+
+- **II.1.3's own ledger line stays CLOSED** while `int-bit-count` is OPEN. Whether it should
+  be re-opened, or the break named a fourth parity exception, is the user's call.
+- **Q17's stale code comments** (§3) are for a separate code-comment pass with its own
+  regression.
+- **SPEC.md's "owed to the overview" notes** at the old :3211 and :3833 (SPEC_OVERVIEW §6's
+  count) are now satisfied by Q16's edit. They were left as written because they are part of
+  SPEC's dated record.
