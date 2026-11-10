@@ -1,6 +1,7 @@
 # Copper's semantics on one page
 
-**Status (2026-11-04): the generating document.** Every clause of `SPEC.md` must follow from
+**Status (2026-11-04; SPEC.md normative since 2026-11-09, D-31): the generating document**, and the
+place to start reading. Every clause of `SPEC.md` must follow from
 this page or from a design choice listed on it. A clause that neither follows nor is listed
 is suspect and goes back to its packet. `review/DECISION_AUDIT.md` sorts D-1…D-8 by that
 test. The one question this page had open, Q1, is **decided** (D-8, 2026-11-04): one job.
@@ -63,8 +64,9 @@ These are choices, not consequences; each is recorded in `SPEC_DECISIONS.md`.
    routes the Mealy output to a `combinational` module).
 5. `RegOut` is a port kind whose write takes effect at the next edge (D-6) — the output
    rule.
-6. Every port and register powers on at the zero of its type (D-6; wires in I.11;
-   registers in I.7).
+6. Every port powers on at the zero of its type (D-6; wires in I.11). A register powers on
+   at its constant initializer, stated in the emitted text, and `Bits::x()` states nothing
+   (I.7.4, D-9, D-21).
 7. A register is a local live at a `tick` suspension; anything else a realization must
    store is a carrier, named with the form that provides it (D-7). Under one job no
    carrier is known (I.0.5).
@@ -82,14 +84,19 @@ a meaning. A rule that cannot name its principle is deleted.
 
 Two kinds. A **semantic refusal** cites a clause of §5's first two principles: a non-tick
 `await`, a tickless loop path, a return, a plain `Out` on a sequential module. A
-**lowering limitation** cites the form the transpiler lacks and the date it was recorded:
-twelve rows today (`SPEC.md` §II.3, D-13, 2026-11-05) — six dated refusals (a nested
-`continue`; a nested loop whose ticks are only inside arms; two element writes to an array
-register in one cycle; a constant initializer the evaluator cannot fold; the `Bits` methods
-the transpiler lacks; a hex literal) and six shapes the transpiler admits and realizes
-wrongly (the run-time-empty counted `for`, the pre-loop re-run and drop, the trailing fold
-at edge 1, array-element forwarding, a pre-loop tick), each with a fixture owed to Phase C.
-The eight alignment rules went with the second instant (D-8). The first list is the language.
+**lowering limitation** cites the form the transpiler lacks and the date it was recorded.
+`SPEC.md` §II.3.3 has fifteen rows. Twelve were recorded by D-13 on 2026-11-05: six dated
+refusals (a nested `continue`; a nested loop whose ticks are only inside arms; two element
+writes to an array register in one cycle; a constant initializer the evaluator cannot fold;
+the `Bits` methods the transpiler lacked; a hex literal) and six shapes the transpiler
+admitted and realized wrongly (the run-time-empty counted `for`, the pre-loop re-run and
+drop, the trailing fold at edge 1, array-element forwarding, a pre-loop tick). Three were
+added later: (h) the `continue` of a ticking `for`, (i) and (j) for received memories.
+Each row's ledger line (§III.3) is CLOSED. Phase C lowered the refusals and fixed the
+defects; (h) and (i) stay refused by both front-ends as dated limitations; (f6) and (j)
+proved not to be limitations. The rows found after Phase C are ledger lines of their own,
+each CLOSED or OPEN with an owner. The eight alignment rules went with the second instant
+(D-8). The first list is the language.
 
 ## 7. How it is checked
 

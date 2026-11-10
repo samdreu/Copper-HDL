@@ -19,7 +19,7 @@ rediscovered by an audit.
 **What G-E counts, precisely.** `build.rs` computes it: a module is *anchored* iff
 it is in the sweep's corpus (`examples/` + `tests/fixtures/`), has a `REFERENCE`
 row, **and** is not in `SKIP` — a `REFERENCE`'d module that is also `SKIP`'d never
-runs its reference leg, so the row is inert and is not counted (`bit_not_bits` was
+runs its independent-Verilog leg, so the row is inert and is not counted (`bit_not_bits` was
 exactly that from 2026-08-26 until its stale `SKIP` row was deleted on 2026-09-01,
 and G-E over-reported by one the whole time). The result is written as the
 `ANCHORED` / `UNANCHORED` constants in the generated file and as a
@@ -65,27 +65,29 @@ failure mode the whole guard family exists to prevent.
 | requirement | why |
 |---|---|
 | SV module named **exactly** the Copper module | Verilator runs `--top-module <name>` |
-| clock port named **`clk`** | the generated testbench drives `top->clk` literally |
+| clock port named **`clk`** (a clocked module) | the generated testbench drives `top->clk` literally, when the SV declares an input `clk` (`verilog_has_clock_port`) |
 | port names match the Copper module's **emitted** names | the testbench addresses them by name; a name colliding with an SV/C++ keyword is legalized (`event` → `event_sig`) via `copper_codegen::legalized_port_name` |
 | must pass `verilator -Wall -Wno-DECLFILENAME` | warnings are **fatal** in `verification.rs`; a WIDTHTRUNC or UNUSEDSIGNAL fails the test |
-| same parameter names if the module is generic | `with_params` is mirrored onto the reference leg, so it Verilates at the same widths |
+| same parameter names if the module is generic | `with_params` is mirrored onto the independent-Verilog leg, so it Verilates at the same widths |
 | must not be the transpiler's own output | a reference derived from the transpiler cannot anchor the transpiler; `build.rs` rejects a file carrying the `// @generated` marker |
 
-**A combinational reference still needs `clk`** — the harness always drives one —
-and an *unused* input is UNUSEDSIGNAL under `-Wall`, which is fatal. Consume it with
-an empty `always_ff @(posedge clk) begin end`, which is exactly what the transpiler
-emits for the same reason. `reference_sv/bit_not_bits.sv` shows it.
+**A combinational reference needs no `clk`.** The testbench drives one only when the SV
+declares it (`verilog_has_clock_port` in `copper-sim/src/verification.rs`), and the
+transpiler emits none for a combinational module. If a reference does declare one, an
+*unused* input is UNUSEDSIGNAL under `-Wall`, which is fatal; consume it with an empty
+`always_ff @(posedge clk) begin end`. `reference_sv/bit_not_bits.sv` still does this; it was
+written when the harness drove `clk` unconditionally.
 
-Two things that are *not* required, because both sides already agree on them:
+Two things about the starting state:
 
-- **No `initial` block for memories.** The harness passes no `--x-initial` flag
-  (`verify_with_verilator` in `copper-sim/src/verification.rs` runs Verilator with
-  `--cc --exe --build --top-module <name> --Mdir <dir> -Wall -Wno-DECLFILENAME`,
-  plus `-G<param>=<value>` per parameter and `--trace` when tracing) and the
-  generated testbench sets no `+verilator+rand+reset`, so Verilator's 2-state
-  default leaves every array and register at zero; the transpiler emits no
-  `initial` either, so the two start from the same state. A *preloaded* memory is
-  a different fixture.
+- **State the power-on values in an `initial` block.** Since 2026-10-29/30 the transpiler
+  states every register's power-on value, a constant initializer or the zero of a
+  synthesized register, and zero-fills every `Memory::new` array (SPEC I.7.4, I.10). The
+  default harness passes no `--x-initial` flag, so Verilator's 2-state zero fill would hide an
+  unstated reference value. Under `COPPER_VERILATOR_X_INITIAL=1` (`VerilatorPowerOn`), however,
+  the model starts every unstated register at a random value, and a reference that leaves its
+  array unstated then disagrees. `reference_sv/ram_read_first.sv` gained its `initial` block
+  for exactly this reason (2026-10-30). A *preloaded* memory is a different fixture.
 - **No reset**, unless the design genuinely has X state before one — in which case
   add a row to `RESET` in `build.rs` naming the reset port and whether it is
   active-low.
@@ -139,10 +141,10 @@ the panic names which combination you are in — because that *is* the diagnosis
 | what failed | what it means |
 |---|---|
 | transpiled leg only | the transpiler disagrees with the simulator |
-| **reference leg only** | the simulator and the transpiler agree with each other and are **both wrong** — the case no amount of differential testing can see, and the reason anchoring exists |
+| **independent-Verilog leg only** | the simulator and the transpiler agree with each other and are **both wrong** — the case no amount of differential testing can see, and the reason anchoring exists |
 | both | the transpiler disagrees with the simulator, and both disagree with the reference |
 
-A reference-only failure is also how you localise a bug you already know about.
+An independent-Verilog-only failure is also how you localise a bug you already know about.
 `bit_not_bits` was the worked example: while `!` on a `Bits<N>` still lowered to
 logical `!`, `assign o = ~a` agreed with the simulator and disagreed with the emitted
 SystemVerilog, which is what said the lowering was wrong rather than the executor.

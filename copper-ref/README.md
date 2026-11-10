@@ -52,21 +52,21 @@ in `tests/two_domain_hierarchy_cdc.rs`; pinned in `tests/interp_design.rs`.
 
 **How it is wired.** `build.rs` emits a `<name>_reference_leg` case per corpus module
 (the simulator's trace under the sweep's stimulus policy, replayed through the
-interpreter: `resume` with cycle N's inputs, `edge`, `observe` against `obs_{N+1}`;
-`obs_0` is not recorded by the harness today, a III.2 item) and adds the leg to the
+interpreter: `resume` with cycle N's inputs, `edge`, `observe` against `obs_{N+1}`, and
+`obs_0` before the first edge, compared on all three legs since 2026-11-06) and adds the leg to the
 `_differential` case so one failure report carries all three readings. `tools/regression.sh`'s
 **G-F** counts the cases that ran and the ones skipped with a reason; the leg needs no
 Verilator, so it also runs under `--quick`.
 
 **What it refuses, and how.** Every refusal names its SPEC row (`RefError`):
 
-- `Deferred` — a class the interpreter does not cover yet, skipped by `build.rs`'s
-  `REF_SKIP` with the clause that owes it: a plain `Out` on a clocked module (R8 refuses
+- `Deferred` — a class the interpreter does not cover yet, skipped by `build.rs`
+  (`ref_skip_reason` for a whole class, a `REF_SKIP` row for one module) with the clause that owes it: a plain `Out` on a clocked module (R8 refuses
   it in both front-ends since Phase C step 3), a `Memory` **parameter** (I.10.5: its
   depth and contents are the owner's), a second clock in one kernel (I.12), and a
   `structural` module given to `Module::new` (it is a `Design`, I.13.4(a)).
 - `Unsupported` — outside the kernel or in a dated row: a read inside macro tokens or a
-  statement macro (II.1 R13/R14), `/` (R15), a labelled or valued `break` (R12),
+  statement macro (II.1 R13/R14), a labelled or valued `break` (R12),
   `return` (I.2.5(d)), a non-`tick` `await` (R1), a `tick` before the loop (R21), recursion
   (R6), an or-pattern that binds, a tuple-variant enum, `let … else`, `if let`, closures.
 - `Runtime` — what the Rust program would panic on: an X read as an integer, an index
@@ -82,29 +82,26 @@ forwarding) is interpreted by its Part I meaning — which is the point.
 |------------------------------|-------------------------------------------------------------------------|
 | sim ≠ ref, SV = ref          | a **simulator or macro bug** (or a Phase C obligation not yet landed)   |
 | sim = ref ≠ SV               | a **transpiler bug**, or a II.3 row                                     |
-| sim = SV ≠ ref               | both implementations share a reading the spec does not give — a two-job residue (the one case found, `regout_trailing_single_tick`, became sim = ref ≠ SV at Phase C step 3 and agrees on all three legs since step 4) |
+| sim = SV ≠ ref               | both implementations share a reading the spec does not give — or the interpreter is wrong (the one case found, `regout_trailing_single_tick`, a residue of the retired two-job executor, became sim = ref ≠ SV at Phase C step 3 and agrees on all three legs since step 4) |
 | all three differ             | a **spec gap or an interpreter bug** — read the interpreter's first disagreement first |
 
 Agreement of the three is consistency, not correctness: only an independent anchor
 (BaseJump, a hand-written golden) says what the hardware does.
 
-**The constant evaluator.** Widths, array lengths and `const` items are evaluated by
-the interpreter's own expression evaluator against the file's consts and the module's
-const generics (lazily, memoized). Against `copper_analysis::is_constant_expr` (the
-syntactic predicate both front-ends use for rule R11) and codegen's `fold_const_init`:
-this evaluator **folds** a `const` whose body is an expression (`CLKS / 2`), a const
-generic used as a value, arithmetic over those, casts, and `Bits::zero() / from_uN /
-from_lit / x()` to a value of the width the context gives (II.3 row (d)'s first two
-shapes); it **does not fold** an associated const, a constant free function (both
-`is_constant_expr` accepts), or `Bits::all_ones()` with no width in its spelling.
-`is_constant_expr` accepts any multi-segment path and any call through one, which this
-evaluator only accepts when it names something it can read.
+**The constant evaluator.** Widths, array lengths and `const` items (file scope, `impl`
+blocks as `T::K`, fn bodies) are evaluated by the interpreter's own evaluator
+(`ConstScope`, `Exec::eval_const`) against the file's consts and the module's const
+generics. It shares SPEC I.14.4's grammar with the front-ends'
+`copper_analysis::consts::ConstEnv` but no code (D-21 B2), which is what lets the
+reference leg attribute a disagreement. `tests/const_evaluators_agree.rs` (G-J) pins the
+two against each other on every corpus constant, pre-loop initializer, counted-`for` bound
+and index, and against rustc on the widened grammar. An expression only one evaluator
+folds is a pinned `ASYMMETRIC` row.
 
-**The one-job spelling and today's corpus.** The interpreter implements the one-job
-model only. A shipped module in the two-job spelling with a plain `Out` is deferred;
-a module whose outputs are all `RegOut` runs, and today's simulator agrees with the
-interpreter on it exactly when every input read is "deferred" (a tick follows it in the
-iteration) — a trailing read is the one shape where the two-job executor reads `x_N`
-and the one-job body reads `x_{N+1}`. The five B-rewrites of
-`review/Q1_TRADEOFFS.md` §4 live in `tests/fixtures/q1_b_rewrites_dut.rs` and run
-through every leg.
+**The corpus.** The interpreter implements the one-resumption model only, as the
+simulator has since Phase C step 3 (2026-11-06). Every clocked module's outputs are
+`RegOut`s (R8), so `REF_SKIP` is empty. The leg's only skips are the signature classes
+`build.rs`'s `ref_skip_reason` computes: a `structural` module, a `Memory` parameter, more
+than one clock. The five
+B-rewrites of `review/Q1_TRADEOFFS.md` §4 live in `tests/fixtures/q1_b_rewrites_dut.rs`
+and run through every leg.

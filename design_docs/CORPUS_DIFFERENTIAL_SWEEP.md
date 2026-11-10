@@ -1,7 +1,8 @@
 # Corpus differential sweep — scope and as-built design
 
-**Status:** phases 1–4 BUILT and green (2026-08-25). `build.rs` generates one
-differential case for every `#[hardware]` module in `tests/fixtures/` and
+**Status:** phases 1–4 BUILT and green (2026-08-25); this page re-checked against the tree
+2026-11-09 (`review/DOCS_AUDIT.md`). `build.rs` generates a differential case and a
+reference-interpreter case for every `#[hardware]` module in `tests/fixtures/` and
 `examples/` — those two directories only; `src/sync.rs::sync_2ff` and modules
 declared inline in test files are outside it (a `sync_2ff_concrete` twin is swept)
 — and `tools/regression.sh`'s **G-D** asserts the sweep covered the corpus and ran.
@@ -9,17 +10,23 @@ declared inline in test files are outside it (a `sync_2ff_concrete` twin is swep
 The counts move as the corpus does, so trust the tool over any number written here:
 `build.rs` prints `corpus sweep: N generated, M ignored-with-reason` on every build,
 and G-D prints `corpus sweep ran N differential cases (M ignored-with-reason)` on
-every full run. The current counts are in the build and regression printouts above (and in
-`paper/stats/SUMMARY.md`); on 2026-09-01 it was 133 running, 10 ignored-with-reason, out of
-143 modules, and on 2026-10-28 146 running, 9 ignored-with-reason, out of 155. Every
-ignored one is a row in `build.rs`'s `SKIP` table — a recorded
-transpiler refusal, a structural module with no simulatable body, a deliberate
-divergence witness, a stimulus precondition the sweep will not keep (`mod8`, §0),
-or the pipelined CPU, whose `Memory` parameter the harness cannot supply (the
-one measured divergence of the lowering, `branch_merge`, was fixed 2026-10-29 and
-sweeps, §0). **None is "the generator cannot do this."**
+every full run. The current counts are in those printouts (and in
+`paper/stats/SUMMARY.md`). On 2026-09-01 it was 133 running and 10 ignored-with-reason, out
+of 143 modules; on 2026-10-28, 146 running and 9 ignored, out of 155; on 2026-11-09, 391
+modules with 3 ignored. Every ignored one is a row in `build.rs`'s `SKIP` table. The rows
+today are three: the structural module with no simulatable body (`two_domain_top`), a
+stimulus precondition the sweep will not keep (`mod8`, §0), and the pipelined CPU, whose
+`Memory` parameter the harness cannot supply. The transpiler-refusal and divergence-witness
+rows of earlier editions are gone: the one measured divergence of the lowering,
+`branch_merge`, was fixed 2026-10-29 and sweeps (§0). A module with a payload the generator
+cannot randomize is the one generator-made ignore, and none exists today (SPEC §III.3.4,
+`int-port-unswept`).
 
 ## 0. What the sweep found — the 2026-08-25 log, compressed
+
+*A dated log. Some functions and tests it names were deleted later with the clocked plain `Out`
+(Phase C steps 3–4, 2026-11-06): `vlir_lower::opening_hold_outputs`, `hold_form_audit.rs` and the
+`sequential_forwarding_divergence.rs` probes.*
 
 Phases 1–4 were built and run in one day; this is what each found, kept because
 the findings are the argument for the sweep.
@@ -192,7 +199,10 @@ mechanical, and mechanical is what makes it complete.
 
 ---
 
-## 2. The corpus, measured
+## 2. The corpus, measured (2026-09-01)
+
+*Dated. On 2026-11-09 the corpus had 391 modules: 306 sequential, 81 combinational, 3 synchronizer
+and 1 structural. The array-port and `Memory`-parameter rows below are unchanged.*
 
 143 `#[hardware]` modules across `examples/` and `tests/fixtures/`, counted
 2026-09-01 from the generated manifest (`COVERED` in `$OUT_DIR/corpus_generated.rs`)
@@ -244,9 +254,15 @@ backlog **regrows with every module added**, silently, and this removes that.
 
 `build.rs` (with `syn` and `quote` as build-dependencies) walks `examples/` and
 `tests/fixtures/` (`collect_rs`, which prunes `old/` directories), parses every
-`#[hardware]` signature (`Module::from_item`, `classify`), and emits one `#[test]`
+`#[hardware]` signature (`Module::from_item`, `classify`), and emits two `#[test]`s
 per module into `$OUT_DIR/corpus_generated.rs`, which `tests/corpus_generated.rs`
-`include!`s. `cargo:rerun-if-changed` on both directories and on `build.rs` itself
+`include!`s: `<name>_differential` (the simulator, the transpiled SV under Verilator and,
+unless `REF_SKIP`ped, the reference interpreter, so one failure report carries all three
+readings) and `<name>_reference_leg` (the interpreter alone, no Verilator; G-F counts these).
+It also writes `$OUT_DIR/corpus_manifest.rs` (`SWEEP_MODULES`), which the projection test
+(G-I) and the conformance ledger (G-K) read. A combinational module generic over its domain
+(`D: ClockDomain`, D-22) is instantiated at one concrete domain, `SweepDomain`, declared by
+the generated wrapper. `cargo:rerun-if-changed` on both directories and on `build.rs` itself
 keeps it honest.
 
 Each generated case wraps the source file in its own module and `include!`s it, so
@@ -348,6 +364,16 @@ costs in wall time is a measured number, not an estimate: none worth seeing (§5
 
 ### 3.3 Comparison
 
+**The verdict is SPEC §III.2's agreement relation** (`tests/common/relation.rs`). Each
+sequence is judged per observation, observation 0 included, across the three legs. The verdicts
+are PASS, OUTSIDE (a simulator X against the 2-state SV, which leaves the relation from there
+and is never compared as 1), TRUNCATED (a run-time failure at the same resumption on the
+simulator and the interpreter) and EXCUSED (none today). A disagreement is printed with its
+pattern: `sim≠ref,SV=ref`, `sim=ref≠SV`, `sim=SV≠ref` or `all-differ`. Every case writes its
+verdicts to `COPPER_VERDICT_LEDGER`, and G-G fails on any swept disagreement. A `RESET`-row
+module's observation 0 is outside the SV pair (`with_reset_row`). SPEC §III.2 is the authority;
+the rest of this section is the mechanism.
+
 `EquivalenceTest::differential_only` + `record_differential` (`tests/common/mod.rs`)
 record the simulator's outputs as both actual and expected, so the trace comparison
 is trivially satisfied and the Verilator leg carries the weight. The mode is
@@ -375,20 +401,22 @@ initializer fix it failed 63 of 163 cases; after it, 36 — and none of those is
 Rust initializer. Every register they leave unstated is one codegen synthesizes: a
 `RegOut` port flop (`skip_on_halt`'s `o`, `vr_src_regout`'s `valid`/`data`), the
 edge-sampled register of a conditionally driven plain `Out` (`bsg_dff_en`'s
-`data_o`, `conditional_plain_out`'s `o`), a memory's read- and write-stage registers
+`data_o`, `conditional_plain_out`'s `o`; since D-8 both are `RegOut`, and a clocked plain
+`Out` is refused, R8), a memory's read- and write-stage registers
 (`mem_rd0_q0`, `mem_wr0_s1_*`), a cross-state local hoisted from an input read
 (`mac_pipeline`'s `product_r`) — or an unpreloaded `Memory` array (`ram_*`,
 `dual_port_ram`, the `regs` register file). Their simulator-side power-on value is
 the harness wire's zero or `Memory::new`'s `T::default()`, a convention of the
 harness rather than anything the module states; `vlir_lower` already gave a
-`<port>_hold` register `initial = 0` on exactly that convention. **Decided the same
+`<port>_hold` register `initial = 0` on exactly that convention (the hold form was deleted
+with the clocked plain `Out`, Phase C step 4, 2026-11-06). **Decided the same
 day: state them all.** Every such register now gets `= 0` in the module's `initial`
 block (`VLIRSeqBody::port_inits` for the port flops, `init: Some(0)` for the stage
 registers and hoisted locals) and every `Memory::new` array a zero fill (the
 simulator starts a memory at `T::default()`); Appendix A keeps the measured set.
 After that the randomized sweep passes 162 of its 163 cases, the three `RESET`-row
-modules included (their reset is asserted on cycle 0 and the comparison starts
-there). The one failure was not a transpiled leg at all: `ram_read_first`'s
+modules included (their reset is asserted on cycle 0; since the agreement relation landed,
+2026-11-06, their observation 0 is outside the SV pair). The one failure was not a transpiled leg at all: `ram_read_first`'s
 **independent reference** (`tests/fixtures/reference_sv/ram_read_first.sv`, a
 `REFERENCE` row) left its array deliberately uninitialized, so under randomized
 power-on the hand-written RAM read random words where the simulator and the
@@ -404,7 +432,7 @@ zero-fill comparison the `RESET` table was written against.
 There is no separate constraint file and no stimulus masking; a module whose
 random inputs would hit a precondition is either fine under the harness's own rules
 (a guarded 32-bit address that is simply never in range) or has a `SKIP` row saying
-why. What cannot be inferred from a signature lives in four reviewed tables at the
+why. What cannot be inferred from a signature lives in six reviewed tables at the
 top of `build.rs`, each row a sentence with an author:
 
 | table | carries | verified at build time |
@@ -413,6 +441,8 @@ top of `build.rs`, each row a sentence with an author:
 | `PARAMS` | the monomorphization for a generic module — the same widths its hand-written test uses | a generic module with no complete row is ignored with a reason naming the table |
 | `RESET` | `(module, port, active_low)` for a design whose state is genuinely X until reset — a `Bits::x()` register, or a memory the reset must define. Not for a constant initializer: that reaches the SV as the register's `initial` value (2026-10-29), so the sweep observes such a module from its first cycle | — |
 | `REFERENCE` | an independent Verilog reference, by module | module exists, file exists, declares `module <name>`, is not `// @generated` |
+| `REF_SKIP` | modules the reference-interpreter leg must not run, with the SPEC clause that owes it (empty since Phase C step 9); whole classes — a `structural` module, a `Memory` parameter, more than one clock — are computed by `ref_skip_reason` | every key names a covered module |
+| `REF_SKIP_PATTERN` | the disagreement pattern of every `REF_SKIP` row that excuses a measured disagreement (empty); G-G requires a pin to have measured it this run | validated against `REF_SKIP` |
 
 The generator adds its own ignore reasons where no table applies (`skip_reason`): a
 `Memory` parameter (the sweep would have to invent its size and contents), more than
@@ -432,16 +462,19 @@ re-scans both directories with the same pruning as `collect_rs` and asserts the
 `COVERED` manifest matches in **both** directions — a module with no case, or a case
 for a module that no longer exists, fails naming it.
 
-In `tools/regression.sh`, **G-D** requires that guard's `ok` line in the test log,
-counts the `_differential ... ok` and `... ignored` lines, fails if none ran, and —
-because a case without Verilator compares the simulator to itself — prints
-`G-D NOT SATISFIED` and forces `PARTIAL` when `verilator` is not on the path. **G-E**
+In `tools/regression.sh`, **G-D** requires that guard's `ok` line and the stimulus-policy
+pin's `ok` line in the test log, counts the `_differential ... ok` and `... ignored` lines,
+and fails if none ran. A bare run cannot pass without Verilator: the examples phase fails
+when `verilator` is not on the path. **G-E**
 prints the anchoring ledger `build.rs` writes to the build log (`anchoring: N
 module(s) checked against an independent reference, M cross-checked against the
 transpiler only`); it does not fail.
 
 This repo already had G-A, G-B and G-C because "the check silently did not run" is
-its most-repeated bug class. A sweep without G-D would be one more instance of it.
+its most-repeated bug class. A sweep without G-D would be one more instance of it. The
+sweep's other guards came later: **G-F** (the reference leg ran as many cases as `build.rs`
+generated), **G-G** (every case wrote its §III.2 verdicts, and no swept disagreement
+survives) and **G-I** (the projection relation over `corpus_manifest.rs`).
 
 ---
 

@@ -1,5 +1,11 @@
 # Timing-Pattern Coverage Matrix (gate G1)
 
+> **Status (re-checked 2026-11-09, `review/DOCS_AUDIT.md`).** The six anchors below exist and
+> pass. Since D-8 and R8 (2026-11-06) every output of a clocked module is a `RegOut`, so pattern 3's
+> axis is now *registered outputs* against *combinational modules*. The standing anchoring
+> mechanism is G-E with `build.rs`'s `REFERENCE` table (`ANCHORING_A_MODULE.md`). The 2026-10-23
+> addendum is retired.
+
 > Groundwork for `SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md` gate **G1**. Establishes,
 > per timing pattern, whether Copper's simulation semantics are anchored to an
 > **independent hardware golden** — hand-written or third-party Verilog run under
@@ -55,7 +61,7 @@ under `cargo test`.
 |---|---|---|---|---|---|
 | 1 | **Multi-tick FSM** (≥1 tick per loop iter / `match pc`) | `sipo_block` (4-word deserializer); `mac_fsm`/`mac_pipeline` (3-stage) | **Yes** — `examples/basejump/sv/sipo_block.sv` (BaseJump), LIVE, passes | `examples/basejump/sipo_block.rs::main` (`with_verilog`) | ✅ anchored |
 | 2 | **Mid-phase read** (read whose result crosses a tick within the iteration) | `sipo_block` (words 1–3 sampled after a tick) | **Yes** — `sipo_block.sv`, LIVE, passes | same | ✅ anchored |
-| 3 | **Moore-`RegOut` vs Mealy-`Out`** (registered-output timing axis) | RegOut: `bsg_counter_up_down`, `bsg_dff_en`; comb-out: `det_110101`, `det_010`, combinational examples | **Yes** — BaseJump registered goldens + textbook comb-output goldens, all LIVE | `examples/basejump/bsg_counter_up_down.rs::main`, `examples/basejump/bsg_dff_en.rs::main`; `examples/sequential/pattern_detector.rs::main` (`det_110101` vs `pattern_detector.sv`); `tests/det_010_independent_golden.rs`; the five `with_verilog` combinational examples (`mux`, `priority_encode`, `one_bit_comparator`, `ripple_carry_adder`, `rotate_right`) | ✅ anchored |
+| 3 | **Registered output vs combinational module** (output timing axis; until D-8, Moore-`RegOut` vs Mealy-`Out`) | RegOut: `bsg_counter_up_down`, `bsg_dff_en`, `det_110101`, `det_010` (both `RegOut` since D-8, against comb-output goldens); combinational: the combinational examples | **Yes** — BaseJump registered goldens + textbook comb-output goldens, all LIVE | `examples/basejump/bsg_counter_up_down.rs::main`, `examples/basejump/bsg_dff_en.rs::main`; `examples/sequential/pattern_detector.rs::main` (`det_110101` vs `pattern_detector.sv`); `tests/det_010_independent_golden.rs`; the five `with_verilog` combinational examples (`mux`, `priority_encode`, `one_bit_comparator`, `ripple_carry_adder`, `rotate_right`) | ✅ anchored |
 | 4 | **Memory read latency** | `dual_port_ram` | **Yes** — `examples/memory/sv/dual_port_ram.sv` (independent template), LIVE | `examples/memory/dual_port_ram.rs::main` | ✅ anchored |
 | 5 | **CDC / synchronizer latency** | `sync_2ff` (stdlib, isolated); `two_domain_hierarchy` (dual-clock hierarchy) | **Yes** — `examples/cdc/sv/sync_2ff_ref.sv` + `examples/cdc/sv/two_domain_hierarchy.sv`, both LIVE, pass | `tests/cdc_synchronizer_anchor.rs::independent_verilog_matches_sim` (+ the latency tests listed below); `tests/two_domain_hierarchy_cdc.rs::independent_reference_matches_sim_under_verilator` | ✅ **anchored (closed 2026-08-21)** |
 | 6 | **Variable-iteration loop** (`det_010` shape; data-dependent tick count) | `det_010` (Moore) vs `det_010_awaits` (sliced) | **Was NO** (two codings vs each other). **Now YES** — see below | `tests/det_010_independent_golden.rs::det_010_matches_independent_verilog`, `::det_010_awaits_matches_independent_verilog` | ✅ **anchored (this work)** |
@@ -81,10 +87,12 @@ trace is exercised only by `tests/timing_probe_investigation.rs::probe_registere
 an `#[ignore]`d diagnostic printout with no assertions — and could be promoted to
 a live `with_verilog` check cheaply.
 
-**3 · Moore-`RegOut` vs Mealy-`Out`.** Both output-timing axes have live
+**3 · Registered output vs combinational module.** Both output-timing axes have live
 independent goldens: registered outputs via BaseJump `bsg_counter_up_down` /
-`bsg_dff_en`, combinational/Moore-comb outputs via `det_110101`, the new `det_010`,
-and the combinational suite. (The RegOut lowering itself was landed and anchored
+`bsg_dff_en`, and combinational outputs via the combinational suite. `det_110101` and
+`det_010` drove a plain `Out` until D-8. Their outputs are now `RegOut`, and they still
+match their textbook goldens, whose output is `assign`ed from the state register (the
+golden's `out` and the `RegOut` show the same value at every observation). (The RegOut lowering itself was landed and anchored
 in commit `75f9c26`/`1d13296`.)
 
 **4 · Memory read latency — anchored by `dual_port_ram`** against an independent
@@ -119,7 +127,9 @@ of those is its own test in `tests/cdc_synchronizer_anchor.rs`
 (`sync_2ff_observable_latency_is_one_destination_cycle`,
 `sync_2ff_latency_is_independent_of_source_tick_rate`,
 `narrow_pulse_between_edges_is_dropped`, `pulse_held_across_an_edge_is_captured`,
-`synchronizer_behaves_as_two_flops_not_one`, among others). The
+`sync_2ff_latency_is_measured_from_the_rise_not_from_reset`,
+`source_domain_ticks_do_not_advance_the_synchronizer`, among others; the one-flop case is now
+`a_one_flop_synchronizer_is_refused_by_both_front_ends`, since Phase C step 10). The
 independent Verilog agrees on all of it. Note this does **not** contradict the
 "two destination cycles" figure in `examples/cdc/two_domain_counter.rs`'s prose:
 that counts the full path from a fast-domain *register's* output, which includes the
@@ -132,8 +142,10 @@ all have two: `ff2` is defined post-tick and read pre-tick, so its live range cr
 the loop back edge but no tick edge, and the rule keyed only on ticks.
 The reconciliation test (now `copper-codegen/tests/register_reconciliation.rs`)
 filtered on `#[hardware(sequential)]`, so synchronizers were never reconciled and
-nothing caught it. `Cfg::registers` now has a **back-edge clause** alongside the
-tick clause; the reconciliation test covers `synchronizer` permanently, and
+nothing caught it. `Cfg::registers` then gained a **back-edge clause** alongside the
+tick clause *(deleted in Phase C step 6, 2026-11-07: `sync_2ff` was re-spelled so that the
+second flop is the `RegOut` `q`, and a register is live at a tick, SPEC I.7.1;
+`copper-analysis/src/cfg.rs` "No back-edge clause")*; the reconciliation test covers `synchronizer` permanently, and
 `tests/cdc_synchronizer_anchor.rs::register_inference_matches_the_independent_reference`
 pins the two-flop count against the independent Verilog; and the fix was validated
 against a differential oracle — inference vs codegen's emitted flip-flops over every
@@ -150,9 +162,9 @@ number of times). The only prior check
 (`det_010_variants_match_transition_table`, in that example's `#[cfg(test)]`
 module) compared these **two Copper codings against each other** — it cannot say
 which is correct. It was `#[ignore]`d at the time because they diverged; today it
-is not ignored and the two codings agree — but note its `[[example]]` entry in
-`Cargo.toml` sets no `test = true`, so `cargo test` builds it and does not run it.
-The live check is the golden test below.
+is not ignored and the two codings agree, and since 2026-09-01 its `[[example]]` entry
+in `Cargo.toml` sets `test = true`, so `cargo test` runs it. The independent check is the
+golden test below.
 
 ## What this work added (the G1 det_010 golden)
 
@@ -198,7 +210,13 @@ claims now rest on an outside referee rather than on self-assertion.
 That work also surfaced — and fixed — a real under-approximation in register
 inference on synchronizers; see under pattern 5 above.
 
-## Addendum (2026-10-23) — the trailing region
+## Addendum (2026-10-23) — the trailing region *(retired by D-8)*
+
+*Retired 2026-11-06. The plain `Out` of a clocked body, the m2 test, `trailing_update`,
+`branch_trailing` and `vlir_lower::opening_hold_outputs` were all deleted with D-8 (Phase C
+steps 3–4), and the m2 module was in any case circular as an anchor
+(`review/MEASUREMENTS.md` §C). The trailing `RegOut` write is SPEC I.0.2's next head and
+I.6.1, and `regout_trailing_single_tick` sweeps on three legs.*
 
 A seventh pattern joined the anchored set with the tick-dialect unification: a
 **trailing region** (statements after the last top-level tick) driving a plain
