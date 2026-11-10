@@ -6232,3 +6232,168 @@ examples **32/32**; G-D 388 differential cases (3 ignored-with-reason), G-F 388 
 related, 2379 transitions; G-J 0 DISAGREE; G-E 5 anchored; G-K `234 lines — 234 CLOSED, 0 OPEN`. Not run
 remotely (nothing pushed). Its step 2 passed under `nohup` this time; §AE's SIGPIPE failure did not recur. After
 this run, docs only: this section and CLAUDE.md.
+
+## AI. The two OPEN lines of DOCS_AUDIT §5 closed: the integer bit counts lowered, integer ports swept; 32 integer methods found and left OPEN; II.1.3 re-opened and stays OPEN (2026-11-09)
+
+Branch `claude/open-items-k-94e4ee`, from `paper` at `10b4165`. Predictions are in the session notes
+(`open-items-k-AI.md`), written before each measurement. Tools: rustc 1.98.1 (the pin), Verilator 5.044, Yosys
+0.68, Icarus 12.0.
+
+### AI.0 II.1.3 re-opened first
+
+The user decided (relayed 2026-11-10) that II.1.3 is OPEN while `int-bit-count` is open: the ledger must never
+understate. Done in its own commit before any fix (`19ca863`): II.1.3's line OPEN, owner copper-codegen with
+`int-bit-count`, its CLOSED history kept. Ledger **240 lines — 237 CLOSED, 3 OPEN**.
+
+### AI.1 `II.3 found int-bit-count` — CLOSED
+
+- **Lowering** (`chir_lower::lower_int_bit_count`), Rust's meaning (I.14.3(c)) over the receiver's `n` bits, a
+  signed receiver on its two's-complement bits (the `$signed` wrapper dropped), the result a `u32`:
+  `count_ones` is `32'($countones(n'(x)))` — a new operator `CHIRUnOp::CountOnes` / `VLIRUnOp::CountOnes`, emitted
+  as the system function; `count_zeros` the same over `~x`; `trailing_zeros` the ones of `~x & (x - 1)` (all `n`
+  when `x` is 0); `trailing_ones` the ones of `x & ~(x + 1)`; `leading_zeros` / `leading_ones` a priority chain from
+  the top bit (`x[n-1] == 1 ? 0 : … : n`); `is_power_of_two` `count_ones == 1`. The receiver's lowered width must be
+  known and, where the front-end type of the receiver is known, equal to it (a refusal otherwise, never a
+  miscount). `infer_type_from_expr` types every count as `u32` and `is_power_of_two` as `bool`; before, an
+  unannotated `let n = v.count_ones()` took the receiver's type. (In a sequential body the declared wire can still
+  be narrower: `narrow_sole_resize_wires` narrows a wire whose every use is one narrowing cast — values unchanged.)
+- **Tools.** Predicted: all three accept. Measured on the fixture's SV: Verilator `--lint-only -Wall` clean,
+  Icarus `-g2012` clean, **Yosys refused one module** — `ibc_u32_result`, "Static cast with zero or negative
+  size!". Isolated: Yosys 0.68 refuses a prefix operator applied directly to a size cast (`(~16'(x))`, also
+  `~ 16'(x)`; inside or outside `$countones`) and accepts `~(16'(x))`, `-(16'(x))`, `!(16'(x))`; Verilator and
+  Icarus take both. `$countones` itself is accepted by all three. **Pre-existing:** the corpus module `wint_not`
+  (§AG) emitted `(~128'(x))` on `10b4165` and Yosys refused it. Fix: `emit.rs` parenthesizes a prefix operator's
+  operand whose text is a size cast (`<digits>'(`); found and closed as `II.3 found yosys-unary-cast`. Pinned by
+  `tests/int_bit_count_tools.rs` (the three tools on every new module and `wint_not`; no bare cast under a prefix
+  operator; the Yosys behaviour on 0.68). Mutation: with the parenthesization disabled, two of its three tests
+  fail on exactly `ibc_u32_result` and `wint_not`.
+- **Interpreter.** `count_ones`, `count_zeros`, `leading_zeros`, `trailing_zeros` already counted on the type's
+  own bits (§AG.4 fixed `count_ones`; the other three masked to the width) — measured, no change. `leading_ones`
+  and `trailing_ones` were missing ("integer method"): added. **ConstEnv** lacked the same two: added
+  (`consts.rs`, and their `u32` type in `ConstEnv::ty_of` and `const_fold::ty_hint`). G-J: three new const items
+  (`IBC_LZ_NEG`, `IBC_ZERO`, `IBC_ONES` — negative narrow values, 0, the two `*_ones`): **96 compared (93 before), 0
+  DISAGREE**.
+- **Fixture** `tests/fixtures/int_bit_count_dut.rs`, 6 modules: `ibc_seq_unsigned` / `ibc_seq_signed` (all six
+  counts and `is_power_of_two` at 8, 16, 32, 64, 128 bits), `ibc_comb_unsigned` / `ibc_comb_signed` (combinational,
+  8/32/128 and 16/64/128), `ibc_u32_result` (an unannotated count shifted so a wider type would keep bits a `u32`
+  drops; a `u32` register accumulating counts), `ibc_path_call` (AI.2). Operands: a 2-bit selector picks 0, all
+  ones, a byte shifted to a run-time position, or its complement, so 0 and all ones occur on about a quarter of
+  every random sequence's cycles, and each width takes a window that follows the shift. **12/12 cases pass on
+  three legs.** Mutation: `leading_zeros(0)` lowered as `n - 1` makes the sweep fail (`FAIL: Cycle 0 c8 …`).
+
+### AI.2 `II.3 found int-method-path-call` — found and CLOSED
+
+`u16::count_ones(v)` — and `u16::wrapping_add(v, w)`, a method the `.`-form had lowered for months — compiled and
+was refused by the transpiler ("non-hardware function calls cannot appear …", or "cannot infer bit width" on an
+unannotated `let`), and the interpreter stopped ("call of `u16::leading_zeros`"). Now
+`chir_lower::primitive_method_call` reads `<integer type>::<m>(v, ..)` as `(v as <type>).m(..)` for every method
+the `.`-form lowers with a `self` receiver (`wrapping_*`, `saturating_*`, the seven counts), and the interpreter
+reads a primitive's path call as the method call at that type. Fixture `ibc_path_call` mixes both spellings.
+
+### AI.3 The integer-method probe: 36 lines found, 4 closed, 32 OPEN
+
+Probe (`scratchpad fam/`, one sequential and one combinational module per method, an unannotated `let n =
+v.m(..)` written to a port): 44 methods — the four of `int-bit-count`, `leading_ones`, `trailing_ones`,
+`rotate_left` (constant and run-time amount), `rotate_right`, `swap_bytes`, `reverse_bits`, `to_be`, `to_le`, `pow`,
+`wrapping_pow`, `saturating_pow`, `abs`, `wrapping_abs`, `unsigned_abs`, `saturating_abs`, `signum`, `is_positive`,
+`is_negative`, `wrapping_neg`, `saturating_neg`, `is_power_of_two`, `next_power_of_two`, `wrapping_shl`,
+`wrapping_shr`, `wrapping_div`, `wrapping_rem`, `div_euclid`, `rem_euclid`, `abs_diff`, `min`, `max`, `clamp`,
+`ilog2`, `isqrt`, `midpoint`, and the controls `wrapping_add`, `saturating_add`. On `10b4165`'s code: **the macro
+admits 88/88; the transpiler admits the 4 control probes and refuses 84**, one message ("method `<m>` is not
+supported in hardware expressions"). The 35 refused methods besides the four, and the path-call form, became 36
+OPEN lines in III.3.4 before any fix (`3a81ac7`; **276 lines — 237 CLOSED, 39 OPEN**). Lowered here, as the same
+mechanism as the bit counts: `leading_ones`, `trailing_ones`, `is_power_of_two` (and the path call, AI.2). **Left
+OPEN, owner copper-codegen**, each a different mechanism (a bit permutation, sign arithmetic, division, a
+compare-select, a product chain, a priority-with-overflow structure): the other 32. `to_be`/`to_le` also carry a
+question the SPEC does not settle (AI.7).
+
+### AI.4 `II.3 found int-port-unswept` — CLOSED
+
+- `build.rs`: `is_stimulable` admits the twelve primitive integers (`is_int_payload`); `zero_of` gives `0`.
+  `tests/common`: `RandStim` for `u8`…`u128`, `usize`, `i8`…`i128`, `isize` — the value's two's-complement bits
+  LSB first, the layout of a `Bits<N>` of the same width, drawn bit by bit as `Bits<N>` is (an `In<u8>` and an
+  `In<Bits<8>>` with one seed get the same stimulus); an X bit on an integer port panics. The transpiler emits an
+  integer port as `logic [N-1:0]` (measured: `In<i16>` is `input logic [15:0] a`, the sign in the body's casts), so
+  the testbench needed nothing: ports wider than 64 bits take §AG's word path. The interpreter already read and
+  wrote integer ports at their type, sign-extending a signed one (`copper-ref/src/value.rs::from_bits`).
+- **Fixture** `tests/fixtures/int_port_dut.rs`, 4 modules: `ip_seq_widths` (`u8`, `i16`, `u32`, `i64`, `u128`,
+  `i128` in; `i8`, `i32`, `u64`, `u128`, `i128`, `usize` out), `ip_seq_register` (an `i32` register summing an `i8`
+  port), `ip_comb_widths` (combinational, `i8`, `u16`, `isize` in; `i8`, `u16`, `i128`, `isize` out),
+  `ip_mixed_kinds` (integer, `Bits` and `Logic` ports on one module). **8/8 cases pass on three legs.** Mutation:
+  `as_bits` writing the complement makes every one of the four DISAGREE.
+- **Corpus count** — predicted: no existing module newly swept. Measured: the generated corpus had **0** cases
+  carrying the "unsupported port payload" ignore before and after; the generated differential cases go from 398
+  (395 swept, 3 ignored) to 408 — the 6 `ibc_*` and 4 `ip_*` modules.
+
+### AI.5 sv-baseline
+
+Snapshot of the untouched tree (`10b4165`'s code, 461 modules) taken before any change. **On `61d3b1f`: 11 of 471
+differ — 10 NEW (6 `ibc_*`, 4 `ip_*`), 1 CHANGED: `wint_not`** (its two `~128'(…)` become `~(128'(…))`). Predicted
+before the Yosys finding: 0 changed; revised after it, before the fix ran: exactly `wint_not` ✓. `wint_not` still
+agrees on three legs.
+
+### AI.6 The parity battery
+
+On `61d3b1f`, macro by trybuild `pass`, transpiler by `copper-transpile`:
+- **§AF's 113 probes**: both admit the same 107 and refuse the same 6 (`zzi_05`, `10`, `14`, `16`: R3's message;
+  `zzi_22`, `27`: the shape rule's) — unchanged from §AF.4.
+- **The 4 path-call probes** (`u16::count_ones(v)` annotated and not, `u16::leading_zeros(v)`,
+  `u16::wrapping_add(v, w)`): both admit 4/4 (the transpiler refused all 4 before AI.2).
+- **The 88 integer-method probes**: both admit 22 (the seven lowered methods and the two controls); **66 the macro
+  admits and the transpiler refuses — exactly the 32 OPEN `II.3 found int-method-*` lines** (`rotate_left` has two
+  probes per body kind).
+
+205 probes; outside the three named exceptions, the only breaks left are the 32 OPEN lines. **II.1.3 stays OPEN.**
+
+### AI.7 Decision packet — how II.1.3 closes against rustc's integer API
+
+**Question.** The macro admits any inherent method of a Rust integer (rustc type-checks it; the macro sees no
+types), and the transpiler lowers a finite list. Batch K lowered seven and found 32 more refused; std has more
+than the 44 probed (`overflowing_*` returns a tuple, `to_be_bytes` an array, `ilog10`, `cast_signed`, …). How
+should II.1.3 close?
+
+**What the docs say.** I.14.3(c): Rust integers keep Rust's meaning; `checked_*` is OUTSIDE (refused in both by
+`check_outside_methods` with one message). I.14.3(d) and II.3.3 row (e) enumerate `Bits` methods, not integer
+ones. II.1.3: a module that compiles transpiles or is refused by both, with three named exceptions, each pinned
+by its witnesses (`front_end_parity.rs::the_three_named_parity_exceptions_have_exactly_their_witnesses`). R15
+(`/` on `Bits`) is the precedent for a lowering limitation refused in both front-ends as a dated II.3 row.
+
+**What the code does.** `chir_lower::lower_method_call` lowers `wrapping_add/sub/mul`, `saturating_*`, and since
+§AI the seven counts; any other integer method is refused by name with one message; no wrong text is emitted.
+
+**Options.**
+- **(a) Lower the long tail.** Each method its own lowering and fixture until the probe list is empty. Closes
+  II.1.3 with no new exception, but only for the methods someone listed; a method nobody probed stays a silent
+  break. Cost: many batches; some need structures the transpiler lacks (a run-time `pow`, `isqrt`).
+- **(b) Refuse in both, by name.** `copper-analysis` gains the list of Rust integer method names the transpiler
+  does not lower; both front-ends refuse a call of one with one message (dated II.3 rows, as R15). Closes II.1.3
+  for the listed names. The macro cannot see the receiver's type, so a user `impl` method of the same name
+  (`min`, `max`, `abs`, `pow` on a struct) would be refused too — a false refusal of a shape I.2.4 admits — and a
+  name missing from the list is again a silent break.
+- **(c) A fourth named exception.** "An integer method the transpiler does not lower" is admitted by the macro
+  and refused by the transpiler with one message, never with text; pinned as the other three are — a test that
+  reads the transpiler's lowered-method list and requires every other method probe to be refused with that
+  message (and a ui/pass row). Closes II.1.3 now for every method, probed or not; the exception's extent is the
+  transpiler's list, which shrinks as methods are lowered.
+
+**What each changes.** (a): code per method, no SPEC change. (b): a shared rule in `check_front_end_rules`, a
+II.1.2/II.3 row, ui/fail cases; risks false refusals. (c): II.1.3's text and its exception test; no rule.
+
+**Recommendation: (c), with the cheap methods lowered as they are needed** (the bit permutations, `min`/`max`/
+`clamp`/`abs_diff`, the sign family, `wrapping_neg/shl/shr`). It is the only option that is true of every method
+rustc admits, it emits no wrong text, and it keeps the macro free of a type-blind name list.
+
+**Sub-question, `to_be`/`to_le`.** Rust's meaning is the target's byte order: `to_le` is the identity and `to_be`
+`swap_bytes` on a little-endian target. The simulator runs on the host (little-endian on every machine measured:
+aarch64 laptop, x86-64 `recycle`); the SV has no byte order. Options: (i) the host's meaning, stated as
+little-endian (lower as identity / `swap_bytes`); (ii) refuse both in both front-ends as target-dependent.
+Recommendation: (ii) — a design whose meaning changes with the simulating machine is not one hardware can state.
+Under (c) this is the one place a name-based refusal is worth its false-refusal risk, because the two names mean
+nothing else in Rust's integer API.
+
+### AI.8 Ledger
+
+Before: **240 lines — 238 CLOSED, 2 OPEN** (`10b4165`). II.1.3 re-opened: 240 — 237 CLOSED, 3 OPEN (`19ca863`).
+The probe's 36 lines added OPEN: 276 — 237 CLOSED, 39 OPEN (`3a81ac7`). After AI.1–AI.2 (`dd2674a`, with
+`yosys-unary-cast` found and closed): 277 — 243 CLOSED, 34 OPEN. After AI.4 (`61d3b1f`): **277 lines — 244
+CLOSED, 33 OPEN** (II.1.3 and the 32 `int-method-*` lines).

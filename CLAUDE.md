@@ -472,10 +472,14 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   tree's helper call graph, every behavioural body's `let`s and every pattern naming an X-valued
   file const, and requires `tests/recursive_helper_r6.rs`, `tests/let_instance_d24.rs` and
   `tests/file_x_const_pattern_d26.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins
-  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). **One break is known, OPEN since 2026-11-09**:
-  the integer bit-count methods (`count_ones`, `count_zeros`, `leading_zeros`,
-  `trailing_zeros`) on a run-time value compile and are refused by the transpiler (SPEC
-  §III.3.4 `int-bit-count`, owner copper-codegen). Every earlier break is closed, each by a
+  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). **II.1.3 is OPEN** (re-opened by the
+  user's decision, the ledger must never understate): rustc admits every inherent method of a Rust
+  integer and the transpiler lowers a list — `wrapping_*`, `saturating_*`, and since §AI the bit
+  counts (`count_ones`/`count_zeros`/`leading_*`/`trailing_*`, `is_power_of_two`, as
+  `$countones` and a priority chain, also in the `u16::count_ones(v)` path form). 32 more measured
+  methods (`rotate_*`, `pow`, `abs`, `min`/`max`, `wrapping_neg`, …) compile and are refused by the
+  transpiler, one OPEN line each (SPEC §III.3.4 `int-method-*`, owner copper-codegen); how
+  II.1.3 closes against that open-ended API is a decision packet (MEASUREMENTS §AI.7). Every earlier break is closed, each by a
   swept fixture: SPEC II.1.3 lists them and MEASUREMENTS §Z–§AG has the history (the
   inclusive `for` with Rust's meaning, D-27/D-28, R23 retired; scoped shadows renamed by
   `desugar::rename_scoped_shadows`; a `for` variable typed as Rust types it; the nested and
@@ -485,10 +489,12 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   with a `compile_fail,E0080` doctest. The transpiler emits an elaboration-time `$error`
   (`width_checks::generic_range_checks`); Verilator and Yosys refuse the instance, and Icarus 12
   skips elaboration tasks in generate scopes, a pinned toolchain limit
-  (`tests/generic_range_instance_d30.rs`). The ledger has 240 lines, 238 CLOSED and 2 OPEN
-  (`int-bit-count`, and `int-port-unswept`: an integer-typed port such as `In<u128>` is not
-  swept, because `build.rs::is_stimulable` randomizes only `Logic`/`Bits<N>`). 128-bit values
-  are swept on three legs since §AG (`tests/fixtures/wide_int_dut.rs`). The standing audit is
+  (`tests/generic_range_instance_d30.rs`). The ledger has 277 lines, 244 CLOSED and 33 OPEN
+  (II.1.3 and the 32 `int-method-*` lines). 128-bit values are swept on three legs since §AG
+  (`tests/fixtures/wide_int_dut.rs`), and integer-typed ports (`In<u8>`, `RegOut<i128>`, …) since
+  §AI (`build.rs::is_int_payload`, `tests/common`'s `RandStim` for the primitive integers,
+  `tests/fixtures/int_port_dut.rs`). Yosys 0.68 refuses a prefix operator applied directly to a
+  size cast (`~16'(x)`); the emitter writes `~(16'(x))` (`tests/int_bit_count_tools.rs`). The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one
