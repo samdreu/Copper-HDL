@@ -6537,3 +6537,37 @@ bounds, 9 asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; **G-K `278 lines — 
 the SPEC; fixtures: 8 coreui, 3 example, 13 gone, 412 sweep, 221 test, 152 ui; 387 run checks`**, the 3 example
 fixtures PASS. Not run remotely (nothing pushed). After this run, docs only: this section, III.3.6's counts,
 CLAUDE.md and README.md.
+
+## AK. Reference `.sv` cleanup: three orphans deleted, `bit_not_bits` no longer an anchor, a publication checklist (2026-11-10)
+
+**A correction to §G.** §G's table (the row after `ram_read_first`, `bit_not_bits`) listed
+`tests/fixtures/reference_sv/accumulator_en_dut.sv` and `aggregate_locals_dut.sv` as references
+checked against `accumulator_en` and the aggregate-locals fixtures, with the verdict "identical".
+That claim was wrong. No code in the tree ever read either file: no `REFERENCE` row, no test and no
+example named them. `aggregate_locals_dut.sv` could not have compiled (6 lines, an `inupt` typo, a
+dangling identifier). Both files were deleted on 2026-11-10, together with `examples/counter_enable.sv`,
+which nothing read either. §G is left as written.
+
+**`bit_not_bits` demoted.** Its `REFERENCE` file `tests/fixtures/reference_sv/bit_not_bits.sv`
+was added in 7abfd98a (2026-08-26) in a session, and the user confirmed they did not write it. An
+anchor must be written by the user, independently of Copper. Its `build.rs` row is removed, so G-E
+went from **5 anchored, 409 transpiler-only** (measured on c9cd0f0 before the change) to **4
+anchored, 410 transpiler-only**. The module still sweeps on all three legs. The file is kept and
+nothing reads it now. It is owed an independent reference (SPEC III.2.11 (j) item 9). No ledger
+line cited it, so no line was reopened. SPEC P8 (count) and P24 (anchor list) are updated, and P24
+stays ANCHORED on the five combinational goldens and the Mealy pair.
+
+**Publication.** `design_docs/PUBLICATION_CHECKLIST.md` lists what blocks a public release. That
+covers three third-party references with no redistribution license (`priority_encode.sv`,
+`shift_register.sv`, `dual_port_ram.sv`), which the user will replace. It also covers the provenance
+of the other reference files. The provenance check covered only files without a header. This pass
+found that every file with a "hand-written" header was also added in a commit with a Claude
+co-author, among them the two remaining G-E files `ram_read_first.sv` and `handshake.sv`. Their
+authorship is recorded as unconfirmed and was not changed.
+
+**Measured** by the bare `tools/regression.sh` on 6741b4f (laptop, not recycle): `REGRESSION OK
+(698s)`; 1855 passed, 0 failed, 16 ignored across 162 test binaries; G-C 135 test files; G-D 411
+differential cases (3 ignored with a reason); G-F 411 (3 skipped); G-G differential 3804 PASS / 12
+OUTSIDE / 0 DISAGREE, reference 3816 PASS / 0 DISAGREE; G-I 414/414; G-J 0 DISAGREE; **G-E 4
+anchored, 410 not**; **G-K `278 lines — 278 CLOSED, 0 OPEN`**; examples 32/32. After this run, docs
+only: this section.
