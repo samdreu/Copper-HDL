@@ -1,7 +1,15 @@
 # Synchronous semantics
 
+> **Historical — superseded by `SPEC.md`, normative since 2026-11-09 (D-31).** This was the
+> reference for the execution and timing model from 2026-08-27 until SPEC.md was adopted. Most
+> of it describes machinery that D-8 and Phase C removed (2026-11-06/07): the two-instant
+> executor and its read barrier, a plain `Out` on a clocked module and the pre-tick alignment
+> rules, the trailing fold, register inference's back-edge clause, and `iterate_scc`. Read
+> SPEC.md (start at `SPEC_OVERVIEW.md`) for what the code does now. The file stays at this
+> path because code comments and a test message cite it. `review/DOCS_AUDIT.md` lists the stale claims with line numbers.
+
 The reference for Copper's execution/timing model — **rebased 2026-08-27 onto the
-cycle-dataflow denotation** (`CYCLE_DATAFLOW_SEMANTICS.md`), which is *normative*:
+cycle-dataflow denotation** (`CYCLE_DATAFLOW_SEMANTICS.md`), which was then *normative*:
 it defines one value per signal per cycle, and the simulator and transpiler are
 both implementations with stated obligations. This document states that
 denotation first and the machinery that realizes it second; the refusal rules
@@ -26,7 +34,7 @@ an optional **validation-only backend, never the default** (impl-plan item 7; no
 2026-09-01). This "b vs c2" decision was settled 2026-07-29 against the alternative of making the
 sim consume an FSM IR.
 
-## The denotation — cycle dataflow (normative)
+## The denotation — cycle dataflow (normative until 2026-11-09; superseded by SPEC Part I)
 
 Fix a clock domain; edges are numbered `1, 2, …` and **cycle N** is `[edge N,
 edge N+1)`. The observation instant of cycle N is just after edge N's post-edge
@@ -55,7 +63,8 @@ was proposed and falsified by measurement (V8c; `PAIRED_IMPLEMENTATION_SCOPE.md`
 **Commits** — register locals (the liveness rule), `RegOut` writes, memory
 stagings, and the implicit state register a control-steering read feeds — anchor
 to the segment's **closing edge**; a *trailing* region's commits anchor to the
-edge that **opens** its cycle. **Reads are defined by value, not instant**: an
+edge that **opens** its cycle. *(Retired 2026-11-09 by D-31, as D-6 provided: for a `RegOut` this is
+reversed by SPEC I.6.1 — a write in the resumption that ends at edge N+1 takes effect there.)* **Reads are defined by value, not instant**: an
 `In` read denotes the settled input value of the window its consumer belongs to
 (`Deferred`/`Immediate` below are the implementation). **Emission obligations**
 follow: an opening-prefix plain-`Out` drive's continuous assign is the
@@ -329,7 +338,8 @@ in a tick-first body the registered copy is the plain `Out` written from the com
 The read shifts the pre-tick write into the pre-edge settle; the coroutine then runs the post-tick
 write in the *same* `tick_clock`'s post-edge and clobbers the pre-tick value before it is observed —
 a silent sim ≠ synth divergence (the synthesized combinational Mealy output is correct; the
-simulator loses a cycle). The fix is to declare the port `RegOut` (registered/non-blocking, which
+simulator loses a cycle). *(Retired 2026-11-09 by D-31, as D-5 provided: reversed by SPEC I.5.5;
+the rule and the plain `Out` of a clocked body are gone since D-8, R8.)* The fix is to declare the port `RegOut` (registered/non-blocking, which
 buffers and commits at the edge and reconciles) or to split the writes into distinct FSM states so
 each state drives the output once. This is Copper's analogue of Verilog's blocking/non-blocking
 (`=`/`<=`) choice, and follows MyHDL's discipline of restricting the synthesizable subset — so every

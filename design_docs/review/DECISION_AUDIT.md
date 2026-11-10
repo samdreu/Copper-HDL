@@ -94,13 +94,13 @@ Q1 was decided B (D-8). The table above is read against it as follows.
 | D-7 A: two suspension kinds | **reversed** — one kind, the `tick` site |
 | D-7 A1-i: register = live at a tick suspension; carriers separate (choice 7) | stands; the carrier set is empty (barrier carrier, `_hold`, the input carrier all gone; `ff2` a wire of one resumption) |
 | D-7 A2: wires' values in I.3.3 | **reversed with D-5** — the wires leave I.3.3 and H(M) |
-| D-7 per-domain gating, never-ticked default (accident, pending) | **resolved** — D-17 (2026-11-05), I.12.2: decided from §1, own-domain resumption only; today's any-domain first settle is a measured divergence, Phase C |
+| D-7 per-domain gating, never-ticked default (accident, pending) | **resolved** — D-17 (2026-11-05), I.12.2: decided from §1, own-domain resumption only; the any-domain first settle measured then is gone since Phase C (`copper-sim/src/executor.rs`: `tick_clock::<D>` resumes only `D`'s coroutines) |
 | D-7 "a fixpoint re-poll runs no statement", `poll_tasks` outside a tick (accident, pending) | **resolved** — D-18 (2026-11-05): I.13.2(b) states the per-cycle order and I.13.3 makes the evaluation count unobservable; `poll_tasks` outside a tick is a III.2 precondition |
 
 What changes in the reading of the one page: choices 1–3 of §4 collapse into one (one
 instant, one job, `RegOut` hold), which is what the audit predicted ("choices 1 and 2 are
 one choice seen twice"); the realizability principle names one resumption; §6's lowering
-list is empty. The two pending accidents are exactly as before. No further decision is
+list is empty. The two pending accidents were then as before; both were resolved later (D-17, D-18, rows above). No further decision is
 reversed by D-8; D-2, D-3 and D-6 carry notes only.
 
 D-15 (2026-11-05, packet 15): §I.0–§I.6 consolidated under D-8 — no row of either table changes; the two-job text the "After D-8" table reads against now lives only in the decision log's D-1…D-8 entries and the packet-15 snapshot, and SPEC §I.5 is a forwarding stub whose table routes each I.5 clause to its surviving content.

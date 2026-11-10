@@ -8,6 +8,14 @@ hardware, exact rule locations with transcriptions, transfer to Copper). The
 transcribed inference rules of `esterel.md`, `filament.md` and `anvil.md` were
 checked against the typeset PDF pages, not the OCR text.
 
+**Dated 2026-11-02, before D-8.** The survey content on each HDL stands. The *Transfer to Copper*
+sections of the seventeen 2026-11-02 notes describe Copper as it then was: a plain `Out` on a
+clocked body, the `<port>_hold` form, immediate and deferred reads behind a barrier, opening
+and closing anchors, and the pre-tick rules. D-8 and Phase C removed all of these (2026-11-06).
+Copper's semantics are `../SPEC.md`'s (normative since 2026-11-09, D-31); notes that call
+`SYNCHRONOUS_SEMANTICS.md` or `CYCLE_DATAFLOW_SEMANTICS.md` normative predate that. `koika.md`
+and `kami.md` (2026-11-05) were written against SPEC.
+
 | file | document |
 |---|---|
 | `esterel.md` | Berry & Gonthier, Esterel, SCP 1992 |

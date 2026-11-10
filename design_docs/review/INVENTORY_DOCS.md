@@ -1,5 +1,9 @@
 # Clause inventory of the design documents — 2026-11-03 baseline
 
+> **Snapshot (pointer added 2026-11-09).** The design documents it inventories have since been
+> re-audited against the tree in `DOCS_AUDIT.md`, and most of them are now labelled historical.
+> SPEC.md is normative (D-31).
+
 Read-only inventory of every semantic statement in `design_docs/*.md` (excluding
 `OUTDATED/`, the `FORMAL_SEMANTICS*` drafts and `prior_art/`) and
 `copper-core/src/memory.md`, taken at commit `ea54d26`. Each clause gives (a) a

@@ -209,6 +209,9 @@ compiler output, not as something checked against a simulation.
 
 ### 8.3 Devices that do not fit / where Copper is richer
 
+*(Overtaken 2026-11-04: D-8 adopted Prost's one-job model, and R8 removed the plain `Out` of a clocked
+body, so the contrast below no longer holds. See SPEC_DECISIONS.md D-8 and `review/Q1_TRADEOFFS.md`.)*
+
 - Prost has **no plain `Out`**. Copper's plain `Out` inside a sequential body (a
   combinational output driven from within the clocked process, visible immediately in the
   simulator) is the source of the entire D1/multi_phase/linear-route rule family; Prost

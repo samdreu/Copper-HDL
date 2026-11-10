@@ -1,5 +1,14 @@
 # Pre-Tick Segment Alignment — Divergence Analysis and Guardrail Plan
 
+> **Historical — the rules described here were deleted by D-8 (Phase C step 3, 2026-11-06).**
+> R8 now refuses a plain `Out` on a clocked module in both front-ends, so the shapes these
+> rules guarded cannot be written. The `allow_pretick_alignment` opt-out is itself refused
+> (`copper-macros/tests/ui/fail/retired_pretick_opt_out.rs`). The pins this doc names,
+> `pretick_alignment_corpus.rs`, the ui cases and most of `sequential_forwarding_divergence.rs`,
+> went with the rules. SPEC §II.3.2 is the authority on the sort, and §III.3.5 holds the
+> retired rules' CLOSED lines. Kept for the dated measurements, the rejected fixes and the §10
+> prior-art research; read the "today" and "currently" passages as of 2026-11-02. `review/DOCS_AUDIT.md` lists the stale claims with line numbers.
+
 > **Status (verified against the tree 2026-09-01): the family is GUARDED — four
 > rule functions (one of them carrying a constant-write clause), four exact-set
 > corpus pins; D2 fixed outright.** `pretick_out_write_before_update` (V8) joined

@@ -1,6 +1,6 @@
 # Q1 — two jobs or one? The tradeoff packet (2026-11-04)
 
-**Status: DECIDED — B, one job (user, 2026-11-04), after this packet and the question whether B is too close to Prost (answer: the model is shared and must be cited; the realization, the register inference, the written semantics and the measured, anchored sweep are the daylight). To be recorded in `SPEC_DECISIONS.md` by the next packet; `SPEC.md`/`SPEC_OVERVIEW.md` unchanged here.** Every number below
+**Status: DECIDED — B, one job (user, 2026-11-04), after this packet and the question whether B is too close to Prost (answer: the model is shared and must be cited; the realization, the register inference, the written semantics and the measured, anchored sweep are the daylight). Recorded as D-8 in `SPEC_DECISIONS.md` (2026-11-04) and implemented in Phase C (2026-11-06); `SPEC.md`/`SPEC_OVERVIEW.md` were unchanged by this packet.** Every number below
 was measured in this packet (the method is named next to it); every verdict was predicted
 before it was run and the prediction is printed beside the result. Temporary files (a
 `Cfg::q1_facts` method, a corpus-scan test, `tests/fixtures/q1_rewrites_dut.rs`,

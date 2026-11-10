@@ -1,5 +1,11 @@
 # Formal-esque semantics of Copper — DRAFT kernel, denotation, rules, and conformance ledger
 
+> **Superseded by `SPEC.md`, normative since 2026-11-09 (D-31).** This was the 2026-11-02 draft of
+> a formal semantics. Its two-instant cycle relation (§3.2's `φ`) was rejected by D-8, the one-job
+> body, and SPEC Part I is the semantics that replaced it. Its deference to
+> `SYNCHRONOUS_SEMANTICS.md` is historical too. Kept because SPEC_DECISIONS.md and
+> `FORMAL_SEMANTICS_SURVEY.md` cite it.
+
 **Status: DRAFT PROPOSAL (2026-11-02). Nothing here is decided.** §7 lists the forks
 that are the user's to settle; everything before it is written under the recommended
 choice so there is a concrete object to react to. Where this draft and
@@ -119,6 +125,9 @@ instant is the **last write at or before that instant**, else its initial value
 `CYCLE_DATAFLOW_SEMANTICS.md` §1 stated as a definition.
 
 ### 3.2 Configurations
+
+*(Superseded 2026-11-09 by D-31, as D-7 provided: the two-instant flag `φ` below is replaced by
+SPEC I.0.2's one resumption per tick — D-8.)*
 
 A cycle executes a **residue** `s` (the statement left after the last `tick`;
 initially `loop { s }`) in a store

@@ -1,5 +1,13 @@
 # Timing model unification — scope, after measuring
 
+> **Historical — a pre-D-8 measurement (2026-10).** The two timing derivations it compares
+> (the simulator's two instants and the transpiler's phases) were unified by D-8 and Phase C
+> (2026-11-06): there is one resumption per tick (SPEC I.0.2), and the simulator, the transpiler
+> and the reference interpreter are compared on every swept module (SPEC §III.2). Its lasting
+> conclusion, that a phase-sensitive check belongs on the source, is enforced by
+> `copper-codegen/tests/phase_sensitive_checks.rs`. `copper-analysis/src/cfg.rs` and
+> `tests/timing_model_derivations.rs` still cite this file. `review/DOCS_AUDIT.md` lists the stale claims with line numbers.
+
 **Status:** measured; one fix landed (see §1b). No refactor undertaken — the measurement did not support one. Written 2026-08-25 and brought up to date 2026-09-01 (dated notes mark what §2 left open at the time and §4 has since closed). Written starting from the claim that
 Copper derives "which cycle does this statement run in" twice — once in the simulator
 (by coroutine suspension) and once in `shir_lower` (structurally, by splitting the

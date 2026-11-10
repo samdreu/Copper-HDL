@@ -4,7 +4,7 @@ Read-only inventory of the refusal rules as `copper-analysis` implements them, t
 probe battery's verdicts, the `build.rs` tables, and every open or pending item found by
 grep. Taken at commit `ea54d26`. Paths are relative to the repository root.
 
-**Pointer (2026-11-05, D-13):** the SR/LL column of §(1) is the 2026-11-03 snapshot; its re-cut — each rule's place in II.1 / II.2 / II.3 / retired / I.10 / I.11 — is `SPEC.md` §II.3.2 (D-13 A5), which is the authority.
+**Pointer (2026-11-05, D-13):** the SR/LL column of §(1) is the 2026-11-03 snapshot; its re-cut — each rule's place in II.1 / II.2 / II.3 / retired / I.10 / I.11 — is `SPEC.md` §II.3.2 (D-13 A5), which is the authority. **(2026-11-09)** Since D-8 (Phase C step 3, 2026-11-06) the plain-`Out` rules 7–15 are deleted from both front-ends; their CLOSED lines are SPEC §III.3.5.
 
 ## Summary
 

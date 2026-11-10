@@ -1,5 +1,11 @@
 # Implementation-defined behavior inventory — 2026-11-03 baseline
 
+> **Snapshot (pointer added 2026-11-09).** SPEC.md cites this file by item number, so it is kept
+> as it was. Much of the code it inventories was deleted in Phase C (2026-11-06/07): the read
+> barrier and the two-job executor (D-8), `spawn_child` (D-23), `ReadMode`, and the plain-`Out`
+> emission forms (step 4). What the code decides today is SPEC.md's, and the dated changes are
+> `MEASUREMENTS.md` §E–§AG.
+
 Read-only inventory of every point where the implementation decides meaning, taken at
 commit `ea54d26` from the code and its comments (not the design docs). Paths are
 relative to the repository root. Abbreviations: EX=`copper-sim/src/executor.rs`,

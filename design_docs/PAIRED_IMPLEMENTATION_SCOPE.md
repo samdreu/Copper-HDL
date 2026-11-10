@@ -1,5 +1,11 @@
 # The paired implementation — scope
 
+> **Historical — superseded by D-8 and Phase C steps 3–4 (2026-11-06).** This is the execution
+> record of the 2026-08/09 migration to the cycle-dataflow model. The forms and functions it scopes
+> are deleted: `edge_value`, `forward_opening_drives`, `opening_hold_outputs`,
+> `unprotected_trailing_out_write`, `trailing_out_reads_input`. Today's output form is SPEC I.6.9's,
+> one form (`vlir_lower::split_output_regs`). `review/DOCS_AUDIT.md` lists the stale claims with line numbers.
+
 **Status: EXECUTED 2026-08-26, commit 7abfd98 (phases A, B, D landed; C and E
 deferred — see below; status markers reflect 2026-09-01).** Execution notes, in
 the order things were learned:

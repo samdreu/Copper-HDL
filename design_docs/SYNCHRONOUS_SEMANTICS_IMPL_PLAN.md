@@ -2,8 +2,15 @@
 
 > **This is the historical implementation record** of the executor/semantics work
 > (July–August 2026), kept with its dated status layers intact. **The normative
-> semantics document is `SYNCHRONOUS_SEMANTICS.md`**; where the two disagree, that
-> document and the code are right and this one is history. Sections overtaken by later
+> semantics document is `SPEC.md`** (since 2026-11-09, D-31; until then it was
+> `SYNCHRONOUS_SEMANTICS.md`, now historical too); where this plan disagrees with SPEC.md
+> or the code, they are right and this one is history.
+>
+> *Since D-8 (2026-11-04, implemented in Phase C 2026-11-06/07):* the read-timing machinery
+> these items built has been deleted: the read classifier, the barrier and the two-job executor.
+> A clocked body has one resumption per tick (SPEC I.0.2). Register inference's back-edge
+> clause is gone (Phase C step 6). The validation-only interpreter that item 7 deferred exists,
+> as `copper-ref`, the third leg of the sweep. The items below are as they stood on 2026-09-01. Sections overtaken by later
 > work carry a dated *SUPERSEDED* line rather than being rewritten. The status of every
 > item as of 2026-09-01 is summarized in the *Status as of 2026-09-01* block below.
 >

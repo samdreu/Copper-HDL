@@ -1,4 +1,12 @@
-# Cycle-dataflow semantics — the normative timing model for the async-await surface
+# Cycle-dataflow semantics — the timing model for the async-await surface (historical)
+
+> **Historical — superseded by `SPEC.md` Part I, normative since 2026-11-09 (D-31).** The model
+> here, with two temporal anchors per cycle (an opening and a closing edge split at the read
+> barrier, §2–§3), is the two-job body that D-8 reversed (2026-11-04, implemented in Phase C
+> step 3 on 2026-11-06). The plain-`Out` emission forms and the pre-tick rules of §9–§10.11
+> were deleted with it. Program-order forwarding and the register authority remain true and
+> are restated in SPEC I.0–I.7. **§10.12 is still current.** Section numbers are stable because
+> SPEC, SPEC_DECISIONS and code comments cite them. `review/DOCS_AUDIT.md` lists the stale claims with line numbers.
 
 **Status: DERIVED, VALIDATED, AND IMPLEMENTED — residue recorded (status as of
 2026-09-01).** Phase 1 (the derivation table, `DERIVATION_TABLE.md`) is complete:
@@ -34,7 +42,7 @@ the model (`PAIRED_IMPLEMENTATION_SCOPE.md` §0). The normative statement of the
 model now lives in `SYNCHRONOUS_SEMANTICS.md` (rebased 2026-08-27, commit c1bf21f);
 this document is the derivation record. Decided 2026-08-26 as:
 
-1. **The denotation is normative.** The per-cycle value function defined here is the
+1. **The denotation is normative** (until 2026-11-09; see the header). The per-cycle value function defined here is the
    semantics; the simulator and the transpiler are both *implementations* of it, each
    with stated obligations. A sim ≠ SV disagreement is no longer adjudicated case by
    case — the model assigns which side failed its obligation. Independent hardware
@@ -127,7 +135,7 @@ computation. Its meaning:
   read yields the last value assigned to it in this segment, else the value the
   local's register committed at the segment's opening edge. This is what plain Rust
   does, so it is what "the async fn is just Rust" already promises — and it is what
-  Prost, the only other coroutine HDL, lowers (§10.5). *This clause is the meaning of
+  Prost, the only other coroutine HDL, lowers (`PRETICK_ALIGNMENT_GUARDRAIL.md` §10.5). *This clause is the meaning of
   the source; both implementations owe it.*
 - **Registers = the liveness rule** (defined-in-loop ∧ live-across-a-tick, with the
   back-edge clause). Unchanged, and already shared. **The authority obligation is
@@ -1925,6 +1933,8 @@ form would admit those shapes, which is a legality decision, so it is pinned as
 measured and left to the user.
 
 ### 10.12 The combinational default-then-override — a front-end parity break, closed (derived 2026-11-02, then measured)
+
+*Still current (checked 2026-11-09): `check_definite_assignment` and the `cdo_*` fixtures are live.*
 
 §10.10 (a) found the combinational route refusing `o.write(3); if c { o.write(a) }`
 as a latch. Read off both front ends before any probe: the macro's

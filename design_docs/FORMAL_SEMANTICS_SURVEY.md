@@ -1,5 +1,10 @@
 # How the prior-art HDLs specify their semantics — survey, and what it means for Copper
 
+> **Historical (2026-11-02), pre-D-8.** The survey of prior formal work still holds. The paragraphs
+> stating Copper's position describe the language before D-8 and Phase C (a plain `Out` on clocked
+> bodies, the read barrier); SPEC.md, normative since 2026-11-09 (D-31), states Copper's semantics
+> now. `review/DOCS_AUDIT.md` lists the stale claims with line numbers.
+
 **Status: survey complete, recommendation pending the user's decisions (2026-11-02).**
 Companion: `FORMAL_SEMANTICS.md` (the DRAFT kernel, denotation and conformance ledger
 this survey recommends). Per-paper reading notes, one file per document with

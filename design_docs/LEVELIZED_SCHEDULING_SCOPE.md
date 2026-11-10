@@ -1,5 +1,18 @@
 # Item 6 — Levelized dependency-graph scheduling: as-built design
 
+> **Historical — the scoping record of the levelized scheduler (production default since
+> 2026-07-30).** `SchedulerMode`, `PollOrder`, `COPPER_SCHEDULER` and the golden traces are as
+> described. Since then the executor changed under it:
+> - `PreEdgeBarrier` was deleted by D-8 (2026-11-06), and `tick_clock::<D>` resumes only `D`'s
+>   coroutines, once each.
+> - `spawn_child` was deleted by D-23.
+> - A combinational cycle is refused at spawn (`refuse_comb_cycle`, D-14), so there is no
+>   `iterate_scc` and no convergent loop to iterate.
+> - `diff_convergent_comb_loop` is now
+>   `convergent_comb_loop_is_refused_at_spawn_by_both_schedulers`.
+>
+> `review/DOCS_AUDIT.md` lists the stale claims with line numbers.
+
 > **Meaning:** `SPEC.md` §I.13.2–I.13.3 (D-18, 2026-11-05) — the settle is a function of the
 > sources, so order independence is a theorem (III.1); this document records the realization.
 

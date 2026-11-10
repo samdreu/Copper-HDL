@@ -1,5 +1,12 @@
 # The cycle-dataflow derivation table — phase 1 of CYCLE_DATAFLOW_SEMANTICS.md
 
+> **Historical — a pre-D-8 record (last updated 2026-10-29).** It is the per-module derivation of
+> the cycle-dataflow model (`CYCLE_DATAFLOW_SEMANTICS.md`), which SPEC.md replaced (normative since
+> 2026-11-09, D-31). Its plain-`Out` dispositions describe a construct R8 now refuses. The
+> "mechanical columns regenerate" claim no longer holds: `derivation-audit`'s guard column is empty
+> and its plain-`Out` columns cannot fire. The current per-module evidence is the sweep's three legs
+> and the ledger, SPEC §III.3. `review/DOCS_AUDIT.md` lists the stale claims with line numbers.
+
 **Status: COMPLETE (2026-08-26) — SUPERSEDED as a work list by
 `PAIRED_IMPLEMENTATION_SCOPE.md`, which was scoped and executed the same day on
 this table's findings (commit 7abfd98). Status markers below reflect 2026-09-01.**
@@ -42,7 +49,7 @@ Working the corpus rows produced one refinement the model doc must absorb:
 > **Anchoring is per *region*, not per Comb-component phase.** The merged
 > head-phase of a single-tick loop contains two regions with different commit
 > edges: the **trailing region** (last tick → head) commits at the edge that
-> *opens* its cycle and executes there — it is always opening-anchored, and its
+> *opens* its cycle *(retired 2026-11-09 by D-31, as D-6 provided: for a `RegOut`, reversed by SPEC I.6.1)* and executes there — it is always opening-anchored, and its
 > reads are the `Immediate` class; the **pre-tick region** (head → first tick)
 > commits at the edge that *closes* the cycle — it is closing-anchored iff a
 > commit depends on a same-cycle input, and its reads are the `Deferred` class.
