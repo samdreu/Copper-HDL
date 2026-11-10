@@ -38,7 +38,7 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (405 on 2026-11-09, §AI, 3 of them
+`_reference_leg` cases as build.rs generated to run (411 on 2026-11-10, §AJ, 3 of them
 skipped with a reason, `REF_SKIP` empty; the per-batch growth is in
 `design_docs/review/MEASUREMENTS.md`), each
 leg non-empty,each
@@ -458,7 +458,7 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   to measure what is left unstated), R8 (no
   plain `Out` on a clocked module, one shared message) and the memory rules. A module
   that compiles therefore
-  transpiles, or is refused by both — with **three named exceptions**. **R6** (D-22): recursion
+  transpiles, or is refused by both — with **four named exceptions**. **R6** (D-22): recursion
   through a helper `fn` compiles (the macro sees the module's `ItemFn`, never the helper's
   body) and the transpiler refuses it when it inlines (`RECURSIVE_HELPER_MESSAGE`). **The
   let-bound instance** (D-24): `let _ = child(..)` / `let m = child(..)` in a behavioural body
@@ -466,20 +466,22 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   refuses it with I.13.5's message; the simulator's `HardwareModule` drop guard panics when the
   child is dropped unstarted. **The file-level X-const pattern** (D-26): a pattern naming a file
   `const` whose value is X compiles (the macro cannot see the item's value) and the transpiler
-  refuses it with D-24's `X_PATTERN_MESSAGE`; the simulator matches the X structurally. In none
-  is wrong text emitted. None can widen silently:
+  refuses it with D-24's `X_PATTERN_MESSAGE`; the simulator matches the X structurally. **An
+  integer method the transpiler does not lower** (D-32 (1)): rustc admits every inherent method of
+  a Rust integer and the macro sees no types; the transpiler lowers `copper_codegen::LOWERED_INT_METHODS`
+  (`wrapping_*`, `saturating_*`, the bit counts and `is_power_of_two` since §AI; since §AJ the bit
+  permutations, `min`/`max`/`abs_diff`, the sign family, `wrapping_neg/shl/shr`) in the `.`-form and the
+  `u16::m(v)` path form, and refuses every other with ``method `<m>` `` and `UNLOWERED_METHOD_MESSAGE`.
+  `to_be`/`to_le` mean the host's byte order and are refused in both (`check_target_byte_order`,
+  D-32 (2)). In none is wrong text emitted. None can widen silently:
   `front_end_parity.rs::the_four_named_parity_exceptions_have_exactly_their_witnesses` reads the
-  tree's helper call graph, every behavioural body's `let`s and every pattern naming an X-valued
-  file const, and requires `tests/recursive_helper_r6.rs`, `tests/let_instance_d24.rs` and
-  `tests/file_x_const_pattern_d26.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins
-  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). **II.1.3 is OPEN** (re-opened by the
-  user's decision, the ledger must never understate): rustc admits every inherent method of a Rust
-  integer and the transpiler lowers a list — `wrapping_*`, `saturating_*`, and since §AI the bit
-  counts (`count_ones`/`count_zeros`/`leading_*`/`trailing_*`, `is_power_of_two`, as
-  `$countones` and a priority chain, also in the `u16::count_ones(v)` path form). 32 more measured
-  methods (`rotate_*`, `pow`, `abs`, `min`/`max`, `wrapping_neg`, …) compile and are refused by the
-  transpiler, one OPEN line each (SPEC §III.3.4 `int-method-*`, owner copper-codegen); how
-  II.1.3 closes against that open-ended API is a decision packet (MEASUREMENTS §AI.7). Every earlier break is closed, each by a
+  tree's helper call graph, every behavioural body's `let`s, every pattern naming an X-valued
+  file const and every call of an unlowered integer method, requires `tests/recursive_helper_r6.rs`,
+  `tests/let_instance_d24.rs`, `tests/file_x_const_pattern_d26.rs` and
+  `tests/int_method_unlowered_d32.rs` to hold the only witnesses, and transpiles a probe of every
+  method on and off the lowered list (read from the code, so lowering a method shrinks the
+  exception); `front_end_parity_ui.rs` pins one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`).
+  **II.1.3 is CLOSED** (D-32, MEASUREMENTS §AJ). Every earlier break is closed, each by a
   swept fixture: SPEC II.1.3 lists them and MEASUREMENTS §Z–§AG has the history (the
   inclusive `for` with Rust's meaning, D-27/D-28, R23 retired; scoped shadows renamed by
   `desugar::rename_scoped_shadows`; a `for` variable typed as Rust types it; the nested and
@@ -489,8 +491,8 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   with a `compile_fail,E0080` doctest. The transpiler emits an elaboration-time `$error`
   (`width_checks::generic_range_checks`); Verilator and Yosys refuse the instance, and Icarus 12
   skips elaboration tasks in generate scopes, a pinned toolchain limit
-  (`tests/generic_range_instance_d30.rs`). The ledger has 277 lines, 244 CLOSED and 33 OPEN
-  (II.1.3 and the 32 `int-method-*` lines). 128-bit values are swept on three legs since §AG
+  (`tests/generic_range_instance_d30.rs`). The ledger has 278 lines, 278 CLOSED and 0 OPEN
+  (MEASUREMENTS §AJ). 128-bit values are swept on three legs since §AG
   (`tests/fixtures/wide_int_dut.rs`), and integer-typed ports (`In<u8>`, `RegOut<i128>`, …) since
   §AI (`build.rs::is_int_payload`, `tests/common`'s `RandStim` for the primitive integers,
   `tests/fixtures/int_port_dut.rs`). Yosys 0.68 refuses a prefix operator applied directly to a

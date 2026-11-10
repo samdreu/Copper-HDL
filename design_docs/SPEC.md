@@ -4476,7 +4476,13 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | retired 14 | `multi_phase_out_write` | `gone:multi_phase_out_write`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8 |
 | retired 15 | `out_first_driven_late` | `gone:out_first_driven_late`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; I.11's class vacuous (D-14) |
 
-**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §AI.9 (2026-11-09,
+**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §AJ.8 (2026-11-10,
+on `15e5688`, rustc 1.98.1, REGRESSION OK): **278 lines — 278 CLOSED, 0 OPEN**; 171 required by the SPEC;
+fixture tokens on CLOSED lines: 412 `sweep`, 221 `test`, 152 `ui`, 8 `coreui`, 3 `example`, 13 `gone`; all 387
+run checks satisfied, the 3 examples PASS. §AJ (D-32) closed II.1.3 and the 32 `int-method-*` lines (15
+lowered, 15 covered by II.1.3's fourth named exception, `to-be`/`to-le` refused in both) and found and closed
+`bool-cast-width`.
+(Before:) Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §AI.9 (2026-11-09,
 on `61d3b1f`, rustc 1.98.1, REGRESSION OK): **277 lines — 244 CLOSED, 33 OPEN** (II.1.3 and the 32
 `int-method-*` lines); 171 required by the SPEC; fixture tokens on CLOSED lines: 375 `sweep`, 169 `test`, 129 `ui`,
 8 `coreui`, 3 `example`, 13 `gone`; all 379 run checks satisfied, the 3 examples PASS. §AI closed `int-bit-count`,

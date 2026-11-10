@@ -6410,3 +6410,130 @@ single-tick), 0 uncovered, 2440 transitions; G-J 96 const items compared / 25 ou
 SPEC; fixtures: 8 coreui, 3 example, 13 gone, 375 sweep, 169 test, 129 ui; 379 run checks`**, the 3 example
 fixtures PASS. Not run remotely (nothing pushed). After this run, docs only: III.3.6's counts, this section and
 CLAUDE.md.
+
+## AJ. D-32: II.1.3's fourth named exception, `to_be`/`to_le` refused in both, 15 integer methods lowered; the ledger has no OPEN line (2026-11-10)
+
+Branch `claude/open-items-l-cad906`, from `paper` at `590805c`. The user decided §AI.7's packet on 2026-11-10,
+both as recommended (D-32). Predictions are in the session notes (`open-items-l-AJ.md`), written before each
+measurement. Tools: rustc 1.98.1 (the pin), Verilator 5.044.
+
+### AJ.1 The fourth named exception (D-32 (1))
+
+- **One message, confirmed.** On `590805c` the transpiler refused an unlowered method's `.`-form with "method
+  `<m>` is not supported in hardware expressions" (one template, the `_` arm of `lower_method_call`), but its
+  path-call form (`u16::pow(v, 2)`) with "non-hardware function calls cannot appear …" or, on an unannotated
+  `let`, "cannot infer bit width". Now both forms give ``method `<m>` `` followed by
+  `copper_analysis::UNLOWERED_METHOD_MESSAGE` (`chir_lower::unlowered_method`; the path form in
+  `lower_expr`'s call arm and in `infer_type_from_call`). Measured on §AI's 88 probes and 88 path-call twins
+  generated from them (`zzl_p*`): predicted and measured 22 admitted, 62 refused with the one message, 4 with
+  D-32 (2)'s; the twins' first run refused 62 with "cannot infer bit width", fixed before the commit.
+- **The list in the code.** `copper_codegen::LOWERED_INT_METHODS` (`chir_lower.rs`) is the transpiler's list;
+  `primitive_method_call` reads the path-call form from it, so the two spellings cannot drift.
+- **The pin.** `front_end_parity.rs::the_three_named_parity_exceptions_have_exactly_their_witnesses` is renamed
+  `the_four_…` (its pointers in SPEC, SPEC_DECISIONS, CLAUDE.md, three witness tests and `front_end.rs` with
+  it). It reads `LOWERED_INT_METHODS`, requires a probe for every listed method, and transpiles
+  `INT_METHOD_PROBES` — §AI.3's 44 methods (`rotate_left` at a constant and a run-time amount) and 18 more of
+  std's (the rest of the list, `ilog10`, `ilog`, `saturating_div`, `is_multiple_of`, `unbounded_shl`,
+  `cast_signed`, signed `min`/`max`/`abs_diff`/`rotate_right`/`wrapping_neg`/`wrapping_shr`, `i32::swap_bytes`,
+  `i8::reverse_bits`): 62 probes over 51 methods × {sequential, combinational} × {`.`-form, path call} — on the
+  list, transpiles; `to_be`/`to_le`, D-32 (2)'s message; otherwise the fourth exception's message. Its scan
+  (`modules_calling_an_unlowered_int_method`, type-blind by name over `.m(..)` and `<int>::m(..)`) finds
+  exactly the two witnesses of `tests/int_method_unlowered_d32.rs` (`um_seq`: `wrapping_pow`; `um_comb_path`:
+  `u16::isqrt(v)`), which simulate with Rust's meaning and are refused with the message; no corpus module is
+  a false hit. `ui:pass/int_method_unlowered_d32` is the fourth row of `NAMED_PARITY_EXCEPTIONS`.
+  `copper-analysis` gains a dev-dependency on `copper-codegen` for it (a dev-dependency cycle; the
+  integration test links the one `copper_analysis`). `wrapping_next_power_of_two` was dropped from the probes:
+  rustc 1.98.1 refuses it (E0658, unstable), so it is no method rustc admits.
+
+### AJ.2 `to_be` / `to_le` refused in both (D-32 (2))
+
+`copper_analysis::check_target_byte_order` (`data.rs`, in `check_front_end_rules` after
+`check_outside_methods`) refuses `x.to_be()`, `x.to_le()` and `<int>::to_be(v)` / `<int>::to_le(v)` with
+`TARGET_BYTE_ORDER_MESSAGE` in every mode; the transpiler keeps a defence arm. ui/fail
+`target_byte_order_to_be` (sequential), `_to_le` (combinational), `_path_call`; `front_end_parity_ui.rs`
+transpiles each and requires the macro's message. No existing `.stderr` changed.
+
+### AJ.3 Lowered: 15 integer methods
+
+`rotate_left`, `rotate_right`, `min`, `max`, `abs_diff`, `signum`, `is_positive`, `is_negative`,
+`wrapping_abs`, `unsigned_abs`, `wrapping_neg`, `wrapping_shl`, `wrapping_shr` are a FIR desugar
+(`chir_lower::desugar_int_method`) over operations the transpiler already lowers with Rust's meaning —
+signed and unsigned compares, `<<`/`>>`, `&`/`|`, `wrapping_sub`, casts, an `if` — so lowering and type
+inference (`infer_type_from_expr`) share one definition; `swap_bytes` / `reverse_bits` are a concatenation
+of byte / bit slices of the unsigned bits, `$signed` again for a signed type (`lower_int_permutation`).
+Rotations and wrapping shifts take the amount `& (n − 1)`, Rust's modulo for a power-of-two width; the sign
+family is signed-only, as in Rust; `abs_diff`/`unsigned_abs` are the unsigned type of the width. A struct's
+`impl` method of the same name is inlined instead (`struct_method`). No `Bits` method has any of these names.
+The interpreter (`copper-ref`) gained the eleven it lacked (`wrapping_neg/shl/shr` it had), with `min`/`max`
+refused in a constant as rustc refuses them (a new `in_const` flag: before it, the interpreter evaluated
+`const MN: u8 = 3u8.min(4)`, which `the_widened_constant_grammar_agrees_with_rustc` caught); `ConstEnv` the
+`const fn`s among them, `abs_diff`/`unsigned_abs` typed unsigned (`ty_of`, `const_fold::ty_hint`).
+Not lowered (the exception covers them): `pow`, `wrapping_pow`, `saturating_pow` (a product chain),
+`abs`, `saturating_abs`, `saturating_neg`, `next_power_of_two`, `clamp` (each with a run-time failure or an
+overflow structure), the division family, `ilog2`, `isqrt`, `midpoint`.
+
+- **Fixture** `tests/fixtures/int_method_dut.rs`, 6 modules: `im_perm` (the permutations at 8–128 bits,
+  signed and unsigned, by a random `u32`, its low byte and constants, a signed result widened `as i128`),
+  `im_cmp` (`min`/`max`/`abs_diff` at every width, `b` equal to `a` on half the cycles), `im_sign`,
+  `im_shift`, `im_comb` (combinational, with path calls), `im_path_call` (unannotated `let`s of each result
+  kind). Operands pick 0, all ones, the top bit alone or the port value. Predicted: 6/6 agree on three legs.
+  First run: the reference leg agreed on all 6 (sim = ref); 4 of 6 SV were refused by Verilator `-Wall`:
+  (1) the desugar's `n as u32` literals came out `64'd8` — fixed with suffixed literals (`8u32`, `0i16`), which
+  lower at their type's width and signedness; (2) `im_sign`'s ten `if c { flags |= k; }` statements forwarded
+  into one 54 KB nested mux, past Verilator's 40000-token line limit — the forwarding of a fixture shape
+  that predates this branch, so the fixture writes `flags` as one OR; (3) a found defect, AJ.4. After:
+  **12/12 cases pass, 66 sequences PASS, 0 DISAGREE.** Mutations: `min` lowered with `>=` fails `im_comb`
+  (`FAIL: Cycle 0 o1 …`); dropping the signed re-wrap of a permutation fails `im_perm` (`si`).
+- **G-J**: five const items (`IM_PERM`, `IM_SIGN`, `IM_DIFF`, `IM_FLAGS`, `IM_REV`): **101 compared (96
+  before), 0 DISAGREE**. `ConstEnv`'s casts admit only `0..=u32::MAX` (an existing limit of its grammar), so a
+  first `IM_SIGN` with a negative cast was one-evaluator-only; rewritten.
+
+### AJ.4 `II.3 found bool-cast-width` — found and CLOSED
+
+`((x > 0) as u32) << 4` with `x: i32` emitted `($signed(x) > $signed(32'd0)) << 32'd4`: the comparison's
+operands are as wide as the target, so the cast emitted no size, and the 1-bit compare under a shift is a
+Verilator `-Wall` WIDTHEXPAND (the value is right). Measured on `590805c`'s build with a hand-written probe:
+the same text, so pre-existing. The `as u*` cast of a comparison now states the target width
+(`32'(a > b)`). `im_sign` failed before the fix and passes after it.
+
+### AJ.5 sv-baseline
+
+Snapshot of `590805c` (examples/, tests/fixtures/, src/: 409 modules, 0 refused) taken before any change.
+Predicted (after AJ.4's fix, before measuring): 6 NEW (`im_*`) and 5 CHANGED (`fnw_signed`, `shift_register`,
+`ibc_seq_unsigned`, `ibc_comb_unsigned`, `ibc_path_call`). **Measured: 6 NEW, 3 CHANGED** — the three `ibc_*`
+modules, whose `is_power_of_two() as u64` went from `64'(32'((… == 32'd1)))` to `64'((… == 32'd1))`, the
+same value. `fnw_signed` and `shift_register` were mispredicted: their compare casts already stated the
+target width (a narrowing cast; a 1-bit operand).
+
+### AJ.6 The parity battery
+
+On `883ca7b`'s code, macro by trybuild `pass`, transpiler by `copper-transpile`; predicted before running:
+- **§AF's 113 probes**: both admit 107 and refuse 6 — unchanged.
+- **The 4 path-call probes**: both admit 4/4.
+- **The 88 integer-method probes** and **their 88 path-call twins**: each — the macro admits 84 and refuses
+  the 4 `to_be`/`to_le` probes with D-32 (2)'s message; the transpiler admits 54, refuses those 4 with the
+  same message, and refuses 30 (15 methods × 2 bodies) with the fourth exception's one message.
+- The pin's 18 extra methods (72 probes): the macro admits 72; the transpiler admits 48 and refuses 24 with
+  the exception's message.
+
+All as predicted. 293 probes; outside the four named exceptions no break is left. **II.1.3 CLOSED.**
+
+### AJ.7 Ledger
+
+Before: **277 lines — 244 CLOSED, 33 OPEN** (`590805c`). After (`15e5688`, `cargo test --test
+conformance_ledger`): **278 lines — 278 CLOSED, 0 OPEN** — II.1.3; the 32 `int-method-*` lines (15 lowered,
+sweep fixtures; 15 covered by the fourth exception, the pin test; `to-be`/`to-le` REFUSED in both, their ui
+cases); `II.3 found bool-cast-width` found and closed.
+
+### AJ.8 The bare regression — measured
+
+**Bare `tools/regression.sh` on `15e5688` (the final code commit; laptop; rustc 1.98.1; under `nohup caffeinate
+-i`): REGRESSION OK (702 s).** 1855 passed, 0 failed, 16 ignored, 162 test binaries (G-C 135 test files: +1,
+`tests/int_method_unlowered_d32.rs`); examples **32/32**; G-D 411 differential cases (3 ignored-with-reason), G-F
+411 (3 skipped) — the 6 `im_*` modules added; **G-G differential 3804 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED
+/ 0 DISAGREE**, **reference 3816 PASS / 0 DISAGREE**; G-I 328 clocked related (106 extracted, 23 linear, 199
+single-tick), 0 uncovered, 2450 transitions; G-J 101 const items compared / 26 outside both, 351 counted-`for`
+bounds, 9 asymmetric (pinned), 0 DISAGREE; G-E 5 anchored; **G-K `278 lines — 278 CLOSED, 0 OPEN; 171 required by
+the SPEC; fixtures: 8 coreui, 3 example, 13 gone, 412 sweep, 221 test, 152 ui; 387 run checks`**, the 3 example
+fixtures PASS. Not run remotely (nothing pushed). After this run, docs only: this section, III.3.6's counts,
+CLAUDE.md and README.md.

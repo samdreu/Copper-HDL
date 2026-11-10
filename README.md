@@ -417,16 +417,14 @@ two lists:
   second clock on a behavioural module, a register whose power-on value is not a constant.
 - **II.3**, a dated lowering limitation, with a fix direction.
 
-The macro and the transpiler refuse the same shapes with the same message. **Three named
+The macro and the transpiler refuse the same shapes with the same message. **Four named
 exceptions** are pinned so they cannot widen: recursion through a helper `fn`, a let-bound
-instance, and a pattern naming an X-valued file const. Each compiles under rustc and is
-refused by the transpiler.
+instance, a pattern naming an X-valued file const, and an integer method the transpiler does
+not lower (`copper_codegen::LOWERED_INT_METHODS` lists the ones it does). Each compiles under
+rustc and is refused by the transpiler, which emits no text for it. `to_be`/`to_le` depend on
+the host's byte order and are refused by both.
 
-Known open items, each an OPEN line of the ledger (SPEC §III.3.4), 2026-11-09:
-- the integer bit-count methods (`count_ones`, `count_zeros`, `leading_zeros`,
-  `trailing_zeros`) on a run-time value compile but do not transpile;
-- a module with an integer-typed port (`In<u8>`, `In<u128>`) is not swept, because the
-  generator randomizes `Logic` and `Bits<N>` only.
+The conformance ledger (SPEC §III.3.4) has no OPEN line since 2026-11-10.
 
 Other boundaries:
 - A behavioural module is **single-clock**. Multi-clock designs compose clock domains through
