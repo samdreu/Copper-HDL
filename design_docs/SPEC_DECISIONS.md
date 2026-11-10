@@ -3819,7 +3819,7 @@ witnesses and twins (literal bound, packed vector, ticking `for`) in
 `front_end_parity.rs::the_2026_11_08_rules_refuse_their_witnesses_and_admit_their_twins`; the
 transpiler's pin requires the shared message. (2) `front_end_parity_ui.rs`'s `NAMED_PARITY_EXCEPTIONS`
 gains `("file_x_const_pattern_d26.rs", X_PATTERN_MESSAGE)` (ui/pass); `front_end_parity.rs`'s audit is
-renamed `the_three_named_parity_exceptions_have_exactly_their_witnesses` and gains a third scan — every
+renamed `the_four_named_parity_exceptions_have_exactly_their_witnesses` and gains a third scan — every
 `#[hardware]` fn whose body has an identifier pattern naming a file `const` whose initializer is
 `Logic::X` or `Bits::x()` / `Bits::<N>::x()` — whose set must equal `tests/file_x_const_pattern_d26.rs`'s
 `fx_logic`, `fx_bits` (that file pins the transpiler's refusal and the simulator's structural match).

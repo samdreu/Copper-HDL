@@ -468,7 +468,7 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   `const` whose value is X compiles (the macro cannot see the item's value) and the transpiler
   refuses it with D-24's `X_PATTERN_MESSAGE`; the simulator matches the X structurally. In none
   is wrong text emitted. None can widen silently:
-  `front_end_parity.rs::the_three_named_parity_exceptions_have_exactly_their_witnesses` reads the
+  `front_end_parity.rs::the_four_named_parity_exceptions_have_exactly_their_witnesses` reads the
   tree's helper call graph, every behavioural body's `let`s and every pattern naming an X-valued
   file const, and requires `tests/recursive_helper_r6.rs`, `tests/let_instance_d24.rs` and
   `tests/file_x_const_pattern_d26.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins

@@ -8,7 +8,7 @@
 //! the arm when the scrutinee holds X. The transpiler folds the const's value (§U.2) and refuses
 //! it with the same message. No text is emitted.
 //!
-//! `copper-analysis/tests/front_end_parity.rs::the_three_named_parity_exceptions_have_exactly_their_witnesses`
+//! `copper-analysis/tests/front_end_parity.rs::the_four_named_parity_exceptions_have_exactly_their_witnesses`
 //! scans the tree and requires this file to hold the only modules matching a file const whose
 //! value is X; `copper-macros/tests/ui/pass/file_x_const_pattern_d26.rs` is its ui row.
 

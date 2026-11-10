@@ -7,6 +7,8 @@
 //!   with an X-literal operand, the same question spelled with an operator (D-23 (3)),
 //!   and a `Logic::X` pattern (or one naming a body `const` whose value is X), the
 //!   same question spelled as a pattern (D-24 (2)).
+//! - [`check_target_byte_order`] — `to_be` / `to_le` mean the simulating host's byte order,
+//!   which SystemVerilog has not: refused (D-32 (2), I.14.3(c)).
 //! - [`check_memory_port_index`] — a memory port index `k ≥ R` (`≥ W`) is a shape
 //!   rule decided at the instance (D-19 6b-A, I.14.6(c); I.14.7 (9)).
 
@@ -33,6 +35,56 @@ pub const X_PATTERN_MESSAGE: &str = "a pattern matching the X literal (`Logic::X
 /// The message for `is_valid()` (I.14.3(d)).
 pub const IS_VALID_MESSAGE: &str = "`is_valid()` asks whether a value holds the simulator's \
     third value X, which no 2-state realization holds: it is OUTSIDE (SPEC I.14.3(d), D-19)";
+
+/// The message for `to_be` / `to_le` (SPEC I.14.3(c), D-32 (2)): refused in both front-ends.
+pub const TARGET_BYTE_ORDER_MESSAGE: &str = "`to_be` / `to_le` convert to the byte order of the \
+    machine the program runs on (the identity on one, `swap_bytes` on the other), and SystemVerilog has \
+    no byte order: a design whose meaning changes with the simulating host is not one hardware can state, \
+    so they are refused (SPEC I.14.3(c), D-32). Write `swap_bytes()` or the value itself";
+
+/// The tail of the transpiler's message for a method it does not lower (SPEC II.1.3's fourth
+/// named exception, D-32 (1)); the transpiler writes ``method `<m>` `` ahead of it, one
+/// message for every such method, in the `.`-form and the path-call form (`u16::pow(v, 2)`).
+pub const UNLOWERED_METHOD_MESSAGE: &str = "is not lowered by the transpiler, which emits no text \
+    for it. A Rust integer method the transpiler does not lower compiles under `#[hardware]` (rustc \
+    type-checks it; the macro sees no types) and simulates with Rust's meaning: the fourth named \
+    exception of SPEC II.1.3 (D-32, I.14.3(c)). The integer methods it lowers are \
+    `copper_codegen::LOWERED_INT_METHODS`";
+
+/// The integer types whose path-call form (`u32::to_be(v)`) is a method call (MEASUREMENTS §AI.2).
+const PRIMITIVE_INTS: &[&str] =
+    &["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"];
+
+/// Refuse `x.to_be()` / `x.to_le()` and their path-call form `<int>::to_be(v)` in every module
+/// mode (SPEC I.14.3(c), D-32 (2)). By name, as `checked_*` is: the two names mean nothing
+/// else in Rust's integer API. One function for the macro and `transpile_target`.
+pub fn check_target_byte_order(f: &ItemFn) -> Result<(), syn::Error> {
+    struct V(Option<syn::Error>);
+    impl<'ast> Visit<'ast> for V {
+        fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+            if self.0.is_none() && mc.args.is_empty() && (mc.method == "to_be" || mc.method == "to_le") {
+                self.0 = Some(syn::Error::new(mc.method.span(), TARGET_BYTE_ORDER_MESSAGE));
+            }
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            if self.0.is_none() {
+                if let Expr::Path(p) = &*c.func {
+                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    if let [.., ty, m] = segs.as_slice() {
+                        if (m == "to_be" || m == "to_le") && PRIMITIVE_INTS.contains(&ty.as_str()) {
+                            self.0 = Some(syn::Error::new(p.span(), TARGET_BYTE_ORDER_MESSAGE));
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+    }
+    let mut v = V(None);
+    v.visit_block(&f.block);
+    v.0.map_or(Ok(()), Err)
+}
 
 const CHECKED: &[&str] = &[
     "checked_add",

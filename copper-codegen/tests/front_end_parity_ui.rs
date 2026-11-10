@@ -75,6 +75,7 @@ const NAMED_PARITY_EXCEPTIONS: &[(&str, &str)] = &[
     ("recursive_helper_r6.rs", copper_analysis::front_end::RECURSIVE_HELPER_MESSAGE),
     ("let_instance_d24.rs", copper_analysis::front_end::BEHAVIOURAL_INSTANCE_MESSAGE),
     ("file_x_const_pattern_d26.rs", copper_analysis::X_PATTERN_MESSAGE),
+    ("int_method_unlowered_d32.rs", copper_analysis::UNLOWERED_METHOD_MESSAGE),
 ];
 
 /// ui/fail cases whose transpiler message is not the macro's, with the reason.

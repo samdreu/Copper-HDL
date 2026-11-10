@@ -51,8 +51,9 @@ mod data;
 pub mod front_end;
 pub use front_end::{check_front_end_rules, hardware_mode, parse_hardware_args, HardwareMode};
 pub use data::{
-    check_memory_port_index, check_outside_methods, memory_port_index_message, CHECKED_METHOD_MESSAGE,
-    IS_VALID_MESSAGE, X_COMPARISON_MESSAGE, X_PATTERN_MESSAGE,
+    check_memory_port_index, check_outside_methods, check_target_byte_order, memory_port_index_message,
+    CHECKED_METHOD_MESSAGE, IS_VALID_MESSAGE, TARGET_BYTE_ORDER_MESSAGE, UNLOWERED_METHOD_MESSAGE,
+    X_COMPARISON_MESSAGE, X_PATTERN_MESSAGE,
 };
 mod init;
 pub mod memory_rules;

@@ -798,6 +798,40 @@ fn is_comparison_or_logical_op(op: &str) -> bool {
     matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||")
 }
 
+/// The Rust integer methods (taking `self`) the transpiler lowers, with Rust's meaning
+/// (SPEC I.14.3(c)), in the `.`-form and the path-call form (`u16::count_ones(v)`). **This list
+/// is the extent of SPEC II.1.3's fourth named exception (D-32 (1))**: every other integer
+/// method compiles under `#[hardware]` and is refused here with
+/// [`copper_analysis::UNLOWERED_METHOD_MESSAGE`], never with text, so lowering a method and
+/// adding it here shrinks the exception. Pinned both ways:
+/// `copper-analysis/tests/front_end_parity.rs::the_four_named_parity_exceptions_have_exactly_their_witnesses`
+/// transpiles a probe of every method on and off the list.
+pub const LOWERED_INT_METHODS: &[&str] = &[
+    "wrapping_add", "wrapping_sub", "wrapping_mul", "saturating_add", "saturating_sub",
+    "saturating_mul", "count_ones", "count_zeros", "leading_zeros", "trailing_zeros",
+    "leading_ones", "trailing_ones", "is_power_of_two",
+];
+
+/// The primitive integer types, whose `<type>::<m>(v, ..)` is a method call (MEASUREMENTS §AI.2).
+const PRIMITIVE_INTS: [&str; 12] =
+    ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"];
+
+/// The refusal of a method the transpiler does not lower: one message (D-32 (1)).
+fn unlowered_method(method: &str, span: copper_core::frontend_ir::SourceSpan) -> CHIRLowerError {
+    CHIRLowerError::UnsupportedConstruct {
+        description: format!("method `{method}` {}", copper_analysis::UNLOWERED_METHOD_MESSAGE),
+        span,
+        suggested_rewrite: None,
+    }
+}
+
+/// `<integer type>::<m>` — a primitive integer's method or associated function by path.
+fn primitive_path_method(call: &ExprCall) -> Option<String> {
+    let path = call_path(call)?;
+    let (ty, method) = path.split_once("::")?;
+    (PRIMITIVE_INTS.contains(&ty) && !method.contains("::")).then(|| method.to_string())
+}
+
 /// The whitespace-stripped callee path of a call, e.g. `"Bits::from_u32"`.
 /// `u16::count_ones(v)` — a primitive integer's method called through its type's path — as the
 /// method call `(v as u16).count_ones()` it is (rustc has typed `v` as that integer, so the
@@ -805,16 +839,9 @@ fn is_comparison_or_logical_op(op: &str) -> bool {
 /// lowers with a `self` receiver (MEASUREMENTS §AI: line `II.3 found int-method-path-call`);
 /// any other path call keeps its refusal.
 fn primitive_method_call(call: &ExprCall) -> Option<ExprType> {
-    const PRIMS: [&str; 12] =
-        ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"];
-    const SELF_METHODS: [&str; 13] = [
-        "wrapping_add", "wrapping_sub", "wrapping_mul", "saturating_add", "saturating_sub",
-        "saturating_mul", "count_ones", "count_zeros", "leading_zeros", "trailing_zeros",
-        "leading_ones", "trailing_ones", "is_power_of_two",
-    ];
     let path = call_path(call)?;
     let (ty, method) = path.split_once("::")?;
-    if !PRIMS.contains(&ty) || !SELF_METHODS.contains(&method) || call.args.is_empty() {
+    if !PRIMITIVE_INTS.contains(&ty) || !LOWERED_INT_METHODS.contains(&method) || call.args.is_empty() {
         return None;
     }
     let receiver = ExprType::Cast(copper_core::frontend_ir::ExprCast {
@@ -1217,6 +1244,12 @@ fn width_from_turbofish(path: &str) -> Option<usize> {
 
 /// Infer the type of a constructor-style call such as `Bits::from_u32(x)`.
 fn infer_type_from_call(call: &ExprCall, span: SourceSpan) -> Result<CHIRType, CHIRLowerError> {
+    // `let n = u16::pow(v, 2)`: a primitive path call `primitive_method_call` did not take is
+    // an integer method the transpiler does not lower — its one message, not "cannot infer"
+    // (D-32 (1)).
+    if let Some(m) = primitive_path_method(call) {
+        return Err(unlowered_method(&m, span));
+    }
     let path = call_path(call);
     if let Some(w) = path.as_deref().and_then(constructor_width) {
         return Ok(CHIRType::UInt { width: Width::Concrete(w) });
@@ -5537,6 +5570,10 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
                         value,
                     })),
                 }
+            } else if let Some(m) = primitive_path_method(call) {
+                // `u16::pow(v, 2)`: an integer method's path call the list above does not
+                // hold — the fourth named exception's one message (D-32 (1)).
+                Err(unlowered_method(&m, call.span))
             } else {
                 Err(CHIRLowerError::UnsupportedConstruct {
                     description: "non-hardware function calls cannot appear in hardware expressions; add #[hardware]".to_string(),
@@ -7431,11 +7468,16 @@ fn lower_method_call(
             let inlined = build_inlined_expr(&with_self, &args, span)?;
             lower_expr(&inlined, ctx)
         }
-        _ => Err(CHIRLowerError::UnsupportedConstruct {
-            description: format!("method `{}` is not supported in hardware expressions", mc.method),
+        // `to_be` / `to_le` are refused by both front-ends before lowering
+        // (`copper_analysis::check_target_byte_order`, D-32 (2)); kept as defence.
+        "to_be" | "to_le" if mc.args.is_empty() => Err(CHIRLowerError::UnsupportedConstruct {
+            description: copper_analysis::TARGET_BYTE_ORDER_MESSAGE.to_string(),
             span: mc.span,
             suggested_rewrite: None,
         }),
+        // Every other method: SPEC II.1.3's fourth named exception for a Rust integer
+        // method (D-32 (1)) — one message, no text.
+        _ => Err(unlowered_method(&mc.method, mc.span)),
     }
 }
 

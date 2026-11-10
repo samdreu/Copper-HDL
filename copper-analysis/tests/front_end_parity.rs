@@ -594,7 +594,148 @@ fn modules_matching_a_file_x_const(items: &[syn::Item]) -> Vec<String> {
         .collect()
 }
 
-/// SPEC II.1.3's three named exceptions, each found by a scan that sees what the macro
+/// The integer-method probes of MEASUREMENTS §AI.3 (44 methods, `rotate_left` at a constant and
+/// a run-time amount) and §AJ's additions: `(method, receiver type, arguments)`. In the probe
+/// body `v` and `w` have the receiver type and `s` is a `u32` below 32.
+const INT_METHOD_PROBES: &[(&str, &str, &str)] = &[
+    ("count_ones", "u16", ""), ("count_zeros", "u16", ""), ("leading_zeros", "u16", ""),
+    ("trailing_zeros", "u16", ""), ("count_ones", "i16", ""), ("leading_zeros", "i8", ""),
+    ("leading_ones", "u16", ""), ("trailing_ones", "u16", ""), ("rotate_left", "u16", "3"),
+    ("rotate_right", "u16", "3"), ("rotate_left", "u16", "s"), ("swap_bytes", "u16", ""),
+    ("reverse_bits", "u16", ""), ("to_be", "u16", ""), ("to_le", "u16", ""), ("pow", "u16", "2"),
+    ("wrapping_pow", "u16", "3"), ("saturating_pow", "u16", "3"), ("abs", "i16", ""),
+    ("wrapping_abs", "i16", ""), ("unsigned_abs", "i16", ""), ("saturating_abs", "i16", ""),
+    ("signum", "i16", ""), ("is_positive", "i16", ""), ("is_negative", "i16", ""),
+    ("wrapping_neg", "u16", ""), ("saturating_neg", "i16", ""), ("is_power_of_two", "u16", ""),
+    ("next_power_of_two", "u8", ""), ("wrapping_shl", "u16", "s"), ("wrapping_shr", "u16", "s"),
+    ("wrapping_div", "u16", "3"), ("wrapping_rem", "u16", "3"), ("div_euclid", "u16", "3"),
+    ("rem_euclid", "u16", "3"), ("abs_diff", "u16", "w"), ("min", "u16", "w"), ("max", "u16", "w"),
+    ("clamp", "u16", "3, 9"), ("ilog2", "u16", ""), ("isqrt", "u16", ""), ("midpoint", "u16", "w"),
+    ("wrapping_add", "u16", "w"), ("saturating_add", "u16", "w"),
+    // §AJ: the rest of what `LOWERED_INT_METHODS` holds, and a few more of std's API.
+    ("wrapping_sub", "u16", "w"), ("wrapping_mul", "u16", "w"), ("saturating_sub", "u16", "w"),
+    ("saturating_mul", "u16", "w"), ("ilog10", "u16", ""), ("ilog", "u16", "3"),
+    ("saturating_div", "u16", "3"), ("wrapping_next_power_of_two", "u8", ""),
+    ("is_multiple_of", "u16", "3"), ("unbounded_shl", "u16", "s"), ("cast_signed", "u16", ""),
+    ("min", "i16", "w"), ("max", "i16", "w"), ("abs_diff", "i16", "w"), ("rotate_right", "i16", "s"),
+    ("wrapping_neg", "i16", ""), ("wrapping_shr", "i16", "s"), ("swap_bytes", "i32", ""),
+    ("reverse_bits", "i8", ""),
+];
+
+/// One probe module: `let n = <call>;` written to a 16-bit port, sequential or combinational.
+fn int_method_probe(method: &str, ty: &str, args: &str, sequential: bool, path_form: bool) -> String {
+    let call = match (path_form, args.is_empty()) {
+        (false, _) => format!("v.{method}({args})"),
+        (true, true) => format!("{ty}::{method}(v)"),
+        (true, false) => format!("{ty}::{method}(v, {args})"),
+    };
+    let body = format!(
+        "let v: {ty} = (a.read().as_u16() | 1) as {ty}; let w: {ty} = b.read().as_u16() as {ty}; \
+         let s: u32 = (b.read().as_u16() & 31) as u32; let n = {call}; \
+         q.write(Bits::from_u16(n as u16)); let _ = (w, s);"
+    );
+    let head = "use copper_core::{Bits, Clock, ClockDomain}; use copper_core::port::{In, Out, RegOut}; \
+                use copper_macros::hardware; struct A; impl ClockDomain for A {}";
+    if sequential {
+        format!("{head} #[hardware(sequential)] async fn m(clk: Clock<A>, a: In<Bits<16>, A>, b: In<Bits<16>, A>, q: RegOut<Bits<16>, A>) {{ loop {{ {body} clk.tick().await; }} }}")
+    } else {
+        format!("{head} #[hardware(combinational)] fn m<D: ClockDomain>(a: In<Bits<16>, D>, b: In<Bits<16>, D>, q: Out<Bits<16>, D>) {{ {body} }}")
+    }
+}
+
+/// D-32: the transpiler admits every probe of a method on `copper_codegen::LOWERED_INT_METHODS`
+/// (read from the code), refuses `to_be`/`to_le` with D-32 (2)'s message, and refuses every other
+/// probe with the fourth exception's one message — `.`-form and path-call form, sequential and
+/// combinational. Every listed method is probed, so the list cannot claim a lowering no probe ran.
+fn int_methods_follow_the_lowered_list() {
+    let lowered = copper_codegen::LOWERED_INT_METHODS;
+    for m in lowered {
+        assert!(INT_METHOD_PROBES.iter().any(|(p, _, _)| p == m), "lowered method `{m}` has no probe");
+    }
+    let cfg = copper_codegen::EmitConfig::default();
+    let mut wrong = Vec::new();
+    for &(m, ty, args) in INT_METHOD_PROBES {
+        for sequential in [true, false] {
+            for path_form in [false, true] {
+                let src = int_method_probe(m, ty, args, sequential, path_form);
+                let r = copper_codegen::transpile_source(&src, Some("m"), &cfg);
+                let what = format!("{ty}::{m}({args}) seq={sequential} path={path_form}");
+                match r {
+                    Ok(_) if lowered.contains(&m) => {}
+                    Err(e) if m == "to_be" || m == "to_le" => {
+                        if !e.contains(copper_analysis::TARGET_BYTE_ORDER_MESSAGE) {
+                            wrong.push(format!("{what}: not D-32 (2)'s message: {e}"));
+                        }
+                    }
+                    Err(e) if !lowered.contains(&m) => {
+                        let msg = format!("method `{m}` {}", copper_analysis::UNLOWERED_METHOD_MESSAGE);
+                        if !e.contains(&msg) {
+                            wrong.push(format!("{what}: not the fourth exception's message: {e}"));
+                        }
+                    }
+                    Ok(_) => wrong.push(format!("{what}: transpiles, but `{m}` is not on LOWERED_INT_METHODS")),
+                    Err(e) => wrong.push(format!("{what}: on LOWERED_INT_METHODS, refused: {e}")),
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// `#[hardware]` fns of one file (any `mod` depth) calling an integer method of
+/// [`INT_METHOD_PROBES`] the transpiler does not lower — `.m(..)` or `<int>::m(..)`, type-blind
+/// (the scan's false hits would show as unexpected witnesses). `to_be`/`to_le` are refused by
+/// both front-ends and are not the exception's.
+fn modules_calling_an_unlowered_int_method(items: &[Item]) -> Vec<String> {
+    const PRIMS: [&str; 12] = ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"];
+    fn unlowered(m: &str) -> bool {
+        INT_METHOD_PROBES.iter().any(|(p, _, _)| *p == m)
+            && !copper_codegen::LOWERED_INT_METHODS.contains(&m)
+            && m != "to_be"
+            && m != "to_le"
+    }
+    struct V(bool);
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+            self.0 |= unlowered(&mc.method.to_string());
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(p) = &*c.func {
+                let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                if let [.., ty, m] = segs.as_slice() {
+                    self.0 |= PRIMS.contains(&ty.as_str()) && unlowered(m);
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+    }
+    let mut fns = Vec::new();
+    fn walk(items: &[Item], out: &mut Vec<ItemFn>) {
+        for it in items {
+            match it {
+                Item::Fn(f) if f.attrs.iter().any(|a| a.path().is_ident("hardware")) => out.push(f.clone()),
+                Item::Mod(m) => {
+                    if let Some((_, inner)) = &m.content {
+                        walk(inner, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(items, &mut fns);
+    fns.into_iter()
+        .filter(|f| {
+            let mut v = V(false);
+            syn::visit::Visit::visit_block(&mut v, &f.block);
+            v.0
+        })
+        .map(|f| f.sig.ident.to_string())
+        .collect()
+}
+
+/// SPEC II.1.3's four named exceptions, each found by a scan that sees what the macro
 /// cannot, and each required to have exactly its witnesses, so none can widen unseen.
 ///
 /// **R6** (D-22; MEASUREMENTS §Q): recursion through a helper `fn` compiles — the macro
@@ -614,10 +755,19 @@ fn modules_matching_a_file_x_const(items: &[syn::Item]) -> Vec<String> {
 /// `X_PATTERN_MESSAGE`; the simulator matches X structurally. The scan reads each file's X-valued
 /// consts against the patterns of its `#[hardware]` bodies.
 ///
+/// **An integer method the transpiler does not lower** (D-32 (1); MEASUREMENTS §AJ): rustc
+/// type-checks `v.rotate_left(3)` and the macro sees no types, so it compiles and simulates with
+/// Rust's meaning; the transpiler refuses it with ``method `<m>` `` and `UNLOWERED_METHOD_MESSAGE`,
+/// never with text. Its extent is the complement of `copper_codegen::LOWERED_INT_METHODS`, read
+/// from the code: [`int_methods_follow_the_lowered_list`] transpiles every probe of
+/// [`INT_METHOD_PROBES`] in both spellings and both body kinds, and the scan requires
+/// `tests/int_method_unlowered_d32.rs` to hold the only modules calling an unlowered one.
+///
 /// Any other module a scan finds simulates (or panics) and does not transpile — a parity break
-/// to fix, not a fourth exception.
+/// to fix, not a fifth exception.
 #[test]
-fn the_three_named_parity_exceptions_have_exactly_their_witnesses() {
+fn the_four_named_parity_exceptions_have_exactly_their_witnesses() {
+    int_methods_follow_the_lowered_list();
     let root = repo_root();
     let mut files = Vec::new();
     for dir in ["examples", "src", "tests"] {
@@ -627,6 +777,7 @@ fn the_three_named_parity_exceptions_have_exactly_their_witnesses() {
     let mut found = BTreeSet::new();
     let mut bound = BTreeSet::new();
     let mut xmatch = BTreeSet::new();
+    let mut unlowered = BTreeSet::new();
     for path in &files {
         let Ok(src) = fs::read_to_string(path) else { continue };
         let Ok(file) = syn::parse_file(&src) else { continue };
@@ -640,7 +791,21 @@ fn the_three_named_parity_exceptions_have_exactly_their_witnesses() {
         for m in modules_matching_a_file_x_const(&file.items) {
             xmatch.insert(format!("{rel}::{m}"));
         }
+        for m in modules_calling_an_unlowered_int_method(&file.items) {
+            unlowered.insert(format!("{rel}::{m}"));
+        }
     }
+    let expected: BTreeSet<String> = [
+        "tests/int_method_unlowered_d32.rs::um_comb_path".to_string(),
+        "tests/int_method_unlowered_d32.rs::um_seq".to_string(),
+    ]
+    .into();
+    assert_eq!(
+        unlowered, expected,
+        "the D-32 witnesses are the only modules calling an integer method the transpiler does not lower"
+    );
+    let ui = fs::read_to_string(root.join("copper-macros/tests/ui/pass/int_method_unlowered_d32.rs")).unwrap();
+    assert_eq!(modules_calling_an_unlowered_int_method(&syn::parse_file(&ui).unwrap().items), vec!["int_method_unlowered"]);
     let expected: BTreeSet<String> = [
         "tests/file_x_const_pattern_d26.rs::fx_bits".to_string(),
         "tests/file_x_const_pattern_d26.rs::fx_logic".to_string(),

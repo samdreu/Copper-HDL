@@ -88,6 +88,7 @@ dependencies = [
 name = "copper-analysis"
 version = "0.1.0"
 dependencies = [
+ "copper-codegen",
  "copper-core",
  "proc-macro2",
  "syn",

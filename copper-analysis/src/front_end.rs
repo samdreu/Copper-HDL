@@ -96,7 +96,7 @@ pub(crate) fn outer_type_name(ty: &Type) -> Option<String> {
 /// and rustc admits a non-`async` recursion; the transpiler, which inlines every
 /// helper (I.2.4), refuses it there — so no wrong text is ever emitted, and a
 /// terminating recursion simulates as Rust runs it. Pinned, so it cannot widen, by
-/// `copper-analysis/tests/front_end_parity.rs::the_three_named_parity_exceptions_have_exactly_their_witnesses`
+/// `copper-analysis/tests/front_end_parity.rs::the_four_named_parity_exceptions_have_exactly_their_witnesses`
 /// and `copper-codegen/tests/front_end_parity_ui.rs` (`recursive_helper_r6.rs`).
 pub const RECURSIVE_HELPER_MESSAGE: &str = "a helper `fn` that calls itself (directly or through \
     another helper) has no finite unrolling to inline: refused by the transpiler, which inlines \
@@ -1878,6 +1878,7 @@ pub fn check_front_end_rules(f: &ItemFn, mode: HardwareMode) -> Result<(), Error
     check_one_clock(f, mode)?;
     check_no_clock_construction(f)?;
     crate::check_outside_methods(f)?;
+    crate::check_target_byte_order(f)?;
     crate::check_memory_port_index(f)?;
     check_no_unsupported_idioms(f)?;
     crate::check_admissible(f)?;

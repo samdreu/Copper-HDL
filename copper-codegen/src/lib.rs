@@ -11,7 +11,7 @@ pub mod width_checks;
 mod const_fold;
 
 pub use parser::capture_frontend_ir;
-pub use chir_lower::{lower_to_chir, ModuleRegistry};
+pub use chir_lower::{lower_to_chir, ModuleRegistry, LOWERED_INT_METHODS};
 pub use shir_lower::lower_to_shir;
 pub use vlir_lower::lower_to_vlir;
 pub use vlir_lower::legalized_port_name;

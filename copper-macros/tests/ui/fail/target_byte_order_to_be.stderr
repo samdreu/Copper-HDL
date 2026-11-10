@@ -1,0 +1,19 @@
+error: `to_be` / `to_le` convert to the byte order of the machine the program runs on (the identity on one, `swap_bytes` on the other), and SystemVerilog has no byte order: a design whose meaning changes with the simulating host is not one hardware can state, so they are refused (SPEC I.14.3(c), D-32). Write `swap_bytes()` or the value itself
+  --> tests/ui/fail/target_byte_order_to_be.rs:14:26
+   |
+14 |         q.write(a.read().to_be());
+   |                          ^^^^^
+
+warning: unused import: `Clock`
+ --> tests/ui/fail/target_byte_order_to_be.rs:1:19
+  |
+1 | use copper_core::{Clock, ClockDomain};
+  |                   ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `In` and `RegOut`
+ --> tests/ui/fail/target_byte_order_to_be.rs:2:25
+  |
+2 | use copper_core::port::{In, RegOut};
+  |                         ^^  ^^^^^^
