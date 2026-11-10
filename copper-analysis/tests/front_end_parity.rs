@@ -615,7 +615,7 @@ const INT_METHOD_PROBES: &[(&str, &str, &str)] = &[
     // §AJ: the rest of what `LOWERED_INT_METHODS` holds, and a few more of std's API.
     ("wrapping_sub", "u16", "w"), ("wrapping_mul", "u16", "w"), ("saturating_sub", "u16", "w"),
     ("saturating_mul", "u16", "w"), ("ilog10", "u16", ""), ("ilog", "u16", "3"),
-    ("saturating_div", "u16", "3"), ("wrapping_next_power_of_two", "u8", ""),
+    ("saturating_div", "u16", "3"),
     ("is_multiple_of", "u16", "3"), ("unbounded_shl", "u16", "s"), ("cast_signed", "u16", ""),
     ("min", "i16", "w"), ("max", "i16", "w"), ("abs_diff", "i16", "w"), ("rotate_right", "i16", "s"),
     ("wrapping_neg", "i16", ""), ("wrapping_shr", "i16", "s"), ("swap_bytes", "i32", ""),

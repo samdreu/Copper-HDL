@@ -277,6 +277,14 @@ fn infer_type_from_expr(
             "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" | "leading_ones"
             | "trailing_ones" if mc.args.is_empty() => Ok(CHIRType::UInt { width: Width::Concrete(32) }),
             "is_power_of_two" if mc.args.is_empty() => Ok(CHIRType::Bool),
+            // MEASUREMENTS §AJ: the type of the desugared expression (a permutation keeps `T`).
+            _ if desugarable_int_method(mc, symbols, enums).is_some() => {
+                let names = desugarable_int_method(mc, symbols, enums).expect("checked");
+                match desugar_int_method(mc, &names) {
+                    Some(e) => infer_type_from_expr(&e, span, symbols, enums),
+                    None => infer_type_from_expr(&mc.receiver, span, symbols, enums),
+                }
+            }
             "and_reduce" | "or_reduce" | "xor_reduce" | "nand_reduce" | "nor_reduce"
             | "xnor_reduce" | "get" | "eq_logic" | "ne_logic" | "lt_logic" | "le_logic"
             | "gt_logic" | "ge_logic" => Ok(CHIRType::UInt { width: Width::Concrete(1) }),
@@ -810,6 +818,11 @@ pub const LOWERED_INT_METHODS: &[&str] = &[
     "wrapping_add", "wrapping_sub", "wrapping_mul", "saturating_add", "saturating_sub",
     "saturating_mul", "count_ones", "count_zeros", "leading_zeros", "trailing_zeros",
     "leading_ones", "trailing_ones", "is_power_of_two",
+    // MEASUREMENTS §AJ (D-32): the bit permutations, the compare-selects, the sign family and
+    // the wrapping shifts and negation (`desugar_int_method`, `lower_int_permutation`).
+    "swap_bytes", "reverse_bits", "rotate_left", "rotate_right", "min", "max", "abs_diff",
+    "signum", "is_positive", "is_negative", "wrapping_abs", "unsigned_abs", "wrapping_neg",
+    "wrapping_shl", "wrapping_shr",
 ];
 
 /// The primitive integer types, whose `<type>::<m>(v, ..)` is a method call (MEASUREMENTS §AI.2).
@@ -5697,6 +5710,21 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
                     let tw = resolve_type(&cast.target_ty.ty_text, cast.target_ty.span)
                         .ok()
                         .and_then(|t| width_of_type_concrete(&t));
+                    // `(a > b) as u32`: a comparison is one bit whatever its operands' width, so
+                    // the cast states the target's width (`32'(a > b)`). Until 2026-11-10 an
+                    // operand as wide as the target left the bit bare, a -Wall WIDTHEXPAND under
+                    // a shift (line `II.3 found bool-cast-width`, MEASUREMENTS §AJ).
+                    let comparison = matches!(
+                        &plain,
+                        CHIRExpr::BinOp {
+                            op: CHIRBinOp::Eq | CHIRBinOp::Neq | CHIRBinOp::Lt | CHIRBinOp::Lte | CHIRBinOp::Gt
+                                | CHIRBinOp::Gte | CHIRBinOp::LogicalAnd | CHIRBinOp::LogicalOr,
+                            ..
+                        }
+                    );
+                    if let (true, Some(t)) = (comparison, tw) {
+                        return Ok(if t == 1 { plain } else { CHIRExpr::Resize { expr: Box::new(plain), width: Width::Concrete(t) } });
+                    }
                     match (tw, width_ignoring_default_lits(&plain, ctx)) {
                         (Some(t), Some(w)) if t > w => widening_resize(plain, t, ctx),
                         (Some(t), Some(w)) if t != w => {
@@ -7188,6 +7216,159 @@ fn lower_int_bit_count(
     })
 }
 
+// ── Integer methods lowered by desugaring (D-32; MEASUREMENTS §AJ) ─────────────
+
+/// The integer methods lowered as a FIR expression over operations the transpiler already
+/// lowers with Rust's meaning (signed and unsigned compares, `<<`/`>>`, `&`/`|`,
+/// `wrapping_sub`, casts, `if`), so lowering and type inference share one definition. A bit
+/// permutation is `swap_bytes` / `reverse_bits` (a concatenation of slices, below).
+const DESUGARED_INT_METHODS: &[&str] = &[
+    "swap_bytes", "reverse_bits", "rotate_left", "rotate_right", "min", "max", "abs_diff", "signum", "is_positive", "is_negative",
+    "wrapping_abs", "unsigned_abs", "wrapping_neg", "wrapping_shl", "wrapping_shr",
+];
+
+/// `(T, U, n, signed)` for a primitive integer type: its name, the unsigned type of its width.
+fn int_type_names(t: &CHIRType) -> Option<(String, String, usize, bool)> {
+    let (n, signed) = match t {
+        CHIRType::UInt { width: Width::Concrete(n) } => (*n, false),
+        CHIRType::SInt { width: Width::Concrete(n) } => (*n, true),
+        _ => return None,
+    };
+    if ![8, 16, 32, 64, 128].contains(&n) {
+        return None;
+    }
+    Some((format!("{}{n}", if signed { "i" } else { "u" }), format!("u{n}"), n, signed))
+}
+
+/// The receiver's integer type, when the method is one of ours and the receiver an integer.
+fn desugarable_int_method(
+    mc: &copper_core::frontend_ir::ExprMethodCall,
+    symbols: &SymbolTable,
+    enums: &EnumRegistry,
+) -> Option<(String, String, usize, bool)> {
+    let argc = match mc.method.as_str() {
+        "min" | "max" | "abs_diff" | "rotate_left" | "rotate_right" | "wrapping_shl" | "wrapping_shr" => 1,
+        "swap_bytes" | "reverse_bits" => 0,
+        m if DESUGARED_INT_METHODS.contains(&m) => 0,
+        _ => return None,
+    };
+    if mc.args.len() != argc || !mc.turbofish.is_empty() {
+        return None;
+    }
+    let t = infer_type_from_expr(&mc.receiver, mc.span, symbols, enums).ok()?;
+    let names = int_type_names(&t)?;
+    // Rust has the sign family on signed types only, `abs_diff` and the rest on both.
+    match mc.method.as_str() {
+        "signum" | "is_positive" | "is_negative" | "wrapping_abs" | "unsigned_abs" if !names.3 => None,
+        _ => Some(names),
+    }
+}
+
+/// `v.m(a)` as a FIR expression of lowered operations, with Rust's meaning at `T` (I.14.3(c)).
+/// `None` for `swap_bytes` / `reverse_bits`, which lower to CHIR directly.
+fn desugar_int_method(
+    mc: &copper_core::frontend_ir::ExprMethodCall,
+    (t, u, n, _signed): &(String, String, usize, bool),
+) -> Option<ExprType> {
+    use copper_core::frontend_ir::{ExprBinary, ExprCast, ExprIf, ExprLit, ExprStmt, RawTypeRef};
+    let sp = mc.span;
+    let cast = |e: ExprType, ty: &str| {
+        ExprType::Cast(ExprCast { expr: Box::new(e), target_ty: RawTypeRef { ty_text: ty.to_string(), span: sp }, span: sp })
+    };
+    // A suffixed literal (`0i16`, `7u32`) lowers at its type's width and signedness; a cast of
+    // an unsuffixed one keeps the default literal width (`$signed(64'd0)`).
+    let lit = |v: u128, ty: &str| ExprType::Lit(ExprLit { text: format!("{v}{ty}"), span: sp });
+    let bin = |l: ExprType, op: &str, r: ExprType| {
+        ExprType::Binary(ExprBinary { left: Box::new(l), op: op.to_string(), right: Box::new(r), span: sp })
+    };
+    let wsub = |l: ExprType, r: ExprType| {
+        ExprType::MethodCall(copper_core::frontend_ir::ExprMethodCall {
+            receiver: Box::new(l),
+            method: "wrapping_sub".to_string(),
+            args: vec![r],
+            turbofish: Vec::new(),
+            span: sp,
+        })
+    };
+    let ite = |c: ExprType, a: ExprType, b: ExprType| {
+        ExprType::If(ExprIf {
+            condition: Box::new(c),
+            then_block: vec![RawStmt {
+                order: 0,
+                kind: RawStmtKind::Expr(ExprStmt { expr: a, has_semi: false, span: sp }),
+                text: String::new(),
+                span: sp,
+            }],
+            else_branch: Some(Box::new(b)),
+            span: sp,
+        })
+    };
+    let v = (*mc.receiver).clone();
+    let arg = || mc.args[0].clone();
+    // The shift amount `a & (n - 1)` as a `u32` (Rust's `wrapping_sh*` and `rotate_*` take
+    // it modulo the width, a power of two).
+    let amount = || bin(cast(arg(), "u32"), "&", lit(*n as u128 - 1, "u32"));
+    Some(match mc.method.as_str() {
+        "min" => ite(bin(v.clone(), "<=", arg()), v, arg()),
+        "max" => ite(bin(v.clone(), ">=", arg()), v, arg()),
+        "abs_diff" => ite(
+            bin(v.clone(), ">", arg()),
+            wsub(cast(v.clone(), u), cast(arg(), u)),
+            wsub(cast(arg(), u), cast(v, u)),
+        ),
+        "is_positive" => bin(v, ">", lit(0, t)),
+        "is_negative" => bin(v, "<", lit(0, t)),
+        "signum" => ite(
+            bin(v.clone(), ">", lit(0, t)),
+            lit(1, t),
+            ite(bin(v, "<", lit(0, t)), wsub(lit(0, t), lit(1, t)), lit(0, t)),
+        ),
+        "wrapping_neg" => wsub(lit(0, t), v),
+        "wrapping_abs" => ite(bin(v.clone(), "<", lit(0, t)), wsub(lit(0, t), v.clone()), v),
+        "unsigned_abs" => ite(
+            bin(v.clone(), "<", lit(0, t)),
+            wsub(lit(0, u), cast(v.clone(), u)),
+            cast(v, u),
+        ),
+        "wrapping_shl" => bin(v, "<<", amount()),
+        "wrapping_shr" => bin(v, ">>", amount()),
+        "rotate_left" | "rotate_right" => {
+            // On the unsigned bits: `(x << k) | (x >> ((n - k) & (n - 1)))` (or mirrored), `k` the
+            // amount modulo `n`; `k == 0` gives `x | x`. Cast back to `T`.
+            let x = || cast(v.clone(), u);
+            let back = bin(wsub(lit(*n as u128, "u32"), amount()), "&", lit(*n as u128 - 1, "u32"));
+            let (first, second) = if mc.method == "rotate_left" { ("<<", ">>") } else { (">>", "<<") };
+            cast(bin(bin(x(), first, amount()), "|", bin(x(), second, back)), t)
+        }
+        _ => return None,
+    })
+}
+
+/// `swap_bytes` / `reverse_bits`: a concatenation of the receiver's byte / bit slices, the
+/// receiver's unsigned bits in, `$signed` again for a signed `T`.
+fn lower_int_permutation(
+    mc: &copper_core::frontend_ir::ExprMethodCall,
+    (_t, u, n, signed): &(String, String, usize, bool),
+    ctx: &mut LowerCtx,
+) -> Result<CHIRExpr, CHIRLowerError> {
+    let as_u = ExprType::Cast(copper_core::frontend_ir::ExprCast {
+        expr: mc.receiver.clone(),
+        target_ty: copper_core::frontend_ir::RawTypeRef { ty_text: u.clone(), span: mc.span },
+        span: mc.span,
+    });
+    let x = match lower_expr(&as_u, ctx)? {
+        CHIRExpr::SignCast { signed: false, expr } => *expr,
+        other => other,
+    };
+    let step = if mc.method == "swap_bytes" { 8 } else { 1 };
+    // Concat lists the most significant part first: the receiver's least significant part.
+    let parts: Vec<CHIRExpr> = (0..n / step)
+        .map(|i| CHIRExpr::Slice { expr: Box::new(x.clone()), high: i * step + step - 1, low: i * step })
+        .collect();
+    let bits = if parts.len() == 1 { parts.into_iter().next().unwrap() } else { CHIRExpr::Concat(parts) };
+    Ok(if *signed { CHIRExpr::SignCast { signed: true, expr: Box::new(bits) } } else { bits })
+}
+
 fn lower_method_call(
     mc: &copper_core::frontend_ir::ExprMethodCall,
     ctx: &mut LowerCtx,
@@ -7301,6 +7482,18 @@ fn lower_method_call(
             if mc.args.is_empty() && struct_method(mc, ctx).is_none() =>
         {
             lower_int_bit_count(mc, ctx)
+        }
+        // The integer methods of MEASUREMENTS §AJ with Rust's meaning (I.14.3(c), D-32): a FIR
+        // desugar over lowered operations, or a bit permutation. A struct local's `impl`
+        // method of the same name is inlined below instead.
+        _ if struct_method(mc, ctx).is_none()
+            && desugarable_int_method(mc, &ctx.symbols, &ctx.enums).is_some() =>
+        {
+            let names = desugarable_int_method(mc, &ctx.symbols, &ctx.enums).expect("checked");
+            match desugar_int_method(mc, &names) {
+                Some(e) => lower_expr(&e, ctx),
+                None => lower_int_permutation(mc, &names, ctx),
+            }
         }
         // `checked_*` is OUTSIDE (I.14.3(c)): refused by both front-ends before
         // lowering (`copper_analysis::check_outside_methods`); kept as defence.

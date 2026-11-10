@@ -30,6 +30,8 @@ fn ty_hint(e: &ExprType, env: &ConstEnv) -> Option<IntTy> {
         ExprType::MethodCall(m) => match m.method.as_str() {
             "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" | "leading_ones"
             | "trailing_ones" => IntTy::of_name("u32"),
+            // MEASUREMENTS §AJ: the unsigned type of the receiver's width.
+            "abs_diff" | "unsigned_abs" => ty_hint(&m.receiver, env).map(|t| IntTy { bits: t.bits, signed: false }),
             _ => ty_hint(&m.receiver, env).or_else(|| m.args.iter().find_map(|a| ty_hint(a, env))),
         },
         _ => None,

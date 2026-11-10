@@ -148,6 +148,9 @@ pub struct Exec<'a> {
     call_stack: Vec<String>,
     /// The `impl` type of each associated fn being called: what `Self` names.
     self_ty: Vec<String>,
+    /// A constant context (a `const` item, a width): `Ord`'s `min`/`max` are refused there,
+    /// as rustc refuses them (not `const fn`s), and evaluated at run time (MEASUREMENTS §AJ).
+    in_const: bool,
 }
 
 fn unsup(s: impl Into<String>) -> RefError {
@@ -186,7 +189,7 @@ impl<'a> ConstEval for Exec<'a> {
         env.enter(0);
         let mut pending = HashMap::new();
         let inputs = HashMap::new();
-        let mut ex = Exec { prog: self.prog, env: &mut env, inputs: &inputs, pending: &mut pending, mems: None, call_stack: Vec::new(), self_ty: Vec::new() };
+        let mut ex = Exec { prog: self.prog, env: &mut env, inputs: &inputs, pending: &mut pending, mems: None, call_stack: Vec::new(), self_ty: Vec::new(), in_const: true };
         let v = ex.eval_expr(e)?;
         v.as_index()
     }
@@ -199,7 +202,7 @@ impl<'a> Exec<'a> {
         inputs: &'a HashMap<String, Value>,
         pending: &'a mut HashMap<String, Value>,
     ) -> Self {
-        Exec { prog, env, inputs, pending, mems: None, call_stack: Vec::new(), self_ty: Vec::new() }
+        Exec { prog, env, inputs, pending, mems: None, call_stack: Vec::new(), self_ty: Vec::new(), in_const: false }
     }
 
     /// Give the resumption the module's memories (I.10.1(a)).
@@ -215,6 +218,7 @@ impl<'a> Exec<'a> {
         let mut pending = HashMap::new();
         let inputs = HashMap::new();
         let mut ex = Exec::new(prog, &mut env, &inputs, &mut pending);
+        ex.in_const = true;
         ex.eval_expr(e)
     }
 
@@ -1805,6 +1809,49 @@ impl<'a> Exec<'a> {
                 let r = if m == "leading_ones" { (pat << (128 - bits)).leading_ones() } else { pat.trailing_ones() };
                 Ok(Value::Int(r.min(bits) as i128, IntTy::U32))
             }
+            // The bit permutations, the compare-selects and the sign family with Rust's meaning
+            // at `t` (MEASUREMENTS §AJ, D-32): on the type's own bits, a `u128` on its pattern.
+            "rotate_left" | "rotate_right" | "swap_bytes" | "reverse_bits" => {
+                let bits = int_bits(t);
+                let mask = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
+                let pat = (v as u128) & mask;
+                let r = match m {
+                    "swap_bytes" => pat.swap_bytes() >> (128 - bits),
+                    "reverse_bits" => pat.reverse_bits() >> (128 - bits),
+                    _ => {
+                        let s = (arg1(args)?.as_int()? as u128 % bits as u128) as u32;
+                        let s = if m == "rotate_left" { s } else { (bits - s) % bits };
+                        if s == 0 { pat } else { ((pat << s) | (pat >> (bits - s))) & mask }
+                    }
+                };
+                Ok(Value::Int(wrap_int(r as i128, t), t))
+            }
+            "min" | "max" if self.in_const => {
+                Err(unsup(format!("`{m}` in a constant (`Ord`'s, not a `const fn`: rustc refuses it)")))
+            }
+            "min" | "max" => {
+                let o = arg1(args)?.as_int()?;
+                let less = t.cmp(v, o) == std::cmp::Ordering::Less;
+                Ok(Value::Int(if (m == "min") == less { v } else if v == o { v } else { o }, t))
+            }
+            "abs_diff" => {
+                let o = arg1(args)?.as_int()?;
+                let u = unsigned_twin(t);
+                let r = if t.cmp(v, o) == std::cmp::Ordering::Greater {
+                    (v as u128).wrapping_sub(o as u128)
+                } else {
+                    (o as u128).wrapping_sub(v as u128)
+                };
+                Ok(Value::Int(wrap_int(r as i128, u), u))
+            }
+            "signum" if signed_int(t) => Ok(Value::Int(v.signum(), t)),
+            "is_positive" if signed_int(t) => Ok(Value::Bool(v > 0)),
+            "is_negative" if signed_int(t) => Ok(Value::Bool(v < 0)),
+            "wrapping_abs" if signed_int(t) => Ok(Value::Int(wrap_int(v.wrapping_abs(), t), t)),
+            "unsigned_abs" if signed_int(t) => {
+                let u = unsigned_twin(t);
+                Ok(Value::Int(wrap_int(v.unsigned_abs() as i128, u), u))
+            }
             other => Err(unsup(format!("integer method `{other}`"))),
         }
     }
@@ -2212,6 +2259,18 @@ fn as_int_ty(m: &str) -> IntTy {
 
 fn signed_int(t: IntTy) -> bool {
     t.is_signed()
+}
+
+/// The unsigned integer type of `t`'s width (`abs_diff`, `unsigned_abs`).
+fn unsigned_twin(t: IntTy) -> IntTy {
+    match t {
+        IntTy::I8 | IntTy::U8 => IntTy::U8,
+        IntTy::I16 | IntTy::U16 => IntTy::U16,
+        IntTy::I32 | IntTy::U32 => IntTy::U32,
+        IntTy::I64 | IntTy::U64 => IntTy::U64,
+        IntTy::I128 | IntTy::U128 => IntTy::U128,
+        IntTy::Isize | IntTy::Usize | IntTy::Unsuffixed => IntTy::Usize,
+    }
 }
 
 /// The order of two integer values of one type (a `u128` unsigned on its patterns;

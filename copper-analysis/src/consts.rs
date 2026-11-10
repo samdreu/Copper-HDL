@@ -603,7 +603,8 @@ impl ConstEnv {
             Expr::MethodCall(mc) => match mc.method.to_string().as_str() {
                 "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" | "leading_ones"
                 | "trailing_ones" => IntTy::of_name("u32"),
-                "is_power_of_two" => None,
+                "is_power_of_two" | "is_positive" | "is_negative" => None,
+                "abs_diff" | "unsigned_abs" => self.ty_of(&mc.receiver).map(|t| IntTy { bits: t.bits, signed: false }),
                 _ => self.ty_of(&mc.receiver).or_else(|| mc.args.iter().find_map(|a| self.ty_of(a))),
             },
             Expr::Call(c) => {
@@ -868,6 +869,38 @@ pub fn int_method(m: &str, v: i128, args: &[i128], ty: Option<IntTy>) -> Option<
             checked(Some(p))
         }
         "abs" if none(args) && ty?.signed => checked(v.checked_abs()),
+        // The bit permutations and the sign family, `const fn`s at the type (MEASUREMENTS §AJ,
+        // D-32); `abs_diff` / `unsigned_abs` are the unsigned type of the width.
+        "rotate_left" | "rotate_right" => {
+            let t = ty?;
+            let s = u32::try_from(one(args)?).ok()? % t.bits;
+            let s = if m == "rotate_left" { s } else { (t.bits - s) % t.bits };
+            let p = t.pattern(v);
+            let mask = if t.bits == 128 { u128::MAX } else { (1u128 << t.bits) - 1 };
+            t.wrap((if s == 0 { p } else { ((p << s) | (p >> (t.bits - s))) & mask }) as i128)
+        }
+        "swap_bytes" if none(args) => {
+            let t = ty?;
+            t.wrap((t.pattern(v).swap_bytes() >> (128 - t.bits)) as i128)
+        }
+        "reverse_bits" if none(args) => {
+            let t = ty?;
+            t.wrap((t.pattern(v).reverse_bits() >> (128 - t.bits)) as i128)
+        }
+        "abs_diff" => {
+            let t = ty?;
+            let o = one(args)?;
+            if !t.holds(o) {
+                return None;
+            }
+            let r = if v > o { (v as u128).wrapping_sub(o as u128) } else { (o as u128).wrapping_sub(v as u128) };
+            IntTy { bits: t.bits, signed: false }.wrap(i128::try_from(r).ok()?)
+        }
+        "signum" if none(args) && ty?.signed => Some(v.signum()),
+        "is_positive" if none(args) && ty?.signed => Some((v > 0) as i128),
+        "is_negative" if none(args) && ty?.signed => Some((v < 0) as i128),
+        "wrapping_abs" if none(args) && ty?.signed => ty?.wrap(v.wrapping_abs()),
+        "unsigned_abs" if none(args) && ty?.signed => i128::try_from(v.unsigned_abs()).ok(),
         _ => None,
     }
 }
