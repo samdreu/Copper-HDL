@@ -26,13 +26,16 @@
 //! of H(M) beside the environment, its stagings effects of the resumption, its
 //! edge the read and write steps in the mode's order.
 //!
+//! A `combinational` module is evaluated once per input vector ([`Module::evaluate`],
+//! §I.11), and a `structural` module is the design it names ([`Design`], §I.13).
+//!
 //! **What it refuses** — every refusal names its SPEC row:
 //! a plain `Out` on a clocked module, a `Memory` parameter (I.10.5), a second
-//! clock, `combinational` / `structural` modes (all *deferred*, [`RefError::Deferred`],
-//! the `REF_SKIP` classes of `build.rs`); a read inside macro tokens, a statement
-//! macro, `/`, a labelled or valued `break`, `return`, a non-`tick` `await`, a
-//! tick before the loop, recursion ([`RefError::Unsupported`], naming the II.1 /
-//! II.3 row). It has no opinion about what the transpiler can lower: a shape in
+//! clock, a `structural` module given to [`Module::new`] (all *deferred*,
+//! [`RefError::Deferred`], the classes `build.rs`'s `ref_skip_reason` skips); a read
+//! inside macro tokens, a statement macro, a labelled or valued `break`, `return`, a
+//! non-`tick` `await`, a tick before the loop, recursion ([`RefError::Unsupported`],
+//! naming the II.1 / II.3 row). It has no opinion about what the transpiler can lower: a shape in
 //! II.3's defect rows is interpreted by its Part I meaning, which is the point.
 //!
 //! **Reading a disagreement** (`SPEC_OVERVIEW.md` §7): the interpreter is the

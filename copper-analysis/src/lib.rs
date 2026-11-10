@@ -1,5 +1,20 @@
 //! Shared compile-time control/liveness analysis for Copper (c2 architecture).
 //!
+//! **What it holds today (2026-11-09).** One analysis that both front-ends, the
+//! `#[hardware]` macro and the transpiler, run on the same `syn::ItemFn`, so every rule
+//! is stated once (SPEC II.1.3, front-end parity):
+//! - the CFG with `Comb`/`Tick` edges, and register inference ([`infer_registers`]: a
+//!   local is a register iff it is defined in the loop and live at a tick, SPEC I.7.1);
+//! - reachability ([`check_reachability`], SPEC II.1 R3);
+//! - the shared front-end rules ([`check_front_end_rules`]), including R8, no plain `Out`
+//!   on a clocked module ([`check_no_plain_out`]);
+//! - the memory rules ([`memory_rules`], [`check_memory_staging`]);
+//! - the register-initializer and data shape rules;
+//! - the constant evaluator of SPEC I.14.4 ([`consts`]).
+//!
+//! The history below records why the crate was created; the facts it states about
+//! `syn::ItemFn` and the dependency graph still hold.
+//!
 //! **Why this crate exists (gate G6 in `design_docs/SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md`).**
 //! The c2 decision is that the sim macro (`copper-macros`) and the transpiler
 //! (`copper-codegen`) must consume *one* authoritative control-flow analysis —
