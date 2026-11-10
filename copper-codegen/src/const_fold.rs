@@ -28,7 +28,8 @@ fn ty_hint(e: &ExprType, env: &ConstEnv) -> Option<IntTy> {
             _ => None,
         },
         ExprType::MethodCall(m) => match m.method.as_str() {
-            "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" => IntTy::of_name("u32"),
+            "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" | "leading_ones"
+            | "trailing_ones" => IntTy::of_name("u32"),
             _ => ty_hint(&m.receiver, env).or_else(|| m.args.iter().find_map(|a| ty_hint(a, env))),
         },
         _ => None,

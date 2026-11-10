@@ -824,7 +824,22 @@ fn expr_str(e: &VLIRExpr) -> String {
             };
             format!("({} {} {})", expr_str(left), op_str, expr_str(right))
         }
-        VLIRExpr::UnOp { op, expr } => format!("({}{})", unop_str(*op), expr_str(expr)),
+        // `$countones` is a system function (IEEE 1800 §20.9); its argument is
+        // self-determined, so the lowering hands it a width-cast operand.
+        VLIRExpr::UnOp { op: VLIRUnOp::CountOnes, expr } => format!("$countones({})", expr_str(expr)),
+        // A size cast directly under a prefix operator — a `Resize`, or a select emitted as
+        // `W'(e)` — is parenthesized: Yosys 0.68 refuses `~16'(x)` ("Static cast with zero or
+        // negative size!") and accepts `~(16'(x))`; Verilator and Icarus take both
+        // (MEASUREMENTS §AI).
+        VLIRExpr::UnOp { op, expr } => {
+            let inner = expr_str(expr);
+            let digits = inner.bytes().take_while(u8::is_ascii_digit).count();
+            if digits > 0 && inner[digits..].starts_with("'(") {
+                format!("({}({}))", unop_str(*op), inner)
+            } else {
+                format!("({}{})", unop_str(*op), inner)
+            }
+        }
         VLIRExpr::Ternary { cond, then_val, else_val } => format!(
             "({} ? {} : {})",
             expr_str(cond),
@@ -913,6 +928,7 @@ fn unop_str(op: VLIRUnOp) -> &'static str {
         VLIRUnOp::ReductionAnd => "&",
         VLIRUnOp::ReductionOr => "|",
         VLIRUnOp::ReductionXor => "^",
+        VLIRUnOp::CountOnes => unreachable!("`$countones` is emitted as a call, not a prefix operator"),
     }
 }
 

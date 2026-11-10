@@ -273,6 +273,10 @@ fn infer_type_from_expr(
             "as_u128" => Ok(CHIRType::UInt { width: Width::Concrete(128) }),
             "as_usize" => Ok(CHIRType::UInt { width: Width::Concrete(USIZE_BITS) }),
             "as_bool" => Ok(CHIRType::Bool),
+            // The integer bit counts are Rust's `u32` (MEASUREMENTS §AI).
+            "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" | "leading_ones"
+            | "trailing_ones" if mc.args.is_empty() => Ok(CHIRType::UInt { width: Width::Concrete(32) }),
+            "is_power_of_two" if mc.args.is_empty() => Ok(CHIRType::Bool),
             "and_reduce" | "or_reduce" | "xor_reduce" | "nand_reduce" | "nor_reduce"
             | "xnor_reduce" | "get" | "eq_logic" | "ne_logic" | "lt_logic" | "le_logic"
             | "gt_logic" | "ge_logic" => Ok(CHIRType::UInt { width: Width::Concrete(1) }),
@@ -301,7 +305,10 @@ fn infer_type_from_expr(
         },
         ExprType::Call(call) => match identity_pack_call(call) {
             Some(inner) => infer_type_from_expr(inner, span, symbols, enums),
-            None => infer_type_from_call(call, span),
+            None => match primitive_method_call(call) {
+                Some(mc) => infer_type_from_expr(&mc, span, symbols, enums),
+                None => infer_type_from_call(call, span),
+            },
         },
         // A field read of a flattened struct local: `ex_mem.alu_result` is the
         // `ex_mem_alu_result` net.
@@ -792,6 +799,38 @@ fn is_comparison_or_logical_op(op: &str) -> bool {
 }
 
 /// The whitespace-stripped callee path of a call, e.g. `"Bits::from_u32"`.
+/// `u16::count_ones(v)` — a primitive integer's method called through its type's path — as the
+/// method call `(v as u16).count_ones()` it is (rustc has typed `v` as that integer, so the
+/// cast is the identity and states the receiver's width). Only for the methods the `.`-form
+/// lowers with a `self` receiver (MEASUREMENTS §AI: line `II.3 found int-method-path-call`);
+/// any other path call keeps its refusal.
+fn primitive_method_call(call: &ExprCall) -> Option<ExprType> {
+    const PRIMS: [&str; 12] =
+        ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"];
+    const SELF_METHODS: [&str; 13] = [
+        "wrapping_add", "wrapping_sub", "wrapping_mul", "saturating_add", "saturating_sub",
+        "saturating_mul", "count_ones", "count_zeros", "leading_zeros", "trailing_zeros",
+        "leading_ones", "trailing_ones", "is_power_of_two",
+    ];
+    let path = call_path(call)?;
+    let (ty, method) = path.split_once("::")?;
+    if !PRIMS.contains(&ty) || !SELF_METHODS.contains(&method) || call.args.is_empty() {
+        return None;
+    }
+    let receiver = ExprType::Cast(copper_core::frontend_ir::ExprCast {
+        expr: Box::new(call.args[0].clone()),
+        target_ty: copper_core::frontend_ir::RawTypeRef { ty_text: ty.to_string(), span: call.span },
+        span: call.span,
+    });
+    Some(ExprType::MethodCall(copper_core::frontend_ir::ExprMethodCall {
+        receiver: Box::new(receiver),
+        method: method.to_string(),
+        args: call.args[1..].to_vec(),
+        turbofish: Vec::new(),
+        span: call.span,
+    }))
+}
+
 fn call_path(call: &ExprCall) -> Option<String> {
     match &*call.func {
         ExprType::Lit(lit) => Some(lit.text.chars().filter(|c| !c.is_whitespace()).collect()),
@@ -5421,6 +5460,8 @@ pub(crate) fn lower_expr(expr: &ExprType, ctx: &mut LowerCtx) -> Result<CHIRExpr
             } else if call_path(call).as_deref().is_some_and(|n| ctx.fns.contains_key(n)) {
                 // Call to a file-scope free function (#7b): inline it.
                 lower_inlined_fn_call(call, ctx)
+            } else if let Some(mc) = primitive_method_call(call) {
+                lower_expr(&mc, ctx)
             } else if call_path(call).as_deref().is_some_and(|p| p.ends_with("::mux")) && call.args.len() == 3 {
                 // `Bits::mux(sel, a, b)`: `sel ? a : b` (I.14.3(d); MEASUREMENTS §J.14).
                 let cond = lower_expr(&call.args[0], ctx)?;
@@ -7040,6 +7081,76 @@ fn lower_saturating(
     })
 }
 
+/// `x.count_ones()` and its family on a Rust integer `x` of `n` bits (see the call site).
+/// Every result but `is_power_of_two`'s is Rust's `u32`, a 32-bit value here:
+/// - `count_ones` is `32'($countones(n'(x)))`, `count_zeros` the same over `~x`;
+/// - `trailing_zeros` counts the ones of `~x & (x - 1)` — exactly the bits below the lowest
+///   one, all `n` of them when `x` is 0 — and `trailing_ones` those of `x & ~(x + 1)`;
+/// - `leading_zeros` / `leading_ones` are a priority chain from the top bit: the first bit
+///   from the top that is 1 (resp. 0) at index `i` gives `n - 1 - i`, none gives `n`;
+/// - `is_power_of_two` (unsigned only, as in Rust) is `count_ones == 1`.
+/// A signed receiver is counted on its two's-complement bits (the `$signed` wrapper is
+/// dropped). The receiver's width must be known and, where the front-end type of the
+/// receiver is known too, equal to it: a width the transpiler got wrong would miscount.
+fn lower_int_bit_count(
+    mc: &copper_core::frontend_ir::ExprMethodCall,
+    ctx: &mut LowerCtx,
+) -> Result<CHIRExpr, CHIRLowerError> {
+    let refuse = |why: String| CHIRLowerError::UnsupportedConstruct {
+        description: format!("`{}` {why} (SPEC I.14.3(c); MEASUREMENTS §AI)", mc.method),
+        span: mc.span,
+        suggested_rewrite: None,
+    };
+    let x = match lower_expr(&mc.receiver, ctx)? {
+        CHIRExpr::SignCast { signed: true, expr } => *expr,
+        other => other,
+    };
+    let Some(n) = width_ignoring_default_lits(&x, ctx) else {
+        return Err(refuse("needs a receiver of a known width".to_string()));
+    };
+    if !(1..=128).contains(&n) {
+        return Err(refuse(format!("is lowered for integers of 1 to 128 bits, not {n}")));
+    }
+    if let Ok(ty) = infer_type_from_expr(&mc.receiver, mc.span, &ctx.symbols, &ctx.enums) {
+        if let Some(tw) = width_of_type_concrete(&ty) {
+            if tw != n {
+                return Err(refuse(format!("on a receiver typed {tw} bits wide whose lowered width is {n}")));
+            }
+        }
+    }
+    let lit = |w: usize, v: u128| CHIRExpr::Lit(CHIRLit { ty: CHIRType::UInt { width: Width::Concrete(w) }, value: v });
+    let bx = |e: CHIRExpr| Box::new(e);
+    let not = |e: CHIRExpr| CHIRExpr::UnOp { op: CHIRUnOp::BitNot, expr: bx(e) };
+    let bin = |l: CHIRExpr, op: CHIRBinOp, r: CHIRExpr| CHIRExpr::BinOp { left: bx(l), op, right: bx(r) };
+    let count = |e: CHIRExpr| CHIRExpr::Resize {
+        expr: bx(CHIRExpr::UnOp {
+            op: CHIRUnOp::CountOnes,
+            expr: bx(CHIRExpr::Resize { expr: bx(e), width: Width::Concrete(n) }),
+        }),
+        width: Width::Concrete(32),
+    };
+    Ok(match mc.method.as_str() {
+        "count_ones" => count(x),
+        "count_zeros" => count(not(x)),
+        "trailing_zeros" => count(bin(not(x.clone()), CHIRBinOp::BitAnd, bin(x, CHIRBinOp::Sub { wrapping: true }, lit(n, 1)))),
+        "trailing_ones" => count(bin(x.clone(), CHIRBinOp::BitAnd, not(bin(x, CHIRBinOp::Add { wrapping: true }, lit(n, 1))))),
+        "is_power_of_two" => bin(count(x), CHIRBinOp::Eq, lit(32, 1)),
+        _ => {
+            // leading_zeros / leading_ones: bit 0's test innermost, the top bit's outermost.
+            let want = if mc.method == "leading_zeros" { 1 } else { 0 };
+            let mut acc = lit(32, n as u128);
+            for i in 0..n {
+                acc = CHIRExpr::Mux {
+                    cond: bx(bin(CHIRExpr::Slice { expr: bx(x.clone()), high: i, low: i }, CHIRBinOp::Eq, lit(1, want))),
+                    then_val: bx(lit(32, (n - 1 - i) as u128)),
+                    else_val: bx(acc),
+                };
+            }
+            acc
+        }
+    })
+}
+
 fn lower_method_call(
     mc: &copper_core::frontend_ir::ExprMethodCall,
     ctx: &mut LowerCtx,
@@ -7143,6 +7254,16 @@ fn lower_method_call(
         // operand is not lowered yet (refused, MEASUREMENTS §M).
         "saturating_add" | "saturating_sub" | "saturating_mul" if mc.args.len() == 1 => {
             lower_saturating(mc, ctx)
+        }
+        // The integer bit-count methods with Rust's meaning (I.14.3(c); SPEC III.3.4
+        // `II.3 found int-bit-count`, MEASUREMENTS §AI): a `u32` counted over the
+        // receiver's own bits, two's complement for a signed one. A struct local's `impl`
+        // method of the same name is inlined below instead.
+        "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" | "leading_ones"
+        | "trailing_ones" | "is_power_of_two"
+            if mc.args.is_empty() && struct_method(mc, ctx).is_none() =>
+        {
+            lower_int_bit_count(mc, ctx)
         }
         // `checked_*` is OUTSIDE (I.14.3(c)): refused by both front-ends before
         // lowering (`copper_analysis::check_outside_methods`); kept as defence.

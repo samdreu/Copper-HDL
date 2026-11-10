@@ -1358,6 +1358,13 @@ impl<'a> Exec<'a> {
             if self.prog.enums.contains_key(ty) {
                 return Err(unsup(format!("a tuple variant `{ty}::{m}(…)` (I.2.4: enums are unit-variant value sets)")));
             }
+            // `u16::count_ones(v)`: a primitive integer's method through its type's path is the
+            // method call on `v` at that type (MEASUREMENTS §AI).
+            if let (Some(it), Some(first)) = (IntTy::parse(ty), args.first()) {
+                if let Value::Int(v, _) = first.clone().coerce_to(&Ty::Int(it))? {
+                    return self.int_method(v, it, m, &args[1..]);
+                }
+            }
         }
         Err(unsup(format!("call of `{}`", segs.join("::"))))
     }
@@ -1790,6 +1797,13 @@ impl<'a> Exec<'a> {
                 let bits = int_bits(t);
                 let pat = if bits >= 128 { v as u128 } else { (v as u128) & ((1u128 << bits) - 1) };
                 Ok(Value::Int(pat.count_ones() as i128, IntTy::U32))
+            }
+            // The ones from the top / the bottom of the type's own bits (MEASUREMENTS §AI).
+            "leading_ones" | "trailing_ones" => {
+                let bits = int_bits(t);
+                let pat = if bits >= 128 { v as u128 } else { (v as u128) & ((1u128 << bits) - 1) };
+                let r = if m == "leading_ones" { (pat << (128 - bits)).leading_ones() } else { pat.trailing_ones() };
+                Ok(Value::Int(r.min(bits) as i128, IntTy::U32))
             }
             other => Err(unsup(format!("integer method `{other}`"))),
         }

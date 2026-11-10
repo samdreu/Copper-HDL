@@ -554,6 +554,10 @@ pub enum CHIRUnOp {
     ReductionAnd,
     ReductionOr,
     ReductionXor,
+    /// The number of one bits of the operand (Rust's `count_ones`), emitted as SV's
+    /// `$countones`. The lowering always wraps it in a 32-bit `Resize` (Rust's `u32`
+    /// result), so no width walk ever reads the bare operator (MEASUREMENTS §AI).
+    CountOnes,
 }
 
 // ── Error model ───────────────────────────────────────────────────────────────

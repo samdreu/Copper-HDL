@@ -951,6 +951,7 @@ fn lower_unop(op: &CHIRUnOp) -> VLIRUnOp {
         CHIRUnOp::ReductionAnd => VLIRUnOp::ReductionAnd,
         CHIRUnOp::ReductionOr => VLIRUnOp::ReductionOr,
         CHIRUnOp::ReductionXor => VLIRUnOp::ReductionXor,
+        CHIRUnOp::CountOnes => VLIRUnOp::CountOnes,
     }
 }
 

@@ -410,4 +410,6 @@ pub enum VLIRBinOp {
 pub enum VLIRUnOp {
     BitNot, LogicalNot, Neg,
     ReductionAnd, ReductionOr, ReductionXor,
+    /// `$countones(x)` — a system function, not a prefix operator (MEASUREMENTS §AI).
+    CountOnes,
 }

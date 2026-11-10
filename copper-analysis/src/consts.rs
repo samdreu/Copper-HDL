@@ -601,7 +601,8 @@ impl ConstEnv {
                 _ => None,
             },
             Expr::MethodCall(mc) => match mc.method.to_string().as_str() {
-                "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" => IntTy::of_name("u32"),
+                "count_ones" | "count_zeros" | "leading_zeros" | "trailing_zeros" | "leading_ones"
+                | "trailing_ones" => IntTy::of_name("u32"),
                 "is_power_of_two" => None,
                 _ => self.ty_of(&mc.receiver).or_else(|| mc.args.iter().find_map(|a| self.ty_of(a))),
             },
@@ -851,6 +852,15 @@ pub fn int_method(m: &str, v: i128, args: &[i128], ty: Option<IntTy>) -> Option<
         "trailing_zeros" if none(args) => {
             let t = ty?;
             Some(t.pattern(v).trailing_zeros().min(t.bits) as i128)
+        }
+        // The ones counted from the top / the bottom of the type's own bits (MEASUREMENTS §AI).
+        "leading_ones" if none(args) => {
+            let t = ty?;
+            Some((t.pattern(v) << (128 - t.bits)).leading_ones().min(t.bits) as i128)
+        }
+        "trailing_ones" if none(args) => {
+            let t = ty?;
+            Some(t.pattern(v).trailing_ones().min(t.bits) as i128)
         }
         "is_power_of_two" if none(args) && !ty?.signed => Some((v > 0 && v & (v - 1) == 0) as i128),
         "next_power_of_two" if none(args) && !ty?.signed => {
