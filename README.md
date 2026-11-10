@@ -472,10 +472,21 @@ The other documents in `design_docs/` are historical and say so in a dated heade
 
 ## License
 
-The Copper source is licensed under the MIT License (see `LICENSE`; the
-copyright holder and year there are placeholders to be confirmed by the author).
-The BaseJump STL-derived reference Verilog listed below is under the Solderpad
-Hardware License v0.51 and keeps that license: see `LICENSE-Solderpad`.
+Copper is licensed under either of
+
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([`LICENSE-MIT`](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in Copper by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
+
+The exception is the BaseJump STL-derived reference Verilog listed below: it is
+under the Solderpad Hardware License v0.51 and keeps that license (see
+`LICENSE-Solderpad`), not the dual license above.
 
 The Verilog vendored as **independent references** under `examples/*/sv/` and
 `tests/fixtures/reference_sv/` comes from three sources, and each file's header
