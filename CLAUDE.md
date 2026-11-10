@@ -38,7 +38,7 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (388, 3 of them skipped with a reason, since 2026-11-09 §AF — 6 modules in one fixture file; 382 after §AE's 8 modules in one fixture file; 374 after §AD — 30 modules in three fixture files; 344 after §AC's 22 modules in one fixture file; 322 after §AB's 19 modules in four fixture files; 303 after §AA's 20 modules in three fixture files; 283 after §Z's 34 modules in five fixture files; 249 after §Y's ten `tfr_*` fixtures; 239 after §X's three `cc_body_*`; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
+`_reference_leg` cases as build.rs generated to run (395, 3 of them skipped with a reason, since 2026-11-09 §AG — 7 modules in one fixture file, `wide_int_dut`; 388 after §AF's 6 modules in one fixture file; 382 after §AE's 8 modules in one fixture file; 374 after §AD — 30 modules in three fixture files; 344 after §AC's 22 modules in one fixture file; 322 after §AB's 19 modules in four fixture files; 303 after §AA's 20 modules in three fixture files; 283 after §Z's 34 modules in five fixture files; 249 after §Y's ten `tfr_*` fixtures; 239 after §X's three `cc_body_*`; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
 clocked, 18 of them binding a `Memory` (I.10), 52 combinational (I.11); `REF_SKIP` empty), each
 leg non-empty, and the design leg (I.13, `copper_ref::Design` on `two_domain_top` vs the hand-wired
 simulation, `tests/two_domain_hierarchy_cdc.rs`) — and
@@ -481,7 +481,7 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   of several is over-checked), the macro places an inline `const { assert!(..) }` (E0080 at monomorphization —
   `cargo check`/trybuild never see it, so `src/lib.rs` pins it with a `compile_fail,E0080` doctest), the
   transpiler lowers the `for` as non-empty and emits an elaboration-time `$error`
-  (`width_checks::generic_range_checks`; Verilator and Yosys refuse the instance, Icarus 12 ignores it)
+  (`width_checks::generic_range_checks`; Verilator and Yosys refuse the instance; Icarus 12 skips every elaboration task inside a generate scope — a toolchain limit, pinned by `generic_range_instance_d30.rs`, §AG.2)
   (`tests/fixtures/generic_range_dut.rs`, `tests/generic_range_instance_d30.rs`). **D-29** (2026-11-09, §AE) closed §AD.5's break,
   `ticking-for-ends-in-loop`: a nested tick-bearing loop (a counted `for`, a hand-written `loop`, a `while`)
   whose body has no bare tick and ends in a skippable wait, R3 holding through an earlier inner `for` over a
@@ -529,7 +529,7 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   (`tests/fixtures/stmt_match_wire_dut.rs`) — and `forwarded-narrow-widening`: a register or wire's
   forwarded value substituted under a widening cast (`32'(r)` → `32'(8'(a) + 8'd250)`) was evaluated at
   the cast's width (`sim=ref≠SV`, silent); `shir_lower::at_own_width` keeps it at its own
-  (`tests/fixtures/forwarded_width_dut.rs`). The ledger has no OPEN line since §AF (234 lines, all CLOSED). The standing audit is
+  (`tests/fixtures/forwarded_width_dut.rs`). The ledger has no OPEN line since §AF (238 lines, all CLOSED, since §AG). **128-bit integers are swept on three legs since §AG**: the interpreter has `i128` and the full `u128` (a `u128` held as its `i128` pattern, every numeric reading type-aware), and the sweep's testbench drives and compares a port wider than 64 bits word by word (`verification.rs::wide_check`; ports up to 64 bits keep their text and cache key); `tests/fixtures/wide_int_dut.rs`. An integer-typed port (`In<u128>`) is still unswept at every width. The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one

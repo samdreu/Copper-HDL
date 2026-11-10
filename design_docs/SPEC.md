@@ -4420,14 +4420,15 @@ the regression. I.5 has no numbered clause (a forwarding stub, D-15) and so no l
 | retired 14 | `multi_phase_out_write` | `gone:multi_phase_out_write`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8 |
 | retired 15 | `out_first_driven_late` | `gone:out_first_driven_late`, `ui:fail/plain_out_on_sequential` | PA | CLOSED | D-8; I.11's class vacuous (D-14) |
 
-**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §AF.6
-(2026-11-09, on `0709b9b`, REGRESSION OK): **234 lines — 234 CLOSED, 0 OPEN**; 171 required by the SPEC
+**III.3.6 Counts.** Measured by G-K on the bare regression of `review/MEASUREMENTS.md` §AG.6
+(2026-11-09, on `0f4a0f3`, rustc 1.98.1, REGRESSION OK): **238 lines — 238 CLOSED, 0 OPEN**; 171 required by the SPEC
 (91 numbered clauses, 23 II.1.2 rules — R23 retired by D-28 and kept as a CLOSED line, 4 II.2.1 rules,
-14 II.3.3 rows, 28 row-(e) methods, 9 retired rules) and 63 beyond it (the 7 methods row (e) owes, 56
-II.3 rows found in Phase C and after). Fixture tokens on CLOSED lines: 345 `sweep`, 160 `test`, 132 `ui`,
-8 `coreui`, 3 `example`, 13 `gone`; G-K's run check found all 358 run checks satisfied and the 3 examples
-PASS. §AE closed `ticking-for-ends-in-loop` (D-29) and added `ticking-for-generic-range`; §AF closed it
-(D-30) and II.1.3; G-G 0 DISAGREE.
+14 II.3.3 rows, 28 row-(e) methods, 9 retired rules) and 67 beyond it (the 7 methods row (e) owes, 60
+II.3 rows found in Phase C and after). Fixture tokens on CLOSED lines: 355 `sweep`, 165 `test`, 132 `ui`,
+8 `coreui`, 3 `example`, 13 `gone`; G-K's run check found all 366 run checks satisfied and the 3 examples
+PASS. §AG added `ref-no-i128` and `icarus-elab-error` OPEN (236 — 234 CLOSED, 2 OPEN, on `54d88fe`), closed both,
+and found and closed `i128-min-panic` and `ref-count-ones`; G-G 0 DISAGREE.
+(Before §AG, on `0709b9b`: 234 lines — 234 CLOSED, 0 OPEN, §AF.6.)
 (Before §AF, on `c4fd345`: 234 lines — 232 CLOSED, 2 OPEN, §AE.7.)
 (Before §AE, on `77f5c65`: 233 lines — 231 CLOSED, 2 OPEN, §AD.8.)
 (Before §AD, on `4b32ed8`: 230 lines — 227 CLOSED, 3 OPEN, §AC.9.)

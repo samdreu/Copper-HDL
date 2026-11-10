@@ -6066,6 +6066,111 @@ G-J 91 const items compared / 25 outside both, 348 counted-`for` bounds compared
 DISAGREE; G-E 5 anchored; **G-K `234 lines — 234 CLOSED, 0 OPEN`**. Not run remotely (nothing pushed). After this
 run, docs only: III.3.6's counts, this section, CLAUDE.md.
 
+## AG. The two recorded limits ledgered and closed: 128-bit integers on three legs, Icarus's elaboration tasks; two more found and closed (2026-11-09)
+
+Branch `claude/open-items-j-0f9896`, from `paper` at `c81b59f`. Two limits recorded in §U.7, §AB.1/§AB.8 and §AF.1
+had no ledger line; both were added OPEN first (`54d88fe`, III.3.4: `II.3 found ref-no-i128`, `II.3 found
+icarus-elab-error`), then closed. Predictions are in the session notes (`open-items-j-AG.md`), written before any
+measurement. A first, docs-only commit (`3cb2ede`) made CLAUDE.md state SPEC.md's own status line (not yet
+normative; `SYNCHRONOUS_SEMANTICS.md` wins until the SPEC is adopted) — no other design doc claims to be normative
+against the SPEC (`FORMAL_SEMANTICS.md`, `SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md`, `CYCLE_DATAFLOW_SEMANTICS.md` all
+defer to `SYNCHRONOUS_SEMANTICS.md`, consistent with SPEC.md's line 3). Adopting the SPEC is the user's decision.
+
+### AG.1 `II.3 found ref-no-i128` — CLOSED
+
+- **Interpreter** (`copper-ref/src/value.rs`, `interp.rs`): `IntTy::I128`; a `u128` is held as the `i128` with its
+  128-bit pattern, and every reading of it as a number goes through `IntTy::cmp` (the `for`'s empty/done tests, a
+  range pattern), `u128_binop` (checked `+ - * / %`, the comparisons), the 128-bit arms of the integer methods
+  (`wrapping_*`, `saturating_*`, `pow`, `next_power_of_two`, `is_power_of_two`) or a logical `>>`; a literal above
+  `i128::MAX` with a `u128` suffix is parsed as its pattern; `u128::MAX` is the pattern `-1`; `Bits::from_u128` of
+  a pattern is accepted. Arithmetic on the other types is checked (`i128::MIN - 1` is the overflow fault, not a host
+  panic). `!` on an integer is the complement at its type (a narrow unsigned `!` was an overflow fault).
+- **Testbench** (`copper-sim/src/verification.rs`): a port wider than 64 bits is a Verilator `VlWide` array of
+  32-bit words — driven word by word (`input_assign`), compared word by word (`wide_check`, the relation form and
+  the legacy one), the value Verilator showed printed as `0x` + hex and read back as a `u128`
+  (`tests/common::sv_values`, `relation::to_int`, `Pattern::of`). A testbench with such a port gains
+  `#include <iomanip>`; every other testbench keeps its exact text, so no cache key changed. **Predicted** that
+  the four first modules need no testbench change (ports ≤ 64 bits) ✓; **found**: `wint_port128` (128-bit ports)
+  panicked in `logic_vec_to_int` (a shift overflow) — the sweep's own harness goes through it too, so §U.7 (ii)
+  applied to the sweep, not only to `EquivalenceTest::new`. Mutation check: driving word 0 of each wide input with
+  its low bit flipped makes the case `DISAGREE sim=ref≠SV` with the SV's full 128-bit value parsed.
+- **Fixture** `tests/fixtures/wide_int_dut.rs`, 7 modules: `sat_u128` and `imx_u128_done` (moved from
+  `tests/ref_probes/`, their SV byte-identical; `tests/saturating_u128_equivalence.rs` and
+  `tests/inclusive_max_u128.rs` now include the fixture and keep their directed stimulus), `wint_i128_arith`
+  (`i128` clamps at both bounds, signed order, `>>` arithmetic), `wint_u128_order` (`u128` above `i128::MAX`:
+  order, `/`, logical `>>`, `wrapping_mul`, a `u128` register), `wint_i128_for` (a constant range at `i128::MIN`,
+  a run-time inclusive end near `i128::MAX`), `wint_port128` (128-bit ports), `wint_not` (`!` at every width
+  class). **14/14 cases pass.** Before, on `c81b59f`'s interpreter (measured by checking out `copper-ref/src`
+  only): the reference leg of `sat_u128` and `wint_u128_order` failed (overflow at 2^127), `wint_i128_arith` and
+  `wint_i128_for` stopped (no `i128`), `wint_not` failed (overflow in `!`). **Prediction missed: `imx_u128_done`
+  agreed** on the old interpreter — its `u128::MAX` was `i128::MAX`, which has the same low byte, and the module
+  writes the low byte; the ASYMMETRIC row of §AB.8 already said its number was wrong.
+- **G-I** (`tests/projection_relation.rs`): no swept module had used D-28's done-flag form (the only one lived in
+  `ref_probes/`), so the walker had never met it — `imx_u128_done` failed P1 ("unrecognized counted-`for` test").
+  The walker now records the done flag at its declaration, takes the increment `if c == e { d = true } else
+  { c = c + 1 }` as advancing it, and reads `if d` as `c > e` (Last/More) and the hoisted guard `a <= e` as
+  "entered". It also read a primitive's `MIN`/`MAX` in a `for` bound as unknown (`wint_i128_for`: "did not reach a
+  tick"); its bound evaluator now reads them through `primitive_assoc_const`. Both related, 0 uncovered.
+- `timing_model_derivations.rs`: `imx_u128_done` and `wint_i128_for` take the extraction route, as `imx_*`.
+- **G-J**: the `u128::MAX - 1` row stays `ASYMMETRIC` — it is `ConstEnv`'s `i128` that declines it; its reason now
+  says the interpreter evaluates it correctly. No G-J row existed only because of the interpreter. Predicted ✓.
+- **Not done, recorded**: an integer-typed port (`In<u128>`, `RegOut<i128>`) is unswept at every width — the
+  generator randomizes `Logic`/`Bits<N>` only (`#[ignore]` with that reason; measured on a first `wint_port128`).
+
+### AG.2 `II.3 found icarus-elab-error` — CLOSED, a documented toolchain limit
+
+Measured on Icarus 12.0, Verilator 5.044, Yosys 0.68. Icarus runs an elaboration system task in a module's own scope
+(`module t; $error("x"); $fatal(1, ..); endmodule` → "During elaboration", exit 1) and **silently skips one inside
+any generate scope**: `if (1)` named or not, without `begin`, inside `generate … endgenerate`, a generate `for`, a
+generate `case`, an `else` branch, and the emitted parametric check at `W = 0` — 9 variants, all exit 0 with no
+message (`-gassertions`/`-gsupported-assertions` change nothing). A module instantiated in a generate scope does run
+its own. The one construct that would carry the check to Icarus — an auxiliary module whose own scope holds the task,
+instantiated inside the generate `if` — is refused by Yosys (`parameter string`: syntax error) and by Icarus (a
+task with a non-literal argument: "sorry: … only support a single string argument"), so the emitted form stays and
+no SV changed. Verilator (USERERROR) and Yosys refuse `W = 0` with D-30's message. Pinned by
+`tests/generic_range_instance_d30.rs::icarus_12_skips_an_elaboration_task_inside_a_generate_scope` (Yosys and Icarus
+legs when installed; the Icarus assertion is scoped to Icarus 12, so a release that changes it fails there; both
+mutation checks — Yosys's message, Icarus's skip — fail the test). The width-constraint checks of §M.5 (8) have the
+same form and the same limit. Icarus is no correctness leg.
+
+### AG.3 Found and closed — `II.3 found i128-min-panic` (a parity break)
+
+`wint_i128_arith` made `copper-transpile` panic (`attempt to negate with overflow`,
+`copper-analysis/src/consts.rs:216`, `IntTy::min` = `-(1 << 127)`); with that fixed, `wint_i128_for` made it panic
+in `control_extract::expand_counted_for`'s counter width (`-lim`, `lim = 1 << 127`). The macro admits both modules —
+a parity break, no text emitted. Now `-1 << (bits - 1)` and "every `i128` fits 128 signed bits".
+
+### AG.4 Found and closed — `II.3 found ref-count-ones`
+
+The interpreter's `count_ones` counted the `i128`'s sign extension: G-J measured **2 DISAGREE** on two new file
+consts (`WINT_ONES = (-1i8).count_ones()`: copper-ref 128, `ConstEnv` 8; `WINT_ONES_NEG`: 123 vs 11); now 0. Not
+sweepable — the transpiler has no `count_ones` lowering (it refuses the method).
+
+### AG.5 sv-baseline and ledger
+
+**sv-baseline against `c81b59f` on `81b8297` (the code commit before the rebase onto `9a4e370`, whose only code-side change is the toolchain pin): 9 of 461 differ — 7 NEW (`wide_int_dut`), 2 REMOVED (the moved
+`ref_probes` modules, whose SV is byte-identical at the new path). No existing corpus module's SV changed**
+(predicted 0 ✓).
+
+Ledger: before **234 — 234 CLOSED, 0 OPEN** (`c81b59f`); with the two OPEN lines **236 — 234 CLOSED, 2 OPEN**
+(`54d88fe`); after **238 lines — 238 CLOSED, 0 OPEN; 171 required by the SPEC; fixtures: 8 coreui, 3 example, 13
+gone, 355 sweep, 165 test, 132 ui; 366 run checks** (`0f4a0f3`, G-K in AG.6).
+
+### AG.6 The bare regression — measured
+
+A first bare run on `81b8297` (rustc 1.92, before `paper` pinned 1.98.1 in §AH): REGRESSION OK (639 s) — not the
+verdict. The branch was then rebased onto `paper` at `9a4e370` (no conflict).
+
+**Bare `tools/regression.sh` on `0f4a0f3` (the final code commit; laptop; rustc 1.98.1; under `nohup`): REGRESSION
+OK (365 s).** 1818 passed, 0 failed, 16 ignored, 160 test binaries (G-C 133 test files); examples **32/32**; G-D 395
+differential cases (3 ignored-with-reason), G-F 395 (3 skipped) — the 7 `wide_int_dut` modules added; **G-G
+differential 3642 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**, **reference 3654 PASS / 0 DISAGREE**;
+G-I 316 clocked related (106 extracted, 23 linear, 187 single-tick), 0 uncovered, 2426 transitions; G-J 93 const
+items compared / 25 outside both, 351 counted-`for` bounds compared, 9 asymmetric (pinned), 0 DISAGREE; G-E 5
+anchored; **G-K `238 lines — 238 CLOSED, 0 OPEN; 171 required by the SPEC; fixtures: 8 coreui, 3 example, 13 gone,
+355 sweep, 165 test, 132 ui; 366 run checks`**, the 3 example fixtures PASS. Not run remotely (`recycle` busy). After
+this run, docs only: III.3.6's counts, this section, CLAUDE.md.
+
 ## AH. The toolchain pinned: rustc 1.98.1 everywhere; one `.stderr` re-blessed (2026-11-09)
 
 On `paper` at `c81b59f` (§AF; §AG is batch J's, on its own branch). The first remote regression of `c81b59f` on
