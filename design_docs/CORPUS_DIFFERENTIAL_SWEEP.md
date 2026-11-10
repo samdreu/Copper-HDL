@@ -19,8 +19,10 @@ stimulus precondition the sweep will not keep (`mod8`, §0), and the pipelined C
 `Memory` parameter the harness cannot supply. The transpiler-refusal and divergence-witness
 rows of earlier editions are gone: the one measured divergence of the lowering,
 `branch_merge`, was fixed 2026-10-29 and sweeps (§0). A module with a payload the generator
-cannot randomize is the one generator-made ignore, and none exists today (SPEC §III.3.4,
-`int-port-unswept`).
+cannot randomize is the one generator-made ignore, and none exists today. The generator drives
+`Logic`, `Bits<N>`, the twelve primitive integers (at their own type, as their two's-complement
+bits; since 2026-11-09, SPEC §III.3.4 `int-port-unswept`, `review/MEASUREMENTS.md` §AI) and arrays
+of these.
 
 ## 0. What the sweep found — the 2026-08-25 log, compressed
 

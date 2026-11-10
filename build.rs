@@ -763,8 +763,8 @@ impl Module {
         }
         if self.ports.iter().any(|p| p.kind != Kind::Clock && !is_stimulable(&p.ty)) {
             return Some(format!(
-                "unsupported port payload: the generator can only randomise `Logic` and \
-                 `Bits<N>` ({})",
+                "unsupported port payload: the generator can only randomise `Logic`, \
+                 `Bits<N>`, the primitive integers and arrays of them ({})",
                 self.ports
                     .iter()
                     .filter(|p| p.kind != Kind::Clock && !is_stimulable(&p.ty))
@@ -866,7 +866,7 @@ fn classify(ty: &syn::Type) -> Option<(Kind, String, String)> {
 /// or a const-generic parameter, both of which are in scope in the generated body —
 /// and arrays of either.
 fn is_stimulable(ty: &str) -> bool {
-    if ty == "Logic" {
+    if ty == "Logic" || is_int_payload(ty) {
         return true;
     }
     if let Some(inner) = ty.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
@@ -879,10 +879,22 @@ fn is_stimulable(ty: &str) -> bool {
         .is_some_and(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
 }
 
+/// A Rust integer payload (`u8` … `u128`, `usize`, `i8` … `i128`, `isize`): driven and compared
+/// at its own type by `tests/common`'s `RandStim` impls (SPEC III.3.4 `II.3 found
+/// int-port-unswept`, MEASUREMENTS §AI).
+fn is_int_payload(ty: &str) -> bool {
+    matches!(
+        ty,
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+    )
+}
+
 /// A zero of the payload type, for the wire's initial value.
 fn zero_of(ty: &str) -> String {
     if ty == "Logic" {
         "__Logic::Zero".to_string()
+    } else if is_int_payload(ty) {
+        "0".to_string()
     } else if ty.starts_with('[') {
         // `[T; N]`: `from_fn` rather than `[zero; N]`, which would need `Copy` in a
         // const context the element type does not necessarily satisfy.

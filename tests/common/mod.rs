@@ -167,6 +167,44 @@ impl<const N: usize> RandStim for Bits<N> {
     }
 }
 
+/// A Rust integer port (`In<u8>`, `RegOut<i32>`, …; SPEC III.3.4 `II.3 found int-port-unswept`,
+/// MEASUREMENTS §AI): its value at its own type, as the two's-complement bit pattern of its width,
+/// LSB first — the layout of a `Bits<N>` of the same width, which is how the transpiler emits the
+/// port (`logic [N-1:0]`). Drawn bit by bit like `Bits<N>`, so an `In<u8>` and an `In<Bits<8>>`
+/// with the same seed are driven alike. An integer has no X (I.14.2(a)), and `rng.logic()` draws
+/// none.
+macro_rules! rand_stim_int {
+    ($($t:ty => $u:ty),* $(,)?) => {$(
+        impl RandStim for $t {
+            const WIDTH: usize = <$t>::BITS as usize;
+            fn rand(rng: &mut Rng) -> Self {
+                let bits: Vec<Logic> = (0..Self::WIDTH).map(|_| rng.logic()).collect();
+                Self::from_bits(&bits)
+            }
+            fn from_bits(bits: &[Logic]) -> Self {
+                assert_eq!(bits.len(), Self::WIDTH, concat!("a ", stringify!($t), " is {} bits"), Self::WIDTH);
+                let mut v: $u = 0;
+                for (k, b) in bits.iter().enumerate() {
+                    match b {
+                        Logic::One => v |= 1 << k,
+                        Logic::Zero => {}
+                        Logic::X => panic!(concat!("an X bit driven onto a `", stringify!($t), "` port")),
+                    }
+                }
+                v as $t
+            }
+            fn as_bits(&self) -> Vec<Logic> {
+                let v = *self as $u;
+                (0..Self::WIDTH).map(|k| logic((v >> k) & 1 == 1)).collect()
+            }
+        }
+    )*};
+}
+rand_stim_int!(
+    u8 => u8, u16 => u16, u32 => u32, u64 => u64, u128 => u128, usize => usize,
+    i8 => u8, i16 => u16, i32 => u32, i64 => u64, i128 => u128, isize => usize,
+);
+
 impl<T: RandStim, const N: usize> RandStim for [T; N] {
     const WIDTH: usize = T::WIDTH * N;
     fn rand(rng: &mut Rng) -> Self {
