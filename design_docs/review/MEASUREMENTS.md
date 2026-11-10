@@ -6065,3 +6065,65 @@ skipped); **G-G differential 3582 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 
 G-J 91 const items compared / 25 outside both, 348 counted-`for` bounds compared, 9 asymmetric (pinned), 0
 DISAGREE; G-E 5 anchored; **G-K `234 lines — 234 CLOSED, 0 OPEN`**. Not run remotely (nothing pushed). After this
 run, docs only: III.3.6's counts, this section, CLAUDE.md.
+
+## AH. The toolchain pinned: rustc 1.98.1 everywhere; one `.stderr` re-blessed (2026-11-09)
+
+On `paper` at `c81b59f` (§AF; §AG is batch J's, on its own branch). The first remote regression of `c81b59f` on
+`recycle` failed in `cargo test`, and nowhere else. `recycle` runs rustc 1.98.1 and the laptop ran 1.92.0. The trybuild
+case `register_init_not_constant` pins rustc's own E0015 text, and 1.98 adds a note to it. The run stopped there, so
+the sweep and the examples never ran remotely. The user chose to pin recycle's version for the whole project.
+
+### AH.1 The pin
+
+`rust-toolchain.toml`: `channel = "1.98.1"`, `profile = "minimal"`, components `rustfmt` and `clippy`. Nothing in
+the build, the tests or `tools/regression.sh` calls rustfmt, clippy or `rust-src`. The two components are for
+people. Laptop: rustup 1.28.2, which installed `1.98.1-aarch64-apple-darwin` on the first cargo command
+(rustc 1.98.1 `48a229cea` 2026-09-01, cargo 1.98.1 `797e8a9bc`). Recycle: `~/.cargo/bin/{cargo,rustc}` are rustup
+1.29.1 proxies, so the file takes effect there and **`tools/regression-remote.sh` needs no change**. The script's
+header line `rustc: $(rustc --version)` runs in the clone and so reports the pinned version. Recycle's default
+toolchain is `stable` (1.98.1), but rustup treats the toolchain name `1.98.1` as distinct, so the first remote
+run downloads it once. Neither script bypasses rustup.
+
+### AH.2 Predicted, then measured
+
+Prediction, written before the run: of the 83 ui/fail `.stderr` files (74 in `copper-macros`, 9 in `copper-core`),
+the 14 that carry a rustc error code could change: 2 E0015, E0061, E0080, 2 E0277, 5 E0308, 2 E0382, 2 E0599. The
+other 69 are macro `compile_error!` texts. I expected both E0015 cases to change (the new "is not const" note) and
+possibly E0080's const-eval framing.
+
+Measured under 1.98.1 (`cargo test -p copper-macros --test macro_tests`, `-p copper-core --test cdc_ui`): **one
+mismatch, `copper-macros/tests/ui/fail/register_init_not_constant.stderr`.** Every other ui case matched, `fail`
+and `pass` alike in both crates, including the E0080 case. The prediction was one case too many:
+`register_init_non_const_ctor` (E0015 on an associated fn, `Latch::bubble`) gets no new note under 1.98.
+
+### AH.3 The one re-bless
+
+`TRYBUILD=overwrite` changed only `register_init_not_constant.stderr`, by +5 lines and −0. rustc 1.98 inserts
+`note: function \`seed\` is not const` with a span at the definition (`register_init_not_constant.rs:8:1`,
+`fn seed() -> Bits<8> {`). It sits between the primary span and the existing `= note: calls in constants are
+limited to …`. The error code (E0015), the message (`cannot call non-const function \`seed\` in constants`) and the
+primary span (23:19) are unchanged. That is rustc wording only, and the case still fails for R11's reason.
+`front_end_parity_ui` lists this case as `RUSTC_JUDGED` and never reads its text, so it is unaffected. **Consequence:**
+the suite now fails under rustc 1.92. That is why the pin exists.
+
+### AH.4 Other 1.98 effects: none found
+
+- **Warnings and lints.** `cargo build --workspace --all-targets` under 1.92.0 (separate target dir) and 1.98.1:
+  both succeed. Both give 57 warning lines and the **same 31 distinct (message, location) pairs**, so no new lint
+  fires in our code or in macro-generated code. Nothing is promoted to an error. The macro's denied
+  `unused_must_use` still produces the pinned `behavioural_instantiation.stderr` byte for byte.
+- **Const evaluation.** `src/lib.rs`'s `compile_fail,E0080` doctest (`grn_only_boundary::<0>`), compiled as a plain
+  example under 1.98.1, fails with `error[E0080]: evaluation panicked:` followed by D-30's
+  `GENERIC_EMPTY_RANGE_MESSAGE`, spanned at `0..W`. That is the monomorphization check, not some other E0080. The
+  macro's R11 `const { }` wraps behave as in AH.2.
+
+### AH.5 The bare regression — measured
+
+**Bare `tools/regression.sh` on `9b545f7` (the code commit; laptop; rustc 1.98.1 by the toolchain file; under
+`nohup caffeinate -i`): REGRESSION OK (1421 s).** The time is a cold rebuild of every crate and test binary under
+the new compiler. The counts are §AF.6's exactly: 1803 passed, 0 failed, 16 ignored, 160 test binaries (G-C 133);
+examples **32/32**; G-D 388 differential cases (3 ignored-with-reason), G-F 388 (3 skipped); **G-G differential
+3582 PASS / 12 OUTSIDE / 0 TRUNCATED / 0 EXCUSED / 0 DISAGREE**, reference 3594 PASS / 0 DISAGREE; G-I 309 clocked
+related, 2379 transitions; G-J 0 DISAGREE; G-E 5 anchored; G-K `234 lines — 234 CLOSED, 0 OPEN`. Not run
+remotely (nothing pushed). Its step 2 passed under `nohup` this time; §AE's SIGPIPE failure did not recur. After
+this run, docs only: this section and CLAUDE.md.

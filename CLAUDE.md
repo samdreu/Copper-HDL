@@ -168,6 +168,10 @@ entries in `Cargo.toml`.
 
 ### Environment gotchas (important)
 
+- **The compiler is pinned** to rustc 1.98.1 by `rust-toolchain.toml` (rustup installs
+  it on first use). The trybuild `.stderr` files pin rustc's own diagnostic text, so the
+  laptop and `recycle` must agree. Changing the pin means re-blessing with
+  `TRYBUILD=overwrite` and reviewing each diff (MEASUREMENTS §AH).
 - **Verilator is required** for examples and equivalence tests (`brew install
   verilator`). A stale `VERILATOR_ROOT` in the environment makes `verilator` refuse
   to run; every Verilator invocation in the harness clears the variable itself
