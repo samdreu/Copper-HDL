@@ -7,6 +7,13 @@ use copper_core::Logic;
 use std::fmt;
 
 /// A Rust integer type the corpus uses for counters, `pc` locals and indices.
+///
+/// A value is held in an `i128` (`Value::Int`): the number itself for every type but
+/// `u128`, whose value is the `i128` with the same 128-bit pattern (`v as u128`) —
+/// so every reading of a `u128` as a number (order, arithmetic, a clamp) goes through
+/// [`IntTy::cmp`], [`IntTy::to_u128`] or the interpreter's `u128` arms (SPEC III.3.4
+/// `II.3 found ref-no-i128`, MEASUREMENTS §AG; until then `u128` stopped at `i128::MAX`
+/// and there was no `i128`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IntTy {
     U8,
@@ -19,6 +26,7 @@ pub enum IntTy {
     I16,
     I32,
     I64,
+    I128,
     Isize,
     /// An unsuffixed literal, or an arithmetic result of two: it takes the type of
     /// whatever it meets (rustc's inference, approximated by first contact).
@@ -38,6 +46,7 @@ impl IntTy {
             "i16" => IntTy::I16,
             "i32" => IntTy::I32,
             "i64" => IntTy::I64,
+            "i128" => IntTy::I128,
             "isize" => IntTy::Isize,
             _ => return None,
         })
@@ -51,23 +60,37 @@ impl IntTy {
             IntTy::U16 | IntTy::I16 => 16,
             IntTy::U32 | IntTy::I32 => 32,
             IntTy::U64 | IntTy::I64 | IntTy::Usize | IntTy::Isize => 64,
-            IntTy::U128 => 128,
+            IntTy::U128 | IntTy::I128 => 128,
             IntTy::Unsuffixed => return None,
         })
     }
 
     pub fn is_signed(self) -> bool {
-        matches!(self, IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize)
+        matches!(self, IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::I128 | IntTy::Isize)
     }
 
-    /// The inclusive range of the type; `Unsuffixed` is unbounded here.
+    /// The order of two values of this type: a `u128` compares its patterns unsigned.
+    pub fn cmp(self, a: i128, b: i128) -> std::cmp::Ordering {
+        if self == IntTy::U128 { (a as u128).cmp(&(b as u128)) } else { a.cmp(&b) }
+    }
+
+    /// The value as a `u128` when it is a non-negative number (a `u128`'s pattern, or a
+    /// non-negative value of any other type); `None` for a negative value.
+    pub fn to_u128(self, v: i128) -> Option<u128> {
+        if self == IntTy::U128 { Some(v as u128) } else { u128::try_from(v).ok() }
+    }
+
+    /// The inclusive range of the type as the `i128`s that hold its extremes (a `u128`'s
+    /// maximum is the pattern `-1`; order them with [`IntTy::cmp`]). `Unsuffixed` is
+    /// unbounded here.
     pub fn range(self) -> (i128, i128) {
         match self {
             IntTy::U8 => (0, u8::MAX as i128),
             IntTy::U16 => (0, u16::MAX as i128),
             IntTy::U32 => (0, u32::MAX as i128),
             IntTy::U64 | IntTy::Usize => (0, u64::MAX as i128),
-            IntTy::U128 => (0, i128::MAX),
+            IntTy::U128 => (0, -1),
+            IntTy::I128 => (i128::MIN, i128::MAX),
             IntTy::I8 => (i8::MIN as i128, i8::MAX as i128),
             IntTy::I16 => (i16::MIN as i128, i16::MAX as i128),
             IntTy::I32 => (i32::MIN as i128, i32::MAX as i128),
@@ -88,6 +111,7 @@ impl IntTy {
             IntTy::I16 => "i16",
             IntTy::I32 => "i32",
             IntTy::I64 => "i64",
+            IntTy::I128 => "i128",
             IntTy::Isize => "isize",
             IntTy::Unsuffixed => "{integer}",
         }
@@ -159,6 +183,7 @@ impl fmt::Display for Value {
             Value::LitX => write!(f, "x (unsized)"),
             Value::LitOnes => write!(f, "all ones (unsized)"),
             Value::Bool(b) => write!(f, "{b}"),
+            Value::Int(v, IntTy::U128) => write!(f, "{}u128", *v as u128),
             Value::Int(v, t) => write!(f, "{v}{}", t.name()),
             Value::Enum(e, v) => write!(f, "{e}::{v}"),
             Value::Tuple(vs) => {
@@ -313,8 +338,10 @@ impl Value {
             (Value::LitOnes, Ty::Bits(w)) => Ok(Value::Bits(RefBits::all_ones(*w))),
             (Value::LitOnes, Ty::Logic) => Ok(Value::Bits(RefBits::all_ones(1))),
             (Value::Int(v, IntTy::Unsuffixed), Ty::Int(t)) => {
+                // An unsuffixed literal holds its number, never a `u128` pattern.
                 let (lo, hi) = t.range();
-                if v < lo || v > hi {
+                let fits = if *t == IntTy::U128 { v >= 0 } else { v >= lo && v <= hi };
+                if !fits {
                     return Err(RefError::Runtime(format!("literal {v} out of range for {}", t.name())));
                 }
                 Ok(Value::Int(v, *t))

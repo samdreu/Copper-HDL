@@ -1,7 +1,8 @@
 //! `saturating_add` / `saturating_sub` on `u128` (SPEC II.3.3 (e), MEASUREMENTS §U.7): the
 //! simulator against the transpiled SystemVerilog under Verilator, on the operand pairs that
-//! reach each clamp and a few that do not. The module is not swept (the reference interpreter's
-//! `u128` range stops at `i128::MAX`; see `tests/ref_probes/saturating_u128_probe.rs`).
+//! reach each clamp and a few that do not — the boundary pairs the sweep's random stimulus need not
+//! hit. The module is also swept on three legs (`tests/fixtures/wide_int_dut.rs`, since MEASUREMENTS
+//! §AG gave the reference interpreter its `u128`).
 
 mod common;
 
@@ -14,8 +15,8 @@ use copper_sim::HardwareExecutor;
 struct MainClk;
 impl ClockDomain for MainClk {}
 
-include!("ref_probes/saturating_u128_probe.rs");
-const SRC: &str = include_str!("ref_probes/saturating_u128_probe.rs");
+include!("fixtures/wide_int_dut.rs");
+const SRC: &str = include_str!("fixtures/wide_int_dut.rs");
 
 #[test]
 fn u128_saturating_add_and_sub_clamp_and_match_verilog() {

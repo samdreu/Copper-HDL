@@ -93,7 +93,7 @@ impl Pattern {
     /// leg does not compare the observation; `sv_outside` says the SV leg exists but
     /// the observation is outside its pair. Returns `None` if every compared pair
     /// agrees.
-    pub fn of(sim: &[Logic], rf: Option<&[Logic]>, sv: Option<u64>, sv_outside: bool, sv_runs: bool) -> Option<Pattern> {
+    pub fn of(sim: &[Logic], rf: Option<&[Logic]>, sv: Option<u128>, sv_outside: bool, sv_runs: bool) -> Option<Pattern> {
         let sim_int = to_int(sim);
         let sim_ne_sv = matches!((sv, sim_int), (Some(v), Some(s)) if v != s);
         let sim_ne_ref = rf.is_some_and(|r| r != sim);
@@ -120,11 +120,11 @@ impl Pattern {
 }
 
 /// A bit vector as the integer the testbench compares (`None` if any bit is X).
-pub fn to_int(v: &[Logic]) -> Option<u64> {
-    let mut r = 0u64;
+pub fn to_int(v: &[Logic]) -> Option<u128> {
+    let mut r = 0u128;
     for (i, b) in v.iter().enumerate() {
         match b {
-            Logic::One => r |= 1 << i,
+            Logic::One => r |= 1u128 << i,
             Logic::Zero => {}
             Logic::X => return None,
         }

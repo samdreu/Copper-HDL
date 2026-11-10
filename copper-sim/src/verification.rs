@@ -204,6 +204,14 @@ pub fn generate_testbench(
     if !trace.sequences.is_empty() && tracing {
         tb.push_str("#include <string>\n");
     }
+    // A port wider than 64 bits prints its words in hex (`wide_check`); only such a
+    // testbench gains the include, so every other one keeps its text and cache key.
+    let wide = trace.cycles.iter().any(|c| {
+        c.outputs.iter().chain(c.inputs.iter()).any(|(_, v)| v.len() > 64)
+    });
+    if wide {
+        tb.push_str("#include <iomanip>\n");
+    }
     tb.push_str("\n");
 
     // main()
@@ -270,8 +278,7 @@ pub fn generate_testbench(
         tb.push_str(&format!("    // Cycle {}\n", cycle_data.cycle));
 
         for (name, values) in &cycle_data.inputs {
-            let value = logic_vec_to_int(values);
-            tb.push_str(&format!("    top->{} = {};\n", name, value));
+            tb.push_str(&input_assign(name, values));
         }
 
         if has_clock {
@@ -322,6 +329,10 @@ pub fn generate_testbench(
             continue;
         }
         for (name, expected) in &cycle_data.outputs {
+            if expected.len() > 64 {
+                tb.push_str(&wide_check(name, expected, cycle_data.cycle, "", &seq_note));
+                continue;
+            }
             let expected_val = logic_vec_to_int(expected);
             tb.push_str(&format!(
                 "    if (top->{name} != {exp}) {{\n\
@@ -384,6 +395,9 @@ fn relation_check(name: &str, expected: &[Logic], cycle: usize, tag: &str, seq_n
          under the agreement relation it is OUTSIDE (SPEC §III.2.2) and must be cut before the \
          testbench is generated"
     );
+    if expected.len() > 64 {
+        return wide_check(name, expected, cycle, tag, seq_note);
+    }
     let exp = logic_vec_to_int(expected);
     format!(
         "    if ((unsigned long long)top->{name} != {exp}ULL) {{\n\
@@ -396,16 +410,70 @@ fn relation_check(name: &str, expected: &[Logic], cycle: usize, tag: &str, seq_n
 }
 
 /// Convert Logic vector to integer for C++ testbench
-fn logic_vec_to_int(values: &[Logic]) -> u64 {
-    let mut result = 0u64;
+fn logic_vec_to_int(values: &[Logic]) -> u128 {
+    assert!(values.len() <= 128, "a port of {} bits (Bits<N> stops at 128, R16)", values.len());
+    let mut result = 0u128;
     for (i, val) in values.iter().enumerate() {
         match val {
-            Logic::One  => result |= 1 << i,
+            Logic::One  => result |= 1u128 << i,
             Logic::Zero => {}
             Logic::X    => result |= 1 << i, // treat X as 1 for testbench purposes
         }
     }
     result
+}
+
+/// A port wider than 64 bits is a Verilator `VlWide` array of 32-bit words, least
+/// significant first (`top->p[0]` holds bits 31..0); a narrower one is a scalar.
+/// (Until 2026-11-09 every port went through a 64-bit integer — a shift overflow at
+/// a 128-bit port, MEASUREMENTS §U.7 (ii), §AG.) Ports of 64 bits or fewer keep their
+/// exact text, so their testbenches and model-cache keys are unchanged.
+fn wide_words(values: &[Logic]) -> Vec<u32> {
+    let v = logic_vec_to_int(values);
+    (0..values.len().div_ceil(32)).map(|k| (v >> (32 * k)) as u32).collect()
+}
+
+/// The stimulus assignment of one input port.
+fn input_assign(name: &str, values: &[Logic]) -> String {
+    if values.len() <= 64 {
+        return format!("    top->{} = {};\n", name, logic_vec_to_int(values));
+    }
+    wide_words(values)
+        .iter()
+        .enumerate()
+        .map(|(k, w)| format!("    top->{name}[{k}] = {w}u;\n"))
+        .collect()
+}
+
+/// The check of one output port wider than 64 bits, word by word. The FAIL line prints
+/// the value Verilator showed as `0x` and its words in hex, most significant first —
+/// the harness reads it back (`tests/common::sv_values`); the expected value is decimal.
+fn wide_check(name: &str, expected: &[Logic], cycle: usize, tag: &str, seq_note: &str) -> String {
+    assert!(
+        !expected.iter().any(|b| *b == Logic::X),
+        "an X observation of `{name}` (cycle {cycle}{tag}) reached the SystemVerilog comparison"
+    );
+    let words = wide_words(expected);
+    let cond = words
+        .iter()
+        .enumerate()
+        .map(|(k, w)| format!("top->{name}[{k}] != {w}u"))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    let shown = (0..words.len())
+        .rev()
+        .map(|k| format!("std::setw(8) << (unsigned)top->{name}[{k}]"))
+        .collect::<Vec<_>>()
+        .join(" << ");
+    format!(
+        "    if ({cond}) {{\n\
+         \x20\x20\x20\x20    std::cout << \"FAIL: Cycle {cycle} {name}{tag} expected {exp} got 0x\" << std::hex << std::setfill('0') << {shown} << std::dec << std::setfill(' ') << \"{seq_note}\" << std::endl;\n\
+         \x20\x20\x20\x20    failures++;\n\
+         \x20\x20\x20\x20}} else {{\n\
+         \x20\x20\x20\x20    std::cout << \"PASS: Cycle {cycle} {name}{tag}\" << std::endl;\n\
+         \x20\x20\x20\x20}}\n",
+        exp = logic_vec_to_int(expected),
+    )
 }
 
 /// Unambiguous marker prefixing the *one* error that means "Verilator is not

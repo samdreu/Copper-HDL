@@ -498,6 +498,11 @@ fn expand_counted_for(
                     let past = if inclusive { b.saturating_add(1) } else { b };
                     let fits = |bits: u32| {
                         if signed {
+                            // Every `i128` fits 128 signed bits (and `-(1 << 127)` overflows: a
+                            // transpiler panic on an `i128::MIN` bound until 2026-11-09, §AG).
+                            if bits >= 128 {
+                                return true;
+                            }
                             let lim = 1i128 << (bits - 1);
                             a >= -lim && past < lim
                         } else {

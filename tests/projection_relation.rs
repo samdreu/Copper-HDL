@@ -717,12 +717,29 @@ fn for_bounds(f: &syn::ExprForLoop, consts: &dyn Fn(&str) -> Option<i128>) -> Fo
     let inclusive = matches!(r.limits, syn::RangeLimits::Closed(_));
     // A path of several segments (`T::K`, an associated const) is looked up by its full name,
     // as `ConstEnv` keys it (the transpiler folds it the same way; MEASUREMENTS §Z.3).
-    let eval = |e: &Expr| match e {
-        Expr::Path(p) if p.path.segments.len() > 1 => {
-            consts(&p.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"))
+    fn eval(e: &Expr, consts: &dyn Fn(&str) -> Option<i128>) -> Option<i128> {
+        match e {
+            // A path of several segments: an associated const by its full name, else a
+            // primitive's `MIN`/`MAX`/`BITS` (`i128::MIN`, MEASUREMENTS §AG).
+            Expr::Path(p) if p.path.segments.len() > 1 => {
+                let n = p.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
+                consts(&n).or_else(|| copper_analysis::consts::primitive_assoc_const(&n).map(|(v, _)| v))
+            }
+            Expr::Paren(p) => eval(&p.expr, consts),
+            Expr::Group(g) => eval(&g.expr, consts),
+            Expr::Unary(syn::ExprUnary { op: syn::UnOp::Neg(_), expr, .. }) => eval(expr, consts)?.checked_neg(),
+            Expr::Binary(b) if matches!(b.op, syn::BinOp::Add(_) | syn::BinOp::Sub(_) | syn::BinOp::Mul(_)) => {
+                let (l, r) = (eval(&b.left, consts)?, eval(&b.right, consts)?);
+                match b.op {
+                    syn::BinOp::Add(_) => l.checked_add(r),
+                    syn::BinOp::Sub(_) => l.checked_sub(r),
+                    _ => l.checked_mul(r),
+                }
+            }
+            other => copper_analysis::consts::eval_syn(other, consts),
         }
-        other => copper_analysis::consts::eval_syn(other, consts),
-    };
+    }
+    let eval = |e: &Expr| eval(e, consts);
     let start = match &r.start {
         Some(s) => eval(s),
         None => Some(0),
@@ -779,6 +796,16 @@ enum Mapped {
 struct Emit<'c, 's> {
     route: Route<'c>,
     src: &'s Src<'s>,
+    /// I.8.5's done flag of a counted `for` (D-28, a 128-bit inclusive range): the flag's name
+    /// by the `for`'s position, recorded at its declaration (`d = a > e`). Its `Ctr` stands for
+    /// "passed" (`at_end`) and "entered" (`advanced`); the increment `if c == e { d = true }
+    /// else { c = c + 1 }` advances it, so the exit test `if d` takes Last/More as `c > e` does
+    /// (MEASUREMENTS §AG: the form was unswept until §AG, so this walker never met it).
+    done_at: std::cell::RefCell<BTreeMap<Pos, String>>,
+}
+
+fn is_done_flag(n: &str) -> bool {
+    n.starts_with("__copper_ctr") && n.ends_with("_done")
 }
 
 fn strip(e: &CHIRExpr) -> &CHIRExpr {
@@ -924,6 +951,19 @@ impl<'c, 's> Emit<'c, 's> {
                 }
                 if let Some(bounds) = self.src.fors.get(&p) {
                     let _ = bounds;
+                    // The done-flag increment: advances the flag (and the counter), no branch.
+                    if let (CHIRExpr::BinOp { left, op: CHIRBinOp::Eq, .. }, [CHIRStmt::Assign { target, .. }]) =
+                        (strip(condition), &then_body[..])
+                    {
+                        if is_done_flag(target) {
+                            cur.ctrs.insert(target.clone(), Ctr { advanced: true, at_end: None });
+                            if let Some(c) = var_name(left).and_then(|n| cur.ctrs.get_mut(n)) {
+                                c.advanced = true;
+                                c.at_end = None;
+                            }
+                            return Ok(());
+                        }
+                    }
                     let take = self.counter_test(condition, cur, p)?;
                     match take {
                         Some(b) => stack.push(if b { then_body } else { else_b }),
@@ -931,7 +971,7 @@ impl<'c, 's> Emit<'c, 's> {
                             // An exit test whose outcome is unknown: both, with labels.
                             let v = var_name(match strip(condition) {
                                 CHIRExpr::BinOp { left, .. } => left,
-                                _ => unreachable!(),
+                                done => done,
                             })
                             .unwrap()
                             .to_string();
@@ -1002,6 +1042,9 @@ impl<'c, 's> Emit<'c, 's> {
                 // A counted `for`'s synthesized declaration, increment or bound snapshot.
                 let incr = matches!(strip(value), CHIRExpr::BinOp { left, op: CHIRBinOp::Add { .. }, right }
                     if var_name(left) == Some(target.as_str()) && lit_value(right) == Some(1));
+                if is_done_flag(target) {
+                    self.done_at.borrow_mut().insert(p, target.clone());
+                }
                 let c = if incr {
                     Ctr { advanced: true, at_end: None }
                 } else {
@@ -1034,7 +1077,25 @@ impl<'c, 's> Emit<'c, 's> {
             let n = var_name(v).ok_or_else(|| format!("counted-`for` test at {} on a non-variable", fmt_pos(p)))?;
             cur.ctrs.get(n).ok_or_else(|| format!("counted-`for` test at {} reads `{n}` before its declaration", fmt_pos(p)))
         };
+        // The done flag's "entered" guard, `a <= e` (`control_extract`, D-28).
+        let entered = || -> Result<bool, String> {
+            let d = self.done_at.borrow().get(&p).cloned()
+                .ok_or_else(|| format!("an `a <= e` guard at {} with no done flag", fmt_pos(p)))?;
+            Ok(cur.ctrs.get(&d).ok_or_else(|| format!("done flag `{d}` read before its declaration"))?.advanced)
+        };
         match strip(cond) {
+            // The done flag: the counter has passed its range.
+            CHIRExpr::Var(n) if is_done_flag(n) => Ok(fact(cond)?.at_end),
+            CHIRExpr::BinOp { op: CHIRBinOp::Lte, .. } => Ok(Some(entered()?)),
+            CHIRExpr::BinOp { left, op: CHIRBinOp::LogicalAnd, right }
+                if var_name(left).is_some_and(is_done_flag) =>
+            {
+                let CHIRExpr::BinOp { op: CHIRBinOp::Lte, .. } = strip(right) else {
+                    return Err(format!("unrecognized done-flag guard at {}", fmt_pos(p)));
+                };
+                let end = fact(left)?.at_end.ok_or_else(|| format!("tick guard at {} with the bound unknown", fmt_pos(p)))?;
+                Ok(Some(end && entered()?))
+            }
             // `c >= e` (exclusive) or `c > e` (inclusive, D-27): the counter has passed its range.
             CHIRExpr::BinOp { left, op: CHIRBinOp::Gte | CHIRBinOp::Gt, .. } => Ok(fact(left)?.at_end),
             CHIRExpr::BinOp { left, op: CHIRBinOp::Neq, .. } => Ok(Some(fact(left)?.advanced)),
@@ -1236,7 +1297,7 @@ fn relate(file_src: &str, f: &syn::ItemFn, consts: &dyn Fn(&str) -> Option<i128>
         return Err("P15: __copper_started powers on at 1".into());
     }
 
-    let em = Emit { route, src: &src };
+    let em = Emit { route, src: &src, done_at: Default::default() };
     let init = EState { ctl: init_ctl, started: started0, ctrs: BTreeMap::new() };
 
     // ── the product: R, every transition ──

@@ -102,6 +102,11 @@ const EXPECTED_DISAGREEMENTS: &[&str] = &[
     "grn_handwritten",
     "grn_then_wait",
     "grn_two_generic",
+    // Added 2026-11-09 with line `II.3 found ref-no-i128` (MEASUREMENTS §AG): `imx_u128_done`, moved
+    // from `tests/ref_probes/` into the sweep (a `u128` run-time end, D-28's done flag), and
+    // `wint_i128_for` (a constant `i128` range and a run-time one) — the extraction route, as `imx_*`'s.
+    "imx_u128_done",
+    "wint_i128_for",
     // Added 2026-10-20 with the modules: the paper's serializer (a `while` wait, a
     // counted `for` over the data bits, each with its tick inside) and the one-tick
     // handshake (two `while` waits). Every tick sits inside a loop, so both extract

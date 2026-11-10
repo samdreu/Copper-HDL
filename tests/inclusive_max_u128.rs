@@ -1,8 +1,9 @@
 //! D-28 at 128 bits (MEASUREMENTS §AB.1): a ticking `for` over a `u128` inclusive range whose
 //! run-time end reaches `u128::MAX` runs its last iteration and stops, in the simulator (Rust's
 //! `RangeInclusive`) and in the transpiled SV (I.8.5's done flag — no counter type holds `e + 1`).
-//! Checked simulator against Verilator on every value of the 2-bit input in turn; not swept (the
-//! reference interpreter's `u128` stops at `i128::MAX`; see `ref_probes/inclusive_max_u128_probe.rs`).
+//! Checked simulator against Verilator on every value of the 2-bit input in turn; also swept on three
+//! legs (`tests/fixtures/wide_int_dut.rs`, since MEASUREMENTS §AG gave the reference interpreter its
+//! `u128`).
 
 mod common;
 
@@ -15,8 +16,8 @@ use copper_sim::HardwareExecutor;
 struct MainClk;
 impl ClockDomain for MainClk {}
 
-include!("ref_probes/inclusive_max_u128_probe.rs");
-const SRC: &str = include_str!("ref_probes/inclusive_max_u128_probe.rs");
+include!("fixtures/wide_int_dut.rs");
+const SRC: &str = include_str!("fixtures/wide_int_dut.rs");
 
 #[test]
 fn a_u128_inclusive_for_at_its_maximum_exits_and_matches_verilog() {

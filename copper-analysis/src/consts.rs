@@ -213,7 +213,9 @@ impl IntTy {
     }
 
     fn min(self) -> i128 {
-        if self.signed { -(1i128 << (self.bits - 1).min(127)) } else { 0 }
+        // `-1 << (bits - 1)`: `i128::MIN` at 128 bits, where `-(1 << 127)` overflows (a
+        // transpiler panic on any `i128::MIN` until 2026-11-09, MEASUREMENTS §AG).
+        if self.signed { -1i128 << (self.bits - 1) } else { 0 }
     }
 
     fn max(self) -> Option<i128> {

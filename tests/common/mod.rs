@@ -1161,7 +1161,8 @@ struct Span {
 
 /// Parse a relation testbench's FAIL lines: `(cycle, port, at obs_0) → the value
 /// Verilator showed`.
-fn sv_values(output: &str) -> std::collections::HashMap<(usize, String, bool), u64> {
+/// The value is decimal, or `0x` and hex for a port wider than 64 bits (`wide_check`).
+fn sv_values(output: &str) -> std::collections::HashMap<(usize, String, bool), u128> {
     let mut m = std::collections::HashMap::new();
     for l in output.lines().filter(|l| l.starts_with("FAIL: Cycle ")) {
         let t: Vec<&str> = l.split_whitespace().collect();
@@ -1169,7 +1170,11 @@ fn sv_values(output: &str) -> std::collections::HashMap<(usize, String, bool), u
         if t.len() < 8 || t[4] != "expected" || t[6] != "got" {
             continue;
         }
-        let (Ok(c), Ok(g)) = (t[2].parse::<usize>(), t[7].parse::<u64>()) else { continue };
+        let g = match t[7].strip_prefix("0x") {
+            Some(h) => u128::from_str_radix(h, 16),
+            None => t[7].parse::<u128>(),
+        };
+        let (Ok(c), Ok(g)) = (t[2].parse::<usize>(), g) else { continue };
         let (port, obs0) = match t[3].strip_suffix("@obs0") {
             Some(p) => (p.to_string(), true),
             None => (t[3].to_string(), false),

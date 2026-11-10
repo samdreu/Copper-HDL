@@ -605,7 +605,8 @@ impl<'a> Exec<'a> {
                 let a = self.eval_expr(lo)?;
                 let b = self.eval_expr(hi)?;
                 let (a, b) = unify_ints(a, b)?;
-                let empty = if inclusive { a.as_int()? > b.as_int()? } else { a.as_int()? >= b.as_int()? };
+                let ord = int_order(&a, &b)?;
+                let empty = if inclusive { ord.is_gt() } else { ord.is_ge() };
                 self.env.declare(&ckey, a);
                 self.env.declare(&ekey, b);
                 self.env.declare(&dkey, Value::Bool(empty));
@@ -616,12 +617,12 @@ impl<'a> Exec<'a> {
             let bindings = if r.is_none() {
                 let c = self.env.get(&ckey).cloned().ok_or_else(|| rt("lost for-counter"))?;
                 let e = self.env.get(&ekey).cloned().ok_or_else(|| rt("lost for-bound"))?;
-                let (ci, ei) = (c.as_int()?, e.as_int()?);
+                let ord = int_order(&c, &e)?;
                 let done = matches!(self.env.get(&dkey), Some(Value::Bool(true)));
-                if done || (!inclusive && ci >= ei) {
+                if done || (!inclusive && ord.is_ge()) {
                     return Ok(Flow::Done);
                 }
-                if inclusive && ci == ei {
+                if inclusive && ord.is_eq() {
                     self.env.set(&dkey, Value::Bool(true))?;
                 } else {
                     let next = self.binop(&BinOp::Add(Default::default()), c.clone(), Value::Int(1, IntTy::Unsuffixed))?;
@@ -874,20 +875,20 @@ impl<'a> Exec<'a> {
                 Ok(true)
             }
             Pat::Range(r) => {
-                let x = v.as_int()?;
                 let lo = match &r.start {
-                    Some(e) => Some(self.eval_expr(e)?.as_int()?),
+                    Some(e) => Some(int_order(v, &self.eval_expr(e)?.size_like(v))?),
                     None => None,
                 };
                 let hi = match &r.end {
-                    Some(e) => Some(self.eval_expr(e)?.as_int()?),
+                    Some(e) => Some(int_order(v, &self.eval_expr(e)?.size_like(v))?),
                     None => None,
                 };
-                let ok_lo = lo.is_none_or(|l| x >= l);
+                // `lo`/`hi`: the order of the scrutinee against each bound.
+                let ok_lo = lo.is_none_or(|o| o.is_ge());
                 let ok_hi = match (hi, &r.limits) {
                     (None, _) => true,
-                    (Some(h), syn::RangeLimits::Closed(_)) => x <= h,
-                    (Some(h), syn::RangeLimits::HalfOpen(_)) => x < h,
+                    (Some(o), syn::RangeLimits::Closed(_)) => o.is_le(),
+                    (Some(o), syn::RangeLimits::HalfOpen(_)) => o.is_lt(),
                 };
                 Ok(ok_lo && ok_hi)
             }
@@ -946,13 +947,14 @@ impl<'a> Exec<'a> {
                     UnOp::Not(_) => match v {
                         Value::Bool(b) => Ok(Value::Bool(!b)),
                         Value::Bits(b) => Ok(Value::Bits(b.not())),
-                        Value::Int(i, t) => int_result(!i, t),
+                        // Rust's `!` on an integer is the bitwise complement at its type.
+                        Value::Int(i, t) => int_result(if t == IntTy::Unsuffixed { !i } else { wrap_int(!i, t) }, t),
                         Value::Lit(_) | Value::LitX => Err(rt("`!` on a Bits literal of unknown width")),
                         other => Err(rt(format!("`!` on {other}"))),
                     },
                     UnOp::Neg(_) => match v {
                         Value::Bits(b) => Ok(Value::Bits(b.neg())),
-                        Value::Int(i, t) => int_result(-i, t),
+                        Value::Int(i, t) => int_result(i.checked_neg().ok_or_else(|| rt("integer overflow in `-`"))?, t),
                         other => Err(rt(format!("`-` on {other}"))),
                     },
                     _ => Err(unsup("unknown unary operator")),
@@ -1177,9 +1179,14 @@ impl<'a> Exec<'a> {
     fn eval_lit(&self, l: &syn::Lit) -> Result<Value, RefError> {
         match l {
             syn::Lit::Int(i) => {
-                let v: i128 = i
-                    .base10_parse()
-                    .map_err(|e| rt(format!("integer literal: {e}")))?;
+                // A `u128` literal above `i128::MAX` is held as its pattern (`IntTy`).
+                let v: i128 = match i.base10_parse::<i128>() {
+                    Ok(v) => v,
+                    Err(_) if i.suffix() == "u128" => {
+                        i.base10_parse::<u128>().map_err(|e| rt(format!("integer literal: {e}")))? as i128
+                    }
+                    Err(e) => return Err(rt(format!("integer literal: {e}"))),
+                };
                 let t = match i.suffix() {
                     "" => IntTy::Unsuffixed,
                     s => IntTy::parse(s).ok_or_else(|| unsup(format!("integer suffix `{s}`")))?,
@@ -1404,6 +1411,11 @@ impl<'a> Exec<'a> {
             "from_u8" | "from_u16" | "from_u32" | "from_u64" | "from_u128" | "from_usize" => {
                 let a = arg1(&args)?;
                 let v = a.as_int()?;
+                if let Value::Int(p, IntTy::U128) = a {
+                    if m == "from_u128" {
+                        return sized(Value::Lit(p as u128));
+                    }
+                }
                 let bits = match m {
                     "from_u8" => 8,
                     "from_u16" => 16,
@@ -1699,6 +1711,24 @@ impl<'a> Exec<'a> {
             | "saturating_mul" | "pow" => {
                 let o = arg1(args)?.as_int()?;
                 let (lo, hi) = t.range();
+                // 128 bits: Rust's own methods at the type (a `u128` on its patterns).
+                if t == IntTy::U128 || t == IntTy::I128 {
+                    let (a, b) = (v as u128, o as u128);
+                    let r = match (m, t) {
+                        ("wrapping_add", _) => v.wrapping_add(o),
+                        ("wrapping_sub", _) => v.wrapping_sub(o),
+                        ("wrapping_mul", _) => v.wrapping_mul(o),
+                        ("saturating_add", IntTy::U128) => a.saturating_add(b) as i128,
+                        ("saturating_sub", IntTy::U128) => a.saturating_sub(b) as i128,
+                        ("saturating_mul", IntTy::U128) => a.saturating_mul(b) as i128,
+                        ("saturating_add", _) => v.saturating_add(o),
+                        ("saturating_sub", _) => v.saturating_sub(o),
+                        ("saturating_mul", _) => v.saturating_mul(o),
+                        (_, IntTy::U128) => a.checked_pow(o as u32).ok_or_else(|| rt("integer overflow in `pow`"))? as i128,
+                        _ => v.checked_pow(o as u32).ok_or_else(|| rt("integer overflow in `pow`"))?,
+                    };
+                    return Ok(Value::Int(r, t));
+                }
                 let r = match m {
                     "wrapping_add" => wrap_int(v + o, t),
                     "wrapping_sub" => wrap_int(v - o, t),
@@ -1718,7 +1748,7 @@ impl<'a> Exec<'a> {
             // The rest of the `const` integer methods the shared evaluator runs
             // (2026-11-08, MEASUREMENTS §V.4), each with Rust's meaning at `t`
             // (`min`/`max` are `Ord`'s, not `const fn`s: outside, as in rustc).
-            "wrapping_neg" => Ok(Value::Int(wrap_int(-v, t), t)),
+            "wrapping_neg" => Ok(Value::Int(wrap_int(v.wrapping_neg(), t), t)),
             "wrapping_shl" | "wrapping_shr" => {
                 let s = (arg1(args)?.as_int()? as u32) % int_bits(t);
                 let bits = int_bits(t);
@@ -1736,6 +1766,10 @@ impl<'a> Exec<'a> {
                 let r = if m == "count_zeros" { bits - pat.count_ones() } else { pat.leading_zeros() - (128 - bits) };
                 Ok(Value::Int(r as i128, IntTy::U32))
             }
+            "next_power_of_two" if t == IntTy::U128 => {
+                let p = (v as u128).checked_next_power_of_two().ok_or_else(|| rt("integer overflow in `next_power_of_two`"))?;
+                Ok(Value::Int(p as i128, t))
+            }
             "next_power_of_two" if !signed_int(t) => {
                 let p = if v <= 1 { 1 } else { 1i128.checked_shl(128 - ((v - 1) as u128).leading_zeros()).ok_or_else(|| rt("integer overflow in `next_power_of_two`"))? };
                 if p > t.range().1 {
@@ -1747,9 +1781,16 @@ impl<'a> Exec<'a> {
                 let r = v.checked_abs().filter(|r| *r <= t.range().1).ok_or_else(|| rt("integer overflow in `abs`"))?;
                 Ok(Value::Int(r, t))
             }
+            "is_power_of_two" if t == IntTy::U128 => Ok(Value::Bool((v as u128).is_power_of_two())),
             "is_power_of_two" => Ok(Value::Bool(v > 0 && (v & (v - 1)) == 0)),
             "trailing_zeros" => Ok(Value::Int(if v == 0 { int_bits(t) as i128 } else { v.trailing_zeros() as i128 }, IntTy::U32)),
-            "count_ones" => Ok(Value::Int(wrap_int(v, t).count_ones() as i128, IntTy::U32)),
+            // The type's bit pattern (a negative `i8` has 8 bits, not the `i128`'s 128;
+            // until §AG this counted the sign extension).
+            "count_ones" => {
+                let bits = int_bits(t);
+                let pat = if bits >= 128 { v as u128 } else { (v as u128) & ((1u128 << bits) - 1) };
+                Ok(Value::Int(pat.count_ones() as i128, IntTy::U32))
+            }
             other => Err(unsup(format!("integer method `{other}`"))),
         }
     }
@@ -1865,6 +1906,9 @@ impl<'a> Exec<'a> {
                     }
                     let r = if matches!(op, BinOp::Shl(_)) {
                         if t == IntTy::Unsuffixed { v.checked_shl(n as u32).ok_or_else(|| rt("shift overflow"))? } else { wrap_int(v << n, t) }
+                    } else if t == IntTy::U128 {
+                        // A `u128`'s `>>` is logical on its pattern.
+                        ((v as u128) >> n) as i128
                     } else {
                         v >> n
                     };
@@ -1923,17 +1967,21 @@ impl<'a> Exec<'a> {
                     return Err(rt(format!("mixed integer types {} and {}", ta.name(), tb.name())));
                 }
                 let (a, b) = (*a, *b);
+                if t == IntTy::U128 {
+                    return u128_binop(op, a, b);
+                }
+                let ovf = || rt(format!("integer overflow at {}", t.name()));
                 Ok(match op {
-                    BinOp::Add(_) => int_result(a + b, t)?,
-                    BinOp::Sub(_) => int_result(a - b, t)?,
+                    BinOp::Add(_) => int_result(a.checked_add(b).ok_or_else(ovf)?, t)?,
+                    BinOp::Sub(_) => int_result(a.checked_sub(b).ok_or_else(ovf)?, t)?,
                     BinOp::Mul(_) => int_result(a.checked_mul(b).ok_or_else(|| rt("integer overflow"))?, t)?,
                     BinOp::Div(_) => {
                         if b == 0 { return Err(rt("integer division by zero")); }
-                        int_result(a / b, t)?
+                        int_result(a.checked_div(b).ok_or_else(ovf)?, t)?
                     }
                     BinOp::Rem(_) => {
                         if b == 0 { return Err(rt("integer remainder by zero")); }
-                        int_result(a % b, t)?
+                        int_result(a.checked_rem(b).ok_or_else(ovf)?, t)?
                     }
                     BinOp::BitAnd(_) => int_result(a & b, t)?,
                     BinOp::BitOr(_) => int_result(a | b, t)?,
@@ -2149,7 +2197,44 @@ fn as_int_ty(m: &str) -> IntTy {
 }
 
 fn signed_int(t: IntTy) -> bool {
-    matches!(t, IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize)
+    t.is_signed()
+}
+
+/// The order of two integer values of one type (a `u128` unsigned on its patterns;
+/// an unsuffixed operand takes the other's type, as in `binop`).
+fn int_order(a: &Value, b: &Value) -> Result<std::cmp::Ordering, RefError> {
+    match (a, b) {
+        (Value::Int(x, ta), Value::Int(y, tb)) => {
+            let t = if *ta == IntTy::Unsuffixed { *tb } else { *ta };
+            Ok(t.cmp(*x, *y))
+        }
+        (x, y) => Err(rt(format!("an order of {x} and {y}, which are not both integers"))),
+    }
+}
+
+/// A binary operator on two `u128`s (patterns in, a pattern out): Rust's meaning, an
+/// overflow, a zero divisor the debug-build panic surfaced as a fault.
+fn u128_binop(op: &BinOp, a: i128, b: i128) -> Result<Value, RefError> {
+    let (x, y) = (a as u128, b as u128);
+    let ovf = || rt("integer overflow at u128");
+    let v = |r: u128| Value::Int(r as i128, IntTy::U128);
+    Ok(match op {
+        BinOp::Add(_) => v(x.checked_add(y).ok_or_else(ovf)?),
+        BinOp::Sub(_) => v(x.checked_sub(y).ok_or_else(ovf)?),
+        BinOp::Mul(_) => v(x.checked_mul(y).ok_or_else(ovf)?),
+        BinOp::Div(_) => v(x.checked_div(y).ok_or_else(|| rt("integer division by zero"))?),
+        BinOp::Rem(_) => v(x.checked_rem(y).ok_or_else(|| rt("integer remainder by zero"))?),
+        BinOp::BitAnd(_) => v(x & y),
+        BinOp::BitOr(_) => v(x | y),
+        BinOp::BitXor(_) => v(x ^ y),
+        BinOp::Eq(_) => Value::Bool(x == y),
+        BinOp::Ne(_) => Value::Bool(x != y),
+        BinOp::Lt(_) => Value::Bool(x < y),
+        BinOp::Le(_) => Value::Bool(x <= y),
+        BinOp::Gt(_) => Value::Bool(x > y),
+        BinOp::Ge(_) => Value::Bool(x >= y),
+        other => return Err(unsup(format!("operator {} on integers", binop_text(other)))),
+    })
 }
 
 fn int_bits(t: IntTy) -> u32 {
@@ -2158,7 +2243,7 @@ fn int_bits(t: IntTy) -> u32 {
         IntTy::U16 | IntTy::I16 => 16,
         IntTy::U32 | IntTy::I32 => 32,
         IntTy::U64 | IntTy::I64 | IntTy::Usize | IntTy::Isize => 64,
-        IntTy::U128 | IntTy::Unsuffixed => 128,
+        IntTy::U128 | IntTy::I128 | IntTy::Unsuffixed => 128,
     }
 }
 
@@ -2171,7 +2256,7 @@ fn wrap_int(v: i128, t: IntTy) -> i128 {
     let m = (1i128 << bits) - 1;
     let u = v & m;
     match t {
-        IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize => {
+        IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::I128 | IntTy::Isize => {
             if u >> (bits - 1) & 1 == 1 { u - (1i128 << bits) } else { u }
         }
         _ => u,
@@ -2181,6 +2266,10 @@ fn wrap_int(v: i128, t: IntTy) -> i128 {
 /// An arithmetic result checked against the type's range — the debug-build panic
 /// of the simulator, surfaced as a fault.
 fn int_result(v: i128, t: IntTy) -> Result<Value, RefError> {
+    // Every `i128` is some `u128`'s pattern.
+    if t == IntTy::U128 {
+        return Ok(Value::Int(v, t));
+    }
     let (lo, hi) = t.range();
     if v < lo || v > hi {
         return Err(rt(format!("integer overflow: {v} is outside {}", t.name())));
