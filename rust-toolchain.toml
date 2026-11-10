@@ -1,0 +1,14 @@
+# Pinned compiler. Copper's tests pin rustc's own diagnostic text: the trybuild
+# `.stderr` files under copper-macros/tests/ui and copper-core/tests/ui compare
+# rustc's messages byte for byte, so a laptop and the `recycle` regression machine
+# on different rustc versions disagree on whether `cargo test` passes (1.92 vs
+# 1.98 differ on E0015's notes — MEASUREMENTS §AH). Every machine therefore builds
+# with this exact version; rustup installs it on the first cargo command.
+# Changing it means re-blessing the `.stderr` files (TRYBUILD=overwrite) and
+# reviewing each diff — see design_docs/review/MEASUREMENTS.md §AH.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+# Nothing in the build, the tests or tools/regression.sh needs more than the
+# minimal profile (rustc, cargo, rust-std); rustfmt and clippy are for people.
+components = ["rustfmt", "clippy"]
