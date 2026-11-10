@@ -38,8 +38,10 @@ corpus differential sweep covered every `#[hardware]` module in `examples/` and
 `tests/fixtures/` and ran with Verilator present, **G-E** (printed, not
 enforced) how many swept modules are additionally anchored to an independent
 hand-written Verilog reference, **G-F** the reference-interpreter leg ran — as many
-`_reference_leg` cases as build.rs generated to run (395, 3 of them skipped with a reason, since 2026-11-09 §AG — 7 modules in one fixture file, `wide_int_dut`; 388 after §AF's 6 modules in one fixture file; 382 after §AE's 8 modules in one fixture file; 374 after §AD — 30 modules in three fixture files; 344 after §AC's 22 modules in one fixture file; 322 after §AB's 19 modules in four fixture files; 303 after §AA's 20 modules in three fixture files; 283 after §Z's 34 modules in five fixture files; 249 after §Y's ten `tfr_*` fixtures; 239 after §X's three `cc_body_*`; 236 of 239 after the three OPEN-line batches §U, §V, §W — §W added the eight `memory_staging_dut` modules; 216 of 219 after §V; 213 of 216 at Phase C step 10: 161
-clocked, 18 of them binding a `Memory` (I.10), 52 combinational (I.11); `REF_SKIP` empty), each
+`_reference_leg` cases as build.rs generated to run (395 on 2026-11-09, 3 of them
+skipped with a reason, `REF_SKIP` empty; the per-batch growth is in
+`design_docs/review/MEASUREMENTS.md`), each
+leg non-empty,each
 leg non-empty, and the design leg (I.13, `copper_ref::Design` on `two_domain_top` vs the hand-wired
 simulation, `tests/two_domain_hierarchy_cdc.rs`) — and
 **G-G** every swept case wrote its per-sequence verdicts under the agreement
@@ -209,7 +211,7 @@ entries in `Cargo.toml`.
 
 ## Architecture
 
-### The five crates
+### The six crates
 
 - **`copper-core`** — the type system and every IR in the pipeline. Hardware
   types (`Logic`, `Bits<N>`, `Clock<D>`, ports `In`/`Out`/`RegOut`, `Memory`),
@@ -222,12 +224,12 @@ entries in `Cargo.toml`.
   — the representation *both* front-ends already hold — so the sim macro and the
   transpiler consume **one** authoritative analysis rather than two that must
   agree. See `design_docs/SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md` (item 2). Provides
-  `Cfg` (a real control-flow graph over `syn::ItemFn`, `E_comb`/`E_tick` edges),
+  `Cfg` (a real control-flow graph over `syn::ItemFn`, `EdgeKind::Comb`/`EdgeKind::Tick` edges),
   `infer_registers` (backward-liveness register inference — a local is a register
   iff it is defined-in-loop ∧ live at a tick, SPEC I.7.1; since Phase C step 6 it is
   computed on a register graph that descends into nested loops, and the old
   live-at-the-loop-head clause is gone; the transpiler's hoisted and promoted locals
-  are pinned ⊆ it corpus-wide by `register_reconciliation.rs`), `check_reachability` (every loop
+  are pinned ⊆ it over `tests/fixtures/` by `register_reconciliation.rs`), `check_reachability` (every loop
   path must reach a `clk.tick().await`, enforced as a hard spanned compile error in
   **both** front-ends), the G2 structural reg-match helpers, and `consts` — the front-ends' constant evaluator of SPEC
   I.14.4 (Phase C step 5: `ConstEnv` over const items, associated consts and `const fn`s;
@@ -276,6 +278,11 @@ entries in `Cargo.toml`.
   kept permanently as the differential oracle). `PollOrder` (`Insertion` /
   `Reversed` / `Seeded`) and its poll-order-independence fuzzer exercise the
   fixpoint oracle only — under levelized the order is canonical.
+- **`copper-ref`** — the reference interpreter: the specification made executable,
+  the sweep's third leg (`_reference_leg`, G-F). It runs a module's `syn::ItemFn` under
+  SPEC I.0.2's protocol with no proc macro, no rustc lowering and no executor, sharing
+  only `copper-core`'s value semantics with the simulator; its constant evaluator is its
+  own (D-21 B2). See `copper-ref/README.md`.
 
 The **root `copper` crate** (`src/`) is the hardware standard library —
 reusable `#[hardware]` modules like `sync_2ff` that must live *downstream* of
@@ -306,29 +313,22 @@ I.0.2): it lowers into phase 0 ahead of segment 0, one forwarding walk across bo
 under `if (__copper_started)`, a synthesized one-bit register that is 0 until the
 first edge. The **pre-loop expression statements** (a `RegOut` write, a memory staging,
 an assignment — SPEC I.9.3) are the first resumption's: both routes lower them into
-segment 0 ahead of the head under `if (!__copper_started)` (Phase C step 5; until then the
-extraction route re-ran them at every return to state 0 and the linear route dropped
-them). Every statement of a segment reads a register it assigned earlier as the
+segment 0 ahead of the head under `if (!__copper_started)`. Every statement of a segment reads a register it assigned earlier as the
 assigned value — the `always_comb` ones too (step 5, II.3 (f5)). A memory `data()` /
 `is_ready()` always reads the registered capture, the word the last edge delivered.
-Until Phase C step 4 (2026-11-06) a clocked plain `Out` had five more forms (a
-continuous `assign`, the every-path mux, the Moore default hoist, the mux +
-`<port>_hold` form, the phase-scoped flop) chosen by an opening/closing drive tag,
-and the trailing region was FOLDED into the last phase's edge; all of that is gone
-(`design_docs/review/MEASUREMENTS.md` §H). A combinational module still emits a
+(The clocked plain-`Out` forms and the trailing fold were removed in Phase C step 4,
+`design_docs/review/MEASUREMENTS.md` §H.) A combinational module still emits a
 top-level drive as `assign` and a branch-nested one (or a port written twice at the top level,
 §U.5) in `always_comb`. A `u8`/`u16`/`i8`/`i16` file const is a sized `localparam` (§U.6); a file const (or immutable `static`) whose initializer has no SV spelling — a `const` method
 call, a tuple-struct field, a `const fn` call — is stated by the value `ConstEnv` folds it to (§X.1).
 
 ### Execution / timing model (sim)
 
-This is the semantic core. `design_docs/SPEC.md` is the language specification
-(Parts I–III, decisions D-1…D-30 in `SPEC_DECISIONS.md`, ledger §III.3 checked by G-K),
-but its own status line still reads "Not yet normative": until it is adopted,
-`design_docs/SYNCHRONOUS_SEMANTICS.md` remains the reference and wins where the two
-disagree. Much of that document predates D-8 (it describes the retired two-job executor
-and plain-`Out` rules), so read the SPEC for what the code does now. The
-rules the whole project is built around:
+This is the semantic core. `design_docs/SPEC.md` is the language specification and is
+**normative** (since 2026-11-09, D-31): Parts I–III, decisions D-1…D-31 in
+`SPEC_DECISIONS.md`, the ledger §III.3 checked by G-K. Where any other doc disagrees with
+it, SPEC wins. `design_docs/SYNCHRONOUS_SEMANTICS.md` was the reference before it and is
+now historical. The rules the whole project is built around:
 
 - Every `clk.tick().await` is a **clock-cycle boundary**; each suspension point
   becomes an FSM state; every value live across an await becomes a **register**.
@@ -337,8 +337,7 @@ rules the whole project is built around:
   driven inputs, resumes each coroutine of `D` once to its next `tick` (every read
   sees `x_{N+1}`), commits the edge, and settles the network for the observation;
   the post-edge settle resumes no coroutine, and only `D`'s ticks resume `D`'s
-  coroutines. The two-job executor, its `PreEdgeBarrier` and the macro's per-read
-  barrier injection are gone.
+  coroutines.
 - **Simulation must be independent of Rust async poll order** — a well-formed
   design simulates identically under any `poll_tasks` order. Do not introduce
   timing that depends on task ordering.
@@ -380,24 +379,24 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   modules against independent BaseJump STL Verilog; that Verilog is under the
   Solderpad license and needs attribution.
 - Design docs live in `design_docs/`, by role:
-  **the language specification** — `SPEC.md` (start here), its decision log
-  `SPEC_DECISIONS.md` (D-1…D-30) and one-page generator `SPEC_OVERVIEW.md`. SPEC.md's
-  status line says it is **not yet normative**: until it is adopted,
-  `SYNCHRONOUS_SEMANTICS.md` remains the reference and wins where the two disagree
-  (`FORMAL_SEMANTICS.md` is an earlier draft that defers to it the same way);
-  **the pre-SPEC reference** — `SYNCHRONOUS_SEMANTICS.md` (rebased 2026-08-27; much of it
-  predates D-8, and the SPEC is what the implementation was rebuilt against);
+  **the language specification (normative)** — `SPEC.md`, its decision log
+  `SPEC_DECISIONS.md` (D-1…D-31) and its one-page generator `SPEC_OVERVIEW.md` (start
+  there);
+  **the measurement log** — `review/MEASUREMENTS.md` (append-only, §A onward; where the
+  history this file no longer carries lives), with the review's baseline snapshots and
+  records beside it (`review/README.md`; the docs audit is `review/DOCS_AUDIT.md`);
+  **the reference interpreter** — `../copper-ref/README.md`;
   **the sweep and anchoring** — `CORPUS_DIFFERENTIAL_SWEEP.md`,
-  `ANCHORING_A_MODULE.md`;
-  **the pre-tick alignment family** — `PRETICK_ALIGNMENT_GUARDRAIL.md`;
-  **the scheduler** — `LEVELIZED_SCHEDULING_SCOPE.md`;
+  `ANCHORING_A_MODULE.md`, `TIMING_COVERAGE_MATRIX.md`;
   **emitted ABIs** — `ARRAY_PORT_ABI.md`, `RECEIVED_MEMORY_ABI.md`;
-  **the cycle-dataflow model and its derivation** — `CYCLE_DATAFLOW_SEMANTICS.md`,
-  `DERIVATION_TABLE.md`, `PAIRED_IMPLEMENTATION_SCOPE.md`,
-  `TIMING_MODEL_UNIFICATION.md`, `TIMING_COVERAGE_MATRIX.md`;
-  **historical plan** — `SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md` (its status notes are
-  dated; do not take "not started" there at face value).
-  `design_docs/OUTDATED/` is historical, not authoritative.
+  **prior art** — `prior_art/` (reading notes; their Copper paragraphs predate D-8) and
+  `FORMAL_SEMANTICS_SURVEY.md`;
+  **historical, each with a dated header** — `SYNCHRONOUS_SEMANTICS.md` (the reference
+  before SPEC), `CYCLE_DATAFLOW_SEMANTICS.md` (§10.12 still current),
+  `PRETICK_ALIGNMENT_GUARDRAIL.md`, `DERIVATION_TABLE.md`, `PAIRED_IMPLEMENTATION_SCOPE.md`,
+  `TIMING_MODEL_UNIFICATION.md`, `LEVELIZED_SCHEDULING_SCOPE.md` (the scheduler's scoping
+  record), `FORMAL_SEMANTICS.md` (superseded draft), `SYNCHRONOUS_SEMANTICS_IMPL_PLAN.md`.
+  `design_docs/OUTDATED/` is historical, not authoritative (`OUTDATED/README.md` indexes it).
 - **The pre-tick alignment rules are retired by D-8** (Phase C step 3, 2026-11-06).
   The family (`unprotected_pretick_out_write`, `pretick_out_write_before_update`,
   `trailing_regout_reads_input`, `trailing_out_reads_input`,
@@ -473,72 +472,31 @@ the emitted SV is the concrete module's, with no parameter for `D`.
   tree's helper call graph, every behavioural body's `let`s and every pattern naming an X-valued
   file const, and requires `tests/recursive_helper_r6.rs`, `tests/let_instance_d24.rs` and
   `tests/file_x_const_pattern_d26.rs` to hold the only witnesses, and `front_end_parity_ui.rs` pins
-  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). **No break is known since 2026-11-09 §AF** (SPEC II.1.3 CLOSED; the 113-probe battery
-  admitted and refused alike by both). **D-30** (§AF) closed the last, `ticking-for-generic-range`: a
-  tick-bearing `for` over a range bounded by a const generic where R3's verdict depends on its being
-  non-empty (`loop { q.write(..); for _ in 0..W { tick } }`) is admitted by both and the hypothesis held per
-  instance — `copper_analysis::assumed_nonempty_generic_ranges` picks the ranges (each checked on its own: a set
-  of several is over-checked), the macro places an inline `const { assert!(..) }` (E0080 at monomorphization —
-  `cargo check`/trybuild never see it, so `src/lib.rs` pins it with a `compile_fail,E0080` doctest), the
-  transpiler lowers the `for` as non-empty and emits an elaboration-time `$error`
-  (`width_checks::generic_range_checks`; Verilator and Yosys refuse the instance; Icarus 12 skips every elaboration task inside a generate scope — a toolchain limit, pinned by `generic_range_instance_d30.rs`, §AG.2)
-  (`tests/fixtures/generic_range_dut.rs`, `tests/generic_range_instance_d30.rs`). **D-29** (2026-11-09, §AE) closed §AD.5's break,
-  `ticking-for-ends-in-loop`: a nested tick-bearing loop (a counted `for`, a hand-written `loop`, a `while`)
-  whose body has no bare tick and ends in a skippable wait, R3 holding through an earlier inner `for` over a
-  range non-empty by its constants, is lowered — such a `for` takes I.8.5's `D` with no hoisted tick, its exit
-  test after the increment over a range `ConstEnv` proves non-empty, and the unhoisted form drops its dead entry
-  test, so `splice_zero_time_gotos`'s structural cycle test sees no never-taken exit
-  (`tests/fixtures/ticking_for_ends_in_loop_dut.rs`); an inner run-time range stays R3's refusal in both
-  (ui `runtime_for_ends_in_loop`). §AC's break, a tick-bearing `for` nested in a tick-bearing loop and
-  followed by more of its body, is lowered since §AD.2 (`nested-ticking-for` CLOSED: such a `for` takes
-  I.8.5's `D` unhoisted, `control_extract::expand_counted_for`, `tests/fixtures/nested_ticking_for_dut.rs`);
-  an inner bound naming the outer variable types the inner one by it (§AD.3). Before §AC they were the only ones:
-  the inclusive `for` (`0..=3`), the last shape the macro admitted and the transpiler refused, is IN
-  with Rust's meaning (D-27: tick-free unrolled `b − a + 1` times as an SV `i <= b`; tick-bearing
-  I.8.5's counter exiting on `c > e`), and since **D-28** (2026-11-09) with Rust's meaning at its type's
-  maximum too: I.8.5's form tests a done flag and never increments past the end, the transpiler's counter
-  holds `e + 1` (the next wider type from 32 bits up; the done flag itself for a 128-bit range), and
-  **II.1.2 R23** (the refusal of a constant end at the maximum) is retired. §Z.8's 47-probe battery and 16
-  more around D-28 are admitted by both (MEASUREMENTS §AA.4, §AB.6). §Z
-  lowered the earlier breaks, each a swept
-  fixture: body-local and associated consts (hoisted into the file-const machinery by
-  `copper-codegen/src/desugar.rs`, which also turns `v op= e` into `v = v op e` and a range pattern
-  into a guard), `s.x = e`, `[c, …]`, a `RegOut` write in a tick-free `for` (a temp and a written
-  flag), a guarded or binding statement `match` (an `if` chain), `Bits`/`Logic` consts (sized
-  `localparam`s), a body `struct`, an `impl` method on a struct local, an array-literal register.
-  §AA fixed the two `sim=ref≠SV` miscompiles §Z.9 found (an array register written after its tick
-  and read before it — the head is seeded with the trailing region's write ports; a signed local read
-  unsigned — `chir_lower::signed_read`, plus a widening cast of a signed value). §AB closed the last two
-  OPEN lines of the time: D-28 (above), and **a `for` loop variable has its
-  Rust type** (`chir_lower::for_var_type`: a typed bound's, else a use's, `usize` by an index use alone,
-  `i32` when nothing types it; body reads are cast to it, the interpreter keeps unsuffixed bounds
-  unsuffixed) — and found and closed a narrowing cast to or from a signed type that kept its operand's
-  width, `uN::MAX`/`MIN`/`BITS` read by rustc and the interpreter but not the transpiler (a parity
-  break; `copper_analysis::consts::primitive_assoc_const`), and a body `let` shadowing the loop
-  variable. **§AC (2026-11-09) generalized that to Rust's block scoping**: every binding of one name
-  was one SV signal, so a `let` (a tuple `let`, a `for` pattern) shadowing a binding of an OUTER scope
-  overwrote it — a nested shadow of a `for`'s variable wrote the tick-bearing counter (`sim=ref≠SV`,
-  Verilator-clean over a `u32` range), of an ordinary or port-read local `sim=ref≠SV`, of a register a
-  duplicate SV declaration. `desugar::rename_scoped_shadows` (the last step of `desugar`) now renames
-  the SHADOW `<x>__shadow[k]` for its scope, never the loop variable; a same-block re-`let` keeps the
-  shared signal; a renamed shadow is a register by its own liveness (`desugar::shadows_live_at_tick`)
-  and P13 reads it as `x` (`tests/fixtures/scoped_shadow_dut.rs`, 22 modules). §AD (2026-11-09) closed
-  `stmt-match-wire` — a clocked body's wire assigned in a statement `match` arm was dropped from the
-  forwarded value after the `match` (`sim=ref≠SV`, silent); the `Match` arm of
-  `shir_lower::extract_updates_from_stmts` now merges the arms' wires as the `If` arm does
-  (`tests/fixtures/stmt_match_wire_dut.rs`) — and `forwarded-narrow-widening`: a register or wire's
-  forwarded value substituted under a widening cast (`32'(r)` → `32'(8'(a) + 8'd250)`) was evaluated at
-  the cast's width (`sim=ref≠SV`, silent); `shir_lower::at_own_width` keeps it at its own
-  (`tests/fixtures/forwarded_width_dut.rs`). The ledger has no OPEN line since §AF (238 lines, all CLOSED, since §AG). **128-bit integers are swept on three legs since §AG**: the interpreter has `i128` and the full `u128` (a `u128` held as its `i128` pattern, every numeric reading type-aware), and the sweep's testbench drives and compares a port wider than 64 bits word by word (`verification.rs::wide_check`; ports up to 64 bits keep their text and cache key); `tests/fixtures/wide_int_dut.rs`. An integer-typed port (`In<u128>`) is still unswept at every width. The standing audit is
+  one ui/pass row each (`NAMED_PARITY_EXCEPTIONS`). **One break is known, OPEN since 2026-11-09**:
+  the integer bit-count methods (`count_ones`, `count_zeros`, `leading_zeros`,
+  `trailing_zeros`) on a run-time value compile and are refused by the transpiler (SPEC
+  §III.3.4 `int-bit-count`, owner copper-codegen). Every earlier break is closed, each by a
+  swept fixture: SPEC II.1.3 lists them and MEASUREMENTS §Z–§AG has the history (the
+  inclusive `for` with Rust's meaning, D-27/D-28, R23 retired; scoped shadows renamed by
+  `desugar::rename_scoped_shadows`; a `for` variable typed as Rust types it; the nested and
+  wait-ending tick-bearing `for`, D-29). **A const-generic range R3 takes as non-empty is
+  checked per instance (D-30)**: the macro places an inline `const { assert!(..) }`, which is
+  E0080 at monomorphization — `cargo check` and trybuild never see it, so `src/lib.rs` pins it
+  with a `compile_fail,E0080` doctest. The transpiler emits an elaboration-time `$error`
+  (`width_checks::generic_range_checks`); Verilator and Yosys refuse the instance, and Icarus 12
+  skips elaboration tasks in generate scopes, a pinned toolchain limit
+  (`tests/generic_range_instance_d30.rs`). The ledger has 240 lines, 238 CLOSED and 2 OPEN
+  (`int-bit-count`, and `int-port-unswept`: an integer-typed port such as `In<u128>` is not
+  swept, because `build.rs::is_stimulable` randomizes only `Logic`/`Bits<N>`). 128-bit values
+  are swept on three legs since §AG (`tests/fixtures/wide_int_dut.rs`). The standing audit is
   `copper-analysis/tests/front_end_parity.rs`; a shape both refuse is a
   `copper-macros/tests/ui/fail` case, never a swept module (the former sim-only
   fixtures `tick_first_waiter` and `mp_rom` live there now). When adding a rule to one
   front-end, add it to the other and to the audit in the same change.
 - **When adding a `#[hardware]` mode or flag, fix every attribute parser.**
   `parse_args::<syn::Ident>()` fails outright once a flag is present, which silently
-  drops those modules from corpus scans (`copper-analysis/tests/pretick_alignment_corpus.rs`
-  and `copper-codegen/tests/register_reconciliation.rs` both had this, as did a
-  since-deleted scan). Read the first token of the attribute list instead.
+  drops those modules from corpus scans (`copper-codegen/tests/register_reconciliation.rs`
+  had this, as did two since-deleted scans, `pretick_alignment_corpus.rs` among them). Read the first token of the attribute list instead.
 - Generated Verilator artifacts (`tb_*.cpp`, `obj_dir_*`) land under
   `target/verilator/` (per-invocation names, reclaimed by `cargo clean`);
   `waveforms/*.vcd` is gitignored.
